@@ -915,7 +915,63 @@ identity-fenced recovery plan; Next and seek cannot bypass it. Storage Retry
 commits that plan once and leaves the result paused (or Completed at final EOF),
 without preparing audio. Stop or a replacement discards the plan. Ordinary
 source/decode Retry still reopens the same occurrence at its committed cursor.
-Next from Stopped retains Stopped status on the successor.
+Next from Stopped retains Stopped status on the successor. Playback persistence
+schema v3 adds the private frozen album context described below. Existing v1/v2
+rows migrate with no album context and therefore use exact unity gain.
+
+## Frozen album loudness policy (internal contract, Story 15.10)
+
+Album admission may consume one OpenSubsonic `Child.replayGain` pair:
+`albumGain` is a finite dB adjustment in the conventional 89 dB ReplayGain
+reference, and `albumPeak` is a positive decoded sample peak where 1.0 is full
+scale. The supported bounds are `albumGain ∈ [-60, +30]` and
+`albumPeak ∈ (0, 64]`. The complete provider response must declare the requested
+album membership and track count; every occurrence must contain a usable pair.
+Across occurrences, gain spread must be at most 0.01 dB and peak spread at most
+`max(1e-6, 1e-4 × maximumPeak)`. Resolution uses the minimum accepted gain and
+maximum accepted peak, so provider order cannot change the result.
+
+The common scalar is resolved once in f64 with zero preamp:
+
+```text
+ceiling = 10^(-1 / 20)
+requested = 10^(albumGain / 20)
+effective = min(requested, ceiling / albumPeak)
+```
+
+The runtime f32 value is rounded downward when needed so representation rounding
+cannot exceed that declared sample-reference ceiling. One scalar applies to all
+original album occurrences. Track gain, track peak, fallback gain, embedded
+ReplayGain, R128, Sound Check and dynamic limiting are not applied. Missing,
+partial, malformed, non-finite, inconsistent or unsupported evidence freezes
+exact unity; metadata failure does not reject otherwise playable media and unity
+makes no clipping-safety claim.
+
+The v1 qualification is OpenSubsonic metadata for original PCM-in-WAV, FLAC,
+AAC/ALAC-in-M4A and MP3. Missing or contradictory suffix/content type, Opus,
+Vorbis, WMA, an alternative/transcoded representation, and any later codec or
+container contradiction keep unity or fail preparation before non-unity audio.
+FFmpeg confirms the opened container/codec before adjusted PCM is queued. The
+peak claim concerns the provider's declared decoded sample domain. Resampling,
+downmix, inter-sample peaks, OS processing, interface volume and analog output
+remain outside that claim.
+
+The private persisted context contains policy version, portable server and album
+identity, original occurrence count, selected gain/peak bits, scalar bits,
+provenance reason and fallback reason. Queue and context commit in one SQLite
+transaction. Original members retain the policy across seek, Retry, Next,
+prepared handoff, Pause/Resume, output recreation and paused restart. Appended
+occurrences use unity; successful Clear, ReplaceQueue, PlayTrack or PlayAlbum
+replaces the context, while a failed replacement preserves the prior queue and
+policy. Corrupt or future policy records fail restoration rather than being
+reinterpreted as unity.
+
+The worker multiplies packed f32 output once after swresample and before each
+bounded PCM insertion, including resampler drain. Exact unity bypasses the
+multiplication bit-for-bit. Native callbacks, submitted-tail replay and boundary
+reconciliation do not perform gain work, allocate, fetch metadata, touch SQLite,
+or acquire sync locks. Replay therefore cannot square the scalar, and gain does
+not change frame counts, padding decisions or album boundaries.
 
 Native Next resolves owner state at execution. `canGoNext` is true only for a real
 successor while lifecycle state permits it; delivery while false has no effect. A

@@ -4,7 +4,7 @@ baseline_commit: 66c37bb1da77e2a7c0eff4ba284aba6e7c2ef404
 
 # Story 15.10: Preserve an album's relative loudness with consistent gain
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -31,25 +31,25 @@ so that quiet and loud passages retain their intended relationship while usable 
 
 ## Tasks / Subtasks
 
-- [ ] Lock the metadata/signal contract in executable tests and existing documentation (AC: 1–8).
-  - [ ] Implement the policy below as a small pure resolver; document supported provider/convention/representation and exact peak-domain limits.
-  - [ ] Add numerical, malformed-metadata and unchanged-fallback tests before wiring production playback.
-- [ ] Retain optional album evidence through the provider boundary (AC: 1, 3–4, 6).
-  - [ ] Parse OpenSubsonic `replayGain` tolerantly; normalize only the supported pair with provenance. Preserve absent versus rejected metadata and existing Song equality/serialization behavior.
-  - [ ] Resolve across the complete ordered album before RPC conversion discards Song metadata. Preserve source routing, cancellation/deadline, bounded album size and duplicate occurrences.
-  - [ ] Keep Jellyfin/classic Subsonic/embedded-only/unsupported formats at unity with a typed reason; do not infer metadata coverage from upstream DTOs.
-- [ ] Persist and fence album policy with its occurrence membership (AC: 1, 3, 5).
-  - [ ] Add a transactional playback schema migration and validation for policy version, source album identity, membership and frozen scalar/provenance.
-  - [ ] Commit queue and policy together through existing album reservation/owner flow; failed or superseded admission leaves the previous queue and policy intact.
-  - [ ] Preserve policy through both restoration paths, seek/retry/Next and successor preparation. Clear/replace it only on successful replacement; appended nonmembers use unity.
-- [ ] Thread immutable resolved gain through both native audio paths (AC: 2, 4–6).
-  - [ ] Pass the correct occurrence policy to initial and successor decoder calls in CPAL and Pulse, plus seek/restart preparation.
-  - [ ] Scale converted packed-f32 frames and flushed tail exactly once before queue insertion; unity takes an unchanged fast path.
-  - [ ] Preserve callback/replay, output pinning, pause authorization, presentation receipts, clean EOF/error distinction and aggregate buffer bounds.
+- [x] Lock the metadata/signal contract in executable tests and existing documentation (AC: 1–8).
+  - [x] Implement the policy below as a small pure resolver; document supported provider/convention/representation and exact peak-domain limits.
+  - [x] Add numerical, malformed-metadata and unchanged-fallback tests before wiring production playback.
+- [x] Retain optional album evidence through the provider boundary (AC: 1, 3–4, 6).
+  - [x] Parse OpenSubsonic `replayGain` tolerantly; normalize only the supported pair with provenance. Preserve absent versus rejected metadata and existing Song equality/serialization behavior.
+  - [x] Resolve across the complete ordered album before RPC conversion discards Song metadata. Preserve source routing, cancellation/deadline, bounded album size and duplicate occurrences.
+  - [x] Keep Jellyfin/classic Subsonic/embedded-only/unsupported formats at unity with a typed reason; do not infer metadata coverage from upstream DTOs.
+- [x] Persist and fence album policy with its occurrence membership (AC: 1, 3, 5).
+  - [x] Add a transactional playback schema migration and validation for policy version, source album identity, membership and frozen scalar/provenance.
+  - [x] Commit queue and policy together through existing album reservation/owner flow; failed or superseded admission leaves the previous queue and policy intact.
+  - [x] Preserve policy through both restoration paths, seek/retry/Next and successor preparation. Clear/replace it only on successful replacement; appended nonmembers use unity.
+- [x] Thread immutable resolved gain through both native audio paths (AC: 2, 4–6).
+  - [x] Pass the correct occurrence policy to initial and successor decoder calls in CPAL and Pulse, plus seek/restart preparation.
+  - [x] Scale converted packed-f32 frames and flushed tail exactly once before queue insertion; unity takes an unchanged fast path.
+  - [x] Preserve callback/replay, output pinning, pause authorization, presentation receipts, clean EOF/error distinction and aggregate buffer bounds.
 - [ ] Add integration and regression evidence (AC: 1–8).
-  - [ ] Exercise provider → album admission → persisted policy → production decoder → boundary consumer, including partial tags, provider/tag duplication and independent source identities.
-  - [ ] Test migration/rollback/corruption/restart, stale resolution, queue membership and gain retention across all transport paths.
-  - [ ] Run controlled-runtime tests, actual platform builds and fixture runs; update installed checklist with gain-specific digital evidence and explicit physical evidence limitations.
+  - [x] Exercise provider → album admission → persisted policy → production decoder → boundary consumer, including partial tags, provider/tag duplication and independent source identities.
+  - [x] Test migration/rollback/corruption/restart, stale resolution, queue membership and gain retention across all transport paths.
+  - [ ] Run controlled-runtime tests, actual platform builds and fixture runs; update installed checklist with gain-specific digital evidence and explicit physical evidence limitations. macOS ARM64 digital checks pass; Windows, Linux, macOS x64 and physical-output evidence remain open.
 
 ## Dev Notes
 
@@ -173,24 +173,67 @@ Project context's provider abstraction and managed-zone safety remain foundation
 
 ### Agent Model Used
 
-GPT-6 (story preparation).
+GPT-6.
+
+### Implementation Plan
+
+- Normalize only the complete OpenSubsonic album ReplayGain pair into equality-safe internal evidence, then resolve one versioned policy before converting songs to queue sources.
+- Persist the album source, original occurrence membership and reproducible scalar/provenance in the owner transaction, and select unity for nonmembers.
+- Carry the immutable scalar through initial, seek and successor preparation in both native paths; multiply packed f32 output once after resampling and before queue insertion.
+- Verify the pure policy, provider parsing, admission fencing, migration/restore and production decoder behavior with the controlled runtime, then record installed-platform limits separately.
 
 ### Debug Log References
 
-Repository/planning analysis, previous-story review, five-commit inspection, provider and audio-path analysis, primary technical references and create-story checklist validation. Preparation only; no implementation, runtime tests or physical captures performed for Story 15.10.
+- Red/green focused tests covered resolver math/fallback, OpenSubsonic parsing, persistence migration/context and the production decoder gain boundary.
+- Controlled playback suite: 246 passed, 6 ignored; provider suite: 128 passed; final daemon suite: 949 passed, 6 ignored.
+- Installed-evidence validator: 33 passed. `cargo fmt --check`, `git diff --check`, macOS ARM64 daemon build and daemon clippy completed successfully; clippy retains repository baseline warnings.
+- Linux ARM64 and Windows ARM64 daemon cross-builds were attempted but the controlled toolchain lacked target `core`/`std` and matching native linker/runtime inputs. Those installed rows, macOS x64 and physical capture remain explicitly unverified in the checklist.
+- Review correction: decoded the typed Subsonic body from the original raw response object so `RawValue` retains valid and overflowing ReplayGain tokens while API failures keep their sanitized classification. Subsonic provider regressions: 59 passed.
+- Review correction: fresh album requests now cancel and supersede pending same/different-album resolutions, stale results remain fenced with `ALBUM_SUPERSEDED`, and the UI silently consumes only that expected outcome. Admission regressions: 14 passed; album RPC regressions: 5 passed; corrected full daemon suite: 953 passed, 6 ignored; UI production build passed.
+- Adversarial review correction: classic Subsonic gain is gated off, malformed API error fields retain sanitized generic mapping, supersession wins over obsolete provider failures, and persisted membership is digest-validated. Provider suite: 61 passed; corrected full daemon suite: 955 passed, 6 ignored; UI production build, formatting and diff checks passed.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Defined provider-only metadata admission, whole-album fallback, numerical policy, signal-domain limits, durable membership and both output paths.
-- Preserved predecessor evidence gaps without altering previous story status.
-- Ready for development; task checkboxes remain unchecked until implementation and verification.
+- Added a deterministic album-wide resolver with strict evidence bounds, consistency tolerances, static `-1 dBFS` sample-peak reference protection and exact-unity fallback reasons.
+- Retained tolerant OpenSubsonic metadata without changing the public Song JSON contract; malformed and extreme optional values remain playable at unity.
+- Migrated playback persistence to v3 and atomically fenced source album, original occurrence membership, scalar and provenance; restore rejects corrupt, future or incoherent policies.
+- Passed member gain through admission, seek, retry/resume, successor preparation, CPAL and Pulse. Appended nonmembers use unity and successful replacements clear the old context.
+- Applied gain exactly once to normal and flushed packed-f32 samples after swresample. Qualified non-unity playback verifies the resolved original container/codec before enqueueing audio.
+- Documented signal-domain limits and current platform evidence. Digital macOS ARM64 checks passed; unrun installed and physical-output rows remain open as required by AC8.
 
 ### File List
 
+- `Cargo.toml`
 - `_bmad-output/implementation-artifacts/15-10-preserve-an-album-s-relative-loudness-with-consistent-gain.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/auto_fill/fetch.rs`
+- `hifimule-daemon/src/auto_fill/pipeline.rs`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/playback/album.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/continuity.rs`
+- `hifimule-daemon/src/playback/decoder.rs`
+- `hifimule-daemon/src/playback/loudness.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/album_admission.rs`
+- `hifimule-daemon/src/playback/session/album_admission_tests.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/album_tests.rs`
+- `hifimule-ui/src/rpc.ts`
 
 ### Change Log
 
 - 2026-09-18: Created implementation-ready Story 15.10 with metadata, persistence, audio and evidence contracts.
+- 2026-09-18: Implemented and verified frozen album ReplayGain policy, durable membership, native-path gain application and platform evidence tracking; moved story to review.
+- 2026-09-18: Corrected raw ReplayGain response decoding and made rapid album selection latest-request-wins with silent typed supersession.
+- 2026-09-18: Applied adversarial review fixes for capability gating, tolerant API errors, cancellation precedence and exact persisted membership validation; reopened incomplete platform evidence.

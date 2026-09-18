@@ -20,6 +20,7 @@ struct PendingAlbum {
     epoch: u64,
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
+    superseded: Arc<AtomicBool>,
     _guard: Option<crate::sync::MutationGuard>,
 }
 
@@ -34,11 +35,16 @@ pub(crate) struct AlbumReservation {
     token: String,
     pub(crate) deadline: Instant,
     cancelled: Arc<AtomicBool>,
+    superseded: Arc<AtomicBool>,
 }
 
 impl AlbumReservation {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_superseded(&self) -> bool {
+        self.superseded.load(Ordering::Acquire)
     }
 }
 
@@ -64,14 +70,30 @@ impl PlaybackSession {
         rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_album(
         &self,
         reservation: AlbumReservation,
         sources: Vec<TrackSource>,
     ) -> PResult<SessionSnapshot> {
+        self.commit_album_with_policy(
+            reservation,
+            sources,
+            super::super::loudness::AlbumLoudnessPolicy::unity(
+                super::super::loudness::AlbumLoudnessReason::MetadataAbsent,
+            ),
+        )
+    }
+
+    pub(crate) fn commit_album_with_policy(
+        &self,
+        reservation: AlbumReservation,
+        sources: Vec<TrackSource>,
+        policy: super::super::loudness::AlbumLoudnessPolicy,
+    ) -> PResult<SessionSnapshot> {
         let (tx, rx) = mpsc::channel();
         self.command_tx
-            .try_send(OwnerCommand::CommitAlbum(reservation, sources, tx))
+            .try_send(OwnerCommand::CommitAlbum(reservation, sources, policy, tx))
             .map_err(admission_error)?;
         rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
@@ -165,8 +187,10 @@ pub(super) fn reserve(
             ))
         };
     }
-    if let Some(pending) = &i.album.pending {
-        if pending.params.command_id == params.command_id && pending.params != params {
+    if let Some(pending) = &i.album.pending
+        && pending.params.command_id == params.command_id
+    {
+        if pending.params != params {
             return Err(PlaybackError::conflict(
                 "COMMAND_ID_REUSED",
                 "album command payload changed",
@@ -193,8 +217,13 @@ pub(super) fn reserve(
             "album admission is stale",
         ));
     }
+    if let Some(pending) = &i.album.pending {
+        pending.superseded.store(true, Ordering::Release);
+        cancel_pending(i);
+    }
     let token = Uuid::new_v4().to_string();
     let cancelled = Arc::new(AtomicBool::new(false));
+    let superseded = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + ALBUM_RESOLUTION_TIMEOUT;
     i.album.pending = Some(PendingAlbum {
         params,
@@ -202,12 +231,14 @@ pub(super) fn reserve(
         epoch: i.control_epoch.load(Ordering::Acquire),
         deadline,
         cancelled: cancelled.clone(),
+        superseded: superseded.clone(),
         _guard: guard,
     });
     Ok(AlbumAdmission::Resolve(AlbumReservation {
         token,
         deadline,
         cancelled,
+        superseded,
     }))
 }
 
@@ -215,6 +246,7 @@ pub(super) fn commit(
     i: &mut Inner,
     reservation: AlbumReservation,
     sources: Vec<TrackSource>,
+    policy: super::super::loudness::AlbumLoudnessPolicy,
     serial: &AtomicU64,
 ) -> PResult<SessionSnapshot> {
     prune(i, false);
@@ -224,14 +256,22 @@ pub(super) fn commit(
         .as_ref()
         .is_some_and(|p| p.token == reservation.token)
     {
-        return Err(PlaybackError::conflict(
-            "GENERATION_CONFLICT",
-            "album resolution was superseded",
-        ));
+        return Err(if reservation.is_superseded() {
+            PlaybackError::conflict("ALBUM_SUPERSEDED", "album resolution was superseded")
+        } else {
+            PlaybackError::conflict("GENERATION_CONFLICT", "album admission is stale")
+        });
     }
     let pending = i.album.pending.take().unwrap();
     let p = &pending.params;
-    let result = apply_inner(
+    let membership_digest = super::super::model::album_membership_digest(&sources);
+    let album_context = super::super::model::FrozenAlbumContext {
+        source: p.source.clone(),
+        member_count: sources.len() as u64,
+        membership_digest,
+        policy,
+    };
+    let result = apply_inner_with_album_context(
         i,
         &ApplySessionParams {
             schema_version: p.schema_version,
@@ -242,6 +282,7 @@ pub(super) fn commit(
             operation: SessionOperation::PlayAlbum { sources },
         },
         serial,
+        Some(album_context),
     )?;
     // The assigned rows were validated/decorated before the transaction. Build
     // the response without additional fallible DB reads after successful commit.
@@ -260,6 +301,13 @@ pub(super) fn commit(
     };
     let mut playback = i.playback.clone();
     playback.can_go_next = count > 1;
+    let gain_bits = current.as_ref().map_or(1.0f32.to_bits(), |occurrence| {
+        i.session
+            .album_context
+            .as_ref()
+            .map_or(1.0, |context| context.scalar_for(occurrence))
+            .to_bits()
+    });
     let response = SessionSnapshot {
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
@@ -282,6 +330,7 @@ pub(super) fn commit(
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
         seek_audio: false,
         seek_epoch: i.control_epoch.load(Ordering::Acquire),
+        gain_bits,
     };
     i.album.order.push_back(p.command_id.clone());
     i.album

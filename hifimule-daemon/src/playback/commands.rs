@@ -79,12 +79,26 @@ impl PlaybackCommandService {
 
     /// Run commit and dispatch as one blocking job. Dropping the RPC future
     /// cannot strand an already committed queue before its audio effect runs.
+    #[cfg(test)]
     pub(crate) fn commit_album(
         &self,
         reservation: super::session::AlbumReservation,
         sources: Vec<super::model::TrackSource>,
     ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
         let snapshot = self.playback.commit_album(reservation, sources)?;
+        self.dispatch_effect(&snapshot);
+        Ok(snapshot)
+    }
+
+    pub(crate) fn commit_album_with_policy(
+        &self,
+        reservation: super::session::AlbumReservation,
+        sources: Vec<super::model::TrackSource>,
+        policy: super::loudness::AlbumLoudnessPolicy,
+    ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
+        let snapshot = self
+            .playback
+            .commit_album_with_policy(reservation, sources, policy)?;
         self.dispatch_effect(&snapshot);
         Ok(snapshot)
     }
@@ -113,6 +127,7 @@ impl PlaybackCommandService {
         let generation = snapshot.generation_id.clone();
         let position_ms = snapshot.position_ms;
         let resume_epoch = snapshot.resume_epoch;
+        let gain = f32::from_bits(snapshot.gain_bits);
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -139,7 +154,7 @@ impl PlaybackCommandService {
             }
             let failure = match resolved {
                 Some(Ok(Ok(description))) => super::audio::global()
-                    .start_at_epoch(
+                    .start_at_epoch_with_gain(
                         description,
                         current.source,
                         position_ms,
@@ -147,6 +162,7 @@ impl PlaybackCommandService {
                         playback.clone(),
                         deadline,
                         resume_epoch,
+                        gain,
                     )
                     .await
                     .err(),
@@ -227,6 +243,7 @@ impl PlaybackCommandService {
         let playback = self.playback.clone();
         let generation = snapshot.generation_id.clone();
         let seek_epoch = snapshot.seek_epoch;
+        let gain = f32::from_bits(snapshot.gain_bits);
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -253,7 +270,7 @@ impl PlaybackCommandService {
             }
             let failure = match resolved {
                 Some(Ok(Ok(description))) => super::audio::global()
-                    .start_seek_at_epoch(
+                    .start_seek_at_epoch_with_gain(
                         description,
                         current.source,
                         pending.requested_position_ms,
@@ -262,6 +279,7 @@ impl PlaybackCommandService {
                         playback.clone(),
                         deadline,
                         seek_epoch,
+                        gain,
                     )
                     .await
                     .err(),

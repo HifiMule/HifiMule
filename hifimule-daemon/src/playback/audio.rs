@@ -2,7 +2,7 @@ mod handoff;
 #[cfg(target_os = "linux")]
 mod pulse_output;
 #[cfg(not(target_os = "linux"))]
-use super::decoder::{UNKNOWN_SEEK_LANDING_FRAME, decode_stream_with_seek};
+use super::decoder::{UNKNOWN_SEEK_LANDING_FRAME, decode_stream_with_seek_and_gain};
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
 use super::streaming::{BoundedHttpReader, StreamFailureKind, StreamFailureState, StreamReadError};
 use crate::providers::{PlaybackDescription, PlaybackRequest, select_playback_representation};
@@ -324,6 +324,8 @@ struct PreparedSuccessor {
     representation: String,
     preparation: super::http_source::Preparation,
     seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
+    gain: f32,
+    qualified_suffix: Option<String>,
 }
 
 struct OutputControl {
@@ -552,6 +554,53 @@ fn representation_name(representation: &crate::providers::PlaybackRepresentation
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn qualified_gain_suffix(
+    gain: f32,
+    suffix: Option<&str>,
+    representation: &crate::providers::PlaybackRepresentation,
+) -> Result<Option<String>, PlaybackPipelineError> {
+    if !gain.is_finite() || gain <= 0.0 {
+        return Err(PlaybackPipelineError::decode(anyhow::anyhow!(
+            "invalid frozen album gain"
+        )));
+    }
+    if gain.to_bits() == 1.0f32.to_bits() {
+        return Ok(None);
+    }
+    if representation.provenance != crate::providers::PlaybackProvenance::Original {
+        return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
+            "album gain requires the qualified original representation"
+        )));
+    }
+    let suffix = suffix
+        .map(str::trim)
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+        .filter(|value| matches!(value.as_str(), "wav" | "flac" | "m4a" | "mp3"))
+        .ok_or_else(|| {
+            PlaybackPipelineError::unsupported(anyhow::anyhow!(
+                "album gain source format is unqualified"
+            ))
+        })?;
+    if representation
+        .container
+        .as_deref()
+        .is_some_and(|container| {
+            normalize_container(container).is_some_and(|container| match suffix.as_str() {
+                "wav" => !matches!(container.as_str(), "wav" | "wave"),
+                "flac" => container != "flac",
+                "m4a" => !matches!(container.as_str(), "m4a" | "mp4" | "mov"),
+                "mp3" => container != "mp3" && container != "mpeg",
+                _ => true,
+            })
+        })
+    {
+        return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
+            "resolved container contradicts frozen album gain policy"
+        )));
+    }
+    Ok(Some(suffix))
+}
+
 fn diagnostic_representation(value: &str) -> String {
     let value = normalize_container(value).unwrap_or_default();
     if matches!(
@@ -674,6 +723,9 @@ impl AudioEngine {
         };
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
+        let gain = f32::from_bits(candidate.gain_bits);
+        let qualified_suffix =
+            qualified_gain_suffix(gain, description.song.suffix.as_deref(), &representation)?;
         let representation_name = representation_name(&representation);
         let hint = decoder_hint(&representation);
         let seek_mechanism = representation
@@ -716,6 +768,8 @@ impl AudioEngine {
             representation: representation_name,
             preparation,
             seek_mechanism,
+            gain,
+            qualified_suffix,
         })
         .map_err(|_| PlaybackPipelineError::cancelled(anyhow::anyhow!("successor slot busy")))
     }
@@ -961,7 +1015,7 @@ impl AudioEngine {
         deadline: std::time::Instant,
         expected_epoch: u64,
     ) -> Result<(), PlaybackPipelineError> {
-        self.start_at_epoch_kind(
+        self.start_at_epoch_with_gain(
             description,
             source,
             start_ms,
@@ -969,22 +1023,22 @@ impl AudioEngine {
             session,
             deadline,
             expected_epoch,
-            None,
+            1.0,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn start_seek_at_epoch(
+    pub(crate) async fn start_at_epoch_with_gain(
         &self,
         description: PlaybackDescription,
         source: super::model::TrackSource,
         start_ms: u64,
-        operation_id: String,
         generation: String,
         session: super::PlaybackSession,
         deadline: std::time::Instant,
         expected_epoch: u64,
+        gain: f32,
     ) -> Result<(), PlaybackPipelineError> {
         self.start_at_epoch_kind(
             description,
@@ -994,6 +1048,34 @@ impl AudioEngine {
             session,
             deadline,
             expected_epoch,
+            gain,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_seek_at_epoch_with_gain(
+        &self,
+        description: PlaybackDescription,
+        source: super::model::TrackSource,
+        start_ms: u64,
+        operation_id: String,
+        generation: String,
+        session: super::PlaybackSession,
+        deadline: std::time::Instant,
+        expected_epoch: u64,
+        gain: f32,
+    ) -> Result<(), PlaybackPipelineError> {
+        self.start_at_epoch_kind(
+            description,
+            source,
+            start_ms,
+            generation,
+            session,
+            deadline,
+            expected_epoch,
+            gain,
             Some(operation_id),
         )
         .await
@@ -1009,6 +1091,7 @@ impl AudioEngine {
         session: super::PlaybackSession,
         deadline: std::time::Instant,
         expected_epoch: u64,
+        gain: f32,
         seek_operation_id: Option<String>,
     ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
@@ -1055,6 +1138,8 @@ impl AudioEngine {
         require_preparation_epoch(&session, expected_epoch)?;
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
+        let qualified_suffix =
+            qualified_gain_suffix(gain, description.song.suffix.as_deref(), &representation)?;
         let seek_mechanism = representation
             .seek_mechanism
             .filter(|_| representation.request.range_supported && duration_ms > 0);
@@ -1179,6 +1264,8 @@ impl AudioEngine {
                     worker_seek,
                     worker_boundary_pending,
                     worker_handoff,
+                    gain,
+                    qualified_suffix,
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -1365,6 +1452,8 @@ fn run_output(
     seek_commit: Option<(String, u64)>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
+    gain: f32,
+    qualified_suffix: Option<String>,
 ) -> Result<(), PlaybackPipelineError> {
     let stream_failure = reader.failure_state();
     let preference = session
@@ -1434,7 +1523,7 @@ fn run_output(
         media_seek_requested.then(|| Arc::new(AtomicU64::new(UNKNOWN_SEEK_LANDING_FRAME)));
     let decoder_seek_landing = seek_landing_frame.clone();
     let decoder = super::output::DecoderWorker::spawn_result(cancel.clone(), move || {
-        decode_stream_with_seek(
+        decode_stream_with_seek_and_gain(
             reader,
             Some(&hint),
             rate,
@@ -1445,6 +1534,8 @@ fn run_output(
             Some(provider_duration_ms),
             Some(decoder_seek_qualified),
             decoder_seek_landing,
+            gain,
+            qualified_suffix.as_deref(),
             decoder_pcm,
             decoder_cancel,
         )
@@ -1730,6 +1821,8 @@ fn run_output(
                 representation,
                 preparation,
                 seek_mechanism,
+                gain,
+                qualified_suffix,
             } = prepared;
             let qualified = Arc::new(AtomicU64::new(0));
             let decoder_qualified = qualified.clone();
@@ -1754,7 +1847,7 @@ fn run_output(
             };
             let decoder_cancel = cancel.clone();
             let worker = super::output::DecoderWorker::spawn_result(cancel.clone(), move || {
-                decode_stream_with_seek(
+                decode_stream_with_seek_and_gain(
                     reader,
                     Some(&decoder_hint),
                     rate,
@@ -1765,6 +1858,8 @@ fn run_output(
                     Some(duration_ms),
                     Some(decoder_qualified),
                     None,
+                    gain,
+                    qualified_suffix.as_deref(),
                     queue,
                     decoder_cancel,
                 )
@@ -2688,6 +2783,27 @@ mod tests {
             seek_mechanism: None,
             request: request(url),
         }
+    }
+
+    #[test]
+    fn non_unity_gain_requires_a_compatible_original_representation() {
+        let original = representation(
+            Some("audio/flac"),
+            Some("flac"),
+            "https://music.example/original",
+        );
+        assert_eq!(
+            qualified_gain_suffix(0.75, Some("FLAC"), &original).unwrap(),
+            Some("flac".into())
+        );
+        assert!(qualified_gain_suffix(0.75, Some("mp3"), &original).is_err());
+        let mut alternative = original;
+        alternative.provenance = PlaybackProvenance::Alternative;
+        assert!(qualified_gain_suffix(0.75, Some("flac"), &alternative).is_err());
+        assert_eq!(
+            qualified_gain_suffix(1.0, Some("opus"), &alternative).unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -20,14 +20,16 @@ impl MediaProvider for AlbumProvider {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
         self.release.notified().await;
+        let mut track: Song = serde_json::from_value(json!({
+            "id": format!("{id}-track"), "title": "Track", "duration": 1,
+            "albumId": id, "suffix": "flac", "contentType": "audio/flac"
+        }))
+        .unwrap();
+        track.album_loudness = AlbumLoudnessEvidence::open_subsonic(-6.0, 0.5);
         Ok(AlbumWithTracks {
-            album: serde_json::from_value(json!({"id": id, "name": "Album"})).unwrap(),
-            tracks: vec![
-                serde_json::from_value(
-                    json!({"id": "album-track", "title": "Track", "duration": 1}),
-                )
+            album: serde_json::from_value(json!({"id": id, "name": "Album", "trackCount": 1}))
                 .unwrap(),
-            ],
+            tracks: vec![track],
         })
     }
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {
@@ -84,11 +86,11 @@ impl MediaProvider for AlbumProvider {
         unreachable!()
     }
     fn server_type(&self) -> ServerType {
-        ServerType::Jellyfin
+        ServerType::OpenSubsonic
     }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            open_subsonic: false,
+            open_subsonic: true,
             supports_changes_since: false,
             supports_server_transcoding: false,
             supports_playlist_write: false,
@@ -233,10 +235,69 @@ async fn album_rpc_successful_receipt_replay_does_not_resolve_again() {
     .unwrap();
     assert_eq!(replay, first);
     assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
+    let snapshot = f.state.playback.snapshot().unwrap();
+    let expected = 10f32.powf(-6.0 / 20.0);
+    assert!((f32::from_bits(snapshot.gain_bits) - expected).abs() <= 1e-7);
+    let persisted = f.state.db.load_playback_session().unwrap().unwrap();
     assert_eq!(
-        f.state.playback.snapshot().unwrap().queue_revision,
+        persisted.album_context.unwrap().policy.scalar_bits,
+        snapshot.gain_bits
+    );
+    assert_eq!(
+        snapshot.queue_revision,
         first["data"]["queueRevision"].as_str().unwrap()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn album_rpc_latest_request_cancels_and_fences_prior_resolution() {
+    for replacement_album in ["album", "different-album"] {
+        let f = Fixture::new().await;
+        let first_request = f.request();
+        let state = f.state.clone();
+        let first = tokio::spawn(async move {
+            handle_playback_play_album(&state, Some(first_request), None).await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            f.provider.entered.notified(),
+        )
+        .await
+        .unwrap();
+
+        let mut replacement_request = f.request();
+        replacement_request["source"]["albumId"] = replacement_album.into();
+        let state = f.state.clone();
+        let replacement = tokio::spawn(async move {
+            handle_playback_play_album(&state, Some(replacement_request), None).await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            f.provider.entered.notified(),
+        )
+        .await
+        .unwrap();
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.data.unwrap()["code"], "ALBUM_SUPERSEDED");
+
+        f.provider.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), replacement)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let snapshot = f.state.playback.snapshot().unwrap();
+        assert_eq!(
+            snapshot.current.unwrap().source.track_id,
+            format!("{replacement_album}-track")
+        );
+        assert_eq!(f.provider.calls.load(Ordering::SeqCst), 2);
+    }
 }
 
 #[tokio::test]

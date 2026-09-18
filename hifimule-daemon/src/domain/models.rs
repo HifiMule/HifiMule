@@ -3,6 +3,44 @@ use serde::{Deserialize, Serialize};
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const BITS_PER_KILOBIT: u32 = 1_000;
 
+/// Equality-safe, bounded provider evidence retained only inside the daemon.
+/// The wire `Song` contract deliberately does not expose provider loudness data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlbumLoudnessEvidence {
+    #[default]
+    Absent,
+    Rejected,
+    OpenSubsonic {
+        album_gain_db_bits: u64,
+        album_peak_bits: u64,
+    },
+}
+
+impl AlbumLoudnessEvidence {
+    pub fn open_subsonic(album_gain_db: f64, album_peak: f64) -> Self {
+        if !album_gain_db.is_finite() || !album_peak.is_finite() {
+            return Self::Rejected;
+        }
+        Self::OpenSubsonic {
+            album_gain_db_bits: album_gain_db.to_bits(),
+            album_peak_bits: album_peak.to_bits(),
+        }
+    }
+
+    pub fn values(self) -> Option<(f64, f64)> {
+        match self {
+            Self::OpenSubsonic {
+                album_gain_db_bits,
+                album_peak_bits,
+            } => Some((
+                f64::from_bits(album_gain_db_bits),
+                f64::from_bits(album_peak_bits),
+            )),
+            Self::Absent | Self::Rejected => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Library {
     pub id: String,
@@ -47,6 +85,8 @@ pub struct Song {
     pub suffix: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+    #[serde(skip)]
+    pub album_loudness: AlbumLoudnessEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,11 +270,18 @@ mod tests {
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
             size_bytes: None,
+            album_loudness: AlbumLoudnessEvidence::Absent,
         };
 
         assert_eq!(song.id, "9f86d081884c7d659a2feaa0c55ad015");
         assert_eq!(song.artist_id.as_deref(), Some("artist-md5-id"));
         assert_eq!(song.album_id.as_deref(), Some("album-md5-id"));
+        assert!(
+            serde_json::to_value(&song)
+                .unwrap()
+                .get("albumLoudness")
+                .is_none()
+        );
     }
 
     #[test]

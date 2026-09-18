@@ -68,6 +68,77 @@ fn replace(owner: &PlaybackSession, command_id: String) -> PResult<ApplyResult> 
 }
 
 #[test]
+fn frozen_album_gain_follows_members_but_not_appended_occurrences() {
+    let owner = Owner::new();
+    let initial = owner.0.snapshot().unwrap();
+    let reservation = resolve(&owner.0, request(&initial));
+    let policy = crate::playback::loudness::AlbumLoudnessPolicy {
+        version: crate::playback::loudness::ALBUM_LOUDNESS_POLICY_VERSION,
+        scalar_bits: 0.75f32.to_bits(),
+        gain_db_bits: Some(0.0f64.to_bits()),
+        peak_bits: Some((crate::playback::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+        reason: crate::playback::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+    };
+    let committed = owner
+        .0
+        .commit_album_with_policy(reservation, sources(2), policy)
+        .unwrap();
+    assert_eq!(f32::from_bits(committed.gain_bits), 0.75);
+    let originals = committed.occurrences.clone();
+
+    let appended = owner
+        .0
+        .apply(ApplySessionParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: committed.instance_id.clone(),
+            session_id: committed.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: committed.queue_revision.clone(),
+            operation: SessionOperation::AppendQueue {
+                sources: vec![TrackSource {
+                    server_id: "other".into(),
+                    track_id: "appended".into(),
+                }],
+            },
+        })
+        .unwrap()
+        .assigned_occurrences
+        .pop()
+        .unwrap();
+    let after_append = owner.0.snapshot().unwrap();
+    owner
+        .0
+        .apply(ApplySessionParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: after_append.instance_id,
+            session_id: after_append.session_id,
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: after_append.queue_revision,
+            operation: SessionOperation::SelectCurrent {
+                occurrence_id: appended.occurrence_id,
+            },
+        })
+        .unwrap();
+    assert_eq!(f32::from_bits(owner.0.snapshot().unwrap().gain_bits), 1.0);
+
+    let selected = owner.0.snapshot().unwrap();
+    owner
+        .0
+        .apply(ApplySessionParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: selected.instance_id,
+            session_id: selected.session_id,
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: selected.queue_revision,
+            operation: SessionOperation::SelectCurrent {
+                occurrence_id: originals[1].occurrence_id.clone(),
+            },
+        })
+        .unwrap();
+    assert_eq!(f32::from_bits(owner.0.snapshot().unwrap().gain_bits), 0.75);
+}
+
+#[test]
 fn transport_and_replacement_supersede_album_resolution_atomically() {
     for action in [
         Some(ControlAction::Pause),
@@ -176,16 +247,51 @@ fn dropping_reservation_releases_busy_slot() {
     let params = request(&owner.0.snapshot().unwrap());
     let reservation = resolve(&owner.0, params.clone());
     assert_eq!(
-        error_code(
-            owner
-                .0
-                .reserve_album(request(&owner.0.snapshot().unwrap()), None)
-        ),
+        error_code(owner.0.reserve_album(params.clone(), None)),
         "PLAYBACK_BUSY"
     );
     drop(reservation);
     let replacement = resolve(&owner.0, params);
     owner.0.commit_album(replacement, sources(1)).unwrap();
+}
+
+#[test]
+fn fresh_album_reservation_supersedes_pending_same_or_different_album() {
+    for replacement_album in ["album", "different-album"] {
+        let owner = Owner::new();
+        let snapshot = owner.0.snapshot().unwrap();
+        let first_params = request(&snapshot);
+        let first = resolve(&owner.0, first_params);
+        let mut replacement_params = request(&snapshot);
+        replacement_params.source.album_id = replacement_album.into();
+
+        let replacement = resolve(&owner.0, replacement_params);
+
+        assert!(first.is_cancelled());
+        assert!(first.is_superseded());
+        assert_eq!(
+            error_code(owner.0.commit_album(first, sources(1))),
+            "ALBUM_SUPERSEDED"
+        );
+        let committed = owner.0.commit_album(replacement, sources(2)).unwrap();
+        assert_eq!(committed.total_occurrence_count, 2);
+    }
+}
+
+#[test]
+fn stale_replacement_does_not_cancel_valid_pending_reservation() {
+    let owner = Owner::new();
+    let snapshot = owner.0.snapshot().unwrap();
+    let first = resolve(&owner.0, request(&snapshot));
+    let mut stale = request(&snapshot);
+    stale.expected_queue_revision = "999".into();
+
+    assert_eq!(
+        error_code(owner.0.reserve_album(stale, None)),
+        "GENERATION_CONFLICT"
+    );
+    assert!(!first.is_cancelled());
+    owner.0.commit_album(first, sources(1)).unwrap();
 }
 
 #[test]

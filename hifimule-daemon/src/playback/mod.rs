@@ -6,6 +6,7 @@ mod continuity;
 pub mod decoder;
 pub mod devices;
 mod http_source;
+pub(crate) mod loudness;
 pub mod model;
 pub mod native;
 mod output;

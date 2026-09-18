@@ -672,6 +672,7 @@ mod tests {
             resume_epoch: 0,
             seek_audio: false,
             seek_epoch: 0,
+            gain_bits: 1.0f32.to_bits(),
             schema_version: 1,
             instance_id: "instance".into(),
             session_id: "session".into(),

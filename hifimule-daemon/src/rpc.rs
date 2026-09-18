@@ -921,6 +921,7 @@ async fn handle_playback_play_album(
         AlbumAdmission::Resolve(reservation) => reservation,
     };
     let album = resolve_playback_album(state, &p.source, &reservation).await?;
+    let policy = crate::playback::loudness::resolve_album_policy(&album);
     let tracks = order_album_tracks(album.tracks).map_err(|error| {
         let code = match error {
             AlbumValidationError::Empty => "ALBUM_EMPTY",
@@ -949,7 +950,7 @@ async fn handle_playback_play_album(
     let runtime = tokio::runtime::Handle::current();
     let snapshot = tokio::task::spawn_blocking(move || {
         let _runtime = runtime.enter();
-        service.commit_album(reservation, sources)
+        service.commit_album_with_policy(reservation, sources, policy)
     })
     .await
     .map_err(playback_task_error)?
@@ -962,6 +963,22 @@ async fn resolve_playback_album(
     source: &crate::playback::model::AlbumSource,
     reservation: &crate::playback::session::AlbumReservation,
 ) -> Result<crate::domain::models::AlbumWithTracks, JsonRpcError> {
+    let stale_error = || {
+        let code = if reservation.is_superseded() {
+            "ALBUM_SUPERSEDED"
+        } else {
+            "GENERATION_CONFLICT"
+        };
+        JsonRpcError {
+            code: 409,
+            message: if code == "ALBUM_SUPERSEDED" {
+                "Album playback was superseded".into()
+            } else {
+                "Album admission is stale".into()
+            },
+            data: Some(serde_json::json!({"code":code})),
+        }
+    };
     let resolve = async {
         let provider = crate::server_manager::get_provider_by_server_id(
             &state.server_manager,
@@ -971,20 +988,25 @@ async fn resolve_playback_album(
         .await?;
         provider.get_album(&source.album_id).await
     };
-    tokio::select! {
-        result = tokio::time::timeout_at(tokio::time::Instant::from_std(reservation.deadline), resolve) => result,
+    let result = tokio::select! {
+        biased;
         _ = async {
             while !reservation.is_cancelled() {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
-        } => return Err(JsonRpcError {
-            code: 409, message: "Album playback was superseded".into(),
-            data: Some(serde_json::json!({"code":"GENERATION_CONFLICT"})),
-        }),
-    }.map_err(|_| JsonRpcError {
-        code: ERR_CONNECTION_FAILED, message: "Album resolution timed out".into(),
-        data: Some(serde_json::json!({"code":"PLAYBACK_TIMEOUT"})),
-    })?.map_err(provider_error_to_rpc)
+        } => return Err(stale_error()),
+        result = tokio::time::timeout_at(tokio::time::Instant::from_std(reservation.deadline), resolve) => result,
+    };
+    if reservation.is_cancelled() {
+        return Err(stale_error());
+    }
+    result
+        .map_err(|_| JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Album resolution timed out".into(),
+            data: Some(serde_json::json!({"code":"PLAYBACK_TIMEOUT"})),
+        })?
+        .map_err(provider_error_to_rpc)
 }
 
 #[cfg(test)]
@@ -13226,6 +13248,7 @@ mod tests {
                 content_type: Some("audio/mpeg".to_string()),
                 suffix: Some("mp3".to_string()),
                 size_bytes: None,
+                album_loudness: Default::default(),
             })
             .collect::<Vec<_>>();
         let provider = FakeBrowseProvider::with_genre_tracks("rock", tracks);
@@ -13265,6 +13288,7 @@ mod tests {
             content_type: Some("audio/flac".to_string()),
             suffix: Some("flac".to_string()),
             size_bytes: None,
+            album_loudness: Default::default(),
         });
 
         let (items, playlist) =
@@ -13320,6 +13344,7 @@ mod tests {
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
             size_bytes: None,
+            album_loudness: Default::default(),
         };
         let provider = FakeBrowseProvider::with_album_and_song(
             crate::domain::models::AlbumWithTracks {
@@ -13397,6 +13422,7 @@ mod tests {
             content_type: None,
             suffix: None,
             size_bytes: None,
+            album_loudness: Default::default(),
         }
     }
 
@@ -13728,6 +13754,7 @@ mod tests {
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
             size_bytes: None,
+            album_loudness: Default::default(),
         };
         let provider = FakePlaylistProvider::with_song("playlist-42", song);
         state
@@ -13770,6 +13797,7 @@ mod tests {
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
             size_bytes: None,
+            album_loudness: Default::default(),
         }
     }
 

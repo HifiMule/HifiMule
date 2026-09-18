@@ -8,6 +8,15 @@ use crate::providers::PlaybackSeekMechanism;
 
 pub const UNKNOWN_SEEK_LANDING_FRAME: u64 = u64::MAX;
 
+#[inline]
+fn apply_album_gain(sample: f32, gain: f32) -> f32 {
+    if gain.to_bits() == 1.0f32.to_bits() {
+        sample
+    } else {
+        sample * gain
+    }
+}
+
 pub struct DecodeSummary {
     pub frames: u64,
     pub emitted_frames: u64,
@@ -111,8 +120,9 @@ pub fn decode_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn decode_stream_with_seek(
-    mut reader: super::streaming::BoundedHttpReader,
+    reader: super::streaming::BoundedHttpReader,
     filename_hint: Option<&str>,
     output_rate: u32,
     output_channels: u16,
@@ -125,6 +135,44 @@ pub fn decode_stream_with_seek(
     pcm: Arc<ArrayQueue<f32>>,
     cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<DecodeSummary> {
+    decode_stream_with_seek_and_gain(
+        reader,
+        filename_hint,
+        output_rate,
+        output_channels,
+        start_frame,
+        seek_mechanism,
+        media_seek_requested,
+        provider_duration_ms,
+        decoded_duration_ms,
+        seek_landing_frame,
+        1.0,
+        None,
+        pcm,
+        cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decode_stream_with_seek_and_gain(
+    mut reader: super::streaming::BoundedHttpReader,
+    filename_hint: Option<&str>,
+    output_rate: u32,
+    output_channels: u16,
+    start_frame: u64,
+    seek_mechanism: Option<PlaybackSeekMechanism>,
+    media_seek_requested: bool,
+    provider_duration_ms: Option<u64>,
+    decoded_duration_ms: Option<Arc<AtomicU64>>,
+    seek_landing_frame: Option<Arc<AtomicU64>>,
+    gain: f32,
+    qualified_suffix: Option<&str>,
+    pcm: Arc<ArrayQueue<f32>>,
+    cancel: Arc<AtomicBool>,
+) -> anyhow::Result<DecodeSummary> {
+    if !gain.is_finite() || gain <= 0.0 {
+        anyhow::bail!("invalid frozen album gain");
+    }
     let source_failure = reader.failure_state();
     let preparation = reader.preparation();
     ffmpeg::init()?;
@@ -176,6 +224,11 @@ pub fn decode_stream_with_seek(
     let stream_duration = stream.duration();
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
     let mut decoder = context.decoder().audio()?;
+    if let Some(suffix) = qualified_suffix
+        && !decoded_representation_matches(suffix, &container_name, decoder.id().name())
+    {
+        anyhow::bail!("resolved representation contradicts frozen album gain policy");
+    }
     let mut validated_duration_ms = None;
     if let Some(seek_mechanism) = seek_mechanism {
         let container = container_name.clone();
@@ -370,7 +423,8 @@ pub fn decode_stream_with_seek(
                         Ordering::Acquire,
                     );
                 }
-                while pcm.push(*sample).is_err() {
+                let sample = apply_album_gain(*sample, gain);
+                while pcm.push(sample).is_err() {
                     if cancel.load(Ordering::Acquire) {
                         anyhow::bail!("cancelled");
                     }
@@ -426,7 +480,8 @@ pub fn decode_stream_with_seek(
                     discard_samples -= 1;
                     continue;
                 }
-                while pcm.push(*sample).is_err() {
+                let sample = apply_album_gain(*sample, gain);
+                while pcm.push(sample).is_err() {
                     if cancel.load(Ordering::Acquire) {
                         anyhow::bail!("cancelled");
                     }
@@ -458,6 +513,25 @@ pub fn decode_stream_with_seek(
         frames,
         emitted_frames: emitted_samples / u64::from(output_channels),
     })
+}
+
+fn decoded_representation_matches(suffix: &str, container: &str, codec: &str) -> bool {
+    let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
+    let container = container.to_ascii_lowercase();
+    let codec = codec.to_ascii_lowercase();
+    match suffix.as_str() {
+        "wav" => {
+            container.contains("wav")
+                && matches!(codec.as_str(), "pcm_s16le" | "pcm_s24le" | "pcm_s32le")
+        }
+        "flac" => container.contains("flac") && codec == "flac",
+        "m4a" => {
+            (container.contains("mov") || container.contains("mp4") || container.contains("m4a"))
+                && matches!(codec.as_str(), "alac" | "aac")
+        }
+        "mp3" => container.contains("mp3") && codec == "mp3",
+        _ => false,
+    }
 }
 
 // Provider duration is whole seconds. Reconcile sub-second rounding, but never
@@ -516,6 +590,74 @@ fn validated_seek_duration_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn album_gain_has_a_bit_exact_unity_path_and_scales_once() {
+        for sample in [0.0f32, -0.0, 0.25, -0.5, 1.25] {
+            assert_eq!(apply_album_gain(sample, 1.0).to_bits(), sample.to_bits());
+        }
+        assert!((apply_album_gain(0.4, 0.75) - 0.3).abs() <= f32::EPSILON);
+        assert!((apply_album_gain(-0.4, 0.75) + 0.3).abs() <= f32::EPSILON);
+    }
+
+    fn decode_fixture_samples(path: &std::path::Path, gain: f32) -> (DecodeSummary, Vec<f32>) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reader = BoundedHttpReader::from_source(
+            std::fs::File::open(path).unwrap(),
+            cancel.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let pcm = Arc::new(ArrayQueue::<f32>::new(64 * 1024));
+        let drain_pcm = pcm.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let drain_done = done.clone();
+        let samples = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drain_samples = samples.clone();
+        let consumer = std::thread::spawn(move || {
+            while !drain_done.load(Ordering::Acquire) || !drain_pcm.is_empty() {
+                if let Some(sample) = drain_pcm.pop() {
+                    drain_samples.lock().unwrap().push(sample);
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        let summary = decode_stream_with_seek_and_gain(
+            reader,
+            path.file_name().and_then(|name| name.to_str()),
+            48_000,
+            2,
+            0,
+            None,
+            false,
+            None,
+            None,
+            None,
+            gain,
+            Some("wav"),
+            pcm,
+            cancel,
+        )
+        .unwrap();
+        done.store(true, Ordering::Release);
+        consumer.join().unwrap();
+        let samples = Arc::try_unwrap(samples).unwrap().into_inner().unwrap();
+        (summary, samples)
+    }
+
+    #[test]
+    fn production_decoder_scales_converted_and_drained_samples_once() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated-seek-pcm16.wav");
+        let (unity_summary, unity) = decode_fixture_samples(&fixture, 1.0);
+        let (scaled_summary, scaled) = decode_fixture_samples(&fixture, 0.5);
+        assert_eq!(unity_summary.emitted_frames, scaled_summary.emitted_frames);
+        assert_eq!(unity.len(), scaled.len());
+        assert!(unity.iter().any(|sample| *sample == 0.0));
+        for (original, adjusted) in unity.iter().zip(&scaled) {
+            assert_eq!(adjusted.to_bits(), (original * 0.5).to_bits());
+        }
+    }
     use crate::playback::streaming::{
         BoundedHttpReader, COMPRESSED_CAPACITY_BYTES, COMPRESSED_CHUNK_BYTES,
     };

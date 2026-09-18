@@ -57,6 +57,7 @@ mod tests {
             content_type: None,
             suffix: None,
             size_bytes: None,
+            album_loudness: Default::default(),
         }
     }
 

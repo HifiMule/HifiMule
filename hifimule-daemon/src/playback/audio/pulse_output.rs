@@ -1,6 +1,6 @@
 use super::*;
 use crate::playback::{
-    decoder::decode_stream_with_seek,
+    decoder::decode_stream_with_seek_and_gain,
     devices::pulse_stream::PinnedStream,
     output::{BoundaryPcmConsumer, PresentationActivity, PresentationLedger},
 };
@@ -107,6 +107,8 @@ pub(super) fn run_output(
     mut seek_commit: Option<(String, u64)>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
+    gain: f32,
+    qualified_suffix: Option<String>,
 ) -> Result<(), PlaybackPipelineError> {
     let preference = session
         .selected_output(&generation)
@@ -142,7 +144,7 @@ pub(super) fn run_output(
     let decoder_seek_landing = seek_landing_frame.clone();
     let stream_failure = reader.failure_state();
     let decoder = crate::playback::output::DecoderWorker::spawn_result(cancel.clone(), move || {
-        decode_stream_with_seek(
+        decode_stream_with_seek_and_gain(
             reader,
             Some(&hint),
             rate,
@@ -153,6 +155,8 @@ pub(super) fn run_output(
             Some(provider_duration_ms),
             Some(decoder_seek_qualified),
             decoder_seek_landing,
+            gain,
+            qualified_suffix.as_deref(),
             decoder_pcm,
             decoder_cancel,
         )
@@ -260,6 +264,8 @@ pub(super) fn run_output(
                     representation,
                     preparation,
                     seek_mechanism,
+                    gain,
+                    qualified_suffix,
                 } = prepared;
                 let qualified = Arc::new(AtomicU64::new(0));
                 let decoder_qualified = qualified.clone();
@@ -288,7 +294,7 @@ pub(super) fn run_output(
                 let worker = crate::playback::output::DecoderWorker::spawn_result(
                     cancel.clone(),
                     move || {
-                        decode_stream_with_seek(
+                        decode_stream_with_seek_and_gain(
                             reader,
                             Some(&decoder_hint),
                             rate,
@@ -299,6 +305,8 @@ pub(super) fn run_output(
                             Some(duration_ms),
                             Some(decoder_qualified),
                             None,
+                            gain,
+                            qualified_suffix.as_deref(),
                             queue,
                             decoder_cancel,
                         )

@@ -80,6 +80,7 @@ enum OwnerCommand {
     CommitAlbum(
         AlbumReservation,
         Vec<TrackSource>,
+        super::loudness::AlbumLoudnessPolicy,
         mpsc::Sender<PResult<SessionSnapshot>>,
     ),
     ListOutputs(ListOutputsParams, mpsc::Sender<PResult<OutputList>>),
@@ -209,6 +210,13 @@ impl PlaybackSession {
             .db
             .playback_successor(&inner.session.session_id, predecessor.ordinal)
             .ok()??;
+        let gain_bits = inner
+            .session
+            .album_context
+            .as_ref()
+            .map_or(1.0f32.to_bits(), |context| {
+                context.scalar_for(&successor).to_bits()
+            });
         Some(super::continuity::SuccessorCandidate {
             instance_id: inner.instance_id.clone(),
             session_id: inner.session.session_id.clone(),
@@ -217,6 +225,7 @@ impl PlaybackSession {
             queue_revision: inner.session.queue_revision,
             control_epoch,
             preparation_generation: self.generation_serial.load(Ordering::Acquire),
+            gain_bits,
         })
     }
 
@@ -949,12 +958,18 @@ fn owner_loop(
                 };
                 let _ = reply.send(with_metadata(result, &i));
             }
-            Ok(OwnerCommand::CommitAlbum(reservation, sources, reply)) => {
+            Ok(OwnerCommand::CommitAlbum(reservation, sources, policy, reply)) => {
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
                 } else {
-                    album_admission::commit(&mut i, reservation, sources, &generation_serial)
+                    album_admission::commit(
+                        &mut i,
+                        reservation,
+                        sources,
+                        policy,
+                        &generation_serial,
+                    )
                 };
                 if result.is_ok() {
                     reset_ingress(&i, &ingress);
@@ -1281,7 +1296,7 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::ReserveAlbum(_, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
-        OwnerCommand::CommitAlbum(_, _, reply) => {
+        OwnerCommand::CommitAlbum(_, _, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::ListOutputs(_, reply) => {
@@ -1443,6 +1458,7 @@ fn fresh_session() -> PersistedSession {
         state: TransportState::Idle,
         current_occurrence_id: None,
         position_ms: 0,
+        album_context: None,
     }
 }
 fn require_schema(v: u32) -> PResult<()> {
@@ -1479,6 +1495,15 @@ fn apply_inner(
     i: &mut Inner,
     p: &ApplySessionParams,
     generation_serial: &AtomicU64,
+) -> PResult<ApplyResult> {
+    apply_inner_with_album_context(i, p, generation_serial, None)
+}
+
+fn apply_inner_with_album_context(
+    i: &mut Inner,
+    p: &ApplySessionParams,
+    generation_serial: &AtomicU64,
+    album_context: Option<super::model::FrozenAlbumContext>,
 ) -> PResult<ApplyResult> {
     require_schema(p.schema_version)?;
     if Uuid::parse_str(&p.command_id).is_err() {
@@ -1532,6 +1557,12 @@ fn apply_inner(
                 validate_sources(sources)?;
             }
             assigned = make_occurrences(sources, 0);
+            next_session.album_context =
+                if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
+                    album_context
+                } else {
+                    None
+                };
             decorate_availability(&i.db, &mut assigned)?;
             next_session.current_occurrence_id = assigned.first().map(|o| o.occurrence_id.clone());
             next_session.position_ms = 0;
@@ -1600,6 +1631,7 @@ fn apply_inner(
             })?;
         }
         SessionOperation::Clear => {
+            next_session.album_context = None;
             next_session.current_occurrence_id = None;
             next_session.position_ms = 0;
             next_session.queue_revision = next_session
@@ -1614,6 +1646,7 @@ fn apply_inner(
                 .map_err(storage)?;
         }
         SessionOperation::PlayTrack { source } => {
+            next_session.album_context = None;
             source
                 .validate()
                 .map_err(|m| PlaybackError::invalid("INVALID_SESSION", m))?;
@@ -1763,6 +1796,15 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
         seek_audio: false,
         seek_epoch: i.control_epoch.load(Ordering::Acquire),
+        gain_bits: current
+            .as_ref()
+            .and_then(|occurrence| {
+                i.session
+                    .album_context
+                    .as_ref()
+                    .map(|context| context.scalar_for(occurrence).to_bits())
+            })
+            .unwrap_or(1.0f32.to_bits()),
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
         session_id: i.session.session_id.clone(),
@@ -3443,6 +3485,7 @@ mod tests {
             state: TransportState::Playing,
             current_occurrence_id: None,
             position_ms: 0,
+            album_context: None,
         };
         let mut occurrences: Vec<_> = (0..10_000)
             .map(|ordinal| Occurrence {

@@ -485,3 +485,63 @@ The old scalar `beforeOrdinal`/`afterOrdinal` and `failedOccurrenceRetained`
 claims cannot replace these observed identity/state objects. A syntactically valid
 record alone cannot certify the fixture oracle or physical audio: the tester must
 capture those observations on the stated installed platform.
+
+## Story 15.10 album loudness evidence
+
+Album loudness acceptance uses `albumLoudnessEvidenceVersion: 1`. Run the same
+production-pipeline fixture set on Windows x64, Linux x64, macOS x64 and macOS
+ARM64. Record build commit, OS and architecture, controlled FFmpeg ABI, native
+backend, provider/server version, anonymized album/source identities, fixture
+SHA-256, source suffix and content type, selected representation/container/codec,
+declared album gain `D`, declared album peak `P`, frozen f32 scalar bits and typed
+reason, output rate/layout, reference peak, converted peak, maximum absolute
+sample error, exact frame counts and boundary counts. Use scalar tolerance `1e-7`
+and packed-f32 sample tolerance `2e-6` unless a codec-specific tighter oracle is
+documented.
+
+The required digital matrix includes zero, negative and positive gain; excessive
+boost constrained by the `-1 dBFS` decoded sample-reference ceiling; intentional
+zeros, positive/negative samples and impulses; two distinguishable album tracks
+whose level ratio is preserved; short tracks and decoder/resampler drain;
+mono/stereo and 44.1↔48 kHz conversion; valid, absent, partial, malformed,
+conflicting and order-reversed metadata; provider plus embedded ReplayGain; and
+unsupported/transcoded representations. Same-rate/layout qualified rows must
+show `peak <= ceiling + 2e-6`. Converted rows compare every sample against an
+independently converted unity reference multiplied once by the frozen scalar and
+must report the observed post-conversion peak without claiming a universal bound.
+
+Lifecycle rows cover seek, Next, natural handoff, Pause, repeated Pause,
+submitted-tail replay, Resume, source Retry, output recreation, paused restart,
+stale album resolution, failed replacement, appended nonmembers, SelectCurrent,
+same track IDs on different servers, and a second successful album replacement.
+They must retain one policy for original members, unity for nonmembers, exact
+Story 15.9 frame/boundary counts, and no squared gain on replay.
+
+Digital sample evidence is separate from physical output. For each installed
+target, record OS/interface volume and processing state plus a physical capture
+or listening limitation. A digital pass does not certify true peak, inter-sample
+peak, DAC/analog level, audible continuity or OS processing. At implementation
+time, controlled local decoder fixtures cover WAV production decode, exact unity,
+single scaling and drain; persistence and lifecycle tests cover policy fencing.
+Installed Windows, Linux, macOS x64 and physical-output rows remain unverified
+until those target runs and captures are attached.
+
+Implementation verification on 2026-09-18 used commit baseline
+`66c37bb1da77e2a7c0eff4ba284aba6e7c2ef404` plus the Story 15.10 working tree on
+macOS 27.0 ARM64. The controlled runtime reported FFmpeg 9.0.1 with
+libavcodec 63.1.101, libavformat 63.1.101, libavutil 61.1.101 and libswresample
+7.1.101. The production WAV fixture
+`generated-seek-pcm16.wav` had SHA-256
+`2cb33b052c4a2dbaa2ca42bb62ff2e518b614b9c313c4b908d5236989ba21fdc`.
+The macOS ARM64 daemon build and controlled production-decoder tests passed,
+including exact-unity comparison, one f32 multiplication per emitted sample,
+unchanged frame count and decoder/resampler drain. These are digital PCM results;
+no CoreAudio interface capture, OS-volume observation or physical-output result
+was collected.
+
+Actual daemon cross-builds were attempted for `aarch64-unknown-linux-gnu` and
+`aarch64-pc-windows-gnullvm`. The controlled Rust 1.93 build environment lacked
+the target `core`/`std` artifacts and the host does not provide the matching
+native audio/FFmpeg linker environment, so neither produced a target binary.
+Windows, Linux, macOS x64, all physical-output rows and the complete installed
+gain matrix therefore remain explicitly unverified.

@@ -261,11 +261,19 @@ export async function playbackPlayTrack(serverId: string, trackId: string): Prom
 
 export async function playbackPlayAlbum(serverId: string, albumId: string): Promise<void> {
     const current = await playbackGetSession();
-    await rpcCall('playback.playAlbum', {
-        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
-        commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
-        expectedGenerationId: current.generationId, source: { serverId, albumId },
-    });
+    try {
+        await rpcCall('playback.playAlbum', {
+            schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+            commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
+            expectedGenerationId: current.generationId, source: { serverId, albumId },
+        });
+    } catch (error) {
+        const data = error instanceof RpcError && error.data && typeof error.data === 'object'
+            ? error.data as Record<string, unknown>
+            : null;
+        if (data?.code === 'ALBUM_SUPERSEDED') return;
+        throw error;
+    }
 }
 
 export async function playbackControl(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry', observed?: PlaybackSessionSnapshot): Promise<void> {

@@ -2208,6 +2208,7 @@ mod tests {
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
             size_bytes: Some(size_bytes),
+            album_loudness: Default::default(),
         }
     }
 

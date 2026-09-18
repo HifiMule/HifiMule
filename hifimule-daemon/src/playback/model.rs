@@ -74,6 +74,9 @@ pub struct SessionSnapshot {
     /// Owner-captured epoch fencing asynchronous seek preparation.
     #[serde(skip)]
     pub(crate) seek_epoch: u64,
+    /// Frozen occurrence gain, excluded from the public playback wire contract.
+    #[serde(skip)]
+    pub(crate) gain_bits: u32,
     pub schema_version: u32,
     pub instance_id: String,
     pub session_id: String,
@@ -459,6 +462,68 @@ pub struct PersistedSession {
     pub state: TransportState,
     pub current_occurrence_id: Option<String>,
     pub position_ms: u64,
+    pub(crate) album_context: Option<FrozenAlbumContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FrozenAlbumContext {
+    pub source: AlbumSource,
+    pub member_count: u64,
+    pub membership_digest: String,
+    pub policy: super::loudness::AlbumLoudnessPolicy,
+}
+
+impl FrozenAlbumContext {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        self.source.validate()?;
+        if self.member_count == 0 || self.member_count > super::album::MAX_ALBUM_OCCURRENCES as u64
+        {
+            return Err("invalid album membership count");
+        }
+        if self.membership_digest.len() != 64
+            || !self
+                .membership_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("invalid album membership digest");
+        }
+        self.policy.validate()
+    }
+
+    pub(crate) fn scalar_for(&self, occurrence: &Occurrence) -> f32 {
+        if occurrence.ordinal < self.member_count
+            && occurrence.source.server_id == self.source.server_id
+        {
+            self.policy.scalar()
+        } else {
+            1.0
+        }
+    }
+}
+
+pub(crate) fn album_membership_hasher() -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"hifimule-album-membership-v1\0");
+    hasher
+}
+
+pub(crate) fn hash_album_member(hasher: &mut blake3::Hasher, source: &TrackSource) {
+    for value in [&source.server_id, &source.track_id] {
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+}
+
+pub(crate) fn album_membership_digest<'a>(
+    sources: impl IntoIterator<Item = &'a TrackSource>,
+) -> String {
+    let mut hasher = album_membership_hasher();
+    for source in sources {
+        hash_album_member(&mut hasher, source);
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 #[cfg(test)]

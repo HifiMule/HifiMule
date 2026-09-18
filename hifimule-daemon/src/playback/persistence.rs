@@ -3,7 +3,7 @@ use crate::db::Database;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 2;
+pub const PERSISTENCE_VERSION: i64 = 3;
 
 impl Database {
     pub fn has_portable_server(&self, server_id: &str) -> Result<bool> {
@@ -43,7 +43,7 @@ impl Database {
             return Err(anyhow!("UNSUPPORTED_PLAYBACK_VERSION"));
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_schema (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), version INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0));
+            CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0), album_context_json TEXT);
             CREATE TABLE IF NOT EXISTS playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL CHECK(ordinal>=0), server_id TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(session_id, ordinal));")?;
         if version != Some(PERSISTENCE_VERSION) {
             let has_outcome = {
@@ -56,12 +56,6 @@ impl Database {
             };
             if !has_outcome {
                 tx.execute("ALTER TABLE playback_occurrences ADD COLUMN outcome TEXT CHECK(outcome IN ('naturalCompletion','explicitSkip','technicalFailure') OR outcome IS NULL)", [])?;
-            }
-            if version.is_some() {
-                tx.execute(
-                    "UPDATE playback_schema SET version=2 WHERE singleton_id=1",
-                    [],
-                )?;
             }
         }
         if fail_before_version_commit {
@@ -81,9 +75,27 @@ impl Database {
                 [],
             )?;
         }
+        let has_album_context = {
+            let mut statement = tx.prepare("PRAGMA table_info(playback_sessions)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|name| name == "album_context_json")
+        };
+        if !has_album_context {
+            tx.execute(
+                "ALTER TABLE playback_sessions ADD COLUMN album_context_json TEXT",
+                [],
+            )?;
+        }
         tx.execute(
-            "INSERT OR IGNORE INTO playback_schema(singleton_id,version) VALUES(1,2)",
-            [],
+            "INSERT OR IGNORE INTO playback_schema(singleton_id,version) VALUES(1,?1)",
+            [PERSISTENCE_VERSION],
+        )?;
+        tx.execute(
+            "UPDATE playback_schema SET version=?1 WHERE singleton_id=1 AND version<>?1",
+            [PERSISTENCE_VERSION],
         )?;
         tx.commit()?;
         Ok(())
@@ -97,10 +109,12 @@ impl Database {
     pub fn load_playback_session(&self) -> Result<Option<PersistedSession>> {
         self.init_playback()?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms FROM playback_sessions WHERE singleton_id=1", [], |r| {
+        let loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json FROM playback_sessions WHERE singleton_id=1", [], |r| {
             let state: String = r.get(3)?;
             let state = match state.as_str() { "idle"=>TransportState::Idle, "paused"=>TransportState::Paused, "buffering"=>TransportState::Buffering, "playing"=>TransportState::Playing, "stopping"=>TransportState::Stopping, _=>return Err(rusqlite::Error::InvalidQuery) };
-            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)? })
+            let context_json: Option<String> = r.get(6)?;
+            let album_context = context_json.map(|json| serde_json::from_str(&json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))).transpose()?;
+            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)?, album_context })
         }).optional()?;
         if loaded.is_none() {
             let count: i64 =
@@ -119,6 +133,13 @@ impl Database {
             || session.position_ms > 9_007_199_254_740_991
             || session.queue_revision > i64::MAX as u64
             || session.checkpoint_sequence > i64::MAX as u64
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        if session
+            .album_context
+            .as_ref()
+            .is_some_and(|context| context.validate().is_err())
         {
             return Err(anyhow!("INVALID_SESSION"));
         }
@@ -144,6 +165,7 @@ impl Database {
         let mut after = -1i64;
         let mut found = false;
         let mut scanned = 0i64;
+        let mut album_membership = super::model::album_membership_hasher();
         loop {
             let mut stmt = tx.prepare("SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 200")?;
             let rows = stmt
@@ -161,13 +183,37 @@ impl Database {
                     return Err(anyhow!("INVALID_SESSION"));
                 }
                 found |= Some(&row.occurrence_id) == session.current_occurrence_id.as_ref();
+                if session.album_context.as_ref().is_some_and(|context| {
+                    row.ordinal < context.member_count
+                        && row.source.server_id != context.source.server_id
+                }) {
+                    return Err(anyhow!("INVALID_SESSION"));
+                }
+                if session
+                    .album_context
+                    .as_ref()
+                    .is_some_and(|context| row.ordinal < context.member_count)
+                {
+                    super::model::hash_album_member(&mut album_membership, &row.source);
+                }
                 after = row.ordinal as i64;
                 scanned += 1;
             }
         }
         // Also detects orphaned/foreign-session rows and negative ordinals hidden
         // by the keyset predicate; no whole-history collection is retained.
-        if scanned != count || (count > 0 && !found) {
+        if scanned != count
+            || (count > 0 && !found)
+            || session
+                .album_context
+                .as_ref()
+                .is_some_and(|context| context.member_count > count as u64)
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        if session.album_context.as_ref().is_some_and(|context| {
+            album_membership.finalize().to_hex().as_str() != context.membership_digest
+        }) {
             return Err(anyhow!("INVALID_SESSION"));
         }
         tx.commit()?;
@@ -268,7 +314,8 @@ impl Database {
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
-        tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms) VALUES(1,?1,?2,?3,?4,?5,?6) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64])?;
+        let album_context_json = album_context_json(session)?;
+        tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json) VALUES(1,?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json])?;
         tx.execute(
             "DELETE FROM playback_occurrences WHERE session_id=?1",
             [&session.session_id],
@@ -446,14 +493,26 @@ fn nonnegative(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
 }
 
 fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
+    let album_context_json = album_context_json(session)?;
     let changed = tx.execute(
-        "UPDATE playback_sessions SET session_id=?1,queue_revision=?2,checkpoint_sequence=?3,transport_state=?4,current_occurrence_id=?5,position_ms=?6 WHERE singleton_id=1",
-        params![session.session_id, session.queue_revision as i64, session.checkpoint_sequence as i64, state_name(session.state), session.current_occurrence_id, session.position_ms as i64],
+        "UPDATE playback_sessions SET session_id=?1,queue_revision=?2,checkpoint_sequence=?3,transport_state=?4,current_occurrence_id=?5,position_ms=?6,album_context_json=?7 WHERE singleton_id=1",
+        params![session.session_id, session.queue_revision as i64, session.checkpoint_sequence as i64, state_name(session.state), session.current_occurrence_id, session.position_ms as i64, album_context_json],
     )?;
     if changed != 1 {
         return Err(anyhow!("playback session is absent"));
     }
     Ok(())
+}
+
+fn album_context_json(session: &PersistedSession) -> Result<Option<String>> {
+    session
+        .album_context
+        .as_ref()
+        .map(|context| {
+            context.validate().map_err(|message| anyhow!(message))?;
+            serde_json::to_string(context).map_err(Into::into)
+        })
+        .transpose()
 }
 
 fn insert_occurrences(
@@ -501,6 +560,7 @@ mod tests {
             },
             current_occurrence_id: current,
             position_ms,
+            album_context: None,
         }
     }
 
@@ -515,6 +575,136 @@ mod tests {
             },
             availability: SourceAvailability::NotConfigured,
         }
+    }
+
+    #[test]
+    fn album_context_migrates_and_round_trips_atomically() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let first = occurrence("ignored", 0, "first");
+        let second = occurrence("ignored", 1, "second");
+        let membership_digest =
+            super::super::model::album_membership_digest([&first.source, &second.source]);
+        let mut committed = session(1, Some(first.occurrence_id.clone()), 0);
+        committed.album_context = Some(super::super::model::FrozenAlbumContext {
+            source: super::super::model::AlbumSource {
+                server_id: "portable-server".into(),
+                album_id: "album".into(),
+            },
+            member_count: 2,
+            membership_digest,
+            policy: super::super::loudness::AlbumLoudnessPolicy {
+                version: super::super::loudness::ALBUM_LOUDNESS_POLICY_VERSION,
+                scalar_bits: 0.75f32.to_bits(),
+                gain_db_bits: Some(0.0f64.to_bits()),
+                peak_bits: Some((super::super::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+                reason: super::super::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+            },
+        });
+        db.persist_playback_structure(&committed, &[first.clone(), second.clone()])
+            .unwrap();
+
+        let restored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(restored.album_context, committed.album_context);
+        let context = restored.album_context.unwrap();
+        assert_eq!(context.scalar_for(&first), 0.75);
+        let appended = occurrence("ignored", 2, "appended");
+        assert_eq!(context.scalar_for(&appended), 1.0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE playback_occurrences SET track_id='replacement' WHERE ordinal=1",
+                [],
+            )
+            .unwrap();
+        assert!(db.validate_playback_session(&committed).is_err());
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT version FROM playback_schema WHERE singleton_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn v2_session_migrates_to_unity_without_inventing_album_membership() {
+        let db = Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE playback_schema (singleton_id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+                 INSERT INTO playback_schema VALUES(1,2);
+                 CREATE TABLE playback_sessions (singleton_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL, checkpoint_sequence INTEGER NOT NULL, transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL);
+                 CREATE TABLE playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, outcome TEXT, failure_code TEXT, PRIMARY KEY(session_id, ordinal));",
+            )
+            .unwrap();
+        db.init_playback().unwrap();
+        let columns: Vec<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(playback_sessions)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "album_context_json"));
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT version FROM playback_schema WHERE singleton_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PERSISTENCE_VERSION);
+    }
+
+    #[test]
+    fn corrupt_or_future_album_policy_is_rejected_without_reinterpretation() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let current = occurrence("ignored", 0, "track");
+        let committed = session(1, Some(current.occurrence_id.clone()), 0);
+        db.persist_playback_structure(&committed, &[current])
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE playback_sessions SET album_context_json=?1 WHERE singleton_id=1",
+                ["{malformed"],
+            )
+            .unwrap();
+        assert!(db.load_playback_session().is_err());
+
+        let future = serde_json::json!({
+            "source":{"serverId":"portable-server","albumId":"album"},
+            "memberCount":1,
+            "membershipDigest":"0000000000000000000000000000000000000000000000000000000000000000",
+            "policy":{"version":99,"scalarBits":1.0f32.to_bits(),"gainDbBits":null,
+                "peakBits":null,"reason":"metadataAbsent"}
+        });
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE playback_sessions SET album_context_json=?1 WHERE singleton_id=1",
+                [future.to_string()],
+            )
+            .unwrap();
+        let loaded = db.load_playback_session().unwrap().unwrap();
+        assert!(db.validate_playback_session(&loaded).is_err());
     }
 
     #[test]

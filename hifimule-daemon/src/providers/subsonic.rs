@@ -1,6 +1,7 @@
 use crate::domain::models::{
-    Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChangeType, Genre, ItemRef,
-    ItemType, Kbps, Library, Playlist, PlaylistWithTracks, SearchResult, Seconds, Song,
+    Album, AlbumLoudnessEvidence, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent,
+    ChangeType, Genre, ItemRef, ItemType, Kbps, Library, Playlist, PlaylistWithTracks,
+    SearchResult, Seconds, Song,
 };
 use crate::providers::{
     BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, MediaProvider,
@@ -337,12 +338,13 @@ impl MediaProvider for SubsonicProvider {
 
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError> {
         let album = self.client.get_album(album_id).await?;
+        let open_subsonic = self.open_subsonic;
         let tracks = album
             .album
             .song
             .iter()
             .cloned()
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, open_subsonic))
             .collect();
 
         Ok(AlbumWithTracks {
@@ -1264,40 +1266,43 @@ impl SubsonicClient {
             });
         }
 
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
+        let raw: RawSubsonicEnvelope = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::Deserialization(error.to_string()))?;
-        if let Some(response) = value.get("subsonic-response") {
-            let status = response
-                .get("status")
-                .and_then(|status| status.as_str())
-                .unwrap_or_default();
-            if status.eq_ignore_ascii_case("failed") {
-                let error = response.get("error");
-                let code = error
-                    .and_then(|error| error.get("code"))
-                    .and_then(|code| code.as_i64())
-                    .and_then(|code| i32::try_from(code).ok());
-                let message = error
-                    .and_then(|error| error.get("message"))
-                    .and_then(|message| message.as_str())
-                    .map(sanitize_subsonic_message)
-                    .unwrap_or_else(|| "Subsonic API request failed".to_string());
-                return Err(match code {
-                    Some(40 | 41) => ProviderError::Auth(message),
-                    Some(70) => ProviderError::NotFound {
-                        item_type: "item".to_string(),
-                        id: "unknown".to_string(),
-                    },
-                    _ => ProviderError::Http {
-                        status: None,
-                        message,
-                    },
-                });
-            }
+        let metadata: SubsonicResponseMetadata = serde_json::from_str(raw.response.get())
+            .map_err(|error| ProviderError::Deserialization(error.to_string()))?;
+        let api_error = metadata.error.as_deref().map(parse_api_error);
+        if metadata.status.eq_ignore_ascii_case("failed") {
+            let code = api_error.as_ref().and_then(|error| error.code);
+            let message = api_error
+                .as_ref()
+                .and_then(|error| error.message.as_deref())
+                .map(sanitize_subsonic_message)
+                .unwrap_or_else(|| "Subsonic API request failed".to_string());
+            return Err(match code {
+                Some(40 | 41) => ProviderError::Auth(message),
+                Some(70) => ProviderError::NotFound {
+                    item_type: "item".to_string(),
+                    id: "unknown".to_string(),
+                },
+                _ => ProviderError::Http {
+                    status: None,
+                    message,
+                },
+            });
         }
 
-        let envelope: SubsonicEnvelope<T> = serde_json::from_value(value)
+        let body = serde_json::from_str(raw.response.get())
             .map_err(|error| ProviderError::Deserialization(error.to_string()))?;
+        let envelope = SubsonicEnvelope {
+            response: SubsonicResponse {
+                status: metadata.status,
+                server_version: metadata.server_version,
+                server_type: metadata.server_type,
+                open_subsonic: metadata.open_subsonic,
+                error: api_error,
+                body,
+            },
+        };
 
         Ok(envelope)
     }
@@ -1481,6 +1486,7 @@ fn playlist_from_with_songs_dto(playlist: PlaylistWithSongsDto) -> Playlist {
 
 fn song_from_dto(song: SongDto) -> Song {
     let artist = song.artists.as_ref().and_then(|artists| artists.first());
+    let album_loudness = parse_album_loudness(song.replay_gain.as_deref());
 
     Song {
         id: song.id,
@@ -1507,7 +1513,57 @@ fn song_from_dto(song: SongDto) -> Song {
         content_type: song.content_type,
         suffix: song.suffix,
         size_bytes: song.size,
+        album_loudness,
     }
+}
+
+fn song_from_dto_with_capability(song: SongDto, open_subsonic: bool) -> Song {
+    let mut song = song_from_dto(song);
+    if !open_subsonic {
+        song.album_loudness = AlbumLoudnessEvidence::Absent;
+    }
+    song
+}
+
+fn parse_api_error(value: &serde_json::value::RawValue) -> ApiErrorDto {
+    let value = serde_json::from_str::<serde_json::Value>(value.get()).ok();
+    let object = value.as_ref().and_then(serde_json::Value::as_object);
+    ApiErrorDto {
+        code: object
+            .and_then(|object| object.get("code"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        message: object
+            .and_then(|object| object.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
+fn parse_album_loudness(value: Option<&serde_json::value::RawValue>) -> AlbumLoudnessEvidence {
+    let Some(value) = value else {
+        return AlbumLoudnessEvidence::Absent;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(value.get()) else {
+        return AlbumLoudnessEvidence::Rejected;
+    };
+    let Some(object) = value.as_object() else {
+        return AlbumLoudnessEvidence::Rejected;
+    };
+    if object.get("baseGain").is_some_and(|value| {
+        value
+            .as_f64()
+            .is_none_or(|gain| !gain.is_finite() || gain != 0.0)
+    }) {
+        return AlbumLoudnessEvidence::Rejected;
+    }
+    let (Some(gain), Some(peak)) = (
+        object.get("albumGain").and_then(serde_json::Value::as_f64),
+        object.get("albumPeak").and_then(serde_json::Value::as_f64),
+    ) else {
+        return AlbumLoudnessEvidence::Rejected;
+    };
+    AlbumLoudnessEvidence::open_subsonic(gain, peak)
 }
 
 fn album_matches_letter(name: &str, letter: Option<&str>) -> bool {
@@ -1639,27 +1695,38 @@ fn non_negative_i64(value: Option<i64>) -> Option<u32> {
     value.and_then(|value| u32::try_from(value).ok())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(bound(deserialize = "T: Deserialize<'de> + Default"))]
+#[derive(Debug)]
 struct SubsonicEnvelope<T> {
-    #[serde(rename = "subsonic-response")]
     response: SubsonicResponse<T>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(bound(deserialize = "T: Deserialize<'de> + Default"))]
+#[derive(Debug)]
 struct SubsonicResponse<T> {
+    status: String,
+    server_version: Option<String>,
+    server_type: Option<String>,
+    open_subsonic: Option<bool>,
+    error: Option<ApiErrorDto>,
+    body: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSubsonicEnvelope {
+    #[serde(rename = "subsonic-response")]
+    response: Box<serde_json::value::RawValue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubsonicResponseMetadata {
     status: String,
     #[serde(default, rename = "version")]
     server_version: Option<String>,
     #[serde(default, rename = "type")]
     server_type: Option<String>,
-    #[serde(rename = "openSubsonic")]
+    #[serde(default, rename = "openSubsonic")]
     open_subsonic: Option<bool>,
-    error: Option<ApiErrorDto>,
     #[serde(default)]
-    #[serde(flatten)]
-    body: T,
+    error: Option<Box<serde_json::value::RawValue>>,
 }
 
 struct PingResult {
@@ -1671,7 +1738,7 @@ struct PingResult {
 #[derive(Debug, Deserialize)]
 struct ApiErrorDto {
     code: Option<i32>,
-    message: String,
+    message: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1865,6 +1932,8 @@ struct SongDto {
     created: Option<String>,
     #[serde(default)]
     artists: Option<Vec<ArtistDto>>,
+    #[serde(default, rename = "replayGain")]
+    replay_gain: Option<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1991,6 +2060,7 @@ mod tests {
             played: Some("2026-05-22T12:00:00Z".to_string()),
             created: Some("2026-05-01T00:00:00Z".to_string()),
             artists: None,
+            replay_gain: None,
         });
 
         assert_eq!(song.id, "song-id");
@@ -2028,11 +2098,68 @@ mod tests {
             played: None,
             created: None,
             artists: None,
+            replay_gain: None,
         });
 
         assert_eq!(song.duration_seconds, 0);
         assert_eq!(song.bitrate_kbps, None);
         assert_eq!(song.cover_art_id, None);
+    }
+
+    #[test]
+    fn open_subsonic_album_replay_gain_is_tolerant_and_pair_complete() {
+        let base = serde_json::json!({
+            "id":"song", "title":"Track", "albumId":"album",
+            "suffix":"flac", "contentType":"audio/flac"
+        });
+        let mut valid = base.clone();
+        valid.as_object_mut().unwrap().insert(
+            "replayGain".into(),
+            serde_json::json!({"albumGain":-7.25,"albumPeak":0.91}),
+        );
+        let song = song_from_dto(serde_json::from_value(valid).unwrap());
+        assert_eq!(song.album_loudness.values(), Some((-7.25, 0.91)));
+
+        for replay_gain in [
+            serde_json::json!({"albumGain":-7.25}),
+            serde_json::json!({"albumPeak":0.91}),
+            serde_json::json!({"albumGain":"-7.25","albumPeak":0.91}),
+            serde_json::json!({"albumGain":-7.25,"albumPeak":null}),
+            serde_json::json!([]),
+            serde_json::json!({"albumGain":-7.25,"albumPeak":0.91,"baseGain":1.0}),
+        ] {
+            let mut value = base.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("replayGain".into(), replay_gain);
+            let song = song_from_dto(serde_json::from_value(value).unwrap());
+            assert_eq!(song.album_loudness, AlbumLoudnessEvidence::Rejected);
+        }
+        let absent = song_from_dto(serde_json::from_value(base).unwrap());
+        assert_eq!(absent.album_loudness, AlbumLoudnessEvidence::Absent);
+
+        let with_ignored_track_fields: SongDto = serde_json::from_value(serde_json::json!({
+            "id":"song", "title":"Track", "albumId":"album", "suffix":"flac",
+            "replayGain":{"albumGain":-7.25,"albumPeak":0.91,"baseGain":0.0,
+                "trackGain":12.0,"trackPeak":4.0,"fallbackGain":20.0}
+        }))
+        .unwrap();
+        assert_eq!(
+            song_from_dto(with_ignored_track_fields)
+                .album_loudness
+                .values(),
+            Some((-7.25, 0.91))
+        );
+
+        let overflow: SongDto = serde_json::from_str(
+            r#"{"id":"song","title":"Track","replayGain":{"albumGain":1e400,"albumPeak":1}}"#,
+        )
+        .expect("overflow in optional loudness metadata must not reject the song DTO");
+        assert_eq!(
+            song_from_dto(overflow).album_loudness,
+            AlbumLoudnessEvidence::Rejected
+        );
     }
 
     #[tokio::test]
@@ -2184,7 +2311,7 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(&ok(
-                r#""album":{"id":"album1","name":"Album","artist":"Artist","artistId":"artist1","songCount":1,"duration":319,"coverArt":"album-cover","song":[{"id":"song1","title":"Track","album":"Album","artist":"Artist","albumId":"album1","artistId":"artist1","duration":319,"bitRate":320,"coverArt":"song-cover"}]}"#,
+                r#""album":{"id":"album1","name":"Album","artist":"Artist","artistId":"artist1","songCount":1,"duration":319,"coverArt":"album-cover","song":[{"id":"song1","title":"Track","album":"Album","artist":"Artist","albumId":"album1","artistId":"artist1","duration":319,"bitRate":320,"coverArt":"song-cover","suffix":"flac","contentType":"audio/flac","replayGain":{"albumGain":-7.25,"albumPeak":0.91}}]}"#,
             ))
             .create_async()
             .await;
@@ -2195,6 +2322,63 @@ mod tests {
         assert_eq!(album.album.id, "album1");
         assert_eq!(album.album.duration_seconds, Some(319));
         assert_eq!(album.tracks[0].bitrate_kbps, Some(320));
+        assert_eq!(album.tracks[0].album_loudness.values(), Some((-7.25, 0.91)));
+    }
+
+    #[tokio::test]
+    async fn get_album_rejects_overflowing_optional_replay_gain_without_rejecting_album() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""album":{"id":"album1","name":"Album","songCount":1,"song":[{"id":"song1","title":"Track","albumId":"album1","suffix":"flac","contentType":"audio/flac","replayGain":{"albumGain":1e400,"albumPeak":1}}]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let album = provider.get_album("album1").await.expect("album");
+
+        assert_eq!(album.tracks.len(), 1);
+        assert_eq!(
+            album.tracks[0].album_loudness,
+            AlbumLoudnessEvidence::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn classic_subsonic_album_ignores_replay_gain_fields() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""album":{"id":"album1","name":"Album","songCount":1,"song":[{"id":"song1","title":"Track","albumId":"album1","suffix":"flac","contentType":"audio/flac","replayGain":{"albumGain":-7.25,"albumPeak":0.91}}]}"#,
+            ))
+            .create_async()
+            .await;
+        let client = SubsonicClient::new(server.url(), USERNAME, PASSWORD).expect("client");
+        let provider = SubsonicProvider::from_client_for_tests(client, false);
+
+        let album = provider.get_album("album1").await.expect("album");
+
+        assert_eq!(
+            album.tracks[0].album_loudness,
+            AlbumLoudnessEvidence::Absent
+        );
     }
 
     #[tokio::test]
@@ -2955,6 +3139,7 @@ mod tests {
             played: None,
             created: None,
             artists: None,
+            replay_gain: None,
         };
 
         let changes = album_song_changes(&[&expected], &[actual], true);
@@ -3034,6 +3219,30 @@ mod tests {
         let malformed = json_provider.list_artists(None, None, 0, 0).await;
 
         assert!(matches!(malformed, Err(ProviderError::Deserialization(_))));
+    }
+
+    #[tokio::test]
+    async fn malformed_api_error_fields_still_map_to_sanitized_generic_failure() {
+        let mut server = Server::new_async().await;
+        let _failure = server
+            .mock("GET", "/rest/getArtists.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":"invalid","message":{"password":"raw-password"}}}}"#,
+            )
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let result = provider.list_artists(None, None, 0, 0).await;
+
+        assert!(matches!(
+            result,
+            Err(ProviderError::Http { status: None, ref message })
+                if message == "Subsonic API request failed"
+        ));
     }
 
     #[tokio::test]
