@@ -2183,6 +2183,10 @@ h2 {
 .playback-controls__info { min-width: 0; flex: 1; display: flex; flex-direction: column; }
 .playback-controls__info strong, .playback-controls__status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playback-controls__status { font-size: .75rem; opacity: .72; }
+.playback-controls__timeline { display: grid; grid-template-columns: max-content minmax(7rem, 1fr) max-content; align-items: center; gap: .45rem; font-size: .72rem; }
+.playback-controls__timeline input[type="range"] { min-width: 7rem; accent-color: var(--sl-color-primary-500); }
+.playback-controls__timeline input[type="range"]:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }
+.playback-controls__seek-status { grid-column: 1 / -1; min-height: 1em; opacity: .8; }
 .playback-controls sl-button:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }
 
 .playback-controls__output-dropdown::part(panel) {

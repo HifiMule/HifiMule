@@ -2,12 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use windows::core::{Error as WindowsError, HSTRING};
 use windows::Foundation::{EventRegistrationToken, TimeSpan, TypedEventHandler, Uri};
 use windows::Media::*;
 use windows::Storage::Streams::RandomAccessStreamReference;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
+use windows::core::{Error as WindowsError, HSTRING};
 
 use crate::{
     MediaControlCapabilities, MediaControlEvent, MediaMetadata, MediaPlayback, MediaPosition,
@@ -133,7 +133,11 @@ impl MediaControls {
         let position_handler = TypedEventHandler::new({
             move |_, args: &Option<_>| {
                 let args: &PlaybackPositionChangeRequestedEventArgs = args.as_ref().unwrap();
-                let position = Duration::from(args.RequestedPlaybackPosition()?);
+                let requested = args.RequestedPlaybackPosition()?;
+                if requested.Duration < 0 {
+                    return Ok(());
+                }
+                let position = Duration::from(requested);
 
                 let _ = (event_handler.lock().unwrap())(MediaControlEvent::SetPosition(
                     MediaPosition(position),
@@ -202,6 +206,10 @@ impl MediaControls {
 
         self.controls
             .UpdateTimelineProperties(&self.timeline_properties)?;
+        Ok(())
+    }
+
+    pub fn set_seeked(&mut self, _position_micros: i64) -> Result<(), Error> {
         Ok(())
     }
 

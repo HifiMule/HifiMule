@@ -84,6 +84,25 @@ impl Fixture {
             action,
         }
     }
+
+    fn qualify_seek(&self) -> SessionSnapshot {
+        let snapshot = self.session.snapshot().unwrap();
+        self.session.publish_event(
+            snapshot.generation_id,
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: snapshot.current.unwrap().source,
+                    title: "fixture".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(10_000),
+                representation: "wav".into(),
+                seek: SeekCapability::jellyfin_pcm_wav(),
+            },
+        );
+        self.session.snapshot().unwrap()
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -168,6 +187,65 @@ async fn rpc_and_native_resume_dispatch_the_same_provider_effect_and_failure() {
         assert_eq!(failed.playback.error.unwrap().code, "RESUME_UNAVAILABLE");
         assert_eq!(failed.state, TransportState::Paused);
         assert!(!f.session.output_gate().load(Ordering::Acquire));
+        assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_and_native_seek_share_owner_admission_provider_effect_and_failure() {
+    for native in [false, true] {
+        let f = Fixture::new();
+        let qualified = f.qualify_seek();
+        let ingress = native.then(|| start_ingress(f.service.clone()));
+        if native {
+            ingress
+                .as_ref()
+                .unwrap()
+                .try_send(NativeControlIntent::SeekAbsolute(4_000))
+                .unwrap();
+        } else {
+            f.service
+                .rpc_seek(
+                    SeekParams {
+                        schema_version: 1,
+                        instance_id: qualified.instance_id,
+                        session_id: qualified.session_id,
+                        command_id: uuid::Uuid::new_v4().to_string(),
+                        expected_generation_id: qualified.generation_id,
+                        occurrence_id: qualified.current.unwrap().occurrence_id,
+                        position_ms: 4_000,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        notified(&f.provider.entered).await;
+        let pending = f.session.snapshot().unwrap();
+        assert_eq!(pending.position_ms, 0);
+        assert_eq!(
+            pending.playback.pending_seek.unwrap().requested_position_ms,
+            4_000
+        );
+        f.provider.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let snapshot = f.session.snapshot().unwrap();
+                if snapshot
+                    .playback
+                    .seek_outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.status == "failed")
+                {
+                    assert_eq!(snapshot.position_ms, 0);
+                    assert!(snapshot.playback.pending_seek.is_none());
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("seek failure did not reach authoritative state");
         assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
     }
 }

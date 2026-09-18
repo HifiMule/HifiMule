@@ -51,6 +51,7 @@ fn main() {
         .unwrap();
     controls
         .set_metadata(MediaMetadata {
+            track_id: None,
             title: Some("When The Sun Hits"),
             album: Some("Souvlaki"),
             artist: Some("Slowdive"),

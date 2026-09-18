@@ -55,6 +55,7 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
       ? { playbackGetSession: async () => { calls++; return snapshot; }, playbackControl: control,
           playbackListOutputs: outputRpc.list ?? (async () => ({ instanceId: snapshot.instanceId, outputs: snapshot.output?.selected ? [snapshot.output.selected] : [], output: snapshot.output })),
           playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
+          playbackSeek: outputRpc.seek ?? (async () => snapshot),
         }
       : { t: key => key },
   });
@@ -77,7 +78,8 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
     stateSequence: sequence, generationId: 'generation', state, positionMs: 0,
     current: { occurrenceId: 'occurrence', source: { serverId: 'server', trackId: 'track' } },
     output: { revision: '1', selected: { outputId: 'headphones', displayName: 'Headphones', detail: 'USB', available: true, isDefault: false }, pending: null, active: null, status: 'available', error },
-    playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], metadata: { title: 'Track' }, error },
+    playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], metadata: { title: 'Track' },
+      durationMs: null, seek: { available: false, reason: 'playback.seek.unavailable' }, error },
   };
 }
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
@@ -211,12 +213,80 @@ test('last-resort output remains selectable and warns that routing is best effor
   h.component.destroy();
 });
 
-test('output strings have four-locale parity and no current-default recovery instruction', () => {
+test('output and seek strings have four-locale parity and no current-default recovery instruction', () => {
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
-  const keys = Object.keys(catalog.en).filter(key => key.startsWith('playback.output.') || key.startsWith('playback.error.OUTPUT_'));
+  const keys = Object.keys(catalog.en).filter(key => key.startsWith('playback.output.')
+    || key.startsWith('playback.error.OUTPUT_') || key.startsWith('playback.seek.')
+    || key.startsWith('seek.'));
   for (const language of ['en', 'fr', 'es', 'de']) {
     for (const key of keys) assert.ok(catalog[language][key], `${language}: ${key}`);
     assert.equal(catalog[language]['playback.resume_default_output'], undefined);
     assert.ok(catalog[language]['playback.resume_selected_output'].includes('{name}'));
   }
+});
+
+test('seek slider previews locally and submits only the committed change', async () => {
+  const calls = [];
+  const initial = snapshot('paused');
+  initial.playback.durationMs = 10_000;
+  initial.playback.seek = { available: true, mechanism: 'ffmpeg-post-open-media-time-seek' };
+  const h = harness(initial, async () => {}, { seek: async (position, observed) => {
+    calls.push([position, observed.generationId]);
+    return { ...initial, stateSequence: '2', generationId: 'seek-generation',
+      playback: { ...initial.playback, pendingSeek: { operationId: 'seek', requestedPositionMs: position, priorCommittedPositionMs: 0 } } };
+  }});
+  await h.tick();
+  const slider = h.container.querySelector('input');
+  slider.value = '4000';
+  await slider.listeners.get('input')();
+  assert.equal(calls.length, 0);
+  await slider.listeners.get('change')();
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+  assert.deepEqual(calls, [[4000, 'generation']]);
+  assert.match(text(h.container), /playback.seek.pending/);
+  h.component.destroy();
+});
+
+test('repeated scrubs coalesce to the latest target while seek RPC is pending', async () => {
+  const calls = [];
+  let releaseFirst;
+  const initial = snapshot('paused');
+  initial.playback.durationMs = 10_000;
+  initial.playback.seek = { available: true };
+  const h = harness(initial, async () => {}, { seek: (position, observed) => {
+    calls.push([position, observed.generationId]);
+    const response = { ...initial, stateSequence: String(calls.length + 1), generationId: `seek-${calls.length}` };
+    if (calls.length === 1) return new Promise(resolve => { releaseFirst = () => resolve(response); });
+    return Promise.resolve(response);
+  }});
+  await h.tick();
+  const slider = h.container.querySelector('input');
+  await slider.change('2000');
+  await slider.change('3000');
+  await slider.change('4000');
+  assert.deepEqual(calls, [[2000, 'generation']]);
+  releaseFirst();
+  for (let turn = 0; turn < 24; turn++) await Promise.resolve();
+  assert.deepEqual(calls, [[2000, 'generation'], [4000, 'seek-1']]);
+  h.component.destroy();
+});
+
+test('authoritative clock advances only while fresh and reanchors backward', async () => {
+  const active = snapshot('playing');
+  active.positionMs = 2_000;
+  active.playback.durationMs = 10_000;
+  active.playback.seek = { available: true };
+  const h = harness(active); await h.tick();
+  const slider = h.container.querySelector('input');
+  h.advance(500); h.component.renderTimeline();
+  assert.equal(slider.value, '2500');
+  h.advance(400); h.component.renderTimeline();
+  assert.equal(slider.value, '2750');
+  const backward = { ...active, positionMs: 1_000, stateSequence: '2', generationId: 'seek-generation' };
+  h.setSnapshot(backward); await h.tick();
+  assert.equal(slider.value, '1000');
+  const paused = { ...backward, state: 'paused', stateSequence: '3', playback: { ...backward.playback, status: 'paused' } };
+  h.setSnapshot(paused); await h.tick(); h.advance(700); h.component.renderTimeline();
+  assert.equal(slider.value, '1000');
+  h.component.destroy();
 });

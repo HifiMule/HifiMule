@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 mod pulse_output;
-use super::decoder::decode_stream;
+use super::decoder::{UNKNOWN_SEEK_LANDING_FRAME, decode_stream_with_seek};
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
 use super::streaming::{BoundedHttpReader, StreamFailureKind, StreamFailureState, StreamReadError};
 use crate::providers::{PlaybackDescription, PlaybackRequest, select_playback_representation};
@@ -169,6 +169,10 @@ impl PlaybackPipelineError {
             representation: "unknown".into(),
             source,
         }
+    }
+
+    pub(crate) fn seek_timeout() -> Self {
+        Self::timeout(anyhow::anyhow!("seek preparation timed out"))
     }
 
     fn decode(source: anyhow::Error) -> Self {
@@ -591,7 +595,66 @@ impl AudioEngine {
         deadline: std::time::Instant,
         expected_epoch: u64,
     ) -> Result<(), PlaybackPipelineError> {
+        self.start_at_epoch_kind(
+            description,
+            source,
+            start_ms,
+            generation,
+            session,
+            deadline,
+            expected_epoch,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_seek_at_epoch(
+        &self,
+        description: PlaybackDescription,
+        source: super::model::TrackSource,
+        start_ms: u64,
+        operation_id: String,
+        generation: String,
+        session: super::PlaybackSession,
+        deadline: std::time::Instant,
+        expected_epoch: u64,
+    ) -> Result<(), PlaybackPipelineError> {
+        self.start_at_epoch_kind(
+            description,
+            source,
+            start_ms,
+            generation,
+            session,
+            deadline,
+            expected_epoch,
+            Some(operation_id),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_at_epoch_kind(
+        &self,
+        description: PlaybackDescription,
+        source: super::model::TrackSource,
+        start_ms: u64,
+        generation: String,
+        session: super::PlaybackSession,
+        deadline: std::time::Instant,
+        expected_epoch: u64,
+        seek_operation_id: Option<String>,
+    ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
+        let duration_ms = u64::from(description.song.duration_seconds).saturating_mul(1000);
+        // Persisted sessions intentionally omit transient Completed metadata.
+        // Once the same duration is resolved, an explicit Resume from its
+        // terminal cursor restarts from zero just like a live Completed resume.
+        let start_ms = if seek_operation_id.is_none() && start_ms == duration_ms {
+            0
+        } else {
+            start_ms
+        };
         let _start_guard = self.starts.lock().await;
         require_preparation_epoch(&session, expected_epoch)?;
         session
@@ -621,6 +684,15 @@ impl AudioEngine {
         require_preparation_epoch(&session, expected_epoch)?;
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
+        let seek_candidate = representation.seek_mechanism
+            == Some(crate::providers::PlaybackSeekMechanism::JellyfinOriginalPcmWav)
+            && representation.request.range_supported
+            && duration_ms > 0;
+        if seek_operation_id.is_some() && !seek_candidate {
+            return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
+                "representation is not qualified for media-time seeking"
+            )));
+        }
         let representation_name = representation_name(&representation);
         let decoder_hint = decoder_hint(&representation);
         let request = representation.request;
@@ -669,8 +741,13 @@ impl AudioEngine {
             generation.clone(),
             PlaybackEvent::Resolved {
                 metadata,
-                duration_ms: Some(u64::from(description.song.duration_seconds) * 1000),
+                duration_ms: Some(duration_ms),
                 representation: representation_name.clone(),
+                seek: super::model::SeekCapability::unavailable(if seek_candidate {
+                    "seek.validating"
+                } else {
+                    "seek.representation_unqualified"
+                }),
             },
             expected_epoch,
         );
@@ -686,6 +763,9 @@ impl AudioEngine {
         let pipeline_event_epoch = event_epoch.clone();
         let install_session = session.clone();
         let install_generation = generation.clone();
+        let worker_seek = seek_operation_id
+            .clone()
+            .map(|operation_id| (operation_id, start_ms));
         // A worker cannot open native output until installation has passed the
         // owner's generation and command-epoch fence under the owner lock.
         let (installed_tx, installed_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -696,6 +776,7 @@ impl AudioEngine {
                     worker_alive.store(false, Ordering::Release);
                     return;
                 }
+                let worker_seek_failure = worker_seek.clone();
                 let result = run_output(
                     reader,
                     &decoder_hint,
@@ -711,6 +792,8 @@ impl AudioEngine {
                     worker_endpoint,
                     worker_position,
                     preparation,
+                    seek_candidate,
+                    worker_seek,
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
                 session.output_closed(&generation);
@@ -721,12 +804,20 @@ impl AudioEngine {
                             worker_cancel.load(Ordering::Acquire),
                         ) && log_pipeline_failure(&session, &generation, &error) =>
                     {
-                        session.publish_event_at_epoch(
-                            generation,
-                            PlaybackEvent::Failed {
+                        let event = worker_seek_failure.map_or_else(
+                            || PlaybackEvent::Failed {
                                 code: error.code().into(),
                                 retryable: error.retryable(),
                             },
+                            |(operation_id, _)| PlaybackEvent::SeekFailed {
+                                operation_id,
+                                code: "SEEK_FAILED".into(),
+                                retryable: true,
+                            },
+                        );
+                        session.publish_event_at_epoch(
+                            generation,
+                            event,
                             event_epoch.load(Ordering::Acquire),
                         );
                     }
@@ -850,6 +941,8 @@ fn run_output(
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
     preparation: super::http_source::Preparation,
+    seek_candidate: bool,
+    seek_commit: Option<(String, u64)>,
 ) -> Result<(), PlaybackPipelineError> {
     let stream_failure = reader.failure_state();
     let preference = session
@@ -880,6 +973,7 @@ fn run_output(
         .min(PCM_CAPACITY_MAX_BYTES / std::mem::size_of::<f32>());
     let pcm = Arc::new(ArrayQueue::new(capacity));
     let consumed = Arc::new(AtomicU64::new(0));
+    let base_position_ms = Arc::new(AtomicU64::new(start_ms));
     let output_lost = Arc::new(AtomicBool::new(false));
     #[cfg(target_os = "windows")]
     let _endpoint_monitor = super::devices::wasapi_monitor::SelectedEndpointMonitor::new(
@@ -893,13 +987,23 @@ fn run_output(
     let rate = config.sample_rate;
     let channels = config.channels;
     let hint = hint.to_string();
+    let media_seek_requested = seek_commit.is_some();
+    let seek_qualified = Arc::new(AtomicBool::new(false));
+    let decoder_seek_qualified = seek_qualified.clone();
+    let seek_landing_frame =
+        media_seek_requested.then(|| Arc::new(AtomicU64::new(UNKNOWN_SEEK_LANDING_FRAME)));
+    let decoder_seek_landing = seek_landing_frame.clone();
     let decoder = super::output::DecoderWorker::spawn(cancel.clone(), move || {
-        decode_stream(
+        decode_stream_with_seek(
             reader,
             Some(&hint),
             rate,
             channels,
             start_ms.saturating_mul(u64::from(rate)) / 1000,
+            seek_candidate,
+            media_seek_requested,
+            Some(decoder_seek_qualified),
+            decoder_seek_landing,
             decoder_pcm,
             decoder_cancel,
         )
@@ -919,7 +1023,7 @@ fn run_output(
             decoder.finished.clone(),
             presentation.clone(),
             position_ms.clone(),
-            start_ms,
+            base_position_ms.clone(),
         ),
         cpal::SampleFormat::I32 => build_stream::<i32>(
             &device,
@@ -934,7 +1038,7 @@ fn run_output(
             decoder.finished.clone(),
             presentation.clone(),
             position_ms.clone(),
-            start_ms,
+            base_position_ms.clone(),
         ),
         cpal::SampleFormat::F64 => build_stream::<f64>(
             &device,
@@ -949,7 +1053,7 @@ fn run_output(
             decoder.finished.clone(),
             presentation.clone(),
             position_ms.clone(),
-            start_ms,
+            base_position_ms.clone(),
         ),
         cpal::SampleFormat::I16 => build_stream::<i16>(
             &device,
@@ -964,7 +1068,7 @@ fn run_output(
             decoder.finished.clone(),
             presentation.clone(),
             position_ms.clone(),
-            start_ms,
+            base_position_ms.clone(),
         ),
         cpal::SampleFormat::U16 => build_stream::<u16>(
             &device,
@@ -979,7 +1083,7 @@ fn run_output(
             decoder.finished.clone(),
             presentation.clone(),
             position_ms.clone(),
-            start_ms,
+            base_position_ms.clone(),
         ),
         _ => Err(anyhow::anyhow!("unsupported output sample format")),
     }
@@ -1002,6 +1106,46 @@ fn run_output(
         return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
             "output selection superseded"
         )));
+    }
+    if seek_candidate {
+        let capability = if seek_qualified.load(Ordering::Acquire) {
+            super::model::SeekCapability::jellyfin_pcm_wav()
+        } else {
+            super::model::SeekCapability::unavailable("seek.representation_unqualified")
+        };
+        session.publish_event_at_epoch(
+            generation.clone(),
+            PlaybackEvent::SeekQualified(capability),
+            event_epoch.load(Ordering::Acquire),
+        );
+    }
+    if let Some((operation_id, requested_position_ms)) = seek_commit {
+        let actual_frame = seek_landing_frame
+            .as_ref()
+            .map(|value| value.load(Ordering::Acquire))
+            .filter(|value| *value != UNKNOWN_SEEK_LANDING_FRAME)
+            .ok_or_else(|| {
+                PlaybackPipelineError::decode(anyhow::anyhow!(
+                    "decoder did not report a seek landing position"
+                ))
+            })?;
+        let actual_position_ms = actual_frame.saturating_mul(1000) / u64::from(rate);
+        if actual_position_ms.abs_diff(requested_position_ms) > 50 {
+            return Err(PlaybackPipelineError::decode(anyhow::anyhow!(
+                "decoder seek landing exceeded 50 ms tolerance"
+            )));
+        }
+        base_position_ms.store(actual_position_ms, Ordering::Release);
+        position_ms.store(actual_position_ms, Ordering::Release);
+        session.publish_event_at_epoch(
+            generation.clone(),
+            PlaybackEvent::SeekCommitted {
+                operation_id,
+                requested_position_ms,
+                actual_position_ms,
+            },
+            event_epoch.load(Ordering::Acquire),
+        );
     }
     if let Err(error) = stream.play() {
         cancel.store(true, Ordering::Release);
@@ -1069,7 +1213,8 @@ fn run_output(
             );
         }
         seq += 1;
-        let position = start_ms
+        let position = base_position_ms
+            .load(Ordering::Acquire)
             .saturating_add(samples.saturating_mul(1000) / u64::from(channels) / u64::from(rate));
         if active {
             let _ = session.report_progress(&generation, &occurrence, seq, position);
@@ -1087,10 +1232,23 @@ fn run_output(
                         &stream_failure,
                     )
                 })?;
+            let decoded_ms = if media_seek_requested {
+                result.emitted_frames
+            } else {
+                result.frames
+            }
+            .saturating_mul(1000)
+                / u64::from(rate);
             session.publish_event_at_epoch(
                 generation,
                 PlaybackEvent::Completed {
-                    position_ms: result.frames.saturating_mul(1000) / u64::from(rate),
+                    position_ms: if media_seek_requested {
+                        base_position_ms
+                            .load(Ordering::Acquire)
+                            .saturating_add(decoded_ms)
+                    } else {
+                        decoded_ms
+                    },
                 },
                 event_epoch.load(Ordering::Acquire),
             );
@@ -1133,7 +1291,7 @@ fn build_stream<T>(
     decoded: Arc<AtomicBool>,
     presentation: Arc<super::output::PresentationClock>,
     position_ms: Arc<AtomicU64>,
-    start_ms: u64,
+    base_position_ms: Arc<AtomicU64>,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + Sample,
@@ -1172,7 +1330,7 @@ where
             }
             let total = consumed.fetch_add(rendered.samples, Ordering::Release) + rendered.samples;
             position_ms.store(
-                start_ms.saturating_add(
+                base_position_ms.load(Ordering::Acquire).saturating_add(
                     total.saturating_mul(1000) / u64::from(channels) / u64::from(rate),
                 ),
                 Ordering::Release,
@@ -1616,6 +1774,7 @@ mod tests {
             sample_rate: None,
             bit_depth: None,
             provenance: PlaybackProvenance::Original,
+            seek_mechanism: None,
             request: request(url),
         }
     }

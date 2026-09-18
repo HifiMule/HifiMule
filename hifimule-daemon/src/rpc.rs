@@ -488,6 +488,9 @@ async fn handler(
         "playback.control" => {
             handle_playback_control(&state, payload.params, mutation_guard.take()).await
         }
+        "playback.seek" => {
+            handle_playback_seek(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.retryRestore" => {
             handle_playback_retry_restore(&state, payload.params, mutation_guard.take()).await
         }
@@ -589,6 +592,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playlist.create"
             | "playback.applySession"
             | "playback.control"
+            | "playback.seek"
             | "playback.selectOutput"
             | "playback.retryRestore"
             | "playlist.addItems"
@@ -877,6 +881,30 @@ async fn handle_playback_control(
         state.sync_operation_manager.clone(),
     )
     .rpc_control(p, mutation_guard)
+    .await
+    .map_err(playback_error)?;
+    Ok(serde_json::json!({"data":result}))
+}
+
+async fn handle_playback_seek(
+    state: &AppState,
+    params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
+    let p =
+        serde_json::from_value::<crate::playback::model::SeekParams>(params.unwrap_or(Value::Null))
+            .map_err(|_| JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Invalid playback.seek parameters".into(),
+                data: Some(serde_json::json!({"code":"INVALID_SEEK"})),
+            })?;
+    let result = crate::playback::commands::PlaybackCommandService::new(
+        state.playback.clone(),
+        state.server_manager.clone(),
+        state.db.clone(),
+        state.sync_operation_manager.clone(),
+    )
+    .rpc_seek(p, mutation_guard)
     .await
     .map_err(playback_error)?;
     Ok(serde_json::json!({"data":result}))
@@ -7750,6 +7778,7 @@ mod tests {
     async fn playback_contract_is_exact_bounded_offline_and_conflict_shaped() {
         let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
         assert!(is_mutating_method("playback.applySession"));
+        assert!(is_mutating_method("playback.seek"));
         assert!(is_mutating_method("playback.retryRestore"));
         assert!(!is_mutating_method("playback.getSession"));
         assert!(!is_mutating_method("playback.listOccurrences"));

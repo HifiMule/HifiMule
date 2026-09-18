@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-18  # Story 15.7 prepared and validated; historical installed evidence limitations remain recorded in story files
+last_updated: 2026-09-18  # Story 15.7 implementation ready for review; unavailable installed evidence remains explicit
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -190,7 +190,7 @@ development_status:
   15-4-play-a-selected-library-track-through-the-daemon: done
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: done
   15-6-control-playback-through-the-operating-system-with-the-window-closed: done
-  15-7-seek-within-a-track-and-see-the-actual-playback-position: ready-for-dev
+  15-7-seek-within-a-track-and-see-the-actual-playback-position: review
   15-8-play-an-album-in-order-and-advance-through-its-tracks: backlog
   15-9-preserve-album-continuity-across-prepared-track-boundaries: backlog
   15-10-preserve-an-album-s-relative-loudness-with-consistent-gain: backlog

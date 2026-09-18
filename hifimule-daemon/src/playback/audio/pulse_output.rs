@@ -99,6 +99,8 @@ pub(super) fn run_output(
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
     preparation: crate::playback::http_source::Preparation,
+    seek_candidate: bool,
+    mut seek_commit: Option<(String, u64)>,
 ) -> Result<(), PlaybackPipelineError> {
     let preference = session
         .selected_output(&generation)
@@ -121,14 +123,27 @@ pub(super) fn run_output(
     let decoder_pcm = pcm.clone();
     let decoder_cancel = cancel.clone();
     let hint = hint.to_owned();
+    let media_seek_requested = seek_commit.is_some();
+    let seek_qualified = Arc::new(AtomicBool::new(false));
+    let decoder_seek_qualified = seek_qualified.clone();
+    let seek_landing_frame = media_seek_requested.then(|| {
+        Arc::new(AtomicU64::new(
+            crate::playback::decoder::UNKNOWN_SEEK_LANDING_FRAME,
+        ))
+    });
+    let decoder_seek_landing = seek_landing_frame.clone();
     let stream_failure = reader.failure_state();
     let decoder = crate::playback::output::DecoderWorker::spawn(cancel.clone(), move || {
-        decode_stream(
+        decode_stream_with_seek(
             reader,
             Some(&hint),
             rate,
             channels,
             start_ms.saturating_mul(u64::from(rate)) / 1000,
+            seek_candidate,
+            media_seek_requested,
+            Some(decoder_seek_qualified),
+            decoder_seek_landing,
             decoder_pcm,
             decoder_cancel,
         )
@@ -143,6 +158,7 @@ pub(super) fn run_output(
         .map(|o| o.occurrence_id)
         .unwrap_or_default();
     let mut sequence = 0;
+    let mut base_position_ms = start_ms;
     let mut last_frames = 0;
     let mut last_tick = std::time::SystemTime::now();
     let mut ready = false;
@@ -187,6 +203,51 @@ pub(super) fn run_output(
                         return Err(PlaybackPipelineError::output_policy("GENERATION_CONFLICT"));
                     }
                     preparation.ready();
+                    if seek_candidate {
+                        let capability = if seek_qualified.load(Ordering::Acquire) {
+                            crate::playback::model::SeekCapability::jellyfin_pcm_wav()
+                        } else {
+                            crate::playback::model::SeekCapability::unavailable(
+                                "seek.representation_unqualified",
+                            )
+                        };
+                        session.publish_event_at_epoch(
+                            generation.clone(),
+                            PlaybackEvent::SeekQualified(capability),
+                            event_epoch.load(Ordering::Acquire),
+                        );
+                    }
+                    if let Some((operation_id, requested_position_ms)) = seek_commit.take() {
+                        let actual_frame = seek_landing_frame
+                            .as_ref()
+                            .map(|value| value.load(Ordering::Acquire))
+                            .filter(|value| {
+                                *value != crate::playback::decoder::UNKNOWN_SEEK_LANDING_FRAME
+                            })
+                            .ok_or_else(|| {
+                                PlaybackPipelineError::decode(anyhow::anyhow!(
+                                    "decoder did not report a seek landing position"
+                                ))
+                            })?;
+                        let actual_position_ms =
+                            actual_frame.saturating_mul(1000) / u64::from(rate);
+                        if actual_position_ms.abs_diff(requested_position_ms) > 50 {
+                            return Err(PlaybackPipelineError::decode(anyhow::anyhow!(
+                                "decoder seek landing exceeded 50 ms tolerance"
+                            )));
+                        }
+                        base_position_ms = actual_position_ms;
+                        position_ms.store(actual_position_ms, Ordering::Release);
+                        session.publish_event_at_epoch(
+                            generation.clone(),
+                            PlaybackEvent::SeekCommitted {
+                                operation_id,
+                                requested_position_ms,
+                                actual_position_ms,
+                            },
+                            event_epoch.load(Ordering::Acquire),
+                        );
+                    }
                     ready = true;
                 }
             }
@@ -200,9 +261,7 @@ pub(super) fn run_output(
                     let rendered =
                         consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
                     if !submission_cursor.record(cursor, len, channels, &rendered, &mut ledger) {
-                        return Err(PlaybackPipelineError::output_policy(
-                            "OUTPUT_SWITCH_FAILED",
-                        ));
+                        return Err(PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"));
                     }
                     output
                         .write(&scratch[..len])
@@ -223,9 +282,7 @@ pub(super) fn run_output(
                     let rendered =
                         consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
                     if !submission_cursor.record(cursor, len, channels, &rendered, &mut ledger) {
-                        return Err(PlaybackPipelineError::output_policy(
-                            "OUTPUT_SWITCH_FAILED",
-                        ));
+                        return Err(PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"));
                     }
                     output
                         .write(&scratch[..len])
@@ -237,14 +294,14 @@ pub(super) fn run_output(
                 if frames > last_frames {
                     sequence += 1;
                     position_ms.store(
-                        start_ms + frames.saturating_mul(1000) / u64::from(rate),
+                        base_position_ms + frames.saturating_mul(1000) / u64::from(rate),
                         Ordering::Release,
                     );
                     let _ = session.report_progress(
                         &generation,
                         &occurrence,
                         sequence,
-                        start_ms + frames.saturating_mul(1000) / u64::from(rate),
+                        base_position_ms + frames.saturating_mul(1000) / u64::from(rate),
                     );
                     last_frames = frames;
                 }
@@ -294,10 +351,21 @@ pub(super) fn run_output(
         .map_err(|e| {
             PlaybackPipelineError::from_decode_error_and_stream_state(e, &stream_failure)
         })?;
+    let decoded_ms = if media_seek_requested {
+        decoded.emitted_frames
+    } else {
+        decoded.frames
+    }
+    .saturating_mul(1000)
+        / u64::from(rate);
     session.publish_event_at_epoch(
         generation,
         PlaybackEvent::Completed {
-            position_ms: decoded.frames.saturating_mul(1000) / u64::from(rate),
+            position_ms: if media_seek_requested {
+                base_position_ms.saturating_add(decoded_ms)
+            } else {
+                decoded_ms
+            },
         },
         event_epoch.load(Ordering::Acquire),
     );
@@ -320,7 +388,10 @@ mod tests {
     fn startup_plan_keeps_pcm_frame_aligned() {
         let plan = startup_plan(48_000, 2, 38_401);
         assert_eq!(plan.server_samples % 2, 0);
-        assert_eq!(plan.initial_samples - plan.server_samples, plan.local_reserve_samples);
+        assert_eq!(
+            plan.initial_samples - plan.server_samples,
+            plan.local_reserve_samples
+        );
     }
 
     #[test]

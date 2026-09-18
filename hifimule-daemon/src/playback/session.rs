@@ -64,6 +64,8 @@ pub enum NativeControlIntent {
     Pause,
     Toggle,
     Stop,
+    SeekRelative(i64),
+    SeekAbsolute(u64),
 }
 
 enum OwnerCommand {
@@ -86,6 +88,11 @@ enum OwnerCommand {
     ),
     Control(
         ControlParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
+    Seek(
+        SeekParams,
         Option<crate::sync::MutationGuard>,
         mpsc::Sender<PResult<SessionSnapshot>>,
     ),
@@ -121,6 +128,9 @@ struct Inner {
     dedup_order: VecDeque<String>,
     control_dedup: HashMap<String, (ControlParams, PResult<SessionSnapshot>)>,
     control_dedup_order: VecDeque<String>,
+    seek_dedup: HashMap<String, (SeekParams, PResult<SessionSnapshot>)>,
+    seek_dedup_order: VecDeque<String>,
+    seek_resume_after_commit: bool,
     dirty: bool,
     checkpointed_position_ms: u64,
     playback: PlaybackState,
@@ -237,6 +247,9 @@ impl PlaybackSession {
             dedup_order: VecDeque::new(),
             control_dedup: HashMap::new(),
             control_dedup_order: VecDeque::new(),
+            seek_dedup: HashMap::new(),
+            seek_dedup_order: VecDeque::new(),
+            seek_resume_after_commit: false,
             dirty: false,
             checkpointed_position_ms,
             playback: PlaybackState {
@@ -369,6 +382,21 @@ impl PlaybackSession {
         let (tx, rx) = mpsc::channel();
         self.command_tx
             .try_send(OwnerCommand::NativeControl(intent, guard, tx))
+            .map_err(admission_error)?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn seek_with_guard(
+        &self,
+        p: SeekParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<SessionSnapshot> {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (tx, rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::Seek(p, guard, tx))
             .map_err(admission_error)?;
         rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
@@ -671,10 +699,13 @@ fn owner_loop(
         if !pending.is_empty() {
             let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
             for (_, epoch, generation_id, event) in pending {
-                if event_kind(&event) == 1 && epoch != i.control_epoch.load(Ordering::Acquire) {
+                if matches!(event_kind(&event), 1 | 3)
+                    && epoch != i.control_epoch.load(Ordering::Acquire)
+                {
                     continue;
                 }
                 if !fenced.load(Ordering::Acquire) && i.generation_id == generation_id {
+                    let checkpoint_seek = matches!(&event, PlaybackEvent::SeekCommitted { .. });
                     let output_lost = matches!(&event, PlaybackEvent::Failed { code, .. } if code == "OUTPUT_LOST");
                     if output_lost {
                         i.output_gate.store(false, Ordering::Release);
@@ -691,7 +722,7 @@ fn owner_loop(
                     }
                     apply_playback_event(&mut i, event);
                     refresh_ingress(&i, &ingress);
-                    if output_lost {
+                    if output_lost || checkpoint_seek {
                         let _ = checkpoint_inner(&mut i);
                     }
                 }
@@ -730,6 +761,7 @@ fn owner_loop(
                     prune_dedup(&mut i);
                     if i.control_dedup.contains_key(&params.command_id)
                         || i.output_dedup.contains_key(&params.command_id)
+                        || i.seek_dedup.contains_key(&params.command_id)
                     {
                         Err(PlaybackError::conflict(
                             "COMMAND_ID_REUSED",
@@ -778,6 +810,7 @@ fn owner_loop(
                     Err(owner_stopped())
                 } else if i.dedup.contains_key(&params.command_id)
                     || i.output_dedup.contains_key(&params.command_id)
+                    || i.seek_dedup.contains_key(&params.command_id)
                 {
                     Err(PlaybackError::conflict(
                         "COMMAND_ID_REUSED",
@@ -804,6 +837,52 @@ fn owner_loop(
                     while i.control_dedup_order.len() > 1024 {
                         if let Some(id) = i.control_dedup_order.pop_front() {
                             i.control_dedup.remove(&id);
+                        }
+                    }
+                    result
+                };
+                if result.is_ok() {
+                    refresh_ingress(&i, &ingress);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
+                executing.store(false, Ordering::Release);
+            }
+            Ok(OwnerCommand::Seek(params, _mutation_guard, reply)) => {
+                executing.store(true, Ordering::Release);
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                prune_dedup(&mut i);
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else if i.dedup.contains_key(&params.command_id)
+                    || i.output_dedup.contains_key(&params.command_id)
+                    || i.control_dedup.contains_key(&params.command_id)
+                {
+                    Err(PlaybackError::conflict(
+                        "COMMAND_ID_REUSED",
+                        "command identity was reused with another payload",
+                    ))
+                } else if let Some((old, result)) = i.seek_dedup.get(&params.command_id) {
+                    if old == &params {
+                        result.clone().map(|mut snapshot| {
+                            snapshot.seek_audio = false;
+                            snapshot
+                        })
+                    } else {
+                        Err(PlaybackError::conflict(
+                            "COMMAND_ID_REUSED",
+                            "command identity was reused with another payload",
+                        ))
+                    }
+                } else {
+                    let result = sample_progress(&mut i, &ingress)
+                        .and_then(|()| seek_inner(&mut i, &params, &generation_serial));
+                    i.seek_dedup
+                        .insert(params.command_id.clone(), (params.clone(), result.clone()));
+                    i.seek_dedup_order.push_back(params.command_id.clone());
+                    while i.seek_dedup_order.len() > 1024 {
+                        if let Some(id) = i.seek_dedup_order.pop_front() {
+                            i.seek_dedup.remove(&id);
                         }
                     }
                     result
@@ -952,6 +1031,9 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::Control(_, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
+        OwnerCommand::Seek(_, _guard, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
         OwnerCommand::NativeControl(_, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
@@ -1025,6 +1107,9 @@ fn retry_restore_inner(
         dedup_order: VecDeque::new(),
         control_dedup: HashMap::new(),
         control_dedup_order: VecDeque::new(),
+        seek_dedup: HashMap::new(),
+        seek_dedup_order: VecDeque::new(),
+        seek_resume_after_commit: false,
         dirty: false,
     };
     let response = snapshot(&candidate)?;
@@ -1369,6 +1454,8 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
     Ok(SessionSnapshot {
         resume_audio: false,
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
+        seek_audio: false,
+        seek_epoch: i.control_epoch.load(Ordering::Acquire),
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
         session_id: i.session.session_id.clone(),
@@ -1428,6 +1515,27 @@ fn control_inner(
     if p.action == ControlAction::Resume && i.output_gate.load(Ordering::Acquire) {
         return snapshot(i);
     }
+    if i.playback.pending_seek.is_some()
+        && matches!(p.action, ControlAction::Pause | ControlAction::Resume)
+    {
+        i.state_sequence = i
+            .state_sequence
+            .checked_add(1)
+            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+        i.seek_resume_after_commit = p.action == ControlAction::Resume;
+        i.output_gate.store(false, Ordering::Release);
+        i.session.state = if p.action == ControlAction::Resume {
+            TransportState::Buffering
+        } else {
+            TransportState::Paused
+        };
+        i.playback.status = if p.action == ControlAction::Resume {
+            PlaybackStatus::Loading
+        } else {
+            PlaybackStatus::Paused
+        };
+        return snapshot(i);
+    }
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
     i.state_sequence = i
         .state_sequence
@@ -1459,6 +1567,15 @@ fn control_inner(
             i.playback.error = None;
         }
         ControlAction::Stop => {
+            if let Some(pending) = i.playback.pending_seek.take() {
+                i.playback.seek_outcome = Some(SeekOutcome {
+                    operation_id: pending.operation_id,
+                    requested_position_ms: pending.requested_position_ms,
+                    actual_position_ms: None,
+                    status: "superseded".into(),
+                    error: None,
+                });
+            }
             i.output_gate.store(false, Ordering::Release);
             generation_serial.fetch_add(1, Ordering::AcqRel);
             super::audio::global().control(ControlAction::Stop);
@@ -1485,6 +1602,121 @@ fn control_inner(
     })
 }
 
+fn seek_inner(
+    i: &mut Inner,
+    p: &SeekParams,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
+    require_schema(p.schema_version)?;
+    if Uuid::parse_str(&p.command_id).is_err() {
+        return Err(PlaybackError::invalid(
+            "INVALID_SEEK",
+            "commandId must be a UUID",
+        ));
+    }
+    if p.position_ms > 9_007_199_254_740_991 {
+        return Err(PlaybackError::invalid(
+            "INVALID_SEEK",
+            "positionMs exceeds the safe integer limit",
+        ));
+    }
+    if p.instance_id != i.instance_id || p.session_id != i.session.session_id {
+        return Err(PlaybackError::conflict(
+            "SESSION_MISMATCH",
+            "session identity is stale",
+        ));
+    }
+    if p.expected_generation_id != i.generation_id
+        || i.session.current_occurrence_id.as_deref() != Some(&p.occurrence_id)
+    {
+        return Err(PlaybackError::conflict(
+            "GENERATION_CONFLICT",
+            "playback generation is stale",
+        ));
+    }
+    if !i.playback.seek.available {
+        return Err(PlaybackError::invalid(
+            "SEEK_UNAVAILABLE",
+            "the current representation has no qualified media-time seek",
+        ));
+    }
+    let duration_ms = i
+        .playback
+        .duration_ms
+        .filter(|duration| *duration > 0)
+        .ok_or_else(|| {
+            PlaybackError::invalid("SEEK_UNAVAILABLE", "the current duration is unavailable")
+        })?;
+    if p.position_ms > duration_ms {
+        return Err(PlaybackError::invalid(
+            "INVALID_SEEK",
+            "positionMs exceeds the current duration",
+        ));
+    }
+    let prior = i.session.position_ms;
+    let resume = matches!(
+        i.session.state,
+        TransportState::Playing | TransportState::Buffering
+    ) || matches!(
+        i.playback.status,
+        PlaybackStatus::Active | PlaybackStatus::Loading
+    );
+    i.control_epoch.fetch_add(1, Ordering::AcqRel);
+    generation_serial.fetch_add(1, Ordering::AcqRel);
+    i.output_gate.store(false, Ordering::Release);
+    super::audio::global().control(ControlAction::Stop);
+    i.generation_id = Uuid::new_v4().to_string();
+    i.state_sequence = i
+        .state_sequence
+        .checked_add(1)
+        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+    i.seek_resume_after_commit = resume;
+    i.playback.pending_seek = Some(PendingSeek {
+        operation_id: p.command_id.clone(),
+        requested_position_ms: p.position_ms,
+        prior_committed_position_ms: prior,
+    });
+    i.playback.seek_outcome = Some(SeekOutcome {
+        operation_id: p.command_id.clone(),
+        requested_position_ms: p.position_ms,
+        actual_position_ms: None,
+        status: "pending".into(),
+        error: None,
+    });
+    i.playback.error = None;
+    if p.position_ms == duration_ms {
+        i.session.position_ms = duration_ms;
+        i.session.state = TransportState::Paused;
+        i.playback.status = PlaybackStatus::Completed;
+        i.playback.pending_seek = None;
+        i.playback.seek_outcome = Some(SeekOutcome {
+            operation_id: p.command_id.clone(),
+            requested_position_ms: p.position_ms,
+            actual_position_ms: Some(duration_ms),
+            status: "succeeded".into(),
+            error: None,
+        });
+        i.dirty = true;
+        checkpoint_inner(i)?;
+    } else {
+        i.session.state = if resume {
+            TransportState::Buffering
+        } else {
+            TransportState::Paused
+        };
+        i.playback.status = if resume {
+            PlaybackStatus::Loading
+        } else {
+            PlaybackStatus::Paused
+        };
+    }
+    snapshot(i).map(|mut snapshot| {
+        snapshot.seek_audio = p.position_ms < duration_ms;
+        snapshot.seek_epoch = i.control_epoch.load(Ordering::Acquire);
+        snapshot
+    })
+}
+
 fn native_control_inner(
     i: &mut Inner,
     intent: NativeControlIntent,
@@ -1496,6 +1728,39 @@ fn native_control_inner(
             "there is no current track to control",
         ));
     };
+    if let NativeControlIntent::SeekAbsolute(position_ms) = intent {
+        let params = SeekParams {
+            schema_version: 1,
+            instance_id: i.instance_id.clone(),
+            session_id: i.session.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_generation_id: i.generation_id.clone(),
+            occurrence_id,
+            position_ms,
+        };
+        return seek_inner(i, &params, generation_serial);
+    }
+    if let NativeControlIntent::SeekRelative(offset_ms) = intent {
+        let duration = i
+            .playback
+            .duration_ms
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                PlaybackError::invalid("SEEK_UNAVAILABLE", "the current duration is unavailable")
+            })?;
+        let target = i128::from(i.session.position_ms) + i128::from(offset_ms);
+        let target = target.clamp(0, i128::from(duration)) as u64;
+        let params = SeekParams {
+            schema_version: 1,
+            instance_id: i.instance_id.clone(),
+            session_id: i.session.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_generation_id: i.generation_id.clone(),
+            occurrence_id,
+            position_ms: target,
+        };
+        return seek_inner(i, &params, generation_serial);
+    }
     let action = match intent {
         NativeControlIntent::Play => ControlAction::Resume,
         NativeControlIntent::Pause => ControlAction::Pause,
@@ -1512,6 +1777,9 @@ fn native_control_inner(
             } else {
                 ControlAction::Resume
             }
+        }
+        NativeControlIntent::SeekRelative(_) | NativeControlIntent::SeekAbsolute(_) => {
+            unreachable!()
         }
     };
     let params = ControlParams {
@@ -1591,9 +1859,10 @@ fn retain_dedup(i: &mut Inner, p: ApplySessionParams, r: PResult<ApplyResult>) {
 
 fn event_kind(event: &PlaybackEvent) -> u8 {
     match event {
-        PlaybackEvent::Resolved { .. } => 0,
+        PlaybackEvent::Resolved { .. } | PlaybackEvent::SeekQualified(_) => 0,
         PlaybackEvent::Active | PlaybackEvent::Buffering => 1,
         PlaybackEvent::Completed { .. } | PlaybackEvent::Failed { .. } => 2,
+        PlaybackEvent::SeekCommitted { .. } | PlaybackEvent::SeekFailed { .. } => 3,
     }
 }
 
@@ -1603,10 +1872,31 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             metadata,
             duration_ms,
             representation,
+            seek,
         } => {
             i.playback.metadata = Some(metadata);
             i.playback.duration_ms = duration_ms;
             i.playback.representation = Some(representation);
+            if i.playback.pending_seek.is_none()
+                && i.playback.status == PlaybackStatus::Loading
+                && duration_ms
+                    .is_some_and(|duration| duration > 0 && i.session.position_ms == duration)
+            {
+                i.session.position_ms = 0;
+                i.dirty = true;
+            }
+            i.playback.seek = if duration_ms.is_some_and(|duration| duration > 0) {
+                seek
+            } else {
+                SeekCapability::unavailable("seek.duration_unavailable")
+            };
+        }
+        PlaybackEvent::SeekQualified(capability) => {
+            i.playback.seek = if i.playback.duration_ms.is_some_and(|duration| duration > 0) {
+                capability
+            } else {
+                SeekCapability::unavailable("seek.duration_unavailable")
+            };
         }
         PlaybackEvent::Active if i.output_gate.load(Ordering::Acquire) => {
             i.session.state = TransportState::Playing;
@@ -1623,6 +1913,68 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             i.playback.status = PlaybackStatus::Completed;
             i.dirty = true;
         }
+        PlaybackEvent::SeekCommitted {
+            operation_id,
+            requested_position_ms,
+            actual_position_ms,
+        } if i
+            .playback
+            .pending_seek
+            .as_ref()
+            .is_some_and(|pending| pending.operation_id == operation_id) =>
+        {
+            i.session.position_ms = actual_position_ms;
+            i.playback.pending_seek = None;
+            i.playback.seek_outcome = Some(SeekOutcome {
+                operation_id,
+                requested_position_ms,
+                actual_position_ms: Some(actual_position_ms),
+                status: "succeeded".into(),
+                error: None,
+            });
+            if i.seek_resume_after_commit {
+                i.output_gate.store(true, Ordering::Release);
+                i.session.state = TransportState::Playing;
+                i.playback.status = PlaybackStatus::Active;
+            } else {
+                i.output_gate.store(false, Ordering::Release);
+                i.session.state = TransportState::Paused;
+                i.playback.status = PlaybackStatus::Paused;
+            }
+            i.dirty = true;
+        }
+        PlaybackEvent::SeekCommitted { .. } => {}
+        PlaybackEvent::SeekFailed {
+            operation_id,
+            code,
+            retryable,
+        } if i
+            .playback
+            .pending_seek
+            .as_ref()
+            .is_some_and(|pending| pending.operation_id == operation_id) =>
+        {
+            let requested_position_ms = i
+                .playback
+                .pending_seek
+                .as_ref()
+                .map(|pending| pending.requested_position_ms)
+                .unwrap_or(i.session.position_ms);
+            i.playback.pending_seek = None;
+            i.output_gate.store(false, Ordering::Release);
+            i.session.state = TransportState::Paused;
+            i.playback.status = PlaybackStatus::Error;
+            let error = PlaybackFailure { code, retryable };
+            i.playback.error = Some(error.clone());
+            i.playback.seek_outcome = Some(SeekOutcome {
+                operation_id,
+                requested_position_ms,
+                actual_position_ms: None,
+                status: "failed".into(),
+                error: Some(error),
+            });
+        }
+        PlaybackEvent::SeekFailed { .. } => {}
         PlaybackEvent::Failed { code, retryable } => {
             // This event has already passed the owner's generation fence. A
             // retirement warning is not terminal: the worker is still owned.
@@ -2751,6 +3103,310 @@ mod tests {
                 .code,
             "DAEMON_STOPPED"
         );
+        playback.stop_and_join().unwrap();
+    }
+
+    fn qualified_seek(playback: &PlaybackSession, snapshot: &SessionSnapshot) -> SessionSnapshot {
+        let source = snapshot.current.as_ref().unwrap().source.clone();
+        playback.publish_event(
+            snapshot.generation_id.clone(),
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source,
+                    title: "fixture".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(10_000),
+                representation: "wav".into(),
+                seek: SeekCapability::jellyfin_pcm_wav(),
+            },
+        );
+        playback.snapshot().unwrap()
+    }
+
+    fn seek(snapshot: &SessionSnapshot, position_ms: u64) -> SeekParams {
+        SeekParams {
+            schema_version: 1,
+            instance_id: snapshot.instance_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_generation_id: snapshot.generation_id.clone(),
+            occurrence_id: snapshot.current.as_ref().unwrap().occurrence_id.clone(),
+            position_ms,
+        }
+    }
+
+    #[test]
+    fn seek_rejects_unavailable_and_out_of_bounds_without_mutation() {
+        let (_, playback, selected) = queued();
+        let before = playback.snapshot().unwrap();
+        assert_eq!(
+            playback
+                .seek_with_guard(seek(&before, 1), None)
+                .unwrap_err()
+                .code,
+            "SEEK_UNAVAILABLE"
+        );
+        let qualified = qualified_seek(&playback, &selected);
+        assert_eq!(
+            playback
+                .seek_with_guard(seek(&qualified, 10_001), None)
+                .unwrap_err()
+                .code,
+            "INVALID_SEEK"
+        );
+        let after = playback.snapshot().unwrap();
+        assert_eq!(after.generation_id, qualified.generation_id);
+        assert_eq!(after.position_ms, qualified.position_ms);
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn seek_keeps_requested_target_pending_until_matching_commit() {
+        let (_, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        let request = seek(&qualified, 4_000);
+        let operation = request.command_id.clone();
+        let pending = playback.seek_with_guard(request.clone(), None).unwrap();
+        assert_eq!(pending.position_ms, qualified.position_ms);
+        assert_eq!(pending.queue_revision, qualified.queue_revision);
+        assert_eq!(pending.current, qualified.current);
+        assert_eq!(
+            pending
+                .playback
+                .pending_seek
+                .as_ref()
+                .unwrap()
+                .requested_position_ms,
+            4_000
+        );
+        let replay = playback.seek_with_guard(request, None).unwrap();
+        assert_eq!(replay.generation_id, pending.generation_id);
+        assert!(!replay.seek_audio);
+        playback.publish_event_at_epoch(
+            pending.generation_id.clone(),
+            PlaybackEvent::SeekCommitted {
+                operation_id: operation,
+                requested_position_ms: 4_000,
+                actual_position_ms: 4_012,
+            },
+            pending.seek_epoch,
+        );
+        let committed = playback.snapshot().unwrap();
+        assert_eq!(committed.position_ms, 4_012);
+        assert!(committed.playback.pending_seek.is_none());
+        assert_eq!(
+            committed.playback.seek_outcome.unwrap().actual_position_ms,
+            Some(4_012)
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn exact_end_seek_commits_terminal_cursor_and_checkpoints() {
+        let (_, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        let completed = playback
+            .seek_with_guard(seek(&qualified, 10_000), None)
+            .unwrap();
+        assert_eq!(completed.position_ms, 10_000);
+        assert_eq!(completed.checkpointed_position_ms, 10_000);
+        assert_eq!(completed.playback.status, PlaybackStatus::Completed);
+        assert!(!completed.seek_audio);
+        assert_eq!(completed.queue_revision, qualified.queue_revision);
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn restored_exact_end_resume_normalizes_to_zero_after_duration_resolves() {
+        let (db, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        playback
+            .seek_with_guard(seek(&qualified, 10_000), None)
+            .unwrap();
+        playback.stop_and_join().unwrap();
+
+        let restored = PlaybackSession::restore(db, "seek-end-restore".into());
+        let paused = restored.snapshot().unwrap();
+        assert_eq!(paused.position_ms, 10_000);
+        let loading = restored
+            .control_with_guard(
+                ControlParams {
+                    schema_version: 1,
+                    instance_id: paused.instance_id,
+                    session_id: paused.session_id,
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: paused.generation_id,
+                    occurrence_id: paused.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::Resume,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(loading.position_ms, 10_000);
+        restored.publish_event(
+            loading.generation_id,
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: loading.current.unwrap().source,
+                    title: "fixture".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(10_000),
+                representation: "wav".into(),
+                seek: SeekCapability::jellyfin_pcm_wav(),
+            },
+        );
+        assert_eq!(restored.snapshot().unwrap().position_ms, 0);
+        restored.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn successful_seek_is_durable_but_pending_target_is_not() {
+        let (db, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        let first = seek(&qualified, 4_000);
+        let first_operation = first.command_id.clone();
+        let pending = playback.seek_with_guard(first, None).unwrap();
+        assert_eq!(db.load_playback_session().unwrap().unwrap().position_ms, 0);
+        playback.publish_event_at_epoch(
+            pending.generation_id,
+            PlaybackEvent::SeekCommitted {
+                operation_id: first_operation,
+                requested_position_ms: 4_000,
+                actual_position_ms: 4_012,
+            },
+            pending.seek_epoch,
+        );
+        assert_eq!(playback.snapshot().unwrap().checkpointed_position_ms, 4_012);
+        playback.stop_and_join().unwrap();
+        let restored = PlaybackSession::restore(db, "seek-restore".into());
+        assert_eq!(restored.snapshot().unwrap().position_ms, 4_012);
+        restored.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn failed_seek_checkpoint_is_observable_and_retryable() {
+        let (db, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        let request = seek(&qualified, 4_000);
+        let operation_id = request.command_id.clone();
+        let pending = playback.seek_with_guard(request, None).unwrap();
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_seek_position BEFORE UPDATE OF position_ms ON playback_sessions BEGIN SELECT RAISE(ABORT,'test'); END").unwrap();
+        playback.publish_event_at_epoch(
+            pending.generation_id,
+            PlaybackEvent::SeekCommitted {
+                operation_id,
+                requested_position_ms: 4_000,
+                actual_position_ms: 4_012,
+            },
+            pending.seek_epoch,
+        );
+        let failed = playback.snapshot().unwrap();
+        assert_eq!(failed.position_ms, 4_012);
+        assert_eq!(failed.checkpointed_position_ms, 0);
+        assert_eq!(failed.persistence.status, "error");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_seek_position")
+            .unwrap();
+        playback.final_checkpoint().unwrap();
+        let retried = playback.snapshot().unwrap();
+        assert_eq!(retried.checkpointed_position_ms, 4_012);
+        assert_eq!(retried.persistence.status, "ok");
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn pause_during_seek_preserves_paused_intent_and_stale_commit_is_fenced() {
+        let (_, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        let first = seek(&qualified, 2_000);
+        let first_operation = first.command_id.clone();
+        let first_pending = playback.seek_with_guard(first, None).unwrap();
+        playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: 1,
+                    instance_id: first_pending.instance_id.clone(),
+                    session_id: first_pending.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: first_pending.generation_id.clone(),
+                    occurrence_id: first_pending
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .occurrence_id
+                        .clone(),
+                    action: ControlAction::Pause,
+                },
+                None,
+            )
+            .unwrap();
+        let paused = playback.snapshot().unwrap();
+        assert!(paused.playback.pending_seek.is_some());
+        let second = seek(&paused, 6_000);
+        let second_operation = second.command_id.clone();
+        let second_pending = playback.seek_with_guard(second, None).unwrap();
+        playback.publish_event_at_epoch(
+            first_pending.generation_id,
+            PlaybackEvent::SeekCommitted {
+                operation_id: first_operation,
+                requested_position_ms: 2_000,
+                actual_position_ms: 2_000,
+            },
+            first_pending.seek_epoch,
+        );
+        assert_eq!(playback.snapshot().unwrap().position_ms, 0);
+        playback.publish_event_at_epoch(
+            second_pending.generation_id,
+            PlaybackEvent::SeekCommitted {
+                operation_id: second_operation,
+                requested_position_ms: 6_000,
+                actual_position_ms: 6_000,
+            },
+            second_pending.seek_epoch,
+        );
+        let committed = playback.snapshot().unwrap();
+        assert_eq!(committed.position_ms, 6_000);
+        assert_eq!(committed.state, TransportState::Paused);
+        assert_eq!(committed.playback.status, PlaybackStatus::Paused);
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn native_relative_seek_clamps_protocol_boundaries_before_common_admission() {
+        let (_, playback, selected) = queued();
+        let _ = qualified_seek(&playback, &selected);
+        let zero = playback
+            .native_control(NativeControlIntent::SeekRelative(-30_000), None)
+            .unwrap();
+        assert_eq!(zero.playback.pending_seek.unwrap().requested_position_ms, 0);
+        playback.publish_event_at_epoch(
+            zero.generation_id.clone(),
+            PlaybackEvent::SeekCommitted {
+                operation_id: zero
+                    .playback
+                    .seek_outcome
+                    .as_ref()
+                    .unwrap()
+                    .operation_id
+                    .clone(),
+                requested_position_ms: 0,
+                actual_position_ms: 0,
+            },
+            zero.seek_epoch,
+        );
+        let committed = playback.snapshot().unwrap();
+        let end = playback
+            .native_control(NativeControlIntent::SeekRelative(30_000), None)
+            .unwrap();
+        assert_eq!(end.position_ms, 10_000);
+        assert_eq!(end.playback.status, PlaybackStatus::Completed);
+        assert_eq!(end.current, committed.current);
         playback.stop_and_join().unwrap();
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect and validate sanitized Stories 15.4–15.6 installed-playback evidence."""
+"""Collect and validate sanitized Stories 15.4–15.7 installed-playback evidence."""
 
 from __future__ import annotations
 
@@ -83,6 +83,7 @@ def empty_record(target: str) -> dict:
         "schemaVersion": 1,
         "outputEvidenceVersion": 1,
         "nativeEvidenceVersion": 1,
+        "seekEvidenceVersion": 1,
         "outputDeviceKind": "unverified",
         "recordedAt": now(),
         "target": target,
@@ -102,6 +103,7 @@ def empty_record(target: str) -> dict:
                 for name, path, ui_state in NATIVE_OBSERVATIONS
             },
         },
+        "seek": {"rows": []},
         "outcome": "unverified",
     }
 
@@ -454,9 +456,97 @@ def validate_native_evidence(record: dict) -> list[str]:
     return errors
 
 
+def validate_seek_evidence(record: dict) -> list[str]:
+    if record.get("seekEvidenceVersion") != 1:
+        return ["Story 15.7 seek evidence is missing or has an unsupported version"]
+    seek = record.get("seek")
+    rows = seek.get("rows") if isinstance(seek, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return ["Story 15.7 seek evidence has no provider/representation/backend rows"]
+    errors = []
+    combinations = {}
+    for index, row in enumerate(rows):
+        label = f"seek row {index}"
+        if not isinstance(row, dict):
+            errors.append(f"{label} is invalid")
+            continue
+        key = tuple(row.get(field) for field in
+                    ("provider", "serverVersion", "representation", "container", "codec", "backend"))
+        if any(not isinstance(value, str) or not value.strip() for value in key):
+            errors.append(f"{label} has incomplete provider/representation/backend identity")
+        elif key in combinations and combinations[key] != row:
+            errors.append(f"{label} conflicts with duplicate combination {key}")
+        else:
+            combinations[key] = row
+        enabled = row.get("enabled")
+        if type(enabled) is not bool:
+            errors.append(f"{label} has invalid enabled capability")
+            continue
+        if not enabled:
+            if not str(row.get("disabledReason", "")).strip() or row.get("ordinaryPlayback") != "passed":
+                errors.append(f"{label} disabled capability lacks reason or ordinary-playback pass")
+            continue
+        if row.get("provider") != "jellyfin" or row.get("representation") != "original" \
+                or row.get("container") != "wav" \
+                or row.get("codec") not in {"pcm_s16le", "pcm_s24le", "pcm_s32le"}:
+            errors.append(f"{label} enables an unqualified provider/representation")
+        if row.get("mechanism") != "ffmpeg-post-open-media-time-seek":
+            errors.append(f"{label} has an unqualified seek mechanism")
+        observations = row.get("observations")
+        if not isinstance(observations, list) or not observations:
+            errors.append(f"{label} has no seek observations")
+            continue
+        directions = set()
+        for observation_index, item in enumerate(observations):
+            item_label = f"{label} observation {observation_index}"
+            if not isinstance(item, dict):
+                errors.append(f"{item_label} is invalid")
+                continue
+            numeric = ("requestedPositionMs", "priorCommittedPositionMs", "landedPositionMs",
+                       "fixtureOraclePositionMs", "absoluteErrorMs", "durationMs",
+                       "compressedHighWaterBytes", "pcmHighWaterBytes")
+            if any(type(item.get(field)) not in (int, float) or isinstance(item.get(field), bool)
+                   or not math.isfinite(item[field]) or item[field] < 0 for field in numeric):
+                errors.append(f"{item_label} has invalid numeric evidence")
+                continue
+            if any(type(item[field]) is not int for field in
+                   ("requestedPositionMs", "priorCommittedPositionMs", "landedPositionMs",
+                    "fixtureOraclePositionMs", "durationMs", "compressedHighWaterBytes",
+                    "pcmHighWaterBytes")):
+                errors.append(f"{item_label} positions and buffer peaks must be integers")
+            if item["requestedPositionMs"] > item["durationMs"]:
+                errors.append(f"{item_label} requests beyond duration")
+            expected_error = abs(item["landedPositionMs"] - item["fixtureOraclePositionMs"])
+            if item["absoluteErrorMs"] != expected_error or expected_error > 50:
+                errors.append(f"{item_label} does not independently prove a landing within 50 ms")
+            if item.get("outcome") != "succeeded" or item.get("committedPositionMs") != item["landedPositionMs"]:
+                errors.append(f"{item_label} presents pending, failed or contradictory success")
+            identity_fields = ("instanceId", "sessionId", "generationId", "occurrenceId",
+                               "queueRevision", "operationId")
+            if any(not isinstance(item.get(field), str) or not item[field] for field in identity_fields):
+                errors.append(f"{item_label} has incomplete operation identity")
+            if item.get("queueRevisionAfter") != item.get("queueRevision") \
+                    or item.get("occurrenceIdAfter") != item.get("occurrenceId"):
+                errors.append(f"{item_label} changes queue or occurrence identity")
+            if item["requestedPositionMs"] > item["priorCommittedPositionMs"]:
+                directions.add("forward")
+            elif item["requestedPositionMs"] < item["priorCommittedPositionMs"]:
+                directions.add("backward")
+            if item.get("transportBefore") not in {"active", "paused"} \
+                    or item.get("transportAfter") not in {"active", "paused", "completed"}:
+                errors.append(f"{item_label} has invalid transport outcome")
+            if item["compressedHighWaterBytes"] > 8 * 1024 * 1024 \
+                    or item["pcmHighWaterBytes"] > 1024 * 1024:
+                errors.append(f"{item_label} exceeds bounded playback storage")
+        if not {"forward", "backward"}.issubset(directions):
+            errors.append(f"{label} has no-op or incomplete forward/backward evidence")
+    return errors
+
+
 def validate_record(record: dict) -> list[str]:
     errors = []
     errors.extend(validate_native_evidence(record))
+    errors.extend(validate_seek_evidence(record))
     if record.get("outputEvidenceVersion") != 1:
         errors.append("Story 15.5 output evidence is missing; older playback results are insufficient")
     if record.get("outputDeviceKind") != "physical":
@@ -575,7 +665,10 @@ def validate_matrix(directory: Path) -> list[str]:
             continue
         target = record.get("target")
         if target in REQUIRED_TARGETS:
-            records[target] = (path, record)
+            if target in records:
+                errors.append(f"{target}: duplicate evidence files would overwrite provider combinations")
+            else:
+                records[target] = (path, record)
     for target in REQUIRED_TARGETS:
         if target not in records:
             errors.append(f"{target}: evidence is missing")

@@ -1,6 +1,10 @@
+---
+baseline_commit: 78d963ed5efee7fdaed6d291fcd120700d3432ee
+---
+
 # Story 15.7: Seek within a track and see the actual playback position
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -28,27 +32,27 @@ so that I can replay a passage or continue from a chosen position without restar
 
 ## Tasks / Subtasks
 
-- [ ] Close and record the seek contract before implementation (AC: 1–9).
-  - [ ] Record the initial provider/representation/platform capability matrix, supported mechanism, timestamp origin, decoded landing tolerance and presentation-latency allowance in the API/test documentation. Implement the initial Jellyfin original PCM-in-WAV path described below; add other combinations only after qualification, never by blanket provider-wide capability.
-  - [ ] Adopt the boundary, failure, exact-end and identity contracts below; resolve native normalization and transport-race tables in tests.
-- [ ] Extend authoritative model, owner and shared service (AC: 1–5, 8).
-  - [ ] Add a strict seek request, additive capability/pending-outcome projection and a generation-fenced commit event; route RPC/native admission through one `PlaybackCommandService` effect.
-  - [ ] Keep pending target separate from committed position, preserve queue/occurrence identity, and implement replay/conflict behavior across the existing command namespace.
-  - [ ] Reset progress ingress for new generations; checkpoint confirmed seek commits, including paused seeks, with existing persistence failure handling.
-- [ ] Implement bounded media-time seeking in the existing pipeline (AC: 1–5, 9).
-  - [ ] Use validated demuxer seeking, decoder flush/recreation and bounded pre-roll trimming; preserve request authentication, representation identity and byte-range validation.
-  - [ ] Retire old decode/output buffers before activation, retain latest-seek supersession and selected-output safety, and prevent any audible output during paused preparation.
-  - [ ] Measure actual landing/presentation position on CPAL and Pulse paths; exclude pre-roll, buffering silence and queued-but-unpresented audio from actual advancement.
-- [ ] Wire native seek and actual-position publication (AC: 3, 6–7).
-  - [ ] Extend bounded native intents and actual platform capability masks. Implement checked Windows/macOS conversions and MPRIS track-ID fencing plus correctly typed, success-driven `Seeked`.
-  - [ ] Preserve publication coalescing, correlated failures, native registration lifetime, nonfatal registration errors and priority teardown.
-- [ ] Add accessible seek/elapsed UI using the current controls (AC: 1–3, 5, 7).
-  - [ ] Add elapsed/duration, keyboard-operable slider, local scrub preview, pending/error/unavailable feedback and bounded interpolation.
-  - [ ] Preserve mounted focus, independent output selection, responsive compact output dropdown and polling cleanup. Add English/French/Spanish/German catalog strings.
-- [ ] Add integration, fixture and installed evidence coverage (AC: 1–9).
-  - [ ] Exercise the real RPC/native ingress → service → owner → audio seam, not only enum mappings; add deterministic race barriers and mock HTTP failures.
-  - [ ] Extend UI clock tests, persistence/restart tests and installed collector validation to reject no-op, stale or contradictory success evidence.
-  - [ ] Run relevant checks below and record exact provider/format/backend/OS/architecture evidence and remaining unavailable environments honestly.
+- [x] Close and record the seek contract before implementation (AC: 1–9).
+  - [x] Record the initial provider/representation/platform capability matrix, supported mechanism, timestamp origin, decoded landing tolerance and presentation-latency allowance in the API/test documentation. Implement the initial Jellyfin original PCM-in-WAV path described below; add other combinations only after qualification, never by blanket provider-wide capability.
+  - [x] Adopt the boundary, failure, exact-end and identity contracts below; resolve native normalization and transport-race tables in tests.
+- [x] Extend authoritative model, owner and shared service (AC: 1–5, 8).
+  - [x] Add a strict seek request, additive capability/pending-outcome projection and a generation-fenced commit event; route RPC/native admission through one `PlaybackCommandService` effect.
+  - [x] Keep pending target separate from committed position, preserve queue/occurrence identity, and implement replay/conflict behavior across the existing command namespace.
+  - [x] Reset progress ingress for new generations; checkpoint confirmed seek commits, including paused seeks, with existing persistence failure handling.
+- [x] Implement bounded media-time seeking in the existing pipeline (AC: 1–5, 9).
+  - [x] Use validated demuxer seeking, decoder flush/recreation and bounded pre-roll trimming; preserve request authentication, representation identity and byte-range validation.
+  - [x] Retire old decode/output buffers before activation, retain latest-seek supersession and selected-output safety, and prevent any audible output during paused preparation.
+  - [x] Measure actual landing/presentation position on CPAL and Pulse paths; exclude pre-roll, buffering silence and queued-but-unpresented audio from actual advancement.
+- [x] Wire native seek and actual-position publication (AC: 3, 6–7).
+  - [x] Extend bounded native intents and actual platform capability masks. Implement checked Windows/macOS conversions and MPRIS track-ID fencing plus correctly typed, success-driven `Seeked`.
+  - [x] Preserve publication coalescing, correlated failures, native registration lifetime, nonfatal registration errors and priority teardown.
+- [x] Add accessible seek/elapsed UI using the current controls (AC: 1–3, 5, 7).
+  - [x] Add elapsed/duration, keyboard-operable slider, local scrub preview, pending/error/unavailable feedback and bounded interpolation.
+  - [x] Preserve mounted focus, independent output selection, responsive compact output dropdown and polling cleanup. Add English/French/Spanish/German catalog strings.
+- [x] Add integration, fixture and installed evidence coverage (AC: 1–9).
+  - [x] Exercise the real RPC/native ingress → service → owner → audio seam, not only enum mappings; add deterministic race barriers and mock HTTP failures.
+  - [x] Extend UI clock tests, persistence/restart tests and installed collector validation to reject no-op, stale or contradictory success evidence.
+  - [x] Run relevant checks below and record exact provider/format/backend/OS/architecture evidence and remaining unavailable environments honestly.
 
 ## Dev Notes
 
@@ -188,19 +192,76 @@ Checked 2026-09-18 using primary documentation. Keep the pinned runtime; this st
 
 ### Agent Model Used
 
-Story preparation: Codex. Implementation agent to record its model during dev-story.
+Story preparation: Codex. Implementation: GPT-6 (Codex).
+
+### Implementation Plan
+
+- Extend schema-v1 playback state and the serialized owner with strict seek admission, shared deduplication, generation/epoch fencing, explicit pending/outcome state, exact-end behavior and durable actual-position commits.
+- Qualify only Jellyfin original PCM WAV after FFmpeg inspects the opened stream; perform bounded demuxer seek, decoder flush, pre-roll trim and measured landing publication through the existing CPAL/Pulse pipeline.
+- Route UI and native requests through `PlaybackCommandService`, add accessible timeline behavior and native discontinuity publication, then validate contracts, races, persistence, fixtures and installed-evidence schema.
 
 ### Debug Log References
 
-No implementation or audio acceptance run during story preparation.
+- `rtk proxy node scripts/build-daemon.mjs test -p hifimule-daemon -- --test-threads=1` — 854 passed, 0 failed, 6 explicit hardware/diagnostic ignores.
+- `rtk proxy node --test scripts/tests/playback-ui.test.mjs` — 17 passed.
+- `rtk proxy python3 -m unittest discover -s scripts/tests -p 'test_playback*evidence.py'` — 20 passed.
+- `rtk cargo test -p hifimule-i18n` — 7 passed.
+- `rtk cargo test --manifest-path third_party/souvlaki/Cargo.toml --lib` — 2 passed on macOS.
+- `rtk npm --prefix hifimule-ui run build` — TypeScript and Vite production build passed; existing bundle-size/dynamic-import warnings remain.
+- `rtk proxy node scripts/build-daemon.mjs clippy -p hifimule-daemon` — passed with existing repository warnings; two story-local suggestions were corrected afterward.
+- Targeted `rustfmt --check` for every changed Rust file and `rtk git diff --check` passed. The repository-wide `cargo fmt --all -- --check` remains blocked by pre-existing formatting drift in unrelated MTP files.
+- Windows cross-check could not run because the active Rust toolchain lacks its target core; Linux and installed Windows/macOS hardware evidence remain explicitly unverified in the installed checklist.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Story requirements reconciled against current code, all Epic 15 story boundaries, architecture/UX/PRD, prior review and recent commits.
-- Ready for development; capability qualification, implementation checks and installed seek evidence remain execution tasks.
+- Added strict `playback.seek` admission with shared command identity, pending/committed separation, supersession fencing, exact-end behavior, pause intent preservation and checkpoint retry semantics.
+- Implemented runtime-qualified Jellyfin original WAV seeking for FFmpeg-verified PCM s16le/s24le/s32le. Decoder landing is independently measured and bounded to 50 ms; unsupported WAV codecs retain ordinary playback.
+- Added authenticated range identity checks, including ETag/Last-Modified replacement rejection, bounded pre-roll trimming and actual-position progress bases for CPAL and Pulse.
+- Added native relative/absolute seek parity, occurrence-based MPRIS track IDs, success-driven typed `Seeked`, checked macOS/Windows conversions and terminal-position projection.
+- Added the accessible UI timeline, explicit scrub commit/coalescing, authoritative 750 ms interpolation, four-locale strings, deterministic fixtures, persistence/race tests and strict `seekEvidenceVersion: 1` validation.
+- Installed evidence requirements and all unavailable platform/hardware rows remain explicitly unverified; no local source test was promoted to installed evidence.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-7-seek-within-a-track-and-see-the-actual-playback-position.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/commands_tests.rs`
+- `hifimule-daemon/src/playback/decoder.rs`
+- `hifimule-daemon/src/playback/http_source.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/tests/fixtures/generated-audio.source.md`
+- `hifimule-daemon/tests/fixtures/generated-seek-pcm-f32.wav`
+- `hifimule-daemon/tests/fixtures/generated-seek-pcm16.wav`
+- `hifimule-daemon/tests/fixtures/generated-seek-pcm24.wav`
+- `hifimule-daemon/tests/fixtures/generated-seek-pcm32.wav`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/playback-installed-evidence.py`
+- `scripts/tests/playback-ui.test.mjs`
+- `scripts/tests/test_playback_installed_evidence.py`
+- `third_party/souvlaki/HIFIMULE_PATCH.md`
+- `third_party/souvlaki/examples/window.rs`
+- `third_party/souvlaki/src/lib.rs`
+- `third_party/souvlaki/src/platform/macos/mod.rs`
+- `third_party/souvlaki/src/platform/mpris/dbus/controls.rs`
+- `third_party/souvlaki/src/platform/mpris/dbus/interfaces.rs`
+- `third_party/souvlaki/src/platform/mpris/zbus.rs`
+- `third_party/souvlaki/src/platform/windows/mod.rs`
+- `third_party/souvlaki/src/publication.rs`
+
+### Change Log
+
+- 2026-09-18: Implemented authoritative current-track seeking, actual-position UI/native publication, runtime PCM-WAV qualification, durable commits, race/error handling, fixtures and installed-evidence validation. Marked ready for review.

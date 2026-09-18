@@ -6,9 +6,9 @@ use crate::domain::models::{
 };
 use crate::providers::{
     BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, PlaybackDescription,
-    PlaybackProvenance, PlaybackRepresentation, PlaybackRequest, ProviderChangeContext,
-    ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType, TrackListFilter, TrackListPage,
-    TranscodeProfile,
+    PlaybackProvenance, PlaybackRepresentation, PlaybackRequest, PlaybackSeekMechanism,
+    ProviderChangeContext, ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType,
+    TrackListFilter, TrackListPage, TranscodeProfile,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -584,6 +584,7 @@ impl MediaProvider for JellyfinProvider {
                 sample_rate: None,
                 bit_depth: None,
                 provenance: PlaybackProvenance::Original,
+                seek_mechanism: jellyfin_seek_mechanism(song.suffix.as_deref()),
                 request: PlaybackRequest {
                     url,
                     headers,
@@ -912,6 +913,17 @@ impl MediaProvider for JellyfinProvider {
         let songs: Vec<Song> = response.items.into_iter().map(song_from_item).collect();
         Ok((songs, total))
     }
+}
+
+fn jellyfin_seek_mechanism(suffix: Option<&str>) -> Option<PlaybackSeekMechanism> {
+    suffix
+        .is_some_and(|suffix| {
+            matches!(
+                suffix.trim_start_matches('.').to_ascii_lowercase().as_str(),
+                "wav" | "wave"
+            )
+        })
+        .then_some(PlaybackSeekMechanism::JellyfinOriginalPcmWav)
 }
 
 pub(crate) fn library_from_view(view: JellyfinView) -> Option<Library> {
@@ -2494,5 +2506,17 @@ mod tests {
         assert_eq!(page.tracks.len(), 1);
         assert_eq!(page.tracks[0].id, "track1");
         assert_eq!(page.total, 1);
+    }
+}
+#[test]
+fn seek_capability_is_limited_to_jellyfin_original_wav_candidates() {
+    for suffix in [Some("wav"), Some("WAVE"), Some(".Wav")] {
+        assert_eq!(
+            jellyfin_seek_mechanism(suffix),
+            Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav)
+        );
+    }
+    for suffix in [None, Some("flac"), Some("mp3"), Some("wav?transcoded=true")] {
+        assert_eq!(jellyfin_seek_mechanism(suffix), None);
     }
 }

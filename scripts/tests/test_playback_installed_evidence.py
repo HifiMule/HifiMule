@@ -62,6 +62,30 @@ def native_observation(name, path, ui_state):
     return item
 
 
+def seek_row():
+    def observation(operation, prior, requested, landed):
+        return {
+            "operationId": operation, "instanceId": "instance-a", "sessionId": "session-a",
+            "generationId": "generation-a", "occurrenceId": "occurrence-a",
+            "occurrenceIdAfter": "occurrence-a", "queueRevision": "1",
+            "queueRevisionAfter": "1", "requestedPositionMs": requested,
+            "priorCommittedPositionMs": prior, "landedPositionMs": landed,
+            "committedPositionMs": landed, "fixtureOraclePositionMs": landed,
+            "absoluteErrorMs": 0, "durationMs": 10_000, "transportBefore": "active",
+            "transportAfter": "active", "outcome": "succeeded",
+            "compressedHighWaterBytes": 1024, "pcmHighWaterBytes": 2048,
+        }
+    return {
+        "provider": "jellyfin", "serverVersion": "10.10.7", "representation": "original",
+        "container": "wav", "codec": "pcm_s16le", "backend": "wasapi", "enabled": True,
+        "mechanism": "ffmpeg-post-open-media-time-seek",
+        "observations": [
+            observation("seek-forward", 1_000, 4_000, 4_012),
+            observation("seek-backward", 4_012, 2_000, 2_008),
+        ],
+    }
+
+
 
 class InstalledEvidenceTests(unittest.TestCase):
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
@@ -174,6 +198,7 @@ class InstalledEvidenceTests(unittest.TestCase):
                 name: native_observation(name, path, ui_state)
                 for name, path, ui_state in evidence.NATIVE_OBSERVATIONS
             }},
+            "seek": {"rows": [seek_row()]},
         })
         record["outcome"] = "passed"
         return record
@@ -190,6 +215,20 @@ class InstalledEvidenceTests(unittest.TestCase):
             "C:/Users/test/AppData/Local/HifiMule/avcodec-copy.dll"
         ]
         self.assertTrue(any("four required" in error for error in evidence.validate_record(record)))
+
+    def test_seek_evidence_rejects_noop_false_landing_and_identity_changes(self):
+        record = self.complete_record()
+        row = record["seek"]["rows"][0]
+        row["observations"][0]["requestedPositionMs"] = 1_000
+        self.assertTrue(any("forward/backward" in error for error in evidence.validate_record(record)))
+        record = self.complete_record()
+        item = record["seek"]["rows"][0]["observations"][0]
+        item["fixtureOraclePositionMs"] = item["landedPositionMs"] + 51
+        item["absoluteErrorMs"] = 51
+        self.assertTrue(any("within 50 ms" in error for error in evidence.validate_record(record)))
+        record = self.complete_record()
+        record["seek"]["rows"][0]["observations"][0]["queueRevisionAfter"] = "2"
+        self.assertTrue(any("queue or occurrence" in error for error in evidence.validate_record(record)))
 
     def test_output_evidence_rejects_empty_incomplete_and_virtual_descriptors(self):
         for output in ({}, {"revision": "1", "status": "available"},

@@ -37,3 +37,29 @@ production reader's eviction and resume behavior without large committed files.
 WMA Pro and WMA Lossless decoders are enabled in the controlled runtime, but no
 synthetic fixtures for these variants are available here. DRM-encrypted WMA is
 outside scope. Local tests do not establish installed Windows/Linux/macOS playback.
+## Story 15.7 deterministic seek oracle
+
+`generated-seek-pcm16.wav`, `generated-seek-pcm24.wav`, and
+`generated-seek-pcm32.wav` are two-second, 48 kHz little-endian PCM WAV files
+with the same non-periodic two-component chirp. They were generated with FFmpeg
+9.0.1 by running the command once for each `pcm_s16le`, `pcm_s24le`, and
+`pcm_s32le` encoder:
+
+```sh
+ffmpeg -f lavfi -i "aevalsrc=0.35*sin(2*PI*(173*t+41*t*t))+0.2*sin(2*PI*311*t):s=48000:d=2" -c:a <pcm_encoder> generated-seek-<depth>.wav
+```
+
+SHA-256:
+
+- PCM s16le: `2cb33b052c4a2dbaa2ca42bb62ff2e518b614b9c313c4b908d5236989ba21fdc`
+- PCM s24le: `c72984927ef3365223d286a58d774ca53c29b346c643e6aacc235815fc5c8ebc`
+- PCM s32le: `01cd20191238a6719e288d81732165b83420f8a62616f7a609de5506aebfa84d`
+
+`generated-seek-pcm-f32.wav` uses the same source with `pcm_f32le`. Its SHA-256
+is `160de8a6d1fde79f9e3788e289c69b64f365e05ddd8ffab625c4f1a208d13c5d`.
+It is the negative qualification fixture: seek stays disabled while sequential
+ordinary playback still decodes the complete file.
+
+The changing instantaneous frequency gives each media-time region a distinct
+sample sequence, so a count-only or uniform-wave false landing cannot pass the
+fixture comparison.

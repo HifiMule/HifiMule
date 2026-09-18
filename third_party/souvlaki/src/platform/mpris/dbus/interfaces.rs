@@ -9,12 +9,12 @@ use dbus_crossroads::{Crossroads, IfaceBuilder};
 
 use crate::{MediaControlEvent, MediaPlayback, MediaPosition, SeekDirection};
 
-use super::controls::{create_metadata_dict, ServiceState};
+use super::controls::{ServiceState, create_metadata_dict};
 
 // TODO: This type is super messed up, but it's the only way to get seeking working properly
 // on graphical media controls using dbus-crossroads.
 pub type SeekedSignal =
-    Arc<Mutex<Option<Box<dyn Fn(&Path<'_>, &(String,)) -> dbus::Message + Send + Sync>>>>;
+    Arc<Mutex<Option<Box<dyn Fn(&Path<'_>, &(i64,)) -> dbus::Message + Send + Sync>>>>;
 
 pub fn register_methods<F>(
     state: &Arc<Mutex<ServiceState>>,
@@ -61,7 +61,7 @@ where
             let state = state.clone();
             let event_handler = event_handler.clone();
 
-            move |ctx, _, (offset,): (i64,)| {
+            move |_, _, (offset,): (i64,)| {
                 let abs_offset = offset.unsigned_abs();
                 let direction = if offset > 0 {
                     SeekDirection::Forward
@@ -78,7 +78,6 @@ where
                 {
                     return Err(dbus::MethodErr::failed("seeking is unsupported"));
                 }
-                ctx.push_msg(ctx.make_signal("Seeked", ()));
                 Ok(())
             }
         });
@@ -87,14 +86,14 @@ where
             let state = state.clone();
             let event_handler = event_handler.clone();
 
-            move |_, _, (_trackid, position): (Path, i64)| {
+            move |_, _, (trackid, position): (Path, i64)| {
                 let state = state.lock().unwrap();
 
                 // According to the MPRIS specification:
 
-                // TODO: If the TrackId argument is not the same as the current
-                // trackid, the call is ignored as stale.
-                // (Maybe it should be optional?)
+                if state.metadata.track_id.as_deref() != Some(trackid.to_string().as_str()) {
+                    return Ok(());
+                }
 
                 if let Some(duration) = state.metadata.duration {
                     // If the Position argument is greater than the track length, do nothing.
@@ -127,7 +126,8 @@ where
             }
         });
 
-        *seeked_signal.lock().unwrap() = Some(b.signal::<(String,), _>("Seeked", ("x",)).msg_fn());
+        *seeked_signal.lock().unwrap() =
+            Some(b.signal::<(i64,), _>("Seeked", ("Position",)).msg_fn());
 
         b.property("PlaybackStatus")
             .get({
@@ -268,11 +268,11 @@ fn register_method<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::publication::OwnedMetadata;
     use crate::MediaControlCapabilities;
+    use crate::publication::OwnedMetadata;
     use dbus::{
-        arg::{PropMap, Variant},
         Message, MessageType,
+        arg::{PropMap, Variant},
     };
     use std::cell::RefCell;
 
@@ -380,6 +380,61 @@ mod tests {
         assert!(!cleared.0.contains_key("xesam:title"));
         assert!(!cleared.0.contains_key("xesam:artist"));
         assert!(!cleared.0.contains_key("mpris:length"));
+    }
+
+    #[test]
+    fn seek_methods_preserve_signed_units_and_fence_stale_track_ids() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let (state, mut cr) = fixture(move |event| {
+            captured.lock().unwrap().push(event);
+            true
+        });
+        {
+            let mut state = state.lock().unwrap();
+            state.capabilities.seek = true;
+            state.set_metadata(OwnedMetadata {
+                track_id: Some("/org/mpris/MediaPlayer2/track/current".into()),
+                duration: Some(9_000_000),
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            dispatch(&mut cr, call("Seek").append1(-1_500_000_i64)).msg_type(),
+            MessageType::MethodReturn
+        );
+        assert_eq!(
+            dispatch(
+                &mut cr,
+                call("SetPosition").append2(
+                    Path::new("/org/mpris/MediaPlayer2/track/stale").unwrap(),
+                    2_000_000_i64,
+                )
+            )
+            .msg_type(),
+            MessageType::MethodReturn
+        );
+        assert_eq!(
+            dispatch(
+                &mut cr,
+                call("SetPosition").append2(
+                    Path::new("/org/mpris/MediaPlayer2/track/current").unwrap(),
+                    2_000_000_i64,
+                )
+            )
+            .msg_type(),
+            MessageType::MethodReturn
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                MediaControlEvent::SeekBy(
+                    SeekDirection::Backward,
+                    Duration::from_micros(1_500_000)
+                ),
+                MediaControlEvent::SetPosition(MediaPosition(Duration::from_micros(2_000_000))),
+            ]
+        );
     }
 
     #[test]

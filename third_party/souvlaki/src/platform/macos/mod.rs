@@ -6,15 +6,15 @@ use std::fs;
 
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use block::ConcreteBlock;
 use cocoa::{
-    base::{id, nil, NO, YES},
+    base::{NO, YES, id, nil},
     foundation::{NSInteger, NSString, NSUInteger},
 };
 use core_graphics::geometry::CGSize;
@@ -99,6 +99,10 @@ impl MediaControls {
     /// Set the current playback status.
     pub fn set_playback(&mut self, playback: MediaPlayback) -> Result<(), Error> {
         unsafe { set_playback_status(playback) };
+        Ok(())
+    }
+
+    pub fn set_seeked(&mut self, _position_micros: i64) -> Result<(), Error> {
         Ok(())
     }
 
@@ -288,7 +292,10 @@ unsafe fn attach_command_handlers(
         let handler = handler.clone();
         // event of type MPChangePlaybackPositionCommandEvent
         move |event: id| -> NSInteger {
-            let position = *event.as_ref().unwrap().get_ivar::<f64>("_positionTime");
+            let position: f64 = msg_send![event, positionTime];
+            if !position.is_finite() || position < 0.0 {
+                return command_status(false);
+            }
             command_status((handler)(MediaControlEvent::SetPosition(MediaPosition(
                 Duration::from_secs_f64(position),
             ))))

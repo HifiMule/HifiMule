@@ -866,3 +866,60 @@ lifetime. UI close/reopen does not register controls. Now-playing metadata is a
 replacement projection from authoritative playback state and never triggers a
 provider listening report. Explicit Quit disables commands, clears metadata and
 detaches registration before the native owner is dropped.
+## Playback seek contract (schema v1, Story 15.7)
+
+`playback.seek` accepts the strict playback identity envelope (`schemaVersion`,
+`instanceId`, `sessionId`, `commandId`, `expectedGenerationId`, `occurrenceId`)
+plus an absolute integer `positionMs`. The value must be a nonnegative
+JavaScript-safe integer and no greater than the current positive, verified
+duration. Unknown fields, fractions, negative values, values beyond duration,
+and stale identities are rejected before transport changes. Zero is valid.
+Exactly duration commits the terminal cursor, pauses and silences the current
+occurrence, and never repeats or advances it.
+
+Admission and completion are distinct. An admitted response contains
+`playback.pendingSeek` with an operation ID, requested target and prior
+committed cursor. `positionMs` remains the last actual committed cursor. A
+matching generation- and control-epoch-fenced decoder result clears the pending
+operation and publishes `playback.seekOutcome.status = "succeeded"` with its
+actual landed cursor. Failure retains the previous committed cursor, pauses the
+occurrence and publishes a sanitized retryable `SEEK_FAILED`. Superseded work
+cannot commit or overwrite the later operation. Seeking never changes the
+session, queue revision, queue order, occurrence or source.
+
+The same bounded command-ID namespace is shared by apply, control, output and
+seek mutations. An exact replay returns the authoritative prior admission and
+does not repeat audio work; reuse with different payload returns
+`COMMAND_ID_REUSED`. Successful committed cursors use the existing transactional
+checkpoint path. Pending, failed and superseded targets are never persisted.
+
+### Initial qualified capability matrix
+
+| Provider | Representation | Mechanism | Timestamp origin | Decoded landing tolerance | Presentation allowance | Status |
+| --- | --- | --- | --- | ---: | --- | --- |
+| Jellyfin | Original WAV with FFmpeg-verified `pcm_s16le`, `pcm_s24le` or `pcm_s32le`; authenticated validated byte ranges | FFmpeg post-open media-time seek, decoder/resampler reset and bounded pre-roll trim | Audio stream start time and time base, reconciled to output frame zero | ≤ 50 ms | CPAL callback accounting ≈25 ms; Pulse played-frame accounting ≈5 ms; owner sample 250 ms + snapshot 500 ms + repaint 100 ms | Enabled only after runtime verification |
+| Jellyfin | FLAC, MP3, AAC, ALAC, Opus, Vorbis, AIFF, WMA or transcoded/changed representation | None qualified | — | — | — | Disabled; ordinary playback retained |
+| Subsonic/OpenSubsonic | Raw stream, any format | None qualified | — | — | — | Disabled; ordinary playback retained |
+
+`range_supported`, filename extension, `Accept-Ranges`, or one successful HTTP
+206 response never enables seeking by itself. The provider must identify the
+qualified original candidate and FFmpeg must verify the actual WAV/PCM stream.
+Zero/missing duration, changed validators, ignored/wrong ranges and truncated
+responses disable or fail seeking explicitly.
+
+Native relative commands retain signed microseconds until checked conversion.
+MPRIS negative overshoot normalizes to zero and relative overshoot to the
+single-track terminal cursor; stale `SetPosition` track IDs and out-of-range
+absolute positions are ignored. Windows uses checked signed `TimeSpan`
+conversion and a 10-second FastForward/Rewind step. macOS accepts only finite,
+nonnegative public position-change values. All normalized commands enter the
+same owner admission and effect path as UI seeking. A native `Seeked(i64)` is a
+success-driven discontinuity acknowledgement, never an admission receipt or a
+routine progress signal.
+
+Transport race outcomes are fixed: a later admitted seek wins; Pause changes
+the post-commit intent to paused; Stop, track replacement, output switch/loss
+and Quit invalidate preparation; failure keeps the last committed cursor and
+requires an explicit retry. Compressed storage remains capped at 8 MiB including
+network and scratch allowances, PCM at 1 MiB/500 ms, and the existing 60-second
+total preparation deadline is not restarted by a seek stage.

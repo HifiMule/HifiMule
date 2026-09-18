@@ -44,6 +44,8 @@ pub enum MediaPlayback {
 /// The metadata of a media item.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct MediaMetadata<'a> {
+    /// Stable current-track identity. Linux maps this to an MPRIS object path.
+    pub track_id: Option<&'a str>,
     pub title: Option<&'a str>,
     pub album: Option<&'a str>,
     pub artist: Option<&'a str>,

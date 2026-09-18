@@ -490,6 +490,7 @@ impl MediaProvider for SubsonicProvider {
                 sample_rate: None,
                 bit_depth: None,
                 provenance: PlaybackProvenance::Original,
+                seek_mechanism: None,
                 request: PlaybackRequest {
                     url,
                     headers: reqwest::header::HeaderMap::new(),

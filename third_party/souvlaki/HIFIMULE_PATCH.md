@@ -17,3 +17,11 @@ seek/URI calls; these tests need the native libdbus development library.
 
 macOS temporary NSString allocations use owned `StrongPtr` guards, releasing
 the caller's ownership after Cocoa retains or copies each argument.
+
+Story 15.7 adds checked seek handling: metadata carries an occurrence-derived
+MPRIS track object path, stale `SetPosition` identities are ignored, signed
+microseconds are preserved until validation, and `Seeked(i64)` is coalesced and
+published only after HifiMule reports a committed discontinuity. macOS uses the
+public `positionTime` accessor with finite/nonnegative validation. Windows
+rejects negative `TimeSpan` requests before converting them to `Duration` and
+uses HifiMule's fixed 10-second directional step.

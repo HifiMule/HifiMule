@@ -280,3 +280,27 @@ On 2026-09-16 the user reported that switching between physical devices works an
 All implementation and locally runnable automated checks are complete for story 15.5. The selected-endpoint WASAPI notification adapter also cross-compiles against the Windows ARM64 GNU Rust target; this does not substitute for a complete Windows package/runtime test. On 2026-09-16, the user confirmed that all remaining tests were complete and requested moving story 15.5 to review. This records user-reported completion of the platform validation; no additional per-target logs, package hashes or measurements were supplied in that confirmation. The optional Windows silent binding smoke now includes notification registration/unregistration.
 
 Story 15.5 review refinements: Linux physical outputs with multiple or unknown ports are unavailable because sink pinning cannot prevent automatic headphone-to-speaker port changes. Use a concrete single-port output for physical acceptance; virtual outputs remain explicitly labeled and cannot certify downstream routing. Test rejected analog multi-port routes separately. Evidence requires complete sanitized selected/pending/active descriptors (or explicit null roles), output status/revision/error and transport/position state. The switching scenario must capture different selected identity hashes before and after; absent-startup must capture an unavailable saved output with no active stream.
+## Story 15.7 seek evidence
+
+Seek acceptance uses `seekEvidenceVersion: 1`. Each enabled row records OS and
+architecture, package revision, backend, provider and server version,
+representation/container/codec, operation and playback identity, queue revision,
+requested target, prior committed cursor, independently measured decoded
+landing, absolute error, transport before/after, compressed and PCM peaks, and
+audible outcome. The decoded error must be at most 50 ms. Native API and physical
+control observations are separate fields.
+
+Required installed rows are Windows x64, Linux x64, macOS x64 and macOS ARM64
+for Jellyfin original PCM-in-WAV. A disabled provider/format row must include a
+reason and ordinary-playback result. Existing Stories 15.4–15.6 records remain
+historical evidence and cannot satisfy seek acceptance. At story implementation
+time, installed runs unavailable on the current host remain explicitly
+`unverified`; source compilation or an ordinary playback smoke does not promote
+them.
+
+Boundary/race runs cover zero, exact duration, forward/backward, paused,
+repeated/superseded, failure, Stop, replacement, output loss/switch and Quit.
+The collector rejects no-op forward/backward success, request-equals-result
+without an independent oracle, changed identity/queue, pending/failed targets
+shown as committed, contradictory duplicate matrix rows and missing or
+unsupported evidence versions.

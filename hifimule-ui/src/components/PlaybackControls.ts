@@ -1,9 +1,10 @@
-import { playbackControl, playbackGetSession, playbackListOutputs, playbackSelectOutput, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
+import { playbackControl, playbackGetSession, playbackListOutputs, playbackSeek, playbackSelectOutput, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
 
 export class PlaybackControls {
     private disposed = false;
     private timer: ReturnType<typeof setTimeout> | undefined;
+    private repaintTimer: ReturnType<typeof setInterval> | undefined;
     private snapshot: PlaybackSessionSnapshot | undefined;
     private busy = false;
     private outputBusy = false;
@@ -18,6 +19,15 @@ export class PlaybackControls {
     private readonly outputDropdown = document.createElement('sl-dropdown');
     private readonly outputToggle = document.createElement('sl-icon-button');
     private commandError = '';
+    private previewMs: number | undefined;
+    private queuedSeekMs: number | undefined;
+    private seekBusy = false;
+    private anchorPositionMs = 0;
+    private anchorAt = 0;
+    private readonly timeline = document.createElement('input');
+    private readonly elapsed = document.createElement('span');
+    private readonly duration = document.createElement('span');
+    private readonly seekStatus = document.createElement('span');
     private readonly onPageHide = () => this.destroy();
     private readonly title = document.createElement('strong');
     private readonly status = document.createElement('span');
@@ -34,7 +44,28 @@ export class PlaybackControls {
         this.status.setAttribute('aria-live', 'polite');
         this.status.setAttribute('aria-atomic', 'true');
         this.error.setAttribute('role', 'alert');
-        info.append(this.title, this.status, this.error);
+        const timelineGroup = document.createElement('div');
+        timelineGroup.className = 'playback-controls__timeline';
+        this.timeline.setAttribute('type', 'range');
+        this.timeline.setAttribute('min', '0');
+        this.timeline.setAttribute('step', '1000');
+        this.timeline.setAttribute('aria-label', t('playback.seek.label'));
+        this.timeline.addEventListener('input', () => {
+            const value = Number(this.timeline.value);
+            if (Number.isSafeInteger(value) && value >= 0) {
+                this.previewMs = value;
+                this.renderTimeline();
+            }
+        });
+        this.timeline.addEventListener('change', () => {
+            const value = Number(this.timeline.value);
+            if (Number.isSafeInteger(value) && value >= 0) void this.submitSeek(value);
+        });
+        this.seekStatus.className = 'playback-controls__seek-status';
+        this.seekStatus.setAttribute('role', 'status');
+        this.seekStatus.setAttribute('aria-live', 'polite');
+        timelineGroup.append(this.elapsed, this.timeline, this.duration, this.seekStatus);
+        info.append(this.title, this.status, timelineGroup, this.error);
         const outputGroup = document.createElement('div');
         outputGroup.className = 'playback-controls__output';
         this.outputDropdown.className = 'playback-controls__output-dropdown';
@@ -68,10 +99,12 @@ export class PlaybackControls {
         this.primary.hidden = this.stop.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
         void this.poll();
+        this.scheduleRepaint();
     }
     destroy(): void {
         this.disposed = true;
         if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
+        if (this.repaintTimer !== undefined) globalThis.clearInterval(this.repaintTimer);
         window.removeEventListener('pagehide', this.onPageHide);
     }
     private async poll(): Promise<void> {
@@ -83,6 +116,10 @@ export class PlaybackControls {
                 || snapshot.sessionId !== previous.sessionId
                 || BigInt(snapshot.stateSequence) > BigInt(previous.stateSequence))) {
                 this.snapshot = snapshot;
+                this.anchorPositionMs = snapshot.positionMs;
+                this.anchorAt = this.now();
+                if (!snapshot.playback.pendingSeek
+                    && snapshot.playback.seekOutcome?.status !== 'pending') this.previewMs = undefined;
                 this.render(snapshot);
                 if (!previous || snapshot.instanceId !== previous.instanceId) {
                     this.resetOutput = false;
@@ -90,7 +127,7 @@ export class PlaybackControls {
                     void this.refreshOutputs();
                 }
             }
-        } catch { /* daemon lifecycle UI owns connection errors */ }
+        } catch { this.anchorAt = 0; /* daemon lifecycle UI owns connection errors */ }
         if (!this.disposed) {
             // listOutputs returns the owned worker's cached inventory. Pick up
             // its completed refresh through the existing polling lifecycle.
@@ -126,6 +163,88 @@ export class PlaybackControls {
             ? t('playback.output.active_name', { name: snapshot.output.active.displayName }) : '';
         if (!this.resetOutput) this.outputStatus.textContent = `${outputText} ${active}`.trim();
         this.renderOptions();
+        this.renderTimeline();
+    }
+
+    private scheduleRepaint(): void {
+        if (this.disposed || typeof globalThis.setInterval !== 'function') return;
+        this.repaintTimer = globalThis.setInterval(() => {
+            if (!this.disposed && this.container.isConnected) this.renderTimeline();
+            else this.destroy();
+        }, 100);
+    }
+
+    private shownPositionMs(): number {
+        if (this.previewMs !== undefined) return this.previewMs;
+        const snapshot = this.snapshot;
+        if (!snapshot) return 0;
+        let position = this.anchorPositionMs;
+        if (snapshot.playback.status === 'active' && !snapshot.playback.pendingSeek && this.anchorAt > 0) {
+            const age = Math.max(0, this.now() - this.anchorAt);
+            position += Math.min(age, 750);
+        }
+        const duration = snapshot.playback.durationMs;
+        return Math.max(0, duration && duration > 0 ? Math.min(position, duration) : position);
+    }
+
+    private renderTimeline(): void {
+        const snapshot = this.snapshot;
+        const duration = snapshot?.playback.durationMs ?? 0;
+        const available = Boolean(snapshot?.current && snapshot.playback.seek?.available && duration > 0);
+        const shown = Math.round(this.shownPositionMs());
+        this.timeline.max = String(duration > 0 ? duration : 1);
+        this.timeline.value = String(Math.min(shown, duration > 0 ? duration : 0));
+        this.timeline.disabled = !available;
+        this.timeline.setAttribute('aria-valuetext', t('playback.seek.value', {
+            elapsed: this.formatTime(shown), duration: duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration'),
+        }));
+        this.elapsed.textContent = this.formatTime(shown);
+        this.duration.textContent = duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration');
+        if (snapshot?.playback.pendingSeek) {
+            this.seekStatus.textContent = t('playback.seek.pending');
+        } else if (snapshot?.playback.seekOutcome?.status === 'failed') {
+            this.seekStatus.textContent = t('playback.seek.failed');
+        } else if (!available) {
+            this.seekStatus.textContent = t(snapshot?.playback.seek?.reason ?? 'playback.seek.unavailable');
+        } else {
+            this.seekStatus.textContent = '';
+        }
+    }
+
+    private formatTime(valueMs: number): string {
+        const seconds = Math.max(0, Math.floor(valueMs / 1000));
+        return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    }
+
+    private now(): number {
+        return globalThis.performance?.now?.() ?? Date.now();
+    }
+
+    private async submitSeek(positionMs: number): Promise<void> {
+        if (this.disposed || !this.snapshot || !this.snapshot.playback.seek.available) return;
+        if (this.seekBusy) { this.queuedSeekMs = positionMs; return; }
+        this.seekBusy = true;
+        const observed = this.snapshot;
+        try {
+            const current = await playbackSeek(positionMs, observed);
+            if (!this.disposed && this.snapshot?.instanceId === observed.instanceId
+                && BigInt(current.stateSequence) >= BigInt(this.snapshot.stateSequence)) {
+                this.snapshot = current;
+                this.anchorPositionMs = current.positionMs;
+                this.anchorAt = this.now();
+                this.render(current);
+            }
+        } catch (error) {
+            const code = (error as { data?: { code?: string } })?.data?.code;
+            this.commandError = code ? t(`playback.error.${code}`) : t('playback.command_error');
+            this.previewMs = undefined;
+        } finally {
+            this.seekBusy = false;
+            const queued = this.queuedSeekMs;
+            this.queuedSeekMs = undefined;
+            if (queued !== undefined && queued !== positionMs) void this.submitSeek(queued);
+            else if (!this.disposed) this.renderTimeline();
+        }
     }
 
     private renderOptions(): void {

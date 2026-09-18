@@ -39,6 +39,11 @@ pub enum PlaybackProvenance {
     Alternative,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackSeekMechanism {
+    JellyfinOriginalPcmWav,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackRepresentation {
     pub codec: Option<String>,
@@ -47,6 +52,9 @@ pub struct PlaybackRepresentation {
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u8>,
     pub provenance: PlaybackProvenance,
+    /// Provider-qualified candidate. The decoder must still verify the actual
+    /// container and codec before the owner advertises seeking.
+    pub seek_mechanism: Option<PlaybackSeekMechanism>,
     pub request: PlaybackRequest,
 }
 
@@ -1475,6 +1483,7 @@ mod tests {
             sample_rate,
             bit_depth,
             provenance,
+            seek_mechanism: None,
             request: PlaybackRequest {
                 url: reqwest::Url::parse(&format!("https://music.example/{codec}")).unwrap(),
                 headers: reqwest::header::HeaderMap::new(),

@@ -1,9 +1,9 @@
+use dbus::Path;
 use dbus::arg::{RefArg, Variant};
 use dbus::blocking::Connection;
 use dbus::channel::{MatchingReceiver, Sender};
 use dbus::ffidisp::stdintf::org_freedesktop_dbus::PropertiesPropertiesChanged;
 use dbus::message::SignalArgs;
-use dbus::Path;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -58,6 +58,7 @@ pub fn create_metadata_dict(metadata: &OwnedMetadata) -> HashMap<String, Variant
     let mut insert = |k: &str, v| dict.insert(k.to_string(), Variant(v));
 
     let OwnedMetadata {
+        ref track_id,
         ref title,
         ref album,
         ref artist,
@@ -65,8 +66,10 @@ pub fn create_metadata_dict(metadata: &OwnedMetadata) -> HashMap<String, Variant
         ref duration,
     } = metadata;
 
-    // TODO: this is just a workaround to enable SetPosition.
-    let path = Path::new("/").unwrap();
+    let path = track_id
+        .as_deref()
+        .and_then(|value| Path::new(value).ok())
+        .unwrap_or_else(|| Path::new("/org/mpris/MediaPlayer2/track/none").unwrap());
 
     // MPRIS
     insert("mpris:trackid", Box::new(path));
@@ -198,6 +201,11 @@ impl MediaControls {
         self.send_internal_event(InternalEvent::ChangeVolume(volume))
     }
 
+    /// Publish a confirmed media-time discontinuity.
+    pub fn set_seeked(&mut self, position_micros: i64) -> Result<(), Error> {
+        self.send_internal_event(InternalEvent::Seeked(position_micros))
+    }
+
     fn send_internal_event(&mut self, event: InternalEvent) -> Result<(), Error> {
         let thread = &self.thread.as_ref().ok_or(Error::ThreadNotRunning)?;
         if thread.thread.is_finished() {
@@ -236,8 +244,12 @@ where
     let event_handler = Arc::new(Mutex::new(event_handler));
     let seeked_signal = Arc::new(Mutex::new(None));
 
-    let mut cr =
-        super::interfaces::register_methods(&state, &event_handler, friendly_name, seeked_signal);
+    let mut cr = super::interfaces::register_methods(
+        &state,
+        &event_handler,
+        friendly_name,
+        seeked_signal.clone(),
+    );
 
     conn.start_receive(
         dbus::message::MatchRule::new_method_call(),
@@ -305,7 +317,17 @@ where
                             );
                         }
                     }
-                    _ => (),
+                    InternalEvent::Seeked(position) => {
+                        if let Some(signal) = seeked_signal
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .as_ref()
+                        {
+                            let path = Path::new("/org/mpris/MediaPlayer2").unwrap();
+                            let _ = conn.send(signal(&path, &(position,)));
+                        }
+                    }
+                    InternalEvent::Kill => (),
                 }
             }
             let properties_changed = PropertiesPropertiesChanged {

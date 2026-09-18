@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::convert::From;
 use std::convert::TryFrom;
 use std::convert::TryInto;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use zbus::{dbus_interface, ConnectionBuilder, SignalContext};
+use zbus::{ConnectionBuilder, SignalContext, dbus_interface};
 use zvariant::{ObjectPath, Value};
 
 use crate::{
@@ -128,6 +128,10 @@ impl MediaControls {
     /// Set the volume level (0.0 - 1.0) (Only available on MPRIS)
     pub fn set_volume(&mut self, volume: f64) -> Result<(), Error> {
         self.send_internal_event(InternalEvent::ChangeVolume(volume))?;
+        Ok(())
+    }
+
+    pub fn set_seeked(&mut self, _position_micros: i64) -> Result<(), Error> {
         Ok(())
     }
 

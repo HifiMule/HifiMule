@@ -4,6 +4,7 @@ use std::convert::TryInto;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct OwnedMetadata {
+    pub track_id: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
     pub artist: Option<String>,
@@ -14,6 +15,7 @@ pub struct OwnedMetadata {
 impl From<MediaMetadata<'_>> for OwnedMetadata {
     fn from(other: MediaMetadata) -> Self {
         OwnedMetadata {
+            track_id: other.track_id.map(|s| s.to_string()),
             title: other.title.map(|s| s.to_string()),
             artist: other.artist.map(|s| s.to_string()),
             album: other.album.map(|s| s.to_string()),
@@ -30,6 +32,7 @@ pub(crate) enum InternalEvent {
     ChangePlayback(MediaPlayback),
     ChangeVolume(f64),
     ChangeCapabilities(MediaControlCapabilities),
+    Seeked(i64),
     Kill,
 }
 
@@ -41,6 +44,7 @@ pub(crate) struct PendingUpdates {
     playback: Option<MediaPlayback>,
     volume: Option<f64>,
     capabilities: Option<MediaControlCapabilities>,
+    seeked: Option<i64>,
     stopped: bool,
 }
 
@@ -54,6 +58,7 @@ impl PendingUpdates {
             InternalEvent::ChangePlayback(value) => self.playback = Some(value),
             InternalEvent::ChangeVolume(value) => self.volume = Some(value),
             InternalEvent::ChangeCapabilities(value) => self.capabilities = Some(value),
+            InternalEvent::Seeked(value) => self.seeked = Some(value),
             InternalEvent::Kill => {
                 *self = Self {
                     stopped: true,
@@ -80,6 +85,9 @@ impl PendingUpdates {
         }
         if let Some(value) = self.volume.take() {
             events.push(InternalEvent::ChangeVolume(value));
+        }
+        if let Some(value) = self.seeked.take() {
+            events.push(InternalEvent::Seeked(value));
         }
         Some(events)
     }
@@ -110,9 +118,10 @@ mod tests {
                     ..Default::default()
                 },
             ));
+            pending.push(InternalEvent::Seeked(i as i64));
         }
         let events = pending.take().unwrap();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         assert!(
             events.contains(&InternalEvent::ChangeMetadata(OwnedMetadata {
                 title: Some("track 9999".into()),
@@ -131,6 +140,7 @@ mod tests {
                 ..Default::default()
             }
         )));
+        assert!(events.contains(&InternalEvent::Seeked(9999)));
         assert!(pending.take().unwrap().is_empty());
     }
 

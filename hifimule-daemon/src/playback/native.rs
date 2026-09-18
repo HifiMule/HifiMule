@@ -18,6 +18,7 @@ struct NativeRequest {
 struct PendingResume {
     generation_id: String,
     control_epoch: u64,
+    seek_operation_id: Option<String>,
     replies: Vec<tokio::sync::oneshot::Sender<CommandResult>>,
 }
 
@@ -42,7 +43,14 @@ impl CommandFeedback {
         if let Some(pending) = self.pending.as_mut()
             && pending.generation_id == snapshot.generation_id
             && pending.control_epoch == snapshot.resume_epoch
-            && snapshot.playback.status == PlaybackStatus::Loading
+            && pending.seek_operation_id
+                == snapshot
+                    .playback
+                    .pending_seek
+                    .as_ref()
+                    .map(|seek| seek.operation_id.clone())
+            && (snapshot.playback.status == PlaybackStatus::Loading
+                || snapshot.playback.pending_seek.is_some())
         {
             // An idempotent Play joins the existing attempt; it must not
             // complete the original menu receipt before preparation finishes.
@@ -63,9 +71,16 @@ impl CommandFeedback {
         let pending = PendingResume {
             generation_id: snapshot.generation_id.clone(),
             control_epoch: snapshot.resume_epoch,
+            seek_operation_id: snapshot
+                .playback
+                .pending_seek
+                .as_ref()
+                .map(|seek| seek.operation_id.clone()),
             replies: request.reply.into_iter().collect(),
         };
-        if snapshot.playback.status == PlaybackStatus::Loading {
+        if snapshot.playback.status == PlaybackStatus::Loading
+            || snapshot.playback.pending_seek.is_some()
+        {
             self.pending = Some(pending);
         } else {
             pending.finish(Ok(()));
@@ -85,6 +100,14 @@ impl CommandFeedback {
                 || view.control_epoch != pending.control_epoch
             {
                 Some(Ok(())) // A replacement/Stop superseded the attempt.
+            } else if pending.seek_operation_id.is_some()
+                && view.pending_seek_operation_id == pending.seek_operation_id
+            {
+                None
+            } else if pending.seek_operation_id.is_some() {
+                view.failure_code
+                    .clone()
+                    .map_or(Some(Ok(())), |code| Some(Err(code)))
             } else if let Some(code) = view.failure_code.as_ref() {
                 Some(Err(code.clone()))
             } else if view.status != PlaybackStatus::Loading {
@@ -115,6 +138,7 @@ pub struct NativeCommandMask {
     pub pause: bool,
     pub toggle: bool,
     pub stop: bool,
+    pub seek: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +154,9 @@ pub struct NativePlaybackView {
     pub album: Option<String>,
     pub duration_ms: Option<u64>,
     pub position_ms: u64,
+    pub occurrence_id: Option<String>,
+    pub pending_seek_operation_id: Option<String>,
+    pub seeked_position_ms: Option<u64>,
     pub commands: NativeCommandMask,
     pub failure_code: Option<String>,
 }
@@ -148,6 +175,9 @@ impl Default for NativePlaybackView {
             album: None,
             duration_ms: None,
             position_ms: 0,
+            occurrence_id: None,
+            pending_seek_operation_id: None,
+            seeked_position_ms: None,
             commands: NativeCommandMask::default(),
             failure_code: None,
         }
@@ -206,11 +236,34 @@ impl NativePlaybackView {
             album: metadata.and_then(|value| value.album.clone()),
             duration_ms: metadata.and(snapshot.playback.duration_ms),
             position_ms: snapshot.position_ms,
+            occurrence_id: snapshot.current.as_ref().map(|value| {
+                format!(
+                    "/org/mpris/MediaPlayer2/track/{}",
+                    value.occurrence_id.replace('-', "_")
+                )
+            }),
+            pending_seek_operation_id: snapshot
+                .playback
+                .pending_seek
+                .as_ref()
+                .map(|seek| seek.operation_id.clone()),
+            seeked_position_ms: snapshot.playback.seek_outcome.as_ref().and_then(|outcome| {
+                (outcome.status == "succeeded")
+                    .then_some(outcome.actual_position_ms)
+                    .flatten()
+            }),
             commands: NativeCommandMask {
                 play: resumable && !active,
                 pause: !stopping && current && active,
                 toggle: !stopping && (resumable || active),
                 stop: !stopping && current,
+                seek: !stopping
+                    && current
+                    && snapshot.playback.seek.available
+                    && snapshot
+                        .playback
+                        .duration_ms
+                        .is_some_and(|duration| duration > 0),
             },
             failure_code: snapshot
                 .playback
@@ -343,6 +396,7 @@ pub trait NativeBackend {
     ) -> Result<(), String>;
     fn set_metadata(&mut self, value: souvlaki::MediaMetadata<'_>) -> Result<(), String>;
     fn set_playback(&mut self, value: souvlaki::MediaPlayback) -> Result<(), String>;
+    fn set_seeked(&mut self, position_micros: i64) -> Result<(), String>;
     fn detach(&mut self) -> Result<(), String>;
 }
 
@@ -366,6 +420,10 @@ impl NativeBackend for souvlaki::MediaControls {
     }
     fn set_playback(&mut self, value: souvlaki::MediaPlayback) -> Result<(), String> {
         self.set_playback(value).map_err(|error| error.to_string())
+    }
+    fn set_seeked(&mut self, position_micros: i64) -> Result<(), String> {
+        self.set_seeked(position_micros)
+            .map_err(|error| error.to_string())
     }
     fn detach(&mut self) -> Result<(), String> {
         self.detach().map_err(|error| error.to_string())
@@ -468,6 +526,8 @@ impl<B: NativeBackend> NativeMediaOwner<B> {
         if metadata_changed {
             controls
                 .set_metadata(souvlaki::MediaMetadata {
+                    // Souvlaki copies this into its owned publication state.
+                    track_id: view.occurrence_id.as_deref(),
                     title: view.title.as_deref(),
                     artist: view.artist.as_deref(),
                     album: view.album.as_deref(),
@@ -490,13 +550,23 @@ impl<B: NativeBackend> NativeMediaOwner<B> {
                 PlaybackStatus::Loading | PlaybackStatus::Paused | PlaybackStatus::Error => {
                     souvlaki::MediaPlayback::Paused { progress }
                 }
-                PlaybackStatus::Idle | PlaybackStatus::Stopped | PlaybackStatus::Completed => {
-                    souvlaki::MediaPlayback::Stopped
-                }
+                PlaybackStatus::Completed => souvlaki::MediaPlayback::Paused { progress },
+                PlaybackStatus::Idle | PlaybackStatus::Stopped => souvlaki::MediaPlayback::Stopped,
             };
             controls
                 .set_playback(playback)
                 .map_err(|error| format!("native playback update failed: {error}"))?;
+        }
+        if let Some(position_ms) = view.seeked_position_ms
+            && last.and_then(|last| last.seeked_position_ms) != Some(position_ms)
+        {
+            let micros = position_ms
+                .checked_mul(1000)
+                .and_then(|value| i64::try_from(value).ok())
+                .ok_or_else(|| "native seek position overflow".to_string())?;
+            controls
+                .set_seeked(micros)
+                .map_err(|error| format!("native seek publication failed: {error}"))?;
         }
         self.last = Some(view);
         Ok(())
@@ -544,7 +614,7 @@ fn capabilities(mask: NativeCommandMask) -> souvlaki::MediaControlCapabilities {
         stop: mask.stop,
         next: false,
         previous: false,
-        seek: false,
+        seek: mask.seek,
         raise: false,
         quit: false,
     }
@@ -556,6 +626,22 @@ fn event_to_intent(event: souvlaki::MediaControlEvent) -> Option<NativeControlIn
         souvlaki::MediaControlEvent::Pause => Some(NativeControlIntent::Pause),
         souvlaki::MediaControlEvent::Toggle => Some(NativeControlIntent::Toggle),
         souvlaki::MediaControlEvent::Stop => Some(NativeControlIntent::Stop),
+        souvlaki::MediaControlEvent::SetPosition(position) => u64::try_from(position.0.as_millis())
+            .ok()
+            .map(NativeControlIntent::SeekAbsolute),
+        souvlaki::MediaControlEvent::SeekBy(direction, amount) => {
+            let millis = i64::try_from(amount.as_millis()).ok()?;
+            Some(NativeControlIntent::SeekRelative(match direction {
+                souvlaki::SeekDirection::Forward => millis,
+                souvlaki::SeekDirection::Backward => -millis,
+            }))
+        }
+        souvlaki::MediaControlEvent::Seek(direction) => {
+            Some(NativeControlIntent::SeekRelative(match direction {
+                souvlaki::SeekDirection::Forward => 10_000,
+                souvlaki::SeekDirection::Backward => -10_000,
+            }))
+        }
         _ => None,
     }
 }
@@ -570,6 +656,8 @@ mod tests {
         SessionSnapshot {
             resume_audio: false,
             resume_epoch: 0,
+            seek_audio: false,
+            seek_epoch: 0,
             schema_version: 1,
             instance_id: "instance".into(),
             session_id: "session".into(),
@@ -633,7 +721,8 @@ mod tests {
                 play: true,
                 pause: false,
                 toggle: true,
-                stop: true
+                stop: true,
+                seek: false,
             }
         );
         let active = NativePlaybackView::from_snapshot(
@@ -646,8 +735,37 @@ mod tests {
                 play: false,
                 pause: true,
                 toggle: true,
-                stop: true
+                stop: true,
+                seek: false,
             }
+        );
+    }
+
+    #[test]
+    fn projection_and_native_units_enable_seek_only_for_qualified_tracks() {
+        let mut qualified = snapshot(PlaybackStatus::Paused, TransportState::Paused);
+        qualified.playback.duration_ms = Some(42_000);
+        qualified.playback.seek = SeekCapability::jellyfin_pcm_wav();
+        let view = NativePlaybackView::from_snapshot(&qualified, false);
+        assert!(view.commands.seek);
+        assert_eq!(
+            event_to_intent(souvlaki::MediaControlEvent::SetPosition(
+                souvlaki::MediaPosition(std::time::Duration::from_micros(1_234_000)),
+            )),
+            Some(NativeControlIntent::SeekAbsolute(1_234))
+        );
+        assert_eq!(
+            event_to_intent(souvlaki::MediaControlEvent::SeekBy(
+                souvlaki::SeekDirection::Backward,
+                std::time::Duration::from_micros(2_500_000),
+            )),
+            Some(NativeControlIntent::SeekRelative(-2_500))
+        );
+        assert_eq!(
+            event_to_intent(souvlaki::MediaControlEvent::Seek(
+                souvlaki::SeekDirection::Forward,
+            )),
+            Some(NativeControlIntent::SeekRelative(10_000))
         );
     }
 
@@ -730,18 +848,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_native_events_are_not_remapped() {
+    fn unsupported_navigation_events_are_not_remapped() {
         assert_eq!(
             event_to_intent(souvlaki::MediaControlEvent::Stop),
             Some(NativeControlIntent::Stop)
         );
         assert_eq!(event_to_intent(souvlaki::MediaControlEvent::Next), None);
-        assert_eq!(
-            event_to_intent(souvlaki::MediaControlEvent::SetPosition(
-                souvlaki::MediaPosition(std::time::Duration::from_secs(1))
-            )),
-            None
-        );
     }
 
     #[test]
@@ -873,6 +985,7 @@ mod tests {
             Option<std::time::Duration>,
         ),
         Playback(souvlaki::MediaPlayback),
+        Seeked(i64),
         Detach,
         Drop,
     }
@@ -924,6 +1037,14 @@ mod tests {
         }
         fn set_playback(&mut self, value: souvlaki::MediaPlayback) -> Result<(), String> {
             self.0.lock().unwrap().calls.push(Call::Playback(value));
+            Ok(())
+        }
+        fn set_seeked(&mut self, position_micros: i64) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .calls
+                .push(Call::Seeked(position_micros));
             Ok(())
         }
         fn detach(&mut self) -> Result<(), String> {
@@ -1076,6 +1197,29 @@ mod tests {
             souvlaki::MediaControlEvent::Play
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn native_owner_publishes_only_new_committed_discontinuities() {
+        let (ingress, _rx) = test_ingress();
+        let state = Arc::new(Mutex::new(AdapterState::default()));
+        let mut owner =
+            NativeMediaOwner::register_with(ingress.clone(), || Ok(TestBackend(state.clone())))
+                .unwrap();
+        state.lock().unwrap().calls.clear();
+        ingress.latest.lock().unwrap().seeked_position_ms = Some(4_012);
+        owner.refresh().unwrap();
+        owner.refresh().unwrap();
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| matches!(call, Call::Seeked(4_012_000)))
+                .count(),
+            1
+        );
     }
 
     #[test]

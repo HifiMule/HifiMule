@@ -2,10 +2,13 @@ use anyhow::Context as _;
 use crossbeam_queue::ArrayQueue;
 use ffmpeg_next::{self as ffmpeg, ChannelLayout, format::Sample, frame::Audio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+pub const UNKNOWN_SEEK_LANDING_FRAME: u64 = u64::MAX;
 
 pub struct DecodeSummary {
     pub frames: u64,
+    pub emitted_frames: u64,
 }
 
 fn hint_is_mp3(filename_hint: Option<&str>) -> bool {
@@ -79,12 +82,42 @@ fn reader_is_mp3(
     Ok(prefix_is_mp3(&prefix))
 }
 
+#[cfg(test)]
 pub fn decode_stream(
+    reader: super::streaming::BoundedHttpReader,
+    filename_hint: Option<&str>,
+    output_rate: u32,
+    output_channels: u16,
+    start_frame: u64,
+    pcm: Arc<ArrayQueue<f32>>,
+    cancel: Arc<AtomicBool>,
+) -> anyhow::Result<DecodeSummary> {
+    decode_stream_with_seek(
+        reader,
+        filename_hint,
+        output_rate,
+        output_channels,
+        start_frame,
+        false,
+        false,
+        None,
+        None,
+        pcm,
+        cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decode_stream_with_seek(
     mut reader: super::streaming::BoundedHttpReader,
     filename_hint: Option<&str>,
     output_rate: u32,
     output_channels: u16,
     start_frame: u64,
+    seek_candidate: bool,
+    media_seek_requested: bool,
+    seek_qualified: Option<Arc<AtomicBool>>,
+    seek_landing_frame: Option<Arc<AtomicU64>>,
     pcm: Arc<ArrayQueue<f32>>,
     cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<DecodeSummary> {
@@ -119,8 +152,47 @@ pub fn decode_stream(
         .find(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
         .ok_or_else(|| anyhow::anyhow!("no audio stream"))?;
     let stream_index = stream.index();
+    let stream_time_base = stream.time_base();
+    let stream_start = stream.start_time();
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
     let mut decoder = context.decoder().audio()?;
+    if seek_candidate {
+        let container = input.format().name().to_ascii_lowercase();
+        let codec = decoder.id().name();
+        let qualified = container.split(',').any(|name| name == "wav")
+            && matches!(codec, "pcm_s16le" | "pcm_s24le" | "pcm_s32le");
+        if qualified {
+            if let Some(seek_qualified) = &seek_qualified {
+                seek_qualified.store(true, Ordering::Release);
+            }
+        } else if media_seek_requested {
+            anyhow::bail!("representation failed WAV/PCM seek qualification");
+        }
+    }
+    if media_seek_requested && start_frame > 0 {
+        let relative_us = start_frame
+            .checked_mul(1_000_000)
+            .and_then(|value| value.checked_div(u64::from(output_rate)))
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| anyhow::anyhow!("seek timestamp overflow"))?;
+        let origin_us = if stream_start == ffmpeg::ffi::AV_NOPTS_VALUE {
+            0
+        } else {
+            let scaled = i128::from(stream_start)
+                .saturating_mul(i128::from(stream_time_base.numerator()))
+                .saturating_mul(1_000_000)
+                / i128::from(stream_time_base.denominator());
+            i64::try_from(scaled.max(0))
+                .map_err(|_| anyhow::anyhow!("stream timestamp origin overflow"))?
+        };
+        let timestamp = origin_us
+            .checked_add(relative_us)
+            .ok_or_else(|| anyhow::anyhow!("seek timestamp overflow"))?;
+        input
+            .seek(timestamp, ..timestamp.saturating_add(1))
+            .context("seek audio demuxer")?;
+        decoder.flush();
+    }
     let output_layout = match output_channels {
         1 => ChannelLayout::MONO,
         2 => ChannelLayout::STEREO,
@@ -128,7 +200,13 @@ pub fn decode_stream(
     };
     let mut resampler: Option<ffmpeg::software::resampling::Context> = None;
     let mut frames = 0u64;
-    let mut discard_samples = start_frame.saturating_mul(u64::from(output_channels));
+    let mut emitted_samples = 0u64;
+    let mut discard_samples = if media_seek_requested {
+        0
+    } else {
+        start_frame.saturating_mul(u64::from(output_channels))
+    };
+    let mut seek_trim_pending = media_seek_requested && start_frame > 0;
     let mut receive = |decoder: &mut ffmpeg::decoder::Audio, drain: bool| -> anyhow::Result<()> {
         loop {
             let mut frame = Audio::empty();
@@ -155,6 +233,51 @@ pub fn decode_stream(
             if frame.channel_layout().is_empty() {
                 frame.set_channel_layout(input_layout);
             }
+            if seek_trim_pending {
+                let pts = frame
+                    .pts()
+                    .ok_or_else(|| anyhow::anyhow!("seek landing frame has no timestamp"))?;
+                let origin = if stream_start == ffmpeg::ffi::AV_NOPTS_VALUE {
+                    0
+                } else {
+                    stream_start
+                };
+                let relative = pts.saturating_sub(origin).max(0) as i128;
+                let numerator = i128::from(stream_time_base.numerator()) * i128::from(output_rate);
+                let denominator = i128::from(stream_time_base.denominator());
+                if denominator <= 0 {
+                    anyhow::bail!("invalid audio time base");
+                }
+                let landed_frame = u64::try_from(relative.saturating_mul(numerator) / denominator)
+                    .map_err(|_| anyhow::anyhow!("seek landing timestamp overflow"))?;
+                let tolerance_frames = u64::from(output_rate) * 50 / 1000;
+                if landed_frame > start_frame.saturating_add(tolerance_frames) {
+                    anyhow::bail!("seek landing exceeded 50 ms tolerance");
+                }
+                discard_samples = start_frame
+                    .saturating_sub(landed_frame)
+                    .saturating_mul(u64::from(output_channels));
+                seek_trim_pending = false;
+            }
+            let frame_start = if media_seek_requested {
+                let pts = frame
+                    .pts()
+                    .ok_or_else(|| anyhow::anyhow!("seek output frame has no timestamp"))?;
+                let origin = if stream_start == ffmpeg::ffi::AV_NOPTS_VALUE {
+                    0
+                } else {
+                    stream_start
+                };
+                let relative = pts.saturating_sub(origin).max(0) as i128;
+                let numerator = i128::from(stream_time_base.numerator()) * i128::from(output_rate);
+                let denominator = i128::from(stream_time_base.denominator());
+                Some(
+                    u64::try_from(relative.saturating_mul(numerator) / denominator)
+                        .map_err(|_| anyhow::anyhow!("seek output timestamp overflow"))?,
+                )
+            } else {
+                None
+            };
             let converter = resampler.get_or_insert(ffmpeg::software::resampling::Context::get(
                 frame.format(),
                 input_layout,
@@ -173,10 +296,20 @@ pub fn decode_stream(
             );
             converted.set_rate(output_rate);
             converter.run(&frame, &mut converted)?;
-            for sample in converted.plane::<f32>(0) {
+            for (sample_index, sample) in converted.plane::<f32>(0).iter().enumerate() {
                 if discard_samples > 0 {
                     discard_samples -= 1;
                     continue;
+                }
+                if let (Some(landing), Some(frame_start)) = (&seek_landing_frame, frame_start) {
+                    let actual = frame_start
+                        .saturating_add(sample_index as u64 / u64::from(output_channels));
+                    let _ = landing.compare_exchange(
+                        UNKNOWN_SEEK_LANDING_FRAME,
+                        actual,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
                 }
                 while pcm.push(*sample).is_err() {
                     if cancel.load(Ordering::Acquire) {
@@ -184,6 +317,7 @@ pub fn decode_stream(
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+                emitted_samples = emitted_samples.saturating_add(1);
             }
             frames += converted.samples() as u64;
         }
@@ -237,22 +371,32 @@ pub fn decode_stream(
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+                emitted_samples = emitted_samples.saturating_add(1);
             }
             frames += tail.samples() as u64;
             if delay.is_none() {
-                return Ok(DecodeSummary { frames });
+                return Ok(DecodeSummary {
+                    frames,
+                    emitted_frames: emitted_samples / u64::from(output_channels),
+                });
             }
             // swr_get_delay may retain fixed filter latency after the final
             // drainable sample. Require stable delay across another empty
             // flush before treating that latency as non-drainable.
             if tail.samples() == 0 && previous_delay == delay {
-                return Ok(DecodeSummary { frames });
+                return Ok(DecodeSummary {
+                    frames,
+                    emitted_frames: emitted_samples / u64::from(output_channels),
+                });
             }
             previous_delay = delay;
         }
         anyhow::bail!("resampler did not drain");
     }
-    Ok(DecodeSummary { frames })
+    Ok(DecodeSummary {
+        frames,
+        emitted_frames: emitted_samples / u64::from(output_channels),
+    })
 }
 
 #[cfg(test)]
@@ -470,6 +614,97 @@ mod tests {
     #[test]
     fn adts_aac_header_is_not_recognized_as_mp3() {
         assert!(!prefix_is_mp3(&[0xff, 0xf1, 0x50, 0x80]));
+    }
+
+    fn collect_seek_fixture(
+        name: &str,
+        start_frame: u64,
+        seek_candidate: bool,
+        media_seek: bool,
+    ) -> (Vec<f32>, Option<u64>, bool) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reader = BoundedHttpReader::from_source(
+            std::fs::File::open(path).unwrap(),
+            cancel.clone(),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let pcm = Arc::new(ArrayQueue::new(220_000));
+        let landing = media_seek.then(|| Arc::new(AtomicU64::new(UNKNOWN_SEEK_LANDING_FRAME)));
+        let qualified = Arc::new(AtomicBool::new(false));
+        decode_stream_with_seek(
+            reader,
+            Some(name),
+            48_000,
+            2,
+            start_frame,
+            seek_candidate,
+            media_seek,
+            Some(qualified.clone()),
+            landing.clone(),
+            pcm.clone(),
+            cancel,
+        )
+        .unwrap();
+        let mut samples = Vec::new();
+        while let Some(sample) = pcm.pop() {
+            samples.push(sample);
+        }
+        let landing = landing
+            .map(|landing| landing.load(Ordering::Acquire))
+            .filter(|landing| *landing != UNKNOWN_SEEK_LANDING_FRAME);
+        if media_seek {
+            assert!(qualified.load(Ordering::Acquire));
+        }
+        (samples, landing, qualified.load(Ordering::Acquire))
+    }
+
+    #[test]
+    fn qualified_pcm_wav_matrix_lands_on_independent_fixture_samples() {
+        for name in [
+            "generated-seek-pcm16.wav",
+            "generated-seek-pcm24.wav",
+            "generated-seek-pcm32.wav",
+        ] {
+            let (all, _, _) = collect_seek_fixture(name, 0, false, false);
+            for target_frame in [1u64, 36_000, 90_000, 36_000] {
+                let (sought, actual_landing, qualified) =
+                    collect_seek_fixture(name, target_frame, true, true);
+                assert!(qualified, "{name}");
+                let expected_offset = target_frame as usize * 2;
+                let compared = sought.len().min(9_600);
+                assert!(compared > 0, "{name} at {target_frame}");
+                for (actual, expected) in sought[..compared]
+                    .iter()
+                    .zip(&all[expected_offset..expected_offset + compared])
+                {
+                    assert!(
+                        (actual - expected).abs() < 1.0e-6,
+                        "{name} at {target_frame}"
+                    );
+                }
+                let landed_frames = (all.len() - sought.len()) / 2;
+                assert!(
+                    landed_frames.abs_diff(target_frame as usize) <= 48_000 * 50 / 1000,
+                    "{name} at {target_frame}"
+                );
+                assert!(
+                    actual_landing.unwrap().abs_diff(target_frame) <= 48_000 * 50 / 1000,
+                    "reported landing for {name} at {target_frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_wav_candidate_keeps_ordinary_playback_usable() {
+        let (samples, landing, qualified) =
+            collect_seek_fixture("generated-seek-pcm-f32.wav", 0, true, false);
+        assert!(!qualified);
+        assert!(landing.is_none());
+        assert!(samples.len() >= 96_000);
     }
 
     #[test]

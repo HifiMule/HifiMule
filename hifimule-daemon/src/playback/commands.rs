@@ -60,11 +60,28 @@ impl PlaybackCommandService {
         Ok(snapshot)
     }
 
+    pub async fn rpc_seek(
+        &self,
+        params: super::model::SeekParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
+        let playback = self.playback.clone();
+        let snapshot = tokio::task::spawn_blocking(move || playback.seek_with_guard(params, guard))
+            .await
+            .map_err(|_| task_failed())??;
+        self.dispatch_effect(&snapshot);
+        Ok(snapshot)
+    }
+
     pub fn playback(&self) -> &PlaybackSession {
         &self.playback
     }
 
     fn dispatch_effect(&self, snapshot: &super::model::SessionSnapshot) {
+        if snapshot.seek_audio {
+            self.dispatch_seek(snapshot);
+            return;
+        }
         if !snapshot.resume_audio || self.playback.control_epoch() != snapshot.resume_epoch {
             return;
         }
@@ -152,6 +169,81 @@ impl PlaybackCommandService {
                         retryable: true,
                     },
                     resume_epoch,
+                );
+            }
+        });
+    }
+
+    fn dispatch_seek(&self, snapshot: &super::model::SessionSnapshot) {
+        if self.playback.control_epoch() != snapshot.seek_epoch {
+            return;
+        }
+        let (Some(current), Some(pending)) = (
+            snapshot.current.clone(),
+            snapshot.playback.pending_seek.clone(),
+        ) else {
+            return;
+        };
+        let manager = self.server_manager.clone();
+        let db = self.db.clone();
+        let playback = self.playback.clone();
+        let generation = snapshot.generation_id.clone();
+        let seek_epoch = snapshot.seek_epoch;
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
+            let resolve = async {
+                let provider = crate::server_manager::get_provider_by_server_id(
+                    &manager,
+                    &db,
+                    &current.source.server_id,
+                )
+                .await?;
+                provider.resolve_playback(&current.source.track_id).await
+            };
+            let resolved = tokio::select! {
+                result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
+                _ = async {
+                    while playback.generation_guard(&generation).is_some()
+                        && playback.control_epoch() == seek_epoch
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                } => None,
+            };
+            if playback.control_epoch() != seek_epoch {
+                return;
+            }
+            let failure = match resolved {
+                Some(Ok(Ok(description))) => super::audio::global()
+                    .start_seek_at_epoch(
+                        description,
+                        current.source,
+                        pending.requested_position_ms,
+                        pending.operation_id.clone(),
+                        generation.clone(),
+                        playback.clone(),
+                        deadline,
+                        seek_epoch,
+                    )
+                    .await
+                    .err(),
+                Some(Ok(Err(error))) => Some(
+                    super::audio::PlaybackPipelineError::from_provider_error(error),
+                ),
+                Some(Err(_)) => Some(super::audio::PlaybackPipelineError::seek_timeout()),
+                None => return,
+            };
+            if let Some(error) = failure
+                && super::audio::log_pipeline_failure(&playback, &generation, &error)
+            {
+                playback.publish_event_at_epoch(
+                    generation,
+                    super::model::PlaybackEvent::SeekFailed {
+                        operation_id: pending.operation_id,
+                        code: "SEEK_FAILED".into(),
+                        retryable: true,
+                    },
+                    seek_epoch,
                 );
             }
         });

@@ -71,7 +71,7 @@ pub(crate) struct HttpSource {
     pending_allocation: usize,
     position: u64,
     length: Option<u64>,
-    validator: Option<reqwest::header::HeaderValue>,
+    validator: Option<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
     preparation: Preparation,
 }
 impl HttpSource {
@@ -84,8 +84,15 @@ impl HttpSource {
             .headers()
             .get(reqwest::header::ETAG)
             .filter(|value| !value.as_bytes().starts_with(b"W/"))
-            .or_else(|| response.headers().get(reqwest::header::LAST_MODIFIED))
-            .cloned();
+            .cloned()
+            .map(|value| (reqwest::header::ETAG, value))
+            .or_else(|| {
+                response
+                    .headers()
+                    .get(reqwest::header::LAST_MODIFIED)
+                    .cloned()
+                    .map(|value| (reqwest::header::LAST_MODIFIED, value))
+            });
         Self {
             runtime: tokio::runtime::Handle::current(),
             request,
@@ -189,7 +196,7 @@ impl Seek for HttpSource {
             reqwest::header::ACCEPT_ENCODING,
             reqwest::header::HeaderValue::from_static("identity"),
         );
-        if let Some(validator) = &self.validator {
+        if let Some((_, validator)) = &self.validator {
             headers.insert(reqwest::header::IF_RANGE, validator.clone());
         }
         let url = self.request.url.clone();
@@ -212,6 +219,10 @@ impl Seek for HttpSource {
             .and_then(|value| value.to_str().ok());
         if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
             || !valid_content_range(header, target, self.length)
+            || self
+                .validator
+                .as_ref()
+                .is_some_and(|(name, value)| response.headers().get(name) != Some(value))
             || response
                 .headers()
                 .get(reqwest::header::CONTENT_ENCODING)
@@ -472,6 +483,52 @@ mod tests {
             .mock("GET", "/audio")
             .match_header("range", "bytes=4-")
             .with_body("abcdef")
+            .create_async()
+            .await;
+        let url = reqwest::Url::parse(&format!("{}/audio", server.url())).unwrap();
+        let response = reqwest::get(url.clone()).await.unwrap();
+        let mut source = HttpSource::new(
+            PlaybackRequest {
+                url,
+                headers: Default::default(),
+                range_supported: false,
+            },
+            response,
+            Preparation::new(
+                Instant::now() + Duration::from_secs(60),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        );
+        tokio::task::spawn_blocking(move || {
+            assert_eq!(
+                source.seek(SeekFrom::Start(4)).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        })
+        .await
+        .unwrap();
+        original.assert_async().await;
+        range.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn changed_representation_validator_rejects_range_seek() {
+        let mut server = mockito::Server::new_async().await;
+        let original = server
+            .mock("GET", "/audio")
+            .match_header("range", mockito::Matcher::Missing)
+            .with_header("etag", "\"original\"")
+            .with_body("abcdef")
+            .create_async()
+            .await;
+        let range = server
+            .mock("GET", "/audio")
+            .match_header("range", "bytes=4-")
+            .match_header("if-range", "\"original\"")
+            .with_status(206)
+            .with_header("content-range", "bytes 4-5/6")
+            .with_header("etag", "\"replacement\"")
+            .with_body("ef")
             .create_async()
             .await;
         let url = reqwest::Url::parse(&format!("{}/audio", server.url())).unwrap();
