@@ -21,7 +21,7 @@ export class PlaybackControls {
     private readonly outputDropdown = document.createElement('sl-dropdown');
     private readonly outputToggle = document.createElement('sl-icon-button');
     private commandError = '';
-    private previewMs: number | undefined;
+    private scrubPreviewMs: number | undefined;
     private queuedSeek: { positionMs: number; identity: string } | undefined;
     private scrubbing = false;
     private seekBusy = false;
@@ -40,6 +40,7 @@ export class PlaybackControls {
     private readonly stop = this.button('stop');
     private readonly next = this.button('next');
     private readonly retry = this.button('retry');
+    private readonly returnToSession = this.button('returnToSession');
     constructor(private readonly container: HTMLElement) {
         container.className = 'playback-controls';
         container.setAttribute('aria-label', t('playback.controls'));
@@ -61,7 +62,7 @@ export class PlaybackControls {
             const value = Number(this.timeline.value);
             if (Number.isSafeInteger(value) && value >= 0) {
                 this.scrubbing = true;
-                this.previewMs = value;
+                this.scrubPreviewMs = value;
                 this.renderTimeline();
             }
         });
@@ -105,8 +106,8 @@ export class PlaybackControls {
         this.outputSelect.addEventListener('change', () => void this.chooseOutput());
         outputGroup.append(outputLabel, refresh, this.outputReset, this.outputStatus);
         this.outputDropdown.append(this.outputToggle, outputGroup);
-        container.replaceChildren(info, this.primary, this.stop, this.next, this.retry, this.outputDropdown, this.error);
-        this.primary.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
+        container.replaceChildren(info, this.primary, this.returnToSession, this.stop, this.next, this.retry, this.outputDropdown, this.error);
+        this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
         void this.refreshServerLabels();
         void this.poll();
@@ -128,14 +129,14 @@ export class PlaybackControls {
                 || BigInt(snapshot.stateSequence) > BigInt(previous.stateSequence))) {
                 if (this.seekIdentity(previous) !== this.seekIdentity(snapshot)) {
                     this.scrubbing = false;
-                    this.previewMs = undefined;
+                    this.scrubPreviewMs = undefined;
                     this.queuedSeek = undefined;
                 }
                 this.snapshot = snapshot;
                 this.anchorPositionMs = snapshot.positionMs;
                 this.anchorAt = this.now();
                 if (!this.scrubbing && !this.seekBusy && !snapshot.playback.pendingSeek
-                    && snapshot.playback.seekOutcome?.status !== 'pending') this.previewMs = undefined;
+                    && snapshot.playback.seekOutcome?.status !== 'pending') this.scrubPreviewMs = undefined;
                 this.render(snapshot);
                 if (!previous || snapshot.instanceId !== previous.instanceId) {
                     this.resetOutput = false;
@@ -157,9 +158,12 @@ export class PlaybackControls {
         const sourceLabel = sourceId ? this.serverLabels.get(sourceId) : undefined;
         this.source.textContent = sourceId ? t('playback.source', { source: sourceLabel ?? t('server.default') }) : '';
         this.source.hidden = !sourceId;
-        const statusText = snapshot.playback.error
+        const transportStatus = snapshot.playback.error
             ? t(`playback.error.${snapshot.playback.error.code}`)
             : t(`playback.status.${snapshot.playback.status}`);
+        const statusText = snapshot.mode === 'preview'
+            ? t('playback.status.preview', { status: transportStatus })
+            : transportStatus;
         if (this.status.textContent !== statusText) this.status.textContent = statusText;
         this.error.textContent = this.commandError;
         const action = snapshot.state === 'playing' || snapshot.state === 'buffering' ? 'pause' : 'resume';
@@ -174,6 +178,8 @@ export class PlaybackControls {
         this.next.disabled = this.busy || !snapshot.playback.canGoNext;
         this.retry.hidden = snapshot.playback.status !== 'error' || !snapshot.playback.error?.retryable;
         this.retry.disabled = this.busy;
+        this.returnToSession.hidden = snapshot.mode !== 'preview' || !snapshot.preview?.hasMainSession;
+        this.returnToSession.disabled = this.busy;
         if (action === 'resume' && snapshot.output && (!snapshot.output.selected?.available || snapshot.output.pending)) {
             this.primary.disabled = true;
             this.primary.setAttribute('title', t('playback.output.choose'));
@@ -229,10 +235,10 @@ export class PlaybackControls {
         const available = Boolean(snapshot?.current && snapshot.playback.seek?.available && duration > 0);
         const shown = Math.round(this.shownPositionMs());
         this.timeline.max = String(duration > 0 ? duration : 1);
-        this.timeline.value = String(Math.min(this.previewMs ?? shown, duration > 0 ? duration : 0));
+        this.timeline.value = String(Math.min(this.scrubPreviewMs ?? shown, duration > 0 ? duration : 0));
         this.timeline.disabled = !available;
         this.timeline.setAttribute('aria-valuetext', t('playback.seek.value', {
-            elapsed: this.formatTime(this.previewMs ?? shown), duration: duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration'),
+            elapsed: this.formatTime(this.scrubPreviewMs ?? shown), duration: duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration'),
         }));
         this.elapsed.textContent = this.formatTime(shown);
         this.duration.textContent = duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration');
@@ -281,7 +287,7 @@ export class PlaybackControls {
             if (this.seekIdentity(this.snapshot) === identity) {
                 const code = (error as { data?: { code?: string } })?.data?.code;
                 this.commandError = code ? t(`playback.error.${code}`) : t('playback.command_error');
-                this.previewMs = undefined;
+                this.scrubPreviewMs = undefined;
             }
         } finally {
             this.seekBusy = false;
@@ -291,7 +297,7 @@ export class PlaybackControls {
                 && queued.positionMs !== positionMs) {
                 void this.submitSeek(queued.positionMs);
             } else if (!this.disposed && this.snapshot) {
-                if (!this.scrubbing && !this.snapshot.playback.pendingSeek) this.previewMs = undefined;
+                if (!this.scrubbing && !this.snapshot.playback.pendingSeek) this.scrubPreviewMs = undefined;
                 this.render(this.snapshot);
             }
         }
@@ -376,12 +382,13 @@ export class PlaybackControls {
             if (!this.disposed && this.snapshot) this.render(this.snapshot);
         }
     }
-    private button(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry'): HTMLElement & { disabled: boolean } {
+    private button(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession'): HTMLElement & { disabled: boolean } {
         const button = document.createElement('sl-button') as any;
         button.size = 'small';
         button.dataset.playbackAction = action;
-        button.textContent = t(`playback.${action}`);
-        button.setAttribute('aria-label', t(`playback.${action}`));
+        const labelKey = action === 'returnToSession' ? 'playback.return_to_session' : `playback.${action}`;
+        button.textContent = t(labelKey);
+        button.setAttribute('aria-label', t(labelKey));
         button.addEventListener('click', async () => {
             if (this.busy || this.disposed || !this.snapshot) return;
             this.busy = true;

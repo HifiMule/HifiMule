@@ -44,6 +44,20 @@ impl PlaybackCommandService {
         Ok(snapshot)
     }
 
+    pub async fn rpc_preview(
+        &self,
+        params: super::model::PreviewTrackParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
+        let playback = self.playback.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || playback.preview_with_guard(params, guard))
+                .await
+                .map_err(|_| task_failed())??;
+        self.dispatch_effect(&snapshot);
+        Ok(snapshot)
+    }
+
     pub async fn native_control(
         &self,
         intent: NativeControlIntent,

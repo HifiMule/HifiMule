@@ -223,7 +223,10 @@ export interface PlaybackOutputState {
 }
 export interface PlaybackSessionSnapshot {
     schemaVersion: number; instanceId: string; sessionId: string; queueRevision: string;
-    stateSequence: string; generationId: string; state: string; positionMs: number;
+    stateSequence: string; generationId: string; mode: 'main' | 'preview';
+    preview: { auditionId: string; hasMainSession: boolean; savedMainOccurrenceId: string | null;
+        savedMainPositionMs: number; savedMainIntent: string; resumeInhibited: boolean } | null;
+    state: string; positionMs: number;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
     playback: { status: PlaybackStatus; canGoNext: boolean; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
         seek: { available: boolean; reason?: string | null; mechanism?: string | null; decodedLandingToleranceMs?: number | null };
@@ -259,6 +262,15 @@ export async function playbackPlayTrack(serverId: string, trackId: string): Prom
     });
 }
 
+export async function playbackPreviewTrack(serverId: string, trackId: string): Promise<void> {
+    const current = await playbackGetSession();
+    await rpcCall('playback.previewTrack', {
+        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+        commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
+        expectedGenerationId: current.generationId, source: { serverId, trackId },
+    });
+}
+
 export async function playbackPlayAlbum(serverId: string, albumId: string): Promise<void> {
     const current = await playbackGetSession();
     try {
@@ -276,7 +288,7 @@ export async function playbackPlayAlbum(serverId: string, albumId: string): Prom
     }
 }
 
-export async function playbackControl(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry', observed?: PlaybackSessionSnapshot): Promise<void> {
+export async function playbackControl(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession', observed?: PlaybackSessionSnapshot): Promise<void> {
     const current = observed ?? await playbackGetSession();
     if (!current.current) return;
     await rpcCall('playback.control', {

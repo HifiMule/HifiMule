@@ -172,6 +172,22 @@ through the existing typed failure path; encrypted/DRM WMA is unsupported.
 Fixture provenance and regeneration commands live in
 [`generated-audio.source.md`](../hifimule-daemon/tests/fixtures/generated-audio.source.md).
 
+## Story 15.11 full-track preview evidence
+
+Collect fresh installed evidence on Windows x64, Linux x64, macOS x64 and macOS ARM64. Existing playback, output, gain or seek records do not certify Preview. For every row record source revision, installed package hash, OS/architecture, provider/version/format, selected backend/output, saved and returned positions, gain, active pipeline count, compressed/PCM high-water values, local audition disposition and audible outcome.
+
+- Preview from playing and paused main sessions and from no main. Confirm the audition begins at zero while the full main queue/order/occurrence identities remain unchanged.
+- Replace A→B→C while provider resolve and decode are delayed. Confirm one preserved main checkpoint, one audible owner, at most two decoder/source slots, and `replaced` outcomes exactly once.
+- Exercise natural completion, Return and Stop. Natural completion/Return restore the saved intent subject to output safety; Stop restores the main paused at the saved nonzero cursor. A no-main completion becomes idle and offers no Return.
+- Seek the audition forward to its end and confirm it does not auto-return or become `fullyHeard`; then use explicit Return/Stop. Separately verify continuous natural presentation can record `fullyHeard`.
+- Inject preview preparation failure and main-return failure. Confirm the main queue/cursor remains recoverable, errors identify Preview versus Return, and no fallback to position zero or another output occurs.
+- Remove the output during Preview, reconnect it, and Return. Confirm `resumeInhibited`, a paused restored main and no automatic audio on reconnect. Explicitly select a replacement while paused and verify it does not clear the inhibition implicitly.
+- Close/reopen the UI and verify the same daemon audition, status, Return visibility, focus and selection. Quit/crash during loading, active Preview, replacement and return preparation; relaunch must record one `interrupted` outcome and restore main paused or no-main idle.
+- With the UI closed, deliver native Pause/Play/Toggle/Stop/seek/Next. Controls target audition metadata/position; Stop performs paused return; Next has no effect even if injected despite the disabled capability.
+- Exercise Preview buttons in cards, ordinary list rows and dedicated Tracks rows with a read-only provider and no physical sync device. Record visible focus, localized accessible names (EN/FR/ES/DE), unchanged multi-selection/basket state and immutable source routing after browse-server changes.
+
+No Story 15.11 installed rows were run during implementation on 2026-09-18. All four target rows, physical media-key delivery, physical audio routing, native-worker recreation and installed loss/restart measurements remain **unverified** until actual records are supplied; local unit/UI/build results must not be copied into those rows.
+
 
 ## Story 15.5 output safety matrix
 

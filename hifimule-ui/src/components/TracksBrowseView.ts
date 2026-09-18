@@ -7,6 +7,7 @@ import {
     BrowseAlbum,
     BrowseTrack,
     playbackPlayTrack,
+    playbackPreviewTrack,
 } from '../rpc';
 import { MediaCard } from './MediaCard';
 import { createAlbumPlayButton } from './AlbumPlayButton';
@@ -570,6 +571,20 @@ export class TracksBrowseView {
             catch (error) { showToast((error as Error).message, 'danger'); }
         });
         row.appendChild(playBtn);
+
+        const previewBtn = document.createElement('sl-icon-button') as any;
+        previewBtn.name = 'soundwave';
+        previewBtn.label = t('playback.preview_track', { title: track.title });
+        previewBtn.disabled = !playbackSource;
+        previewBtn.style.fontSize = '1.1rem';
+        previewBtn.addEventListener('mousedown', (event: Event) => event.stopPropagation());
+        previewBtn.addEventListener('click', async (event: Event) => {
+            event.stopPropagation();
+            if (!playbackSource) return;
+            try { await playbackPreviewTrack(playbackSource.serverId, playbackSource.trackId); }
+            catch (error) { showToast((error as Error).message, 'danger'); }
+        });
+        row.appendChild(previewBtn);
 
         const isInBasket = basketStore.has(track.id);
         const toggleBtn = document.createElement('sl-icon-button') as any;

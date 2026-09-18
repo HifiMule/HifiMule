@@ -929,7 +929,8 @@ impl AudioEngine {
                 }
                 super::model::ControlAction::Stop
                 | super::model::ControlAction::Next
-                | super::model::ControlAction::Retry => {
+                | super::model::ControlAction::Retry
+                | super::model::ControlAction::ReturnToSession => {
                     pipeline.gate.store(false, Ordering::Release);
                     pipeline.cancel.store(true, Ordering::Release);
                 }

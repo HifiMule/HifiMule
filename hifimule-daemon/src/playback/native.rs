@@ -680,6 +680,8 @@ mod tests {
             queue_revision: "1".into(),
             state_sequence: "2".into(),
             generation_id: "generation".into(),
+            mode: PlaybackMode::Main,
+            preview: None,
             state,
             current: Some(Occurrence {
                 occurrence_id: "occurrence".into(),

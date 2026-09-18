@@ -97,6 +97,11 @@ enum OwnerCommand {
         Option<crate::sync::MutationGuard>,
         mpsc::Sender<PResult<ApplyResult>>,
     ),
+    Preview(
+        PreviewTrackParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
     RetryRestore(
         Option<crate::sync::MutationGuard>,
         mpsc::Sender<PResult<SessionSnapshot>>,
@@ -137,6 +142,8 @@ struct Inner {
     db: Arc<Database>,
     instance_id: String,
     session: PersistedSession,
+    preview: Option<ActivePreview>,
+    preview_return_pending: bool,
     generation_id: String,
     state_sequence: u64,
     restoration: Status,
@@ -147,10 +154,45 @@ struct Inner {
     control_dedup_order: VecDeque<String>,
     seek_dedup: HashMap<String, (SeekParams, PResult<SessionSnapshot>)>,
     seek_dedup_order: VecDeque<String>,
+    preview_dedup: HashMap<String, (PreviewTrackParams, PResult<SessionSnapshot>)>,
+    preview_dedup_order: VecDeque<String>,
     seek_resume_after_commit: bool,
     dirty: bool,
     checkpointed_position_ms: u64,
     playback: PlaybackState,
+}
+
+#[derive(Debug, Clone)]
+struct ActivePreview {
+    occurrence: Occurrence,
+    position_ms: u64,
+    state: TransportState,
+    saved_main_occurrence_id: Option<String>,
+    saved_main_position_ms: u64,
+    saved_main_intent: TransportState,
+    resume_inhibited: bool,
+    contiguous_heard_ms: u64,
+    coverage_unknown: bool,
+    seek_discontinuous: bool,
+}
+
+impl ActivePreview {
+    fn persisted(&self, session_id: &str) -> PersistedAudition {
+        PersistedAudition {
+            audition_id: self.occurrence.occurrence_id.clone(),
+            parent_session_id: session_id.to_owned(),
+            source: self.occurrence.source.clone(),
+            position_ms: self.position_ms,
+            state: self.state,
+            saved_main_occurrence_id: self.saved_main_occurrence_id.clone(),
+            saved_main_position_ms: self.saved_main_position_ms,
+            saved_main_intent: self.saved_main_intent,
+            resume_inhibited: self.resume_inhibited,
+            contiguous_heard_ms: self.contiguous_heard_ms,
+            coverage_unknown: self.coverage_unknown,
+            seek_discontinuous: self.seek_discontinuous,
+        }
+    }
 }
 #[derive(Clone)]
 struct PendingTerminal {
@@ -199,6 +241,7 @@ impl PlaybackSession {
         if inner.generation_id != generation_id
             || inner.control_epoch.load(Ordering::Acquire) != control_epoch
             || inner.session.state == TransportState::Idle
+            || inner.preview.is_some()
         {
             return None;
         }
@@ -243,16 +286,27 @@ impl PlaybackSession {
                 let valid =
                     Uuid::parse_str(&s.session_id).is_ok() && validate_stored(&db, &s).is_ok();
                 if valid {
+                    let dismissal = db.dismiss_interrupted_audition(&mut s);
                     if s.state != TransportState::Idle {
                         s.state = TransportState::Paused;
                     }
-                    (
-                        s,
-                        Status {
-                            status: "ok".into(),
-                            code: None,
-                        },
-                    )
+                    if dismissal.is_ok() {
+                        (
+                            s,
+                            Status {
+                                status: "ok".into(),
+                                code: None,
+                            },
+                        )
+                    } else {
+                        (
+                            s,
+                            Status {
+                                status: "error".into(),
+                                code: Some("RESTORE_FAILED".into()),
+                            },
+                        )
+                    }
                 } else {
                     (
                         fresh_session(),
@@ -312,6 +366,8 @@ impl PlaybackSession {
             db,
             instance_id,
             session,
+            preview: None,
+            preview_return_pending: false,
             generation_id: Uuid::new_v4().to_string(),
             state_sequence: 0,
             persistence: Status {
@@ -325,6 +381,8 @@ impl PlaybackSession {
             control_dedup_order: VecDeque::new(),
             seek_dedup: HashMap::new(),
             seek_dedup_order: VecDeque::new(),
+            preview_dedup: HashMap::new(),
+            preview_dedup_order: VecDeque::new(),
             seek_resume_after_commit: false,
             dirty: false,
             checkpointed_position_ms,
@@ -443,6 +501,21 @@ impl PlaybackSession {
         let (tx, rx) = mpsc::channel();
         self.command_tx
             .try_send(OwnerCommand::Control(p, guard, tx))
+            .map_err(admission_error)?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn preview_with_guard(
+        &self,
+        p: PreviewTrackParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<SessionSnapshot> {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (tx, rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::Preview(p, guard, tx))
             .map_err(admission_error)?;
         rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
@@ -870,6 +943,55 @@ fn owner_loop(
                         publish_health(&i, &health);
                         continue;
                     }
+                    if i.preview.is_some()
+                        && let PlaybackEvent::Failed { code, retryable } = &event
+                        && code != "OUTPUT_RETIREMENT_PENDING"
+                    {
+                        if code == "OUTPUT_LOST"
+                            && let Some(preview) = i.preview.as_mut()
+                        {
+                            preview.resume_inhibited = true;
+                        }
+                        i.output_gate.store(false, Ordering::Release);
+                        if let Some(preview) = i.preview.as_mut() {
+                            preview.state = TransportState::Paused;
+                        }
+                        i.playback.status = PlaybackStatus::Error;
+                        i.playback.error = Some(PlaybackFailure {
+                            code: if code == "OUTPUT_LOST" {
+                                code.clone()
+                            } else {
+                                "PREVIEW_FAILED".into()
+                            },
+                            retryable: *retryable,
+                        });
+                        i.state_sequence = i.state_sequence.saturating_add(1);
+                        reset_ingress(&i, &ingress);
+                        publish_health(&i, &health);
+                        continue;
+                    }
+                    if i.preview_return_pending {
+                        if matches!(&event, PlaybackEvent::Active) {
+                            i.preview_return_pending = false;
+                        } else if let PlaybackEvent::Failed { code, .. } = &event
+                            && code != "OUTPUT_RETIREMENT_PENDING"
+                        {
+                            i.preview_return_pending = false;
+                            i.output_gate.store(false, Ordering::Release);
+                            i.session.state = TransportState::Paused;
+                            i.playback.status = PlaybackStatus::Error;
+                            i.playback.error = Some(PlaybackFailure {
+                                code: "PREVIEW_RETURN_FAILED".into(),
+                                retryable: true,
+                            });
+                            i.state_sequence = i.state_sequence.saturating_add(1);
+                            i.dirty = true;
+                            let _ = checkpoint_inner(&mut i);
+                            reset_ingress(&i, &ingress);
+                            publish_health(&i, &health);
+                            continue;
+                        }
+                    }
                     if let PlaybackEvent::Failed { code, retryable } = &event
                         && code != "OUTPUT_LOST"
                         && code != "OUTPUT_RETIREMENT_PENDING"
@@ -897,6 +1019,30 @@ fn owner_loop(
                             i.playback.status,
                             PlaybackStatus::Completed | PlaybackStatus::Error
                         ) {
+                            continue;
+                        }
+                        if i.preview.is_some() {
+                            if let Some(preview) = i.preview.as_mut() {
+                                preview.position_ms = position_ms;
+                                if !preview.seek_discontinuous && !preview.coverage_unknown {
+                                    preview.contiguous_heard_ms =
+                                        preview.contiguous_heard_ms.max(position_ms);
+                                }
+                            }
+                            if let Ok(returned) = finish_preview(
+                                &mut i,
+                                true,
+                                "naturalCompletion",
+                                &generation_serial,
+                            ) && returned.resume_audio
+                            {
+                                let generation = i.generation_id.clone();
+                                if let Some(outputs) = i.outputs.as_mut() {
+                                    outputs.effect = Some(generation);
+                                }
+                            }
+                            reset_ingress(&i, &ingress);
+                            publish_health(&i, &health);
                             continue;
                         }
                         match complete_occurrence(&mut i, position_ms, &generation_serial) {
@@ -1056,6 +1202,54 @@ fn owner_loop(
                 });
                 publish_health(&i, &health);
                 let _ = reply.send(result);
+                executing.store(false, Ordering::Release);
+            }
+            Ok(OwnerCommand::Preview(params, _mutation_guard, reply)) => {
+                executing.store(true, Ordering::Release);
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                prune_dedup(&mut i);
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else if album_admission::contains_command(&i, &params.command_id)
+                    || i.dedup.contains_key(&params.command_id)
+                    || i.output_dedup.contains_key(&params.command_id)
+                    || i.control_dedup.contains_key(&params.command_id)
+                    || i.seek_dedup.contains_key(&params.command_id)
+                {
+                    Err(PlaybackError::conflict(
+                        "COMMAND_ID_REUSED",
+                        "command identity was reused with another payload",
+                    ))
+                } else if let Some((old, result)) = i.preview_dedup.get(&params.command_id) {
+                    if old == &params {
+                        result.clone().map(|mut snapshot| {
+                            snapshot.resume_audio = false;
+                            snapshot
+                        })
+                    } else {
+                        Err(PlaybackError::conflict(
+                            "COMMAND_ID_REUSED",
+                            "command identity was reused with another payload",
+                        ))
+                    }
+                } else {
+                    let result = sample_progress(&mut i, &ingress)
+                        .and_then(|()| preview_inner(&mut i, &params, &generation_serial));
+                    i.preview_dedup
+                        .insert(params.command_id.clone(), (params.clone(), result.clone()));
+                    i.preview_dedup_order.push_back(params.command_id.clone());
+                    while i.preview_dedup_order.len() > 1024 {
+                        if let Some(id) = i.preview_dedup_order.pop_front() {
+                            i.preview_dedup.remove(&id);
+                        }
+                    }
+                    result
+                };
+                if result.is_ok() {
+                    refresh_ingress(&i, &ingress);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
             }
             Ok(OwnerCommand::Control(params, _mutation_guard, reply)) => {
@@ -1234,9 +1428,15 @@ fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<(
             .filter(|n| *n <= i64::MAX as u64)
             .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
         p.pending = None;
-        if p.generation_id == i.generation_id && p.occurrence_id == i.session.current_occurrence_id
-        {
-            i.session.position_ms = position;
+        if p.generation_id == i.generation_id && p.occurrence_id == active_occurrence_id(i) {
+            if let Some(preview) = i.preview.as_mut() {
+                if !preview.seek_discontinuous && position >= preview.position_ms {
+                    preview.contiguous_heard_ms = preview.contiguous_heard_ms.max(position);
+                }
+                preview.position_ms = position;
+            } else {
+                i.session.position_ms = position;
+            }
             i.state_sequence = next;
             i.dirty = true;
         }
@@ -1247,8 +1447,8 @@ fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<(
 fn refresh_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
     let mut p = ingress.lock().unwrap_or_else(|e| e.into_inner());
     if p.generation_id != i.generation_id
-        || p.occurrence_id != i.session.current_occurrence_id
-        || (i.session.state == TransportState::Paused && p.position_ms > i.session.position_ms)
+        || p.occurrence_id != active_occurrence_id(i)
+        || (active_state(i) == TransportState::Paused && p.position_ms > active_position(i))
     {
         reset_progress(i, &mut p);
     }
@@ -1258,10 +1458,29 @@ fn reset_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
 }
 fn reset_progress(i: &Inner, p: &mut ProgressIngress) {
     p.generation_id = i.generation_id.clone();
-    p.occurrence_id = i.session.current_occurrence_id.clone();
+    p.occurrence_id = active_occurrence_id(i);
     p.sequence = None;
-    p.position_ms = i.session.position_ms;
+    p.position_ms = active_position(i);
     p.pending = None;
+}
+
+fn active_occurrence_id(i: &Inner) -> Option<String> {
+    i.preview
+        .as_ref()
+        .map(|preview| preview.occurrence.occurrence_id.clone())
+        .or_else(|| i.session.current_occurrence_id.clone())
+}
+
+fn active_position(i: &Inner) -> u64 {
+    i.preview
+        .as_ref()
+        .map_or(i.session.position_ms, |preview| preview.position_ms)
+}
+
+fn active_state(i: &Inner) -> TransportState {
+    i.preview
+        .as_ref()
+        .map_or(i.session.state, |preview| preview.state)
 }
 
 // Output transitions abandon preparation without carrying its intent into a new generation.
@@ -1315,6 +1534,9 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::Apply(_, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
+        OwnerCommand::Preview(_, _guard, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
         OwnerCommand::RetryRestore(_guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
@@ -1365,6 +1587,10 @@ fn retry_restore_inner(
         }
     };
     validate_stored(&inner.db, &loaded)?;
+    inner
+        .db
+        .dismiss_interrupted_audition(&mut loaded)
+        .map_err(storage)?;
     if loaded.state != TransportState::Idle {
         loaded.state = TransportState::Paused;
     }
@@ -1391,6 +1617,8 @@ fn retry_restore_inner(
             ..Default::default()
         },
         session: loaded,
+        preview: None,
+        preview_return_pending: false,
         generation_id: Uuid::new_v4().to_string(),
         state_sequence: next_sequence,
         restoration: Status {
@@ -1407,6 +1635,8 @@ fn retry_restore_inner(
         control_dedup_order: VecDeque::new(),
         seek_dedup: HashMap::new(),
         seek_dedup_order: VecDeque::new(),
+        preview_dedup: HashMap::new(),
+        preview_dedup_order: VecDeque::new(),
         seek_resume_after_commit: false,
         dirty: false,
     };
@@ -1423,6 +1653,16 @@ fn retry_restore_inner(
 
 fn checkpoint_inner(i: &mut Inner) -> PResult<()> {
     if i.restoration.status == "error" || i.pending_terminal.is_some() || !i.dirty {
+        return Ok(());
+    }
+    if let Some(preview) = i.preview.as_ref() {
+        i.db.checkpoint_audition(&preview.persisted(&i.session.session_id))
+            .map_err(storage)?;
+        i.dirty = false;
+        i.persistence = Status {
+            status: "ok".into(),
+            code: None,
+        };
         return Ok(());
     }
     let seq = i
@@ -1543,6 +1783,17 @@ fn apply_inner_with_album_context(
             "stored playback state must be recovered first",
         ));
     }
+    if i.preview.is_some()
+        && matches!(
+            p.operation,
+            SessionOperation::AppendQueue { .. } | SessionOperation::SelectCurrent { .. }
+        )
+    {
+        return Err(PlaybackError::conflict(
+            "PREVIEW_ACTIVE",
+            "the preserved main queue cannot be edited while preview is active",
+        ));
+    }
     if i.pending_terminal.is_some() && matches!(p.operation, SessionOperation::AppendQueue { .. }) {
         return Err(PlaybackError::conflict(
             "PERSISTENCE_FAILED",
@@ -1550,6 +1801,10 @@ fn apply_inner_with_album_context(
         ));
     }
     let mut next_session = i.session.clone();
+    let superseded_audition = i
+        .preview
+        .as_ref()
+        .map(|preview| preview.persisted(&i.session.session_id));
     let mut assigned = Vec::new();
     let next_sequence = i
         .state_sequence
@@ -1587,8 +1842,17 @@ fn apply_inner_with_album_context(
             } else {
                 TransportState::Paused
             };
-            i.db.persist_playback_structure(&next_session, &assigned)
+            if let Some(audition) = superseded_audition.as_ref() {
+                i.db.persist_playback_structure_superseding_audition(
+                    &next_session,
+                    &assigned,
+                    audition,
+                )
                 .map_err(storage)?;
+            } else {
+                i.db.persist_playback_structure(&next_session, &assigned)
+                    .map_err(storage)?;
+            }
         }
         SessionOperation::AppendQueue { sources } => {
             validate_sources(sources)?;
@@ -1649,8 +1913,13 @@ fn apply_inner_with_album_context(
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
             next_session.state = TransportState::Idle;
-            i.db.clear_playback_session(&next_session)
-                .map_err(storage)?;
+            if let Some(audition) = superseded_audition.as_ref() {
+                i.db.persist_playback_structure_superseding_audition(&next_session, &[], audition)
+                    .map_err(storage)?;
+            } else {
+                i.db.clear_playback_session(&next_session)
+                    .map_err(storage)?;
+            }
         }
         SessionOperation::PlayTrack { source } => {
             next_session.album_context = None;
@@ -1669,13 +1938,24 @@ fn apply_inner_with_album_context(
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
             next_session.state = TransportState::Buffering;
-            i.db.persist_playback_structure(&next_session, &assigned)
+            if let Some(audition) = superseded_audition.as_ref() {
+                i.db.persist_playback_structure_superseding_audition(
+                    &next_session,
+                    &assigned,
+                    audition,
+                )
                 .map_err(storage)?;
+            } else {
+                i.db.persist_playback_structure(&next_session, &assigned)
+                    .map_err(storage)?;
+            }
         }
     }
     let preserve_generation = matches!(p.operation, SessionOperation::AppendQueue { .. })
         && i.session.current_occurrence_id == next_session.current_occurrence_id;
     if !preserve_generation {
+        i.preview = None;
+        i.preview_return_pending = false;
         i.pending_terminal = None;
         i.control_epoch.fetch_add(1, Ordering::AcqRel);
         generation_serial.fetch_add(1, Ordering::AcqRel);
@@ -1736,6 +2016,188 @@ fn apply_inner_with_album_context(
         assigned_occurrences: assigned,
     })
 }
+
+fn preview_inner(
+    i: &mut Inner,
+    p: &PreviewTrackParams,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
+    require_schema(p.schema_version)?;
+    if Uuid::parse_str(&p.command_id).is_err() {
+        return Err(PlaybackError::invalid(
+            "INVALID_SESSION",
+            "commandId must be a UUID",
+        ));
+    }
+    p.source
+        .validate()
+        .map_err(|message| PlaybackError::invalid("INVALID_SESSION", message))?;
+    if p.instance_id != i.instance_id || p.session_id != i.session.session_id {
+        return Err(PlaybackError::conflict(
+            "SESSION_MISMATCH",
+            "session identity is stale",
+        ));
+    }
+    if parse_revision(&p.expected_queue_revision)? != i.session.queue_revision {
+        return Err(PlaybackError::conflict(
+            "QUEUE_REVISION_CONFLICT",
+            "queue revision is stale",
+        ));
+    }
+    if p.expected_generation_id != i.generation_id {
+        return Err(PlaybackError::conflict(
+            "GENERATION_CONFLICT",
+            "playback generation is stale",
+        ));
+    }
+    if i.restoration.status == "error" {
+        return Err(PlaybackError::conflict(
+            "RESTORE_FAILED",
+            "stored playback state must be recovered first",
+        ));
+    }
+
+    let (saved_main_occurrence_id, saved_main_position_ms, saved_main_intent, resume_inhibited) =
+        if let Some(active) = i.preview.as_ref() {
+            (
+                active.saved_main_occurrence_id.clone(),
+                active.saved_main_position_ms,
+                active.saved_main_intent,
+                active.resume_inhibited,
+            )
+        } else {
+            super::audio::global().control(ControlAction::Pause);
+            reconcile_presented_handoff(i, generation_serial)?;
+            if let Some(position) = super::audio::global().captured_position(&i.generation_id) {
+                i.session.position_ms = position;
+            }
+            let saved = (
+                i.session.current_occurrence_id.clone(),
+                i.session.position_ms,
+                i.session.state,
+                false,
+            );
+            i.session.state = if i.session.current_occurrence_id.is_some() {
+                TransportState::Paused
+            } else {
+                TransportState::Idle
+            };
+            i.dirty = true;
+            saved
+        };
+
+    i.pending_terminal = None;
+    album_admission::cancel_pending(i);
+    i.control_epoch.fetch_add(1, Ordering::AcqRel);
+    generation_serial.fetch_add(1, Ordering::AcqRel);
+    super::audio::global().control(ControlAction::Stop);
+    i.generation_id = Uuid::new_v4().to_string();
+    let next_preview = ActivePreview {
+        occurrence: Occurrence {
+            occurrence_id: Uuid::new_v4().to_string(),
+            ordinal: 0,
+            source: p.source.clone(),
+            availability: availability(&i.db, &p.source.server_id)?,
+        },
+        position_ms: 0,
+        state: TransportState::Buffering,
+        saved_main_occurrence_id,
+        saved_main_position_ms,
+        saved_main_intent,
+        resume_inhibited,
+        contiguous_heard_ms: 0,
+        coverage_unknown: false,
+        seek_discontinuous: false,
+    };
+    let persisted = next_preview.persisted(&i.session.session_id);
+    if let Some(previous) = i.preview.as_ref() {
+        i.db.replace_audition(
+            &i.session,
+            &previous.persisted(&i.session.session_id),
+            &persisted,
+        )
+        .map_err(storage)?;
+    } else {
+        i.db.persist_audition_admission(&i.session, &persisted)
+            .map_err(storage)?;
+    }
+    i.preview_return_pending = false;
+    i.preview = Some(next_preview);
+    i.output_gate.store(true, Ordering::Release);
+    i.playback = PlaybackState {
+        status: PlaybackStatus::Loading,
+        ..Default::default()
+    };
+    i.state_sequence = i.state_sequence.saturating_add(1);
+    let mut response = snapshot(i)?;
+    response.resume_audio = true;
+    response.resume_epoch = i.control_epoch.load(Ordering::Acquire);
+    Ok(response)
+}
+
+fn finish_preview(
+    i: &mut Inner,
+    resume_saved_intent: bool,
+    disposition: &str,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
+    let preview = i.preview.clone().ok_or_else(|| {
+        PlaybackError::invalid("RETURN_UNAVAILABLE", "there is no active preview")
+    })?;
+    let mut next_session = i.session.clone();
+    next_session.current_occurrence_id = preview.saved_main_occurrence_id.clone();
+    next_session.position_ms = preview.saved_main_position_ms;
+    let should_resume = resume_saved_intent
+        && !preview.resume_inhibited
+        && matches!(
+            preview.saved_main_intent,
+            TransportState::Playing | TransportState::Buffering
+        )
+        && next_session.current_occurrence_id.is_some();
+    next_session.state = if should_resume {
+        TransportState::Buffering
+    } else if next_session.current_occurrence_id.is_some() {
+        TransportState::Paused
+    } else {
+        TransportState::Idle
+    };
+    i.db.finish_audition(
+        &next_session,
+        &preview.persisted(&i.session.session_id),
+        disposition,
+        None,
+        i.playback.duration_ms,
+    )
+    .map_err(storage)?;
+    i.preview = None;
+    i.preview_return_pending = should_resume;
+    i.session = next_session;
+    i.control_epoch.fetch_add(1, Ordering::AcqRel);
+    generation_serial.fetch_add(1, Ordering::AcqRel);
+    super::audio::global().control(ControlAction::Stop);
+    i.generation_id = Uuid::new_v4().to_string();
+    i.output_gate.store(should_resume, Ordering::Release);
+    i.playback = if should_resume {
+        PlaybackState {
+            status: PlaybackStatus::Loading,
+            ..Default::default()
+        }
+    } else if i.session.current_occurrence_id.is_some() {
+        PlaybackState {
+            status: PlaybackStatus::Paused,
+            ..Default::default()
+        }
+    } else {
+        PlaybackState::default()
+    };
+    i.state_sequence = i.state_sequence.saturating_add(1);
+    i.dirty = false;
+    i.checkpointed_position_ms = i.session.position_ms;
+    let mut response = snapshot(i)?;
+    response.resume_audio = should_resume;
+    response.resume_epoch = i.control_epoch.load(Ordering::Acquire);
+    Ok(response)
+}
 fn validate_sources(s: &[TrackSource]) -> PResult<()> {
     if s.len() > MAX_INSERT_BATCH {
         return Err(PlaybackError::invalid(
@@ -1789,45 +2251,78 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         None
     };
     decorate_availability(&i.db, &mut rows)?;
-    let mut current = if let Some(id) = &i.session.current_occurrence_id {
+    let mut main_current = if let Some(id) = &i.session.current_occurrence_id {
         i.db.playback_occurrence(&i.session.session_id, id)
             .map_err(storage)?
     } else {
         None
     };
-    if let Some(current) = current.as_mut() {
+    if let Some(current) = main_current.as_mut() {
         current.availability = availability(&i.db, &current.source.server_id)?;
     }
+    let current = i
+        .preview
+        .as_ref()
+        .map(|preview| preview.occurrence.clone())
+        .or_else(|| main_current.clone());
     Ok(SessionSnapshot {
         resume_audio: false,
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
         seek_audio: false,
         seek_epoch: i.control_epoch.load(Ordering::Acquire),
-        qualified_suffix: current.as_ref().and_then(|occurrence| {
-            i.session
-                .album_context
-                .as_ref()
-                .and_then(|context| context.suffix_for(occurrence))
-        }),
-        gain_bits: current
-            .as_ref()
-            .and_then(|occurrence| {
-                i.session
-                    .album_context
-                    .as_ref()
-                    .map(|context| context.scalar_for(occurrence).to_bits())
+        qualified_suffix: i
+            .preview
+            .is_none()
+            .then(|| {
+                current.as_ref().and_then(|occurrence| {
+                    i.session
+                        .album_context
+                        .as_ref()
+                        .and_then(|context| context.suffix_for(occurrence))
+                })
             })
-            .unwrap_or(1.0f32.to_bits()),
+            .flatten(),
+        gain_bits: i.preview.as_ref().map_or_else(
+            || {
+                current
+                    .as_ref()
+                    .and_then(|occurrence| {
+                        i.session
+                            .album_context
+                            .as_ref()
+                            .map(|context| context.scalar_for(occurrence).to_bits())
+                    })
+                    .unwrap_or(1.0f32.to_bits())
+            },
+            |_| 1.0f32.to_bits(),
+        ),
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
         session_id: i.session.session_id.clone(),
         queue_revision: i.session.queue_revision.to_string(),
         state_sequence: i.state_sequence.to_string(),
         generation_id: i.generation_id.clone(),
-        state: i.session.state,
+        mode: if i.preview.is_some() {
+            PlaybackMode::Preview
+        } else {
+            PlaybackMode::Main
+        },
+        preview: i.preview.as_ref().map(|preview| PreviewSummary {
+            audition_id: preview.occurrence.occurrence_id.clone(),
+            has_main_session: preview.saved_main_occurrence_id.is_some(),
+            saved_main_occurrence_id: preview.saved_main_occurrence_id.clone(),
+            saved_main_position_ms: preview.saved_main_position_ms,
+            saved_main_intent: preview.saved_main_intent,
+            resume_inhibited: preview.resume_inhibited,
+        }),
+        state: active_state(i),
         current: current.clone(),
-        position_ms: i.session.position_ms,
-        checkpointed_position_ms: i.checkpointed_position_ms,
+        position_ms: active_position(i),
+        checkpointed_position_ms: if i.preview.is_some() {
+            active_position(i)
+        } else {
+            i.checkpointed_position_ms
+        },
         persistence: i.persistence.clone(),
         restoration: i.restoration.clone(),
         total_occurrence_count: if failed {
@@ -1840,14 +2335,15 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         next_cursor: next,
         playback: {
             let mut playback = i.playback.clone();
-            playback.can_go_next = current
-                .as_ref()
-                .and_then(|occurrence| {
-                    i.db.playback_successor(&i.session.session_id, occurrence.ordinal)
-                        .ok()
-                        .flatten()
-                })
-                .is_some()
+            playback.can_go_next = i.preview.is_none()
+                && current
+                    .as_ref()
+                    .and_then(|occurrence| {
+                        i.db.playback_successor(&i.session.session_id, occurrence.ordinal)
+                            .ok()
+                            .flatten()
+                    })
+                    .is_some()
                 && i.restoration.status != "error"
                 && i.pending_terminal.is_none();
             playback
@@ -1874,6 +2370,9 @@ fn control_inner(
             "session identity is stale",
         ));
     }
+    if i.preview.is_some() {
+        return preview_control_inner(i, p, generation_serial);
+    }
     let before = i.session.current_occurrence_id.clone();
     reconcile_presented_handoff(i, generation_serial)?;
     let mut reconciled = p.clone();
@@ -1885,7 +2384,7 @@ fn control_inner(
     }
     let p = &reconciled;
     if p.expected_generation_id != i.generation_id
-        || i.session.current_occurrence_id.as_deref() != Some(&p.occurrence_id)
+        || active_occurrence_id(i).as_deref() != Some(&p.occurrence_id)
     {
         return Err(PlaybackError::conflict(
             "GENERATION_CONFLICT",
@@ -2005,6 +2504,7 @@ fn control_inner(
         {
             i.session.position_ms = position;
         }
+        i.preview_return_pending = false;
     }
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
     if matches!(p.action, ControlAction::Pause | ControlAction::Resume) {
@@ -2104,6 +2604,8 @@ fn control_inner(
             committed_snapshot = Some(commit_terminal(i, terminal, generation_serial, false)?);
         }
         ControlAction::Stop => {
+            let preserve_return_position = i.preview_return_pending;
+            i.preview_return_pending = false;
             i.pending_terminal = None;
             if let Some(pending) = i.playback.pending_seek.take() {
                 i.playback.seek_outcome = Some(SeekOutcome {
@@ -2122,15 +2624,25 @@ fn control_inner(
             } else {
                 TransportState::Idle
             };
-            i.session.position_ms = 0;
+            if !preserve_return_position {
+                i.session.position_ms = 0;
+            }
             i.generation_id = Uuid::new_v4().to_string();
-            i.playback.status = if i.session.current_occurrence_id.is_some() {
+            i.playback.status = if preserve_return_position {
+                PlaybackStatus::Paused
+            } else if i.session.current_occurrence_id.is_some() {
                 PlaybackStatus::Stopped
             } else {
                 PlaybackStatus::Idle
             };
             i.dirty = true;
             checkpoint_inner(i)?;
+        }
+        ControlAction::ReturnToSession => {
+            return Err(PlaybackError::invalid(
+                "RETURN_UNAVAILABLE",
+                "there is no active preview with a preserved main session",
+            ));
         }
     }
     committed_snapshot
@@ -2144,6 +2656,116 @@ fn control_inner(
             snapshot.resume_epoch = i.control_epoch.load(Ordering::Acquire);
             snapshot
         })
+}
+
+fn preview_control_inner(
+    i: &mut Inner,
+    p: &ControlParams,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
+    let active_id = i
+        .preview
+        .as_ref()
+        .map(|preview| preview.occurrence.occurrence_id.as_str());
+    if p.expected_generation_id != i.generation_id || active_id != Some(p.occurrence_id.as_str()) {
+        return Err(PlaybackError::conflict(
+            "GENERATION_CONFLICT",
+            "playback generation is stale",
+        ));
+    }
+    match p.action {
+        ControlAction::Next => Err(PlaybackError::conflict(
+            "PREVIEW_ACTIVE",
+            "Next is unavailable while preview is active",
+        )),
+        ControlAction::Stop => finish_preview(i, false, "stopped", generation_serial),
+        ControlAction::ReturnToSession => {
+            if i.preview
+                .as_ref()
+                .and_then(|preview| preview.saved_main_occurrence_id.as_ref())
+                .is_none()
+            {
+                return Err(PlaybackError::invalid(
+                    "RETURN_UNAVAILABLE",
+                    "the preview has no preserved main session",
+                ));
+            }
+            finish_preview(i, true, "returned", generation_serial)
+        }
+        ControlAction::Pause => {
+            super::audio::global().control(ControlAction::Pause);
+            if let Some(position) = super::audio::global().captured_position(&i.generation_id)
+                && let Some(preview) = i.preview.as_mut()
+            {
+                preview.position_ms = position;
+            }
+            i.control_epoch.fetch_add(1, Ordering::AcqRel);
+            super::audio::global()
+                .retain_control_epoch(&i.generation_id, i.control_epoch.load(Ordering::Acquire));
+            i.output_gate.store(false, Ordering::Release);
+            if let Some(preview) = i.preview.as_mut() {
+                preview.state = TransportState::Paused;
+            }
+            i.playback.status = PlaybackStatus::Paused;
+            i.state_sequence = i.state_sequence.saturating_add(1);
+            snapshot(i)
+        }
+        ControlAction::Resume | ControlAction::Retry => {
+            if p.action == ControlAction::Retry && i.playback.status != PlaybackStatus::Error {
+                return Err(PlaybackError::invalid(
+                    "RETRY_UNAVAILABLE",
+                    "the active preview has no retryable failure",
+                ));
+            }
+            if i.outputs.is_some() {
+                output_policy(i).map_err(|code| {
+                    PlaybackError::invalid(code, "choose an available output before resuming")
+                })?;
+            }
+            if i.playback.status == PlaybackStatus::Error {
+                let previous = i.preview.clone().ok_or_else(|| {
+                    PlaybackError::invalid("RETRY_UNAVAILABLE", "the failed preview is absent")
+                })?;
+                let failure_code = i
+                    .playback
+                    .error
+                    .as_ref()
+                    .map(|failure| failure.code.as_str())
+                    .unwrap_or("PREVIEW_FAILED");
+                let mut retry = previous.clone();
+                retry.occurrence.occurrence_id = Uuid::new_v4().to_string();
+                retry.state = TransportState::Buffering;
+                retry.contiguous_heard_ms = 0;
+                retry.coverage_unknown = retry.position_ms > 0;
+                retry.seek_discontinuous = false;
+                i.db.retry_audition(
+                    &i.session,
+                    &previous.persisted(&i.session.session_id),
+                    &retry.persisted(&i.session.session_id),
+                    failure_code,
+                )
+                .map_err(storage)?;
+                i.preview = Some(retry);
+            }
+            i.control_epoch.fetch_add(1, Ordering::AcqRel);
+            if i.playback.status == PlaybackStatus::Error {
+                generation_serial.fetch_add(1, Ordering::AcqRel);
+                super::audio::global().control(ControlAction::Stop);
+                i.generation_id = Uuid::new_v4().to_string();
+            }
+            i.output_gate.store(true, Ordering::Release);
+            if let Some(preview) = i.preview.as_mut() {
+                preview.state = TransportState::Buffering;
+            }
+            i.playback.status = PlaybackStatus::Loading;
+            i.playback.error = None;
+            i.state_sequence = i.state_sequence.saturating_add(1);
+            let mut response = snapshot(i)?;
+            response.resume_audio = true;
+            response.resume_epoch = i.control_epoch.load(Ordering::Acquire);
+            Ok(response)
+        }
+    }
 }
 
 fn seek_inner(
@@ -2204,9 +2826,9 @@ fn seek_inner(
             "positionMs exceeds the current duration",
         ));
     }
-    let prior = i.session.position_ms;
+    let prior = active_position(i);
     let resume = matches!(
-        i.session.state,
+        active_state(i),
         TransportState::Playing | TransportState::Buffering
     ) || matches!(
         i.playback.status,
@@ -2235,9 +2857,19 @@ fn seek_inner(
         error: None,
     });
     i.playback.error = None;
+    if let Some(preview) = i.preview.as_mut()
+        && p.position_ms != prior
+    {
+        preview.seek_discontinuous = true;
+    }
     if p.position_ms == duration_ms {
-        i.session.position_ms = duration_ms;
-        i.session.state = TransportState::Paused;
+        if let Some(preview) = i.preview.as_mut() {
+            preview.position_ms = duration_ms;
+            preview.state = TransportState::Paused;
+        } else {
+            i.session.position_ms = duration_ms;
+            i.session.state = TransportState::Paused;
+        }
         i.playback.status = PlaybackStatus::Completed;
         i.playback.pending_seek = None;
         i.playback.seek_outcome = Some(SeekOutcome {
@@ -2250,11 +2882,16 @@ fn seek_inner(
         i.dirty = true;
         checkpoint_inner(i)?;
     } else {
-        i.session.state = if resume {
+        let state = if resume {
             TransportState::Buffering
         } else {
             TransportState::Paused
         };
+        if let Some(preview) = i.preview.as_mut() {
+            preview.state = state;
+        } else {
+            i.session.state = state;
+        }
         i.playback.status = if resume {
             PlaybackStatus::Loading
         } else {
@@ -2489,9 +3126,13 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 && i.playback.pending_seek.is_none()
                 && i.playback.status == PlaybackStatus::Loading
                 && duration_ms
-                    .is_some_and(|duration| duration > 0 && i.session.position_ms == duration)
+                    .is_some_and(|duration| duration > 0 && active_position(i) == duration)
             {
-                i.session.position_ms = 0;
+                if let Some(preview) = i.preview.as_mut() {
+                    preview.position_ms = 0;
+                } else {
+                    i.session.position_ms = 0;
+                }
                 i.dirty = true;
             }
             i.playback.seek = if duration_ms.is_some_and(|duration| duration > 0) {
@@ -2511,9 +3152,13 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 && i.playback.status == PlaybackStatus::Loading
                 && i.playback
                     .duration_ms
-                    .is_some_and(|duration| duration > 0 && i.session.position_ms == duration)
+                    .is_some_and(|duration| duration > 0 && active_position(i) == duration)
             {
-                i.session.position_ms = 0;
+                if let Some(preview) = i.preview.as_mut() {
+                    preview.position_ms = 0;
+                } else {
+                    i.session.position_ms = 0;
+                }
                 i.dirty = true;
             }
             i.playback.seek =
@@ -2524,7 +3169,8 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 };
         }
         PlaybackEvent::Active if i.output_gate.load(Ordering::Acquire) => {
-            if let Some(occurrence_id) = i.session.current_occurrence_id.as_deref()
+            if i.preview.is_none()
+                && let Some(occurrence_id) = i.session.current_occurrence_id.as_deref()
                 && i.db
                     .clear_playback_failure(&i.session.session_id, occurrence_id)
                     .is_err()
@@ -2534,11 +3180,19 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                     code: Some("PERSISTENCE_FAILED".into()),
                 };
             }
-            i.session.state = TransportState::Playing;
+            if let Some(preview) = i.preview.as_mut() {
+                preview.state = TransportState::Playing;
+            } else {
+                i.session.state = TransportState::Playing;
+            }
             i.playback.status = PlaybackStatus::Active;
         }
         PlaybackEvent::Buffering if i.output_gate.load(Ordering::Acquire) => {
-            i.session.state = TransportState::Buffering;
+            if let Some(preview) = i.preview.as_mut() {
+                preview.state = TransportState::Buffering;
+            } else {
+                i.session.state = TransportState::Buffering;
+            }
             i.playback.status = PlaybackStatus::Loading;
         }
         PlaybackEvent::Completed { position_ms } => {
@@ -2558,7 +3212,11 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             .as_ref()
             .is_some_and(|pending| pending.operation_id == operation_id) =>
         {
-            i.session.position_ms = actual_position_ms;
+            if let Some(preview) = i.preview.as_mut() {
+                preview.position_ms = actual_position_ms;
+            } else {
+                i.session.position_ms = actual_position_ms;
+            }
             i.playback.pending_seek = None;
             i.playback.seek_outcome = Some(SeekOutcome {
                 operation_id,
@@ -2569,11 +3227,19 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             });
             if i.seek_resume_after_commit {
                 i.output_gate.store(true, Ordering::Release);
-                i.session.state = TransportState::Playing;
+                if let Some(preview) = i.preview.as_mut() {
+                    preview.state = TransportState::Playing;
+                } else {
+                    i.session.state = TransportState::Playing;
+                }
                 i.playback.status = PlaybackStatus::Active;
             } else {
                 i.output_gate.store(false, Ordering::Release);
-                i.session.state = TransportState::Paused;
+                if let Some(preview) = i.preview.as_mut() {
+                    preview.state = TransportState::Paused;
+                } else {
+                    i.session.state = TransportState::Paused;
+                }
                 i.playback.status = PlaybackStatus::Paused;
             }
             i.dirty = true;
@@ -2594,10 +3260,14 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 .pending_seek
                 .as_ref()
                 .map(|pending| pending.requested_position_ms)
-                .unwrap_or(i.session.position_ms);
+                .unwrap_or_else(|| active_position(i));
             i.playback.pending_seek = None;
             i.output_gate.store(false, Ordering::Release);
-            i.session.state = TransportState::Paused;
+            if let Some(preview) = i.preview.as_mut() {
+                preview.state = TransportState::Paused;
+            } else {
+                i.session.state = TransportState::Paused;
+            }
             i.playback.status = PlaybackStatus::Error;
             let error = PlaybackFailure { code, retryable };
             i.playback.error = Some(error.clone());
@@ -2627,7 +3297,11 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 });
             }
             i.output_gate.store(false, Ordering::Release);
-            i.session.state = TransportState::Paused;
+            if let Some(preview) = i.preview.as_mut() {
+                preview.state = TransportState::Paused;
+            } else {
+                i.session.state = TransportState::Paused;
+            }
             i.playback.status = PlaybackStatus::Error;
             i.playback.error = Some(PlaybackFailure { code, retryable });
         }
@@ -5204,6 +5878,358 @@ mod tests {
                 PlaybackEvent::Failed { .. }
             ));
         }
+    }
+
+    fn preview_params(snapshot: &SessionSnapshot, track_id: &str) -> PreviewTrackParams {
+        PreviewTrackParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: snapshot.instance_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: snapshot.queue_revision.clone(),
+            expected_generation_id: snapshot.generation_id.clone(),
+            source: TrackSource {
+                server_id: "offline".into(),
+                track_id: track_id.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn preview_replacement_preserves_one_main_and_stop_returns_paused_at_saved_position() {
+        let (db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let main_occurrence = main.current.as_ref().unwrap().occurrence_id.clone();
+        playback
+            .report_progress(&main.generation_id, &main_occurrence, 1, 4_200)
+            .unwrap();
+        playback.final_checkpoint().unwrap();
+        let main = playback.snapshot().unwrap();
+
+        let first = playback
+            .preview_with_guard(preview_params(&main, "audition-a"), None)
+            .unwrap();
+        assert_eq!(first.mode, PlaybackMode::Preview);
+        assert_eq!(
+            first.current.as_ref().unwrap().source.track_id,
+            "audition-a"
+        );
+        assert_eq!(first.queue_revision, main.queue_revision);
+        assert_eq!(first.occurrences, main.occurrences);
+        let summary = first.preview.as_ref().unwrap();
+        assert_eq!(
+            summary.saved_main_occurrence_id.as_deref(),
+            Some(main_occurrence.as_str())
+        );
+        assert_eq!(summary.saved_main_position_ms, 4_200);
+
+        let second = playback
+            .preview_with_guard(preview_params(&first, "audition-b"), None)
+            .unwrap();
+        assert_eq!(
+            second.current.as_ref().unwrap().source.track_id,
+            "audition-b"
+        );
+        assert_eq!(
+            second.preview.as_ref().unwrap().saved_main_position_ms,
+            4_200
+        );
+        assert_eq!(db.playback_count(&main.session_id).unwrap(), 1);
+
+        let next = ControlParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: second.instance_id.clone(),
+            session_id: second.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_generation_id: second.generation_id.clone(),
+            occurrence_id: second.current.as_ref().unwrap().occurrence_id.clone(),
+            action: ControlAction::Next,
+        };
+        assert_eq!(
+            playback.control_with_guard(next, None).unwrap_err().code,
+            "PREVIEW_ACTIVE"
+        );
+
+        let returned = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: second.instance_id.clone(),
+                    session_id: second.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: second.generation_id.clone(),
+                    occurrence_id: second.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::Stop,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(returned.mode, PlaybackMode::Main);
+        assert!(returned.preview.is_none());
+        assert_eq!(returned.current.unwrap().occurrence_id, main_occurrence);
+        assert_eq!(returned.position_ms, 4_200);
+        assert_eq!(returned.state, TransportState::Paused);
+    }
+
+    #[test]
+    fn preview_natural_completion_returns_saved_intent_and_restart_interrupts_once() {
+        let (db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let resumed = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: main.instance_id.clone(),
+                    session_id: main.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: main.generation_id.clone(),
+                    occurrence_id: main.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::Resume,
+                },
+                None,
+            )
+            .unwrap();
+        let preview = playback
+            .preview_with_guard(preview_params(&resumed, "natural"), None)
+            .unwrap();
+        playback.publish_event(
+            preview.generation_id.clone(),
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: preview.current.as_ref().unwrap().source.clone(),
+                    title: "Natural preview".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(8_000),
+                representation: "wav".into(),
+                seek: SeekCapability::jellyfin_pcm_wav(),
+            },
+        );
+        playback.publish_event(
+            preview.generation_id,
+            PlaybackEvent::Completed { position_ms: 8_000 },
+        );
+        let returned = playback.snapshot().unwrap();
+        assert_eq!(returned.mode, PlaybackMode::Main);
+        assert_eq!(returned.state, TransportState::Buffering);
+        let outcomes = db.audition_outcomes(None, 100).unwrap();
+        assert_eq!(outcomes.last().unwrap().disposition, "naturalCompletion");
+        assert!(outcomes.last().unwrap().fully_heard);
+
+        let interrupted = playback
+            .preview_with_guard(preview_params(&returned, "interrupted"), None)
+            .unwrap();
+        assert_eq!(interrupted.mode, PlaybackMode::Preview);
+        playback.stop_and_join().unwrap();
+        let restored = PlaybackSession::restore(db.clone(), "restored".into());
+        assert_eq!(restored.snapshot().unwrap().mode, PlaybackMode::Main);
+        restored.stop_and_join().unwrap();
+        let restored_again = PlaybackSession::restore(db.clone(), "restored-again".into());
+        restored_again.stop_and_join().unwrap();
+        let interrupted_count = db
+            .audition_outcomes(None, 100)
+            .unwrap()
+            .iter()
+            .filter(|outcome| outcome.disposition == "interrupted")
+            .count();
+        assert_eq!(interrupted_count, 1);
+    }
+
+    #[test]
+    fn ordinary_play_supersedes_preview_and_stale_completion_cannot_restore_main() {
+        let (db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let preview = playback
+            .preview_with_guard(preview_params(&main, "audition"), None)
+            .unwrap();
+        let stale_generation = preview.generation_id.clone();
+
+        playback
+            .apply(params(
+                &preview,
+                SessionOperation::ReplaceQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "ordinary-play".into(),
+                    }],
+                },
+            ))
+            .unwrap();
+        let replacement = playback.snapshot().unwrap();
+        assert_eq!(replacement.mode, PlaybackMode::Main);
+        assert_eq!(
+            replacement.current.as_ref().unwrap().source.track_id,
+            "ordinary-play"
+        );
+        assert_eq!(
+            db.audition_outcomes(None, 100)
+                .unwrap()
+                .last()
+                .unwrap()
+                .disposition,
+            "superseded"
+        );
+
+        playback.publish_event(
+            stale_generation,
+            PlaybackEvent::Completed {
+                position_ms: 99_000,
+            },
+        );
+        let current = playback.snapshot().unwrap();
+        assert_eq!(current.mode, PlaybackMode::Main);
+        assert_eq!(
+            current.current.as_ref().unwrap().source.track_id,
+            "ordinary-play"
+        );
+    }
+
+    #[test]
+    fn preview_without_main_completes_to_idle_and_cannot_return() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let empty = playback.snapshot().unwrap();
+        let preview = playback
+            .preview_with_guard(preview_params(&empty, "standalone-audition"), None)
+            .unwrap();
+        let return_error = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: preview.instance_id.clone(),
+                    session_id: preview.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: preview.generation_id.clone(),
+                    occurrence_id: preview.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::ReturnToSession,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(return_error.code, "RETURN_UNAVAILABLE");
+
+        playback.publish_event(
+            preview.generation_id,
+            PlaybackEvent::Completed { position_ms: 3_000 },
+        );
+        let completed = playback.snapshot().unwrap();
+        assert_eq!(completed.mode, PlaybackMode::Main);
+        assert_eq!(completed.state, TransportState::Idle);
+        assert!(completed.current.is_none());
+        assert_eq!(
+            db.audition_outcomes(None, 100)
+                .unwrap()
+                .last()
+                .unwrap()
+                .disposition,
+            "naturalCompletion"
+        );
+    }
+
+    #[test]
+    fn failed_return_keeps_main_paused_at_saved_position() {
+        let (_db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let main_occurrence = main.current.as_ref().unwrap().occurrence_id.clone();
+        playback
+            .report_progress(&main.generation_id, &main_occurrence, 1, 4_200)
+            .unwrap();
+        playback.final_checkpoint().unwrap();
+        let resumed = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: main.instance_id.clone(),
+                    session_id: main.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: main.generation_id.clone(),
+                    occurrence_id: main_occurrence.clone(),
+                    action: ControlAction::Resume,
+                },
+                None,
+            )
+            .unwrap();
+        let preview = playback
+            .preview_with_guard(preview_params(&resumed, "failed-return"), None)
+            .unwrap();
+        let returning = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: preview.instance_id.clone(),
+                    session_id: preview.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: preview.generation_id.clone(),
+                    occurrence_id: preview.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::ReturnToSession,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(returning.position_ms, 4_200);
+        playback.publish_event(
+            returning.generation_id,
+            PlaybackEvent::Failed {
+                code: "SOURCE_UNAVAILABLE".into(),
+                retryable: true,
+            },
+        );
+        let failed = playback.snapshot().unwrap();
+        assert_eq!(failed.mode, PlaybackMode::Main);
+        assert_eq!(failed.state, TransportState::Paused);
+        assert_eq!(failed.position_ms, 4_200);
+        assert_eq!(
+            failed.playback.error.as_ref().unwrap().code,
+            "PREVIEW_RETURN_FAILED"
+        );
+        assert!(failed.playback.error.as_ref().unwrap().retryable);
+    }
+
+    #[test]
+    fn retrying_failed_preview_records_terminal_attempt_and_uses_new_identity() {
+        let (db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let preview = playback
+            .preview_with_guard(preview_params(&main, "retry-preview"), None)
+            .unwrap();
+        let failed_attempt = preview.current.as_ref().unwrap().occurrence_id.clone();
+        playback.publish_event(
+            preview.generation_id,
+            PlaybackEvent::Failed {
+                code: "DECODE_FAILED".into(),
+                retryable: true,
+            },
+        );
+        let failed = playback.snapshot().unwrap();
+        assert_eq!(
+            failed.playback.error.as_ref().unwrap().code,
+            "PREVIEW_FAILED"
+        );
+
+        let retried = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: failed.instance_id.clone(),
+                    session_id: failed.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: failed.generation_id.clone(),
+                    occurrence_id: failed_attempt.clone(),
+                    action: ControlAction::Retry,
+                },
+                None,
+            )
+            .unwrap();
+        assert_ne!(
+            retried.current.as_ref().unwrap().occurrence_id,
+            failed_attempt
+        );
+        let outcome = db.audition_outcomes(None, 100).unwrap().pop().unwrap();
+        assert_eq!(outcome.audition_id, failed_attempt);
+        assert_eq!(outcome.disposition, "technicalFailure");
+        assert_eq!(outcome.failure_code.as_deref(), Some("PREVIEW_FAILED"));
     }
     #[test]
     fn review_restored_verified_end_restarts_progress_after_media_resolution() {

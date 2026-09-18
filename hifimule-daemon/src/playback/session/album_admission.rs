@@ -331,6 +331,8 @@ pub(super) fn commit(
         queue_revision: i.session.queue_revision.to_string(),
         state_sequence: i.state_sequence.to_string(),
         generation_id: i.generation_id.clone(),
+        mode: PlaybackMode::Main,
+        preview: None,
         state: i.session.state,
         current,
         position_ms: i.session.position_ms,

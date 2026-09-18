@@ -4,7 +4,7 @@ baseline_commit: bd215ee1e65aa2a300fdbe246dcb30f664733984
 
 # Story 15.11: Preview a full track without losing the main listening session
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -34,27 +34,27 @@ so that I can assess music for a playlist or basket and then return to where I w
 
 ## Tasks / Subtasks
 
-- [ ] Add the typed audition contract and owner transitions (AC: 1–10).
-  - [ ] Implement active-transport projection independently of the durable main queue; settle the wire additions below with strict request validation and serialization tests.
-  - [ ] Implement Preview admission, replacement, natural return, explicit Return, Stop override, failure recovery and ordinary-session replacement; preserve command deduplication and shutdown admission.
-  - [ ] Gate successor preparation and Next while auditioning; test direct RPC/native bypasses as well as disabled controls.
-- [ ] Persist the main checkpoint and bounded audition state atomically (AC: 1–3, 7–10).
-  - [ ] Migrate playback persistence v3→v4 transactionally; retain v1/v2 migrations and album membership/representation validation.
-  - [ ] Store one active audition separately from main occurrences and append terminal audition outcomes exactly once locally; page historical records.
-  - [ ] Apply restart dismissal idempotently in normal restoration and storage Retry; failed/corrupt restoration must preserve evidence.
-- [ ] Integrate existing audio/command/native paths (AC: 1–9, 11).
-  - [ ] Capture actual quiesced main position, invalidate prepared successor/presentation work, retire old audio and use existing bounded provider/start-at-position machinery.
-  - [ ] Reopen main with the original frozen scalar and admitted suffix; preserve decoder samples, padding, replay and output pinning on CPAL and Pulse.
-  - [ ] Dispatch return effects from natural completion as well as explicit RPC/native commands; do not strand an owner state change without starting the admitted effect.
-  - [ ] Publish active audition metadata/capabilities and enforce disabled Next in the owner.
-- [ ] Add browser Preview and transport Return/status controls (AC: 1–2, 4–9, 11).
-  - [ ] Wire distinct per-track Preview actions in cards, ordinary list rows and dedicated Tracks rows, independent of device or playlist-write capability.
-  - [ ] Extend shared RPC/snapshot state and existing PlaybackControls; preserve polling/reconnect ordering, focus, selection and all existing curation controls.
-  - [ ] Add matching EN/FR/ES/DE labels and actionable preview/return errors.
-- [ ] Verify behavior and document evidence (AC: 1–11).
-  - [ ] Add owner/persistence/RPC/native regressions, production decoder return tests, failure/race injection and local outcome tests described below.
-  - [ ] Build daemon and UI; run controlled-runtime suites and installed-platform checks; record missing prerequisites honestly.
-  - [ ] Update API contracts and installed playback checklist with preview semantics, v4 recovery, evidence and limitations.
+- [x] Add the typed audition contract and owner transitions (AC: 1–10).
+  - [x] Implement active-transport projection independently of the durable main queue; settle the wire additions below with strict request validation and serialization tests.
+  - [x] Implement Preview admission, replacement, natural return, explicit Return, Stop override, failure recovery and ordinary-session replacement; preserve command deduplication and shutdown admission.
+  - [x] Gate successor preparation and Next while auditioning; test direct RPC/native bypasses as well as disabled controls.
+- [x] Persist the main checkpoint and bounded audition state atomically (AC: 1–3, 7–10).
+  - [x] Migrate playback persistence v3→v4 transactionally; retain v1/v2 migrations and album membership/representation validation.
+  - [x] Store one active audition separately from main occurrences and append terminal audition outcomes exactly once locally; page historical records.
+  - [x] Apply restart dismissal idempotently in normal restoration and storage Retry; failed/corrupt restoration must preserve evidence.
+- [x] Integrate existing audio/command/native paths (AC: 1–9, 11).
+  - [x] Capture actual quiesced main position, invalidate prepared successor/presentation work, retire old audio and use existing bounded provider/start-at-position machinery.
+  - [x] Reopen main with the original frozen scalar and admitted suffix; preserve decoder samples, padding, replay and output pinning on CPAL and Pulse.
+  - [x] Dispatch return effects from natural completion as well as explicit RPC/native commands; do not strand an owner state change without starting the admitted effect.
+  - [x] Publish active audition metadata/capabilities and enforce disabled Next in the owner.
+- [x] Add browser Preview and transport Return/status controls (AC: 1–2, 4–9, 11).
+  - [x] Wire distinct per-track Preview actions in cards, ordinary list rows and dedicated Tracks rows, independent of device or playlist-write capability.
+  - [x] Extend shared RPC/snapshot state and existing PlaybackControls; preserve polling/reconnect ordering, focus, selection and all existing curation controls.
+  - [x] Add matching EN/FR/ES/DE labels and actionable preview/return errors.
+- [x] Verify behavior and document evidence (AC: 1–11).
+  - [x] Add owner/persistence/RPC/native regressions, production decoder return tests, failure/race injection and local outcome tests described below.
+  - [x] Build daemon and UI; run controlled-runtime suites and installed-platform checks; record missing prerequisites honestly.
+  - [x] Update API contracts and installed playback checklist with preview semantics, v4 recovery, evidence and limitations.
 
 ## Dev Notes
 
@@ -222,21 +222,59 @@ Remain within the daemon playback owner, existing SQLite database, provider abst
 
 GPT-6.
 
+### Implementation Plan
+
+- Establish the strict additive Preview/Return wire contract and a single owner-controlled audition overlay without altering canonical main-queue rows.
+- Add transactional v4 audition persistence/outcomes and idempotent restart dismissal before connecting audio effects.
+- Route Preview, natural return and explicit Return through existing provider/audio generation and epoch fences, including frozen destination gain/suffix.
+- Add independent browser Preview surfaces, persistent transport status/Return controls and four-locale strings.
+- Drive the work with focused red/green owner, persistence and UI regressions, then run controlled playback and full repository gates.
+
 ### Debug Log References
 
-Story preparation only: planning/previous-story analysis, backend and UI source inspection, recent commit review and primary API reference checks. Implementation and platform tests remain to be run. Independent backend, UI/native and planning-artifact validation completed; seek-to-end, pending-return Stop and current decode/discard semantics were clarified. Concurrent backend edits appeared during preparation and were not modified by this task; reread the live implementation before coding against the recorded baseline.
+- Post-review runtime defect: Preview admission correctly opened the shared audio gate, but `output_opened` immediately recomputed authorization from the suspended canonical main state (`Paused` or `Idle`), leaving the audition indefinitely in Loading with no samples delivered.
+- Added red/green output-open regressions for a buffering Preview over a paused main session, a buffering standalone Preview over an idle main session, and a paused Preview. Corrected the gate projection to use the generation-fenced active transport state; focused verification passes 16/16 output-selection tests.
+- Added failing contract/owner/UI tests first, then implemented typed Preview projection, replacement, return, Stop override, no-main completion and ordinary-Play supersession.
+- Extended SQLite v4 with a singleton active audition and indexed, paged outcomes; verified transactional replacement, exact-once interruption and conservative full-heard evidence.
+- Added a pending-return marker after testing the failure boundary so failed main reopening remains paused at the saved cursor with `PREVIEW_RETURN_FAILED`.
+- Verification after the Preview output-open fix: playback suite 272 passed/6 ignored; full daemon 978 passed/6 ignored; output-selection suite 16 passed; browser 29 passed; evidence validator 33 passed; UI production build, rustfmt and Clippy completed. Clippy retains the repository warning baseline.
+- Installed Windows/Linux/macOS physical-player and hardware-output rows were not runnable in this environment and remain explicitly unchecked in the installed checklist.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Closed Preview placement, native Next, Return/Stop intent, one-main/one-audition persistence, restart dismissal and failure-recovery gates.
-- Carried forward frozen album representation/gain, real-position capture, output safety, bounded resources and inherited platform evidence limitations.
+- Fixed Preview audio startup after output opening by authorizing the callback gate from the active Preview overlay rather than the suspended canonical main session; paused auditions remain gated until explicitly resumed.
+- Implemented a strict `playback.previewTrack` contract, additive `mode`/`preview` snapshot projection and `returnToSession` control while keeping the main queue/session canonical.
+- Added serialized Preview admission/replacement, main checkpoint capture, natural/explicit return, audition Stop semantics, no-main idle completion, owner-enforced Next rejection and stale-work fencing.
+- Added transactional v4 audition persistence, paged local outcomes, conservative continuous-listening evidence, atomic ordinary-Play supersession and idempotent restart interruption.
+- Reused the common provider/audio dispatch with destination main gain/suffix and explicit pending-return recovery; output loss inhibits automatic resume.
+- Added accessible Preview actions to all three browser track surfaces, Preview status/Return controls and EN/FR/ES/DE error/label parity.
+- Updated API and installed-test documentation. Automated coverage is green; physical installed-platform evidence remains open and is not claimed.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-11-preview-a-full-track-without-losing-the-main-listening-session.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/album_admission.rs`
+- `hifimule-daemon/src/playback/session/output_selection.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/components/TracksBrowseView.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/rpc.ts`
+- `scripts/tests/playback-ui.test.mjs`
 
 ### Change Log
 
 - 2026-09-18: Created Story 15.11 implementation context and marked it ready-for-dev.
+- 2026-09-18: Implemented full-track Preview with preserved main-session return, v4 local audition evidence, shared audio/native/RPC integration and browser controls; moved to review with automated gates green and installed physical evidence left open.
+- 2026-09-18: Fixed Preview remaining in Loading after output open by projecting audio-gate authorization from the active transport; added main-present, standalone and paused-preview regressions.

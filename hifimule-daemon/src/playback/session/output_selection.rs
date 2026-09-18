@@ -158,7 +158,7 @@ impl PlaybackSession {
         i.output.error = None;
         i.output_gate.store(
             matches!(
-                i.session.state,
+                active_state(&i),
                 TransportState::Playing | TransportState::Buffering
             ),
             Ordering::Release,
@@ -350,7 +350,11 @@ fn select_inner(
     super::super::audio::global().control(ControlAction::Pause);
     sample_progress(i, ingress)?;
     if let Some(position) = super::super::audio::global().captured_position(&i.generation_id) {
-        i.session.position_ms = i.session.position_ms.max(position);
+        if let Some(preview) = i.preview.as_mut() {
+            preview.position_ms = preview.position_ms.max(position);
+        } else {
+            i.session.position_ms = i.session.position_ms.max(position);
+        }
         i.dirty = true;
     }
     supersede_pending_seek(i);
@@ -474,7 +478,11 @@ pub(super) fn reconcile_outputs(
         i.output_gate.store(false, Ordering::Release);
         let _ = sample_progress(i, ingress);
         if let Some(position) = super::super::audio::global().captured_position(&i.generation_id) {
-            i.session.position_ms = i.session.position_ms.max(position);
+            if let Some(preview) = i.preview.as_mut() {
+                preview.position_ms = preview.position_ms.max(position);
+            } else {
+                i.session.position_ms = i.session.position_ms.max(position);
+            }
             i.dirty = true;
         }
         super::super::audio::global().control(ControlAction::Stop);
@@ -485,7 +493,11 @@ pub(super) fn reconcile_outputs(
         // Requesting Stop is not a native retirement acknowledgment.
         i.output.error = Some(failure("OUTPUT_LOST"));
         i.output.status = "unavailable".into();
-        if i.session.current_occurrence_id.is_some() {
+        if let Some(preview) = i.preview.as_mut() {
+            preview.resume_inhibited = true;
+            preview.state = TransportState::Paused;
+            i.playback.status = PlaybackStatus::Paused;
+        } else if i.session.current_occurrence_id.is_some() {
             i.session.state = TransportState::Paused;
             i.playback.status = PlaybackStatus::Paused;
         }
@@ -692,6 +704,121 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn preview_params(snapshot: &SessionSnapshot, track_id: &str) -> PreviewTrackParams {
+        PreviewTrackParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: snapshot.instance_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: snapshot.queue_revision.clone(),
+            expected_generation_id: snapshot.generation_id.clone(),
+            source: TrackSource {
+                server_id: "offline".into(),
+                track_id: track_id.into(),
+            },
+        }
+    }
+
+    fn select_fixture_output(
+        session: &PlaybackSession,
+        endpoint: &OutputDescriptor,
+    ) -> SessionSnapshot {
+        session
+            .select_output(params(&session.snapshot().unwrap(), endpoint), None)
+            .unwrap();
+        let selected = committed(session);
+        session.take_output_effect();
+        selected
+    }
+
+    #[test]
+    fn preview_output_open_uses_buffering_overlay_over_paused_main() {
+        let (_dir, session, endpoint) = fixture();
+        let selected = select_fixture_output(&session, &endpoint);
+        session
+            .apply(ApplySessionParams {
+                schema_version: SCHEMA_VERSION,
+                instance_id: selected.instance_id,
+                session_id: selected.session_id,
+                command_id: Uuid::new_v4().to_string(),
+                expected_queue_revision: selected.queue_revision,
+                operation: SessionOperation::PlayTrack {
+                    source: TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "main".into(),
+                    },
+                },
+            })
+            .unwrap();
+        let preview = session
+            .preview_with_guard(
+                preview_params(&session.snapshot().unwrap(), "audition"),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(preview.state, TransportState::Buffering);
+        assert!(session.output_opened(
+            &preview.generation_id,
+            endpoint.preference.as_ref().unwrap()
+        ));
+        assert!(session.output_gate.load(Ordering::Acquire));
+        session.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn preview_output_open_uses_buffering_overlay_over_idle_main() {
+        let (_dir, session, endpoint) = fixture();
+        select_fixture_output(&session, &endpoint);
+        let preview = session
+            .preview_with_guard(
+                preview_params(&session.snapshot().unwrap(), "audition"),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(preview.state, TransportState::Buffering);
+        assert!(session.output_opened(
+            &preview.generation_id,
+            endpoint.preference.as_ref().unwrap()
+        ));
+        assert!(session.output_gate.load(Ordering::Acquire));
+        session.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn preview_output_open_keeps_paused_overlay_gate_closed() {
+        let (_dir, session, endpoint) = fixture();
+        select_fixture_output(&session, &endpoint);
+        let preview = session
+            .preview_with_guard(
+                preview_params(&session.snapshot().unwrap(), "audition"),
+                None,
+            )
+            .unwrap();
+        let paused = session
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: preview.instance_id,
+                    session_id: preview.session_id,
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: preview.generation_id,
+                    occurrence_id: preview.current.unwrap().occurrence_id,
+                    action: ControlAction::Pause,
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(paused.state, TransportState::Paused);
+        assert!(
+            session.output_opened(&paused.generation_id, endpoint.preference.as_ref().unwrap())
+        );
+        assert!(!session.output_gate.load(Ordering::Acquire));
+        session.stop_and_join().unwrap();
     }
 
     fn wait_for(

@@ -2,7 +2,7 @@
 // Handles rendering of media items in the grid with selection support.
 
 import { basketStore } from '../state/basket';
-import { getImageUrl, playbackPlayTrack, rpcCall } from '../rpc';
+import { getImageUrl, playbackPlayTrack, playbackPreviewTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { showToast } from '../toast';
 import { createAlbumPlayButton } from './AlbumPlayButton';
@@ -123,6 +123,18 @@ export class MediaCard {
                 catch (error) { showToast((error as Error).message, 'danger'); }
             });
             card.querySelector('.card-content')?.appendChild(play);
+            const preview = document.createElement('sl-icon-button') as any;
+            preview.name = 'soundwave';
+            preview.label = t('playback.preview_track', { title: itemName });
+            preview.disabled = !playbackSource;
+            preview.addEventListener('mousedown', (event: Event) => event.stopPropagation());
+            preview.addEventListener('click', async (event: Event) => {
+                event.stopPropagation();
+                if (!playbackSource) return;
+                try { await playbackPreviewTrack(playbackSource.serverId, playbackSource.trackId); }
+                catch (error) { showToast((error as Error).message, 'danger'); }
+            });
+            card.querySelector('.card-content')?.appendChild(preview);
         }
 
         if (isBrowseItem && (item as BrowseDisplayItem).type === 'MusicAlbum') {

@@ -78,7 +78,7 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
 function snapshot(state = 'buffering', sequence = '1', error = null) {
   return {
     schemaVersion: 1, instanceId: 'instance', sessionId: 'session', queueRevision: '1',
-    stateSequence: sequence, generationId: 'generation', state, positionMs: 0,
+    stateSequence: sequence, generationId: 'generation', mode: 'main', preview: null, state, positionMs: 0,
     current: { occurrenceId: 'occurrence', source: { serverId: 'server', trackId: 'track' } },
     output: { revision: '1', selected: { outputId: 'headphones', displayName: 'Headphones', detail: 'USB', available: true, isDefault: false }, pending: null, active: null, status: 'available', error },
     playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], canGoNext: false, metadata: { title: 'Track' },
@@ -165,6 +165,37 @@ test('loading playback exposes Pause rather than a second Resume', async () => {
   assert.equal(h.container.querySelector('[data-playback-action="resume"]'), null);
   assert.equal(h.container.querySelector('[data-playback-action="retry"]').hidden, true);
   h.component.destroy();
+});
+test('preview status exposes Return only when a main session is preserved', async () => {
+  const audition = snapshot('playing');
+  audition.mode = 'preview';
+  audition.preview = { auditionId: 'audition', hasMainSession: true, savedMainOccurrenceId: 'main', savedMainPositionMs: 4200, savedMainIntent: 'playing', resumeInhibited: false };
+  const actions = [];
+  const h = harness(audition, async action => actions.push(action)); await h.tick();
+  assert.match(text(h.container), /playback\.status\.preview/);
+  const back = h.container.querySelector('[data-playback-action="returnToSession"]');
+  assert.ok(back); assert.equal(back.hidden, false); await back.click();
+  assert.deepEqual(actions, ['returnToSession']);
+  h.setSnapshot({ ...audition, stateSequence: '2', preview: { ...audition.preview, hasMainSession: false } }); await h.tick();
+  assert.equal(back.hidden, true);
+  h.component.destroy();
+});
+
+test('every track surface exposes a distinct preview action with frozen concurrency fields', () => {
+  for (const relative of [
+    '../../hifimule-ui/src/components/MediaCard.ts',
+    '../../hifimule-ui/src/components/TracksBrowseView.ts',
+    '../../hifimule-ui/src/library.ts',
+  ]) {
+    const source = readFileSync(new URL(relative, import.meta.url), 'utf8');
+    assert.match(source, /playbackPreviewTrack/);
+    assert.match(source, /playback\.preview_track/);
+    assert.match(source, /stopPropagation\(\)/);
+  }
+  const rpc = readFileSync(new URL('../../hifimule-ui/src/rpc.ts', import.meta.url), 'utf8');
+  assert.match(rpc, /expectedQueueRevision: current\.queueRevision/);
+  assert.match(rpc, /expectedGenerationId: current\.generationId/);
+  assert.match(rpc, /playback\.previewTrack/);
 });
 test('Shoelace cannot override hidden transport actions', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');

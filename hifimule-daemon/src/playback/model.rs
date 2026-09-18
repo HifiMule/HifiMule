@@ -85,6 +85,8 @@ pub struct SessionSnapshot {
     pub queue_revision: String,
     pub state_sequence: String,
     pub generation_id: String,
+    pub mode: PlaybackMode,
+    pub preview: Option<PreviewSummary>,
     pub state: TransportState,
     pub current: Option<Occurrence>,
     pub position_ms: u64,
@@ -96,6 +98,24 @@ pub struct SessionSnapshot {
     pub next_cursor: Option<String>,
     pub playback: PlaybackState,
     pub output: OutputState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackMode {
+    Main,
+    Preview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSummary {
+    pub audition_id: String,
+    pub has_main_session: bool,
+    pub saved_main_occurrence_id: Option<String>,
+    pub saved_main_position_ms: u64,
+    pub saved_main_intent: TransportState,
+    pub resume_inhibited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +368,18 @@ pub struct PlayAlbumParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewTrackParams {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub session_id: String,
+    pub command_id: String,
+    pub expected_queue_revision: String,
+    pub expected_generation_id: String,
+    pub source: TrackSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -406,6 +438,7 @@ pub enum ControlAction {
     Stop,
     Next,
     Retry,
+    ReturnToSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +498,38 @@ pub struct PersistedSession {
     pub current_occurrence_id: Option<String>,
     pub position_ms: u64,
     pub(crate) album_context: Option<FrozenAlbumContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedAudition {
+    pub audition_id: String,
+    pub parent_session_id: String,
+    pub source: TrackSource,
+    pub position_ms: u64,
+    pub state: TransportState,
+    pub saved_main_occurrence_id: Option<String>,
+    pub saved_main_position_ms: u64,
+    pub saved_main_intent: TransportState,
+    pub resume_inhibited: bool,
+    pub contiguous_heard_ms: u64,
+    pub coverage_unknown: bool,
+    pub seek_discontinuous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditionOutcome {
+    pub outcome_id: u64,
+    pub audition_id: String,
+    pub parent_session_id: String,
+    pub source: TrackSource,
+    pub disposition: String,
+    pub terminal_position_ms: u64,
+    pub duration_ms: Option<u64>,
+    pub failure_code: Option<String>,
+    pub contiguous_heard_ms: u64,
+    pub coverage_unknown: bool,
+    pub seek_discontinuous: bool,
+    pub fully_heard: bool,
 }
 
 // Only legacy v3 migration creates this marker. It never qualifies playback:
@@ -624,6 +689,49 @@ mod seek_contract_tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    fn preview_request() -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "instanceId": "instance",
+            "sessionId": "session",
+            "commandId": "12345678-1234-1234-1234-123456789abc",
+            "expectedQueueRevision": "7",
+            "expectedGenerationId": "generation",
+            "source": { "serverId": "portable-server", "trackId": "track" }
+        })
+    }
+
+    #[test]
+    fn strict_preview_wire_requires_portable_source_and_rejects_unknown_fields() {
+        let parsed = serde_json::from_value::<PreviewTrackParams>(preview_request()).unwrap();
+        assert!(parsed.source.validate().is_ok());
+        assert_eq!(parsed.expected_queue_revision, "7");
+        assert_eq!(parsed.expected_generation_id, "generation");
+
+        let mut unknown = preview_request();
+        unknown.as_object_mut().unwrap().insert(
+            "url".into(),
+            serde_json::json!("https://secret.invalid/audio"),
+        );
+        assert!(serde_json::from_value::<PreviewTrackParams>(unknown).is_err());
+
+        let mut nested_unknown = preview_request();
+        nested_unknown["source"]["albumId"] = serde_json::json!("album");
+        assert!(serde_json::from_value::<PreviewTrackParams>(nested_unknown).is_err());
+    }
+
+    #[test]
+    fn preview_mode_and_return_action_use_additive_camel_case_wire_values() {
+        assert_eq!(
+            serde_json::to_value(PlaybackMode::Preview).unwrap(),
+            "preview"
+        );
+        assert_eq!(
+            serde_json::to_value(ControlAction::ReturnToSession).unwrap(),
+            "returnToSession"
         );
     }
 }

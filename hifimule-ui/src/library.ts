@@ -22,6 +22,7 @@ import {
     getImageUrl,
     rpcCall,
     playbackPlayTrack,
+    playbackPreviewTrack,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { createAlbumPlayButton } from './components/AlbumPlayButton';
@@ -1053,6 +1054,18 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
             catch (error) { showToast((error as Error).message, 'danger'); }
         });
         row.appendChild(play);
+        const preview = document.createElement('sl-icon-button') as any;
+        preview.name = 'soundwave';
+        preview.label = t('playback.preview_track', { title: item.name });
+        preview.disabled = !playbackSource;
+        preview.addEventListener('mousedown', (event: Event) => event.stopPropagation());
+        preview.addEventListener('click', async (event: Event) => {
+            event.stopPropagation();
+            if (!playbackSource) return;
+            try { await playbackPreviewTrack(playbackSource.serverId, playbackSource.trackId); }
+            catch (error) { showToast((error as Error).message, 'danger'); }
+        });
+        row.appendChild(preview);
     }
     if (item.type === 'MusicAlbum') {
         const play = createAlbumPlayButton(item.id, item.serverId, item.name);

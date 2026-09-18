@@ -285,6 +285,9 @@ pub async fn run_server(
                     }
                     continue;
                 }
+                let resume_epoch = snapshot.resume_epoch;
+                let gain = f32::from_bits(snapshot.gain_bits);
+                let admitted_suffix = snapshot.qualified_suffix.clone();
                 let result = if let Some(current) = snapshot.current {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     let resolve = async {
@@ -307,13 +310,16 @@ pub async fn run_server(
                     match resolved {
                         Some(Ok(Ok(description))) => {
                             crate::playback::audio::global()
-                                .start(
+                                .start_at_epoch_with_gain(
                                     description,
                                     current.source,
                                     snapshot.position_ms,
                                     generation.clone(),
                                     playback.clone(),
                                     deadline,
+                                    resume_epoch,
+                                    gain,
+                                    admitted_suffix,
                                 )
                                 .await
                         }
@@ -510,6 +516,9 @@ async fn handler(
         "playback.playAlbum" => {
             handle_playback_play_album(&state, payload.params, mutation_guard.take()).await
         }
+        "playback.previewTrack" => {
+            handle_playback_preview_track(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.listOutputs" => handle_playback_list_outputs(&state, payload.params).await,
         "playback.selectOutput" => {
             handle_playback_select_output(&state, payload.params, mutation_guard.take()).await
@@ -621,6 +630,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playlist.create"
             | "playback.applySession"
             | "playback.playAlbum"
+            | "playback.previewTrack"
             | "playback.control"
             | "playback.seek"
             | "playback.selectOutput"
@@ -1030,6 +1040,31 @@ async fn handle_playback_control(
         state.sync_operation_manager.clone(),
     )
     .rpc_control(p, mutation_guard)
+    .await
+    .map_err(playback_error)?;
+    Ok(serde_json::json!({"data":result}))
+}
+
+async fn handle_playback_preview_track(
+    state: &AppState,
+    params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
+    let p = serde_json::from_value::<crate::playback::model::PreviewTrackParams>(
+        params.unwrap_or(Value::Null),
+    )
+    .map_err(|_| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid playback.previewTrack parameters".into(),
+        data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
+    })?;
+    let result = crate::playback::commands::PlaybackCommandService::new(
+        state.playback.clone(),
+        state.server_manager.clone(),
+        state.db.clone(),
+        state.sync_operation_manager.clone(),
+    )
+    .rpc_preview(p, mutation_guard)
     .await
     .map_err(playback_error)?;
     Ok(serde_json::json!({"data":result}))
