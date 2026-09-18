@@ -557,6 +557,7 @@ fn representation_name(representation: &crate::providers::PlaybackRepresentation
 fn qualified_gain_suffix(
     gain: f32,
     suffix: Option<&str>,
+    admitted_suffix: Option<&str>,
     representation: &crate::providers::PlaybackRepresentation,
 ) -> Result<Option<String>, PlaybackPipelineError> {
     if !gain.is_finite() || gain <= 0.0 {
@@ -568,7 +569,7 @@ fn qualified_gain_suffix(
         return Ok(None);
     }
     if representation.provenance != crate::providers::PlaybackProvenance::Original {
-        return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
+        return Err(PlaybackPipelineError::source(anyhow::anyhow!(
             "album gain requires the qualified original representation"
         )));
     }
@@ -577,10 +578,15 @@ fn qualified_gain_suffix(
         .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
         .filter(|value| matches!(value.as_str(), "wav" | "flac" | "m4a" | "mp3"))
         .ok_or_else(|| {
-            PlaybackPipelineError::unsupported(anyhow::anyhow!(
+            PlaybackPipelineError::source(anyhow::anyhow!(
                 "album gain source format is unqualified"
             ))
         })?;
+    if admitted_suffix != Some(suffix.as_str()) {
+        return Err(PlaybackPipelineError::source(anyhow::anyhow!(
+            "resolved format differs from admitted album representation"
+        )));
+    }
     if representation
         .container
         .as_deref()
@@ -594,7 +600,7 @@ fn qualified_gain_suffix(
             })
         })
     {
-        return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
+        return Err(PlaybackPipelineError::source(anyhow::anyhow!(
             "resolved container contradicts frozen album gain policy"
         )));
     }
@@ -724,8 +730,12 @@ impl AudioEngine {
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
         let gain = f32::from_bits(candidate.gain_bits);
-        let qualified_suffix =
-            qualified_gain_suffix(gain, description.song.suffix.as_deref(), &representation)?;
+        let qualified_suffix = qualified_gain_suffix(
+            gain,
+            description.song.suffix.as_deref(),
+            candidate.qualified_suffix.as_deref(),
+            &representation,
+        )?;
         let representation_name = representation_name(&representation);
         let hint = decoder_hint(&representation);
         let seek_mechanism = representation
@@ -1024,6 +1034,7 @@ impl AudioEngine {
             deadline,
             expected_epoch,
             1.0,
+            None,
         )
         .await
     }
@@ -1039,6 +1050,7 @@ impl AudioEngine {
         deadline: std::time::Instant,
         expected_epoch: u64,
         gain: f32,
+        admitted_suffix: Option<String>,
     ) -> Result<(), PlaybackPipelineError> {
         self.start_at_epoch_kind(
             description,
@@ -1049,6 +1061,7 @@ impl AudioEngine {
             deadline,
             expected_epoch,
             gain,
+            admitted_suffix,
             None,
         )
         .await
@@ -1066,6 +1079,7 @@ impl AudioEngine {
         deadline: std::time::Instant,
         expected_epoch: u64,
         gain: f32,
+        admitted_suffix: Option<String>,
     ) -> Result<(), PlaybackPipelineError> {
         self.start_at_epoch_kind(
             description,
@@ -1076,6 +1090,7 @@ impl AudioEngine {
             deadline,
             expected_epoch,
             gain,
+            admitted_suffix,
             Some(operation_id),
         )
         .await
@@ -1092,6 +1107,7 @@ impl AudioEngine {
         deadline: std::time::Instant,
         expected_epoch: u64,
         gain: f32,
+        admitted_suffix: Option<String>,
         seek_operation_id: Option<String>,
     ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
@@ -1138,8 +1154,12 @@ impl AudioEngine {
         require_preparation_epoch(&session, expected_epoch)?;
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
-        let qualified_suffix =
-            qualified_gain_suffix(gain, description.song.suffix.as_deref(), &representation)?;
+        let qualified_suffix = qualified_gain_suffix(
+            gain,
+            description.song.suffix.as_deref(),
+            admitted_suffix.as_deref(),
+            &representation,
+        )?;
         let seek_mechanism = representation
             .seek_mechanism
             .filter(|_| representation.request.range_supported && duration_ms > 0);
@@ -2793,16 +2813,42 @@ mod tests {
             "https://music.example/original",
         );
         assert_eq!(
-            qualified_gain_suffix(0.75, Some("FLAC"), &original).unwrap(),
+            qualified_gain_suffix(0.75, Some("FLAC"), Some("flac"), &original).unwrap(),
             Some("flac".into())
         );
-        assert!(qualified_gain_suffix(0.75, Some("mp3"), &original).is_err());
+        assert!(qualified_gain_suffix(0.75, Some("mp3"), Some("flac"), &original).is_err());
         let mut alternative = original;
         alternative.provenance = PlaybackProvenance::Alternative;
-        assert!(qualified_gain_suffix(0.75, Some("flac"), &alternative).is_err());
+        assert!(qualified_gain_suffix(0.75, Some("flac"), Some("flac"), &alternative).is_err());
         assert_eq!(
-            qualified_gain_suffix(1.0, Some("opus"), &alternative).unwrap(),
+            qualified_gain_suffix(1.0, Some("opus"), None, &alternative).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn changed_or_missing_admitted_format_is_a_retryable_preparation_error() {
+        let original = representation(
+            Some("audio/mpeg"),
+            Some("mp3"),
+            "https://music.example/original",
+        );
+        for admitted in [Some("flac"), None] {
+            let error = qualified_gain_suffix(0.75, Some("mp3"), admitted, &original).unwrap_err();
+            assert!(error.retryable);
+            assert_eq!(error.code, "SOURCE_UNAVAILABLE");
+        }
+        let mut alternative = original;
+        alternative.provenance = PlaybackProvenance::Alternative;
+        assert!(
+            qualified_gain_suffix(0.75, Some("mp3"), Some("mp3"), &alternative)
+                .unwrap_err()
+                .retryable
+        );
+        assert!(
+            qualified_gain_suffix(0.75, Some("opus"), Some("mp3"), &alternative)
+                .unwrap_err()
+                .retryable
         );
     }
 

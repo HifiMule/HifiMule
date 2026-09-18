@@ -81,7 +81,7 @@ fn frozen_album_gain_follows_members_but_not_appended_occurrences() {
     };
     let committed = owner
         .0
-        .commit_album_with_policy(reservation, sources(2), policy)
+        .commit_album_with_policy(reservation, sources(2), policy, vec!["flac".into(); 2])
         .unwrap();
     assert_eq!(f32::from_bits(committed.gain_bits), 0.75);
     let originals = committed.occurrences.clone();
@@ -462,4 +462,305 @@ async fn shutdown_cancels_pending_reservation_and_releases_mutation_guard() {
         0
     );
     assert!(owner.0.inner.lock().unwrap().album.pending.is_none());
+}
+
+fn gain_transport(s: &SessionSnapshot, action: ControlAction) -> ControlParams {
+    ControlParams {
+        schema_version: 1,
+        instance_id: s.instance_id.clone(),
+        session_id: s.session_id.clone(),
+        command_id: Uuid::new_v4().to_string(),
+        expected_generation_id: s.generation_id.clone(),
+        occurrence_id: s.current.as_ref().unwrap().occurrence_id.clone(),
+        action,
+    }
+}
+
+#[test]
+fn frozen_gain_survives_transport_seek_failures_and_restore_retry() {
+    let owner = Owner::new();
+    let reservation = resolve(&owner.0, request(&owner.0.snapshot().unwrap()));
+    let policy = crate::playback::loudness::AlbumLoudnessPolicy {
+        version: 1,
+        scalar_bits: 0.75f32.to_bits(),
+        gain_db_bits: Some(0.0f64.to_bits()),
+        peak_bits: Some((crate::playback::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+        reason: crate::playback::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+    };
+    owner
+        .0
+        .commit_album_with_policy(
+            reservation,
+            sources(2),
+            policy,
+            vec!["flac".into(), "mp3".into()],
+        )
+        .unwrap();
+    let assert_gain = |s: &SessionSnapshot, suffix: &str| {
+        assert_eq!(s.gain_bits, policy.scalar_bits);
+        assert_eq!(s.qualified_suffix.as_deref(), Some(suffix));
+    };
+    for action in [
+        ControlAction::Pause,
+        ControlAction::Pause,
+        ControlAction::Resume,
+    ] {
+        let before = owner.0.snapshot().unwrap();
+        let after = owner
+            .0
+            .control_with_guard(gain_transport(&before, action), None)
+            .unwrap();
+        assert_gain(&after, "flac");
+    }
+    for code in ["SOURCE_UNAVAILABLE", "OUTPUT_LOST"] {
+        let before = owner.0.snapshot().unwrap();
+        owner.0.publish_event(
+            before.generation_id,
+            PlaybackEvent::Failed {
+                code: code.into(),
+                retryable: true,
+            },
+        );
+        let failed = owner.0.snapshot().unwrap();
+        assert_gain(&failed, "flac");
+        let retried = owner
+            .0
+            .control_with_guard(gain_transport(&failed, ControlAction::Retry), None)
+            .unwrap();
+        assert_gain(&retried, "flac");
+        assert!(retried.resume_audio);
+    }
+    let before = owner.0.snapshot().unwrap();
+    owner.0.publish_event(
+        before.generation_id.clone(),
+        PlaybackEvent::Resolved {
+            metadata: PlaybackTrackMetadata {
+                source: before.current.as_ref().unwrap().source.clone(),
+                title: "fixture".into(),
+                artist: None,
+                album: None,
+            },
+            duration_ms: Some(10_000),
+            representation: "flac".into(),
+            seek: SeekCapability::jellyfin_pcm_wav(),
+        },
+    );
+    let qualified = owner.0.snapshot().unwrap();
+    let operation_id = Uuid::new_v4().to_string();
+    let sought = owner
+        .0
+        .seek_with_guard(
+            SeekParams {
+                schema_version: 1,
+                instance_id: qualified.instance_id,
+                session_id: qualified.session_id,
+                command_id: operation_id.clone(),
+                expected_generation_id: qualified.generation_id,
+                occurrence_id: qualified.current.unwrap().occurrence_id,
+                position_ms: 3000,
+            },
+            None,
+        )
+        .unwrap();
+    assert_gain(&sought, "flac");
+    owner.0.publish_event_at_epoch(
+        sought.generation_id,
+        PlaybackEvent::SeekCommitted {
+            operation_id,
+            requested_position_ms: 3000,
+            actual_position_ms: 3000,
+        },
+        sought.seek_epoch,
+    );
+    let current = owner.0.snapshot().unwrap();
+    assert_gain(&current, "flac");
+    let next = owner
+        .0
+        .control_with_guard(gain_transport(&current, ControlAction::Next), None)
+        .unwrap();
+    assert_gain(&next, "mp3");
+    let db = owner.0.inner.lock().unwrap().db.clone();
+    owner.0.stop_and_join().unwrap();
+    let restored = PlaybackSession::restore(db.clone(), Uuid::new_v4().to_string());
+    let paused = restored.snapshot().unwrap();
+    assert_eq!(paused.state, TransportState::Paused);
+    assert_gain(&paused, "mp3");
+    restored.stop_and_join().unwrap();
+    // Older non-unity records lack representation evidence: retain the data and
+    // expose recoverable restoration failure, never guess a new baseline.
+    let saved = db.load_playback_session().unwrap().unwrap();
+    let original_json: String = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT album_context_json FROM playback_sessions",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&original_json).unwrap();
+    legacy.as_object_mut().unwrap().remove("representations");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE playback_sessions SET album_context_json=?1",
+            [legacy.to_string()],
+        )
+        .unwrap();
+    let recovery = PlaybackSession::restore(db.clone(), Uuid::new_v4().to_string());
+    assert_eq!(recovery.snapshot().unwrap().restoration.status, "error");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE playback_sessions SET album_context_json=?1",
+            [original_json],
+        )
+        .unwrap();
+    let recovered = recovery.retry_restore().unwrap();
+    assert_eq!(recovered.state, TransportState::Paused);
+    assert_eq!(recovered.position_ms, saved.position_ms);
+    assert_gain(&recovered, "mp3");
+    recovery.stop_and_join().unwrap();
+}
+
+#[test]
+fn next_into_appended_nonmember_dispatches_unity_not_predecessor_gain() {
+    let owner = Owner::new();
+    let reservation = resolve(&owner.0, request(&owner.0.snapshot().unwrap()));
+    let policy = crate::playback::loudness::AlbumLoudnessPolicy {
+        version: 1,
+        scalar_bits: 0.75f32.to_bits(),
+        gain_db_bits: Some(0.0f64.to_bits()),
+        peak_bits: Some((crate::playback::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+        reason: crate::playback::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+    };
+    let initial = owner
+        .0
+        .commit_album_with_policy(reservation, sources(1), policy, vec!["flac".into()])
+        .unwrap();
+    owner
+        .0
+        .apply(ApplySessionParams {
+            schema_version: 1,
+            instance_id: initial.instance_id,
+            session_id: initial.session_id,
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: initial.queue_revision,
+            operation: SessionOperation::AppendQueue {
+                sources: sources(1),
+            },
+        })
+        .unwrap();
+    let before = owner.0.snapshot().unwrap();
+    let candidate = owner
+        .0
+        .successor_candidate(&before.generation_id, before.resume_epoch)
+        .unwrap();
+    assert_eq!(candidate.gain_bits, 1.0f32.to_bits());
+    assert_eq!(candidate.qualified_suffix, None);
+    let next = owner
+        .0
+        .control_with_guard(gain_transport(&before, ControlAction::Next), None)
+        .unwrap();
+    assert!(next.resume_audio);
+    assert_eq!(next.gain_bits, 1.0f32.to_bits());
+    assert_eq!(next.qualified_suffix, None);
+    assert_eq!(next.current.as_ref().unwrap().ordinal, 1);
+}
+
+#[test]
+fn non_unity_handoff_and_storage_retry_preserve_frozen_member_policy() {
+    let owner = Owner::new();
+    let reservation = resolve(&owner.0, request(&owner.0.snapshot().unwrap()));
+    let policy = crate::playback::loudness::AlbumLoudnessPolicy {
+        version: 1,
+        scalar_bits: 0.75f32.to_bits(),
+        gain_db_bits: Some(0.0f64.to_bits()),
+        peak_bits: Some((crate::playback::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+        reason: crate::playback::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+    };
+    let initial = owner
+        .0
+        .commit_album_with_policy(
+            reservation,
+            sources(3),
+            policy,
+            vec!["flac".into(), "mp3".into(), "wav".into()],
+        )
+        .unwrap();
+    let candidate = owner
+        .0
+        .successor_candidate(&initial.generation_id, initial.resume_epoch)
+        .unwrap();
+    let token = crate::playback::continuity::HandoffToken {
+        instance_id: candidate.instance_id,
+        session_id: candidate.session_id,
+        predecessor_occurrence_id: candidate.predecessor_occurrence_id,
+        successor_occurrence_id: candidate.successor.occurrence_id,
+        queue_revision: candidate.queue_revision,
+        control_epoch: candidate.control_epoch,
+        preparation_generation: candidate.preparation_generation,
+        output_epoch: 9,
+    };
+    let event = PlaybackEvent::HandoffPresented {
+        token,
+        metadata: PlaybackTrackMetadata {
+            source: candidate.successor.source,
+            title: "second".into(),
+            artist: None,
+            album: None,
+        },
+        duration_ms: 10_000,
+        representation: "mp3".into(),
+        successor_offset_frames: 1200,
+        sample_rate: 48_000,
+        seek: SeekCapability::jellyfin_pcm_wav(),
+    };
+    owner
+        .0
+        .publish_event(initial.generation_id.clone(), event.clone());
+    let adopted = owner.0.snapshot().unwrap();
+    assert_eq!(adopted.current.as_ref().unwrap().ordinal, 1);
+    assert_eq!(adopted.generation_id, initial.generation_id);
+    assert_eq!(adopted.position_ms, 25);
+    assert_eq!(adopted.gain_bits, policy.scalar_bits);
+    assert_eq!(adopted.qualified_suffix.as_deref(), Some("mp3"));
+    owner.0.publish_event(initial.generation_id, event);
+    assert_eq!(owner.0.snapshot().unwrap().current, adopted.current);
+    let db = owner.0.inner.lock().unwrap().db.clone();
+    db.conn.lock().unwrap().execute_batch("CREATE TRIGGER gain_rollback BEFORE UPDATE ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+    assert!(replace(&owner.0, Uuid::new_v4().to_string()).is_err());
+    let unchanged = owner.0.snapshot().unwrap();
+    assert_eq!(unchanged.gain_bits, policy.scalar_bits);
+    assert_eq!(unchanged.current, adopted.current);
+    assert!(
+        owner
+            .0
+            .control_with_guard(gain_transport(&unchanged, ControlAction::Next), None)
+            .is_err()
+    );
+    let failed = owner.0.snapshot().unwrap();
+    assert_eq!(failed.gain_bits, policy.scalar_bits);
+    assert_eq!(failed.qualified_suffix.as_deref(), Some("mp3"));
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER gain_rollback")
+        .unwrap();
+    let recovered = owner
+        .0
+        .control_with_guard(gain_transport(&failed, ControlAction::Retry), None)
+        .unwrap();
+    assert_eq!(recovered.current.as_ref().unwrap().ordinal, 2);
+    assert_eq!(recovered.state, TransportState::Paused);
+    assert!(!recovered.resume_audio);
+    assert_eq!(recovered.gain_bits, policy.scalar_bits);
+    assert_eq!(recovered.qualified_suffix.as_deref(), Some("wav"));
+    replace(&owner.0, Uuid::new_v4().to_string()).unwrap();
+    let replaced = owner.0.snapshot().unwrap();
+    assert_eq!(replaced.gain_bits, 1.0f32.to_bits());
+    assert_eq!(replaced.qualified_suffix, None);
 }

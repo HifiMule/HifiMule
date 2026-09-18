@@ -897,8 +897,8 @@ async fn handle_playback_play_album(
     params: Option<Value>,
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
-    use crate::playback::album::{AlbumValidationError, order_album_tracks};
-    use crate::playback::model::{PlayAlbumParams, TrackSource};
+    use crate::playback::album::{AlbumValidationError, prepare_album};
+    use crate::playback::model::PlayAlbumParams;
     use crate::playback::session::AlbumAdmission;
 
     let p =
@@ -921,8 +921,7 @@ async fn handle_playback_play_album(
         AlbumAdmission::Resolve(reservation) => reservation,
     };
     let album = resolve_playback_album(state, &p.source, &reservation).await?;
-    let policy = crate::playback::loudness::resolve_album_policy(&album);
-    let tracks = order_album_tracks(album.tracks).map_err(|error| {
+    let plan = prepare_album(album, &p.source).map_err(|error| {
         let code = match error {
             AlbumValidationError::Empty => "ALBUM_EMPTY",
             AlbumValidationError::TooLarge => "ALBUM_TOO_LARGE",
@@ -934,13 +933,6 @@ async fn handle_playback_play_album(
             data: Some(serde_json::json!({"code":code})),
         }
     })?;
-    let sources = tracks
-        .into_iter()
-        .map(|track| TrackSource {
-            server_id: p.source.server_id.clone(),
-            track_id: track.id,
-        })
-        .collect();
     let service = crate::playback::commands::PlaybackCommandService::new(
         state.playback.clone(),
         state.server_manager.clone(),
@@ -950,7 +942,12 @@ async fn handle_playback_play_album(
     let runtime = tokio::runtime::Handle::current();
     let snapshot = tokio::task::spawn_blocking(move || {
         let _runtime = runtime.enter();
-        service.commit_album_with_policy(reservation, sources, policy)
+        service.commit_album_with_policy(
+            reservation,
+            plan.sources,
+            plan.policy,
+            plan.representations,
+        )
     })
     .await
     .map_err(playback_task_error)?

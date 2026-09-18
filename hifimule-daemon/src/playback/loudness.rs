@@ -78,8 +78,13 @@ impl AlbumLoudnessPolicy {
     }
 }
 
-pub(crate) fn resolve_album_policy(album: &AlbumWithTracks) -> AlbumLoudnessPolicy {
-    if album.tracks.is_empty()
+pub(crate) fn resolve_album_policy_for(
+    album: &AlbumWithTracks,
+    requested_album: &str,
+) -> AlbumLoudnessPolicy {
+    if album.album.id != requested_album
+        || album.tracks.len() > super::album::MAX_ALBUM_OCCURRENCES
+        || album.tracks.is_empty()
         || album.album.song_count != Some(album.tracks.len() as u32)
         || album
             .tracks
@@ -89,8 +94,8 @@ pub(crate) fn resolve_album_policy(album: &AlbumWithTracks) -> AlbumLoudnessPoli
         return AlbumLoudnessPolicy::unity(AlbumLoudnessReason::IncompleteAlbum);
     }
 
-    let mut gains = Vec::with_capacity(album.tracks.len());
-    let mut peaks = Vec::with_capacity(album.tracks.len());
+    let (mut min_gain, mut max_gain) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_peak, mut max_peak) = (f64::INFINITY, f64::NEG_INFINITY);
     for track in &album.tracks {
         if !qualified_original(track.suffix.as_deref(), track.content_type.as_deref()) {
             return AlbumLoudnessPolicy::unity(AlbumLoudnessReason::UnsupportedRepresentation);
@@ -109,14 +114,17 @@ pub(crate) fn resolve_album_policy(album: &AlbumWithTracks) -> AlbumLoudnessPoli
         if !(-60.0..=30.0).contains(&gain) || !(0.0 < peak && peak <= 64.0) {
             return AlbumLoudnessPolicy::unity(AlbumLoudnessReason::MetadataRejected);
         }
-        gains.push(gain);
-        peaks.push(peak);
+        min_gain = min_gain.min(gain);
+        max_gain = max_gain.max(gain);
+        min_peak = min_peak.min(peak);
+        max_peak = max_peak.max(peak);
     }
-    let min_gain = gains.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_gain = gains.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let min_peak = peaks.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_peak = peaks.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if max_gain - min_gain > 0.01 || max_peak - min_peak > 1e-6f64.max(1e-4 * max_peak) {
+    // Allow only numerical subtraction error, not a broader metadata tolerance.
+    let gain_roundoff = f64::EPSILON * min_gain.abs().max(max_gain.abs()).max(1.0) * 4.0;
+    let peak_roundoff = f64::EPSILON * max_peak.max(1.0) * 4.0;
+    if max_gain - min_gain > 0.01 + gain_roundoff
+        || max_peak - min_peak > 1e-6f64.max(1e-4 * max_peak) + peak_roundoff
+    {
         return AlbumLoudnessPolicy::unity(AlbumLoudnessReason::InconsistentEvidence);
     }
 
@@ -145,7 +153,7 @@ fn effective_scalar(gain_db: f64, peak: f64) -> Option<f32> {
     Some(scalar)
 }
 
-fn qualified_original(suffix: Option<&str>, content_type: Option<&str>) -> bool {
+pub(crate) fn qualified_original(suffix: Option<&str>, content_type: Option<&str>) -> bool {
     let Some(suffix) = suffix.map(str::trim).filter(|value| !value.is_empty()) else {
         return false;
     };
@@ -172,6 +180,10 @@ fn qualified_original(suffix: Option<&str>, content_type: Option<&str>) -> bool 
 mod tests {
     use super::*;
     use crate::domain::models::{Album, Song};
+
+    fn resolve_album_policy(album: &AlbumWithTracks) -> AlbumLoudnessPolicy {
+        resolve_album_policy_for(album, "album")
+    }
 
     fn song(id: &str, gain: AlbumLoudnessEvidence, suffix: &str) -> Song {
         Song {
@@ -328,6 +340,41 @@ mod tests {
             ),
         ]));
         assert_eq!(rejected.reason, AlbumLoudnessReason::InconsistentEvidence);
+    }
+
+    #[test]
+    fn rejects_wrong_requested_identity_and_oversized_evidence() {
+        let row = song("x", AlbumLoudnessEvidence::open_subsonic(6.0, 0.5), "flac");
+        assert_eq!(
+            resolve_album_policy_for(&album(vec![row.clone()]), "other").reason,
+            AlbumLoudnessReason::IncompleteAlbum
+        );
+        let oversized = album(vec![row; super::super::album::MAX_ALBUM_OCCURRENCES + 1]);
+        assert_eq!(
+            resolve_album_policy(&oversized).reason,
+            AlbumLoudnessReason::IncompleteAlbum
+        );
+    }
+
+    #[test]
+    fn decimal_gain_boundary_accepts_roundoff_but_rejects_real_excess() {
+        for base in [-59.0, -1.01, 0.0, 1.0, 29.0] {
+            for (delta, accepted) in [(0.009999999, true), (0.01, true), (0.010000001, false)] {
+                let result = resolve_album_policy(&album(vec![
+                    song("a", AlbumLoudnessEvidence::open_subsonic(base, 0.5), "flac"),
+                    song(
+                        "b",
+                        AlbumLoudnessEvidence::open_subsonic(base + delta, 0.5),
+                        "flac",
+                    ),
+                ]));
+                assert_eq!(
+                    result.reason == AlbumLoudnessReason::OpenSubsonicReplayGain,
+                    accepted,
+                    "base={base}, delta={delta}"
+                );
+            }
+        }
     }
 
     #[test]

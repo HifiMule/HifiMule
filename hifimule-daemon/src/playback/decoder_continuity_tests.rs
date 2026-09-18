@@ -554,3 +554,319 @@ fn continuity_missing_or_unrecognized_mp3_padding_is_not_guessed() {
         );
     }
 }
+
+fn production_gain(
+    path: &Path,
+    rate: u32,
+    channels: u16,
+    start_frame: u64,
+    gain: f32,
+    suffix: &str,
+) -> Vec<f32> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let reader = BoundedHttpReader::from_source(
+        std::fs::File::open(path).unwrap(),
+        cancel.clone(),
+        Arc::new(AtomicU64::new(0)),
+    );
+    let pcm = Arc::new(ArrayQueue::new(4096));
+    let done = Arc::new(AtomicBool::new(false));
+    let drain = pcm.clone();
+    let finished = done.clone();
+    let consumer = std::thread::spawn(move || {
+        let mut samples = Vec::new();
+        while !finished.load(Ordering::Acquire) || !drain.is_empty() {
+            if let Some(sample) = drain.pop() {
+                samples.push(sample);
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        samples
+    });
+    let result = decode_stream_with_seek_and_gain(
+        reader,
+        path.file_name().and_then(|v| v.to_str()),
+        rate,
+        channels,
+        start_frame,
+        None,
+        false,
+        None,
+        None,
+        None,
+        gain,
+        Some(suffix),
+        pcm,
+        cancel,
+    );
+    done.store(true, Ordering::Release);
+    let samples = consumer.join().unwrap();
+    assert_eq!(
+        result.unwrap().emitted_frames * u64::from(channels),
+        samples.len() as u64
+    );
+    samples
+}
+
+// Exercise the actual adapter and admission plan, file-backed persistence, both
+// occurrence preparations, production decode and native boundary/replay consumer.
+// This is digital evidence; it does not claim physical output or device coverage.
+#[tokio::test]
+async fn album_gain_adapter_admission_restart_decode_boundary_and_replay() {
+    use crate::playback::{
+        PlaybackSession,
+        album::prepare_album,
+        model::*,
+        output::{SubmittedFrame, SubmittedTail},
+        session::AlbumAdmission,
+    };
+    use crate::providers::{
+        CredentialKind, MediaProvider, ProviderCredentials, subsonic::SubsonicProvider,
+    };
+    use uuid::Uuid;
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    let mut references = Vec::new();
+    for (index, amplitude) in [8192i16, 16384].into_iter().enumerate() {
+        let input = dir.path().join(format!("{index}.wav"));
+        let samples: Vec<i16> = (0..4003)
+            .flat_map(|frame| {
+                let v = match frame % 4 {
+                    0 => 0,
+                    1 => amplitude,
+                    2 => -amplitude,
+                    _ => 0,
+                };
+                [v, v]
+            })
+            .collect();
+        wav(&input, 48_000, 2, &samples);
+        references.push(
+            samples
+                .iter()
+                .map(|&v| f32::from(v) / 32768.0)
+                .collect::<Vec<_>>(),
+        );
+        let output = dir.path().join(format!("{index}.flac"));
+        let result = Command::new(reference_cli())
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&input)
+            .args([
+                "-c:a",
+                "flac",
+                "-metadata",
+                "REPLAYGAIN_ALBUM_GAIN=20 dB",
+                "-metadata",
+                "REPLAYGAIN_TRACK_GAIN=-40 dB",
+                "-metadata",
+                "REPLAYGAIN_ALBUM_PEAK=10",
+            ])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        files.push(output);
+    }
+    for gain_db in [-6.0f64, 0.0, 6.0] {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server.mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::Any)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"subsonic-response": {"status":"ok", "openSubsonic":true,
+                "album":{"id":"album", "name":"Album", "songCount":2,
+                    "song":[
+                        {"id":"loud", "title":"Loud", "albumId":"album", "track":2, "suffix":"flac",
+                         "replayGain":{"albumGain":gain_db, "albumPeak":0.5}},
+                        {"id":"quiet", "title":"Quiet", "albumId":"album", "track":1, "suffix":"flac",
+                         "replayGain":{"albumGain":gain_db, "albumPeak":0.5}}
+                    ]}}}).to_string()).create_async().await;
+        let provider = SubsonicProvider::from_stored_config(
+            ProviderCredentials {
+                server_url: server.url(),
+                credential: CredentialKind::Password {
+                    username: "fixture".into(),
+                    password: "fixture".into(),
+                },
+            },
+            true,
+            None,
+        )
+        .unwrap();
+        let source = AlbumSource {
+            server_id: "server".into(),
+            album_id: "album".into(),
+        };
+        let plan = prepare_album(provider.get_album("album").await.unwrap(), &source).unwrap();
+        mock.assert_async().await;
+        let expected_scalar = 10f64
+            .powf(gain_db / 20.0)
+            .min(10f64.powf(-1.0 / 20.0) / 0.5);
+        assert!((f64::from(plan.policy.scalar()) - expected_scalar).abs() < 1e-7);
+        let db_path = dir.path().join(format!("{gain_db}.sqlite"));
+        let db = Arc::new(crate::db::Database::new(db_path.clone()).unwrap());
+        let owner = PlaybackSession::restore(db.clone(), Uuid::new_v4().to_string());
+        let before = owner.snapshot().unwrap();
+        let admission = owner
+            .reserve_album(
+                PlayAlbumParams {
+                    schema_version: 1,
+                    instance_id: before.instance_id,
+                    session_id: before.session_id,
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_queue_revision: before.queue_revision,
+                    expected_generation_id: before.generation_id,
+                    source,
+                },
+                None,
+            )
+            .unwrap();
+        let AlbumAdmission::Resolve(reservation) = admission else {
+            panic!("fresh album");
+        };
+        let initial = owner
+            .commit_album_with_policy(reservation, plan.sources, plan.policy, plan.representations)
+            .unwrap();
+        assert_eq!(initial.current.as_ref().unwrap().source.track_id, "quiet");
+        let candidate = owner
+            .successor_candidate(&initial.generation_id, initial.resume_epoch)
+            .unwrap();
+        assert_eq!(candidate.successor.source.track_id, "loud");
+        assert_eq!(candidate.gain_bits, initial.gain_bits);
+        owner.stop_and_join().unwrap();
+        drop(owner);
+        drop(db);
+        let db = Arc::new(crate::db::Database::new(db_path).unwrap());
+        let restored = PlaybackSession::restore(db, Uuid::new_v4().to_string());
+        let snapshot = restored.snapshot().unwrap();
+        assert_eq!(snapshot.state, TransportState::Paused);
+        assert_eq!(snapshot.gain_bits, initial.gain_bits);
+        assert_eq!(snapshot.qualified_suffix, initial.qualified_suffix);
+        let gain = f32::from_bits(snapshot.gain_bits);
+        let decoded: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                let bits = if index == 0 {
+                    snapshot.gain_bits
+                } else {
+                    candidate.gain_bits
+                };
+                let actual = production_gain(file, 48_000, 2, 0, f32::from_bits(bits), "flac");
+                let expected: Vec<_> = references[index]
+                    .iter()
+                    .map(|&v| (f64::from(v) * expected_scalar) as f32)
+                    .collect();
+                assert_samples(
+                    &actual,
+                    &expected,
+                    "admitted FLAC gain with conflicting embedded tags",
+                );
+                assert!(
+                    actual
+                        .iter()
+                        .all(|v| v.abs() <= 10f32.powf(-1.0 / 20.0) + 2e-6)
+                );
+                let sought = production_gain(file, 48_000, 2, 123, gain, "flac");
+                assert_samples(&sought, &actual[246..], "non-unity seek discard");
+                actual
+            })
+            .collect();
+        assert!((decoded[1][2] / decoded[0][2] - 2.0).abs() < 1e-6);
+        let expected = [decoded[0].as_slice(), decoded[1].as_slice()].concat();
+        assert_samples(
+            &join_at_boundary(&decoded[0], &decoded[1], 2),
+            &expected,
+            "frozen album boundary",
+        );
+        let qa = ArrayQueue::new(decoded[0].len());
+        let qb = ArrayQueue::new(decoded[1].len());
+        for &v in &decoded[0] {
+            qa.push(v).unwrap();
+        }
+        for &v in &decoded[1] {
+            qb.push(v).unwrap();
+        }
+        let replay = ArrayQueue::<SubmittedFrame>::new(16);
+        let tail = SubmittedTail::new(16);
+        let mut consumer = BoundaryPcmConsumer::new(2, 2);
+        let mut first = vec![0.0; decoded[0].len() + 8];
+        let rendered = consumer.render_with_tail(
+            &mut first, &qa, true, true, &qb, true, true, &replay, &tail, true,
+        );
+        assert_eq!(rendered.boundary_frame, Some(decoded[0].len() / 2));
+        assert_eq!(first, expected[..first.len()]);
+        tail.reconcile(4, &replay).unwrap();
+        let mut paused = [1.0; 2];
+        consumer.render_with_tail(
+            &mut paused,
+            &qa,
+            true,
+            true,
+            &qb,
+            true,
+            true,
+            &replay,
+            &tail,
+            false,
+        );
+        assert_eq!(paused, [0.0; 2]);
+        let mut partial = [0.0; 2];
+        consumer.render_with_tail(
+            &mut partial,
+            &qa,
+            true,
+            true,
+            &qb,
+            true,
+            true,
+            &replay,
+            &tail,
+            true,
+        );
+        assert_eq!(partial, decoded[1][..2]);
+        // Pause again before the just-resubmitted frame is played.
+        tail.reconcile(1, &replay).unwrap();
+        let mut resumed = [0.0; 8];
+        consumer.render_with_tail(
+            &mut resumed,
+            &qa,
+            true,
+            true,
+            &qb,
+            true,
+            true,
+            &replay,
+            &tail,
+            true,
+        );
+        assert_eq!(
+            resumed,
+            decoded[1][..8],
+            "replay retains one multiplication, never gain squared"
+        );
+        restored.stop_and_join().unwrap();
+    }
+}
+
+#[test]
+fn album_gain_converted_tails_match_independent_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    for (rate, channels) in [(44_100, 1), (48_000, 2)] {
+        let path = dir.path().join(format!("{rate}.wav"));
+        wav(&path, rate, channels, &marked_samples(4003, channels));
+        for (out_rate, out_channels) in [(48_000, 2), (44_100, 1)] {
+            let independent = reference(&path, out_rate, out_channels);
+            for gain in [0.5, 1.5] {
+                let actual = production_gain(&path, out_rate, out_channels, 0, gain, "wav");
+                let expected: Vec<_> = independent.iter().map(|v| v * gain).collect();
+                assert_samples(&actual, &expected, "gain after conversion including drain");
+                eprintln!(
+                    "gain conversion {rate}/{channels} -> {out_rate}/{out_channels}: frames={}, peak={}",
+                    actual.len() / usize::from(out_channels),
+                    actual.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+                );
+            }
+        }
+    }
+}

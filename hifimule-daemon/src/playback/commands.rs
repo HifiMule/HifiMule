@@ -95,10 +95,14 @@ impl PlaybackCommandService {
         reservation: super::session::AlbumReservation,
         sources: Vec<super::model::TrackSource>,
         policy: super::loudness::AlbumLoudnessPolicy,
+        representations: Vec<String>,
     ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
-        let snapshot = self
-            .playback
-            .commit_album_with_policy(reservation, sources, policy)?;
+        let snapshot = self.playback.commit_album_with_policy(
+            reservation,
+            sources,
+            policy,
+            representations,
+        )?;
         self.dispatch_effect(&snapshot);
         Ok(snapshot)
     }
@@ -128,6 +132,7 @@ impl PlaybackCommandService {
         let position_ms = snapshot.position_ms;
         let resume_epoch = snapshot.resume_epoch;
         let gain = f32::from_bits(snapshot.gain_bits);
+        let admitted_suffix = snapshot.qualified_suffix.clone();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -163,6 +168,7 @@ impl PlaybackCommandService {
                         deadline,
                         resume_epoch,
                         gain,
+                        admitted_suffix,
                     )
                     .await
                     .err(),
@@ -244,6 +250,7 @@ impl PlaybackCommandService {
         let generation = snapshot.generation_id.clone();
         let seek_epoch = snapshot.seek_epoch;
         let gain = f32::from_bits(snapshot.gain_bits);
+        let admitted_suffix = snapshot.qualified_suffix.clone();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -280,6 +287,7 @@ impl PlaybackCommandService {
                         deadline,
                         seek_epoch,
                         gain,
+                        admitted_suffix,
                     )
                     .await
                     .err(),

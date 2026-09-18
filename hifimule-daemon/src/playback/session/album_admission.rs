@@ -82,6 +82,7 @@ impl PlaybackSession {
             super::super::loudness::AlbumLoudnessPolicy::unity(
                 super::super::loudness::AlbumLoudnessReason::MetadataAbsent,
             ),
+            Vec::new(),
         )
     }
 
@@ -90,10 +91,17 @@ impl PlaybackSession {
         reservation: AlbumReservation,
         sources: Vec<TrackSource>,
         policy: super::super::loudness::AlbumLoudnessPolicy,
+        representations: Vec<String>,
     ) -> PResult<SessionSnapshot> {
         let (tx, rx) = mpsc::channel();
         self.command_tx
-            .try_send(OwnerCommand::CommitAlbum(reservation, sources, policy, tx))
+            .try_send(OwnerCommand::CommitAlbum(
+                reservation,
+                sources,
+                policy,
+                representations,
+                tx,
+            ))
             .map_err(admission_error)?;
         rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
@@ -247,6 +255,7 @@ pub(super) fn commit(
     reservation: AlbumReservation,
     sources: Vec<TrackSource>,
     policy: super::super::loudness::AlbumLoudnessPolicy,
+    representations: Vec<String>,
     serial: &AtomicU64,
 ) -> PResult<SessionSnapshot> {
     prune(i, false);
@@ -269,6 +278,7 @@ pub(super) fn commit(
         source: p.source.clone(),
         member_count: sources.len() as u64,
         membership_digest,
+        representations,
         policy,
     };
     let result = apply_inner_with_album_context(
@@ -308,6 +318,12 @@ pub(super) fn commit(
             .map_or(1.0, |context| context.scalar_for(occurrence))
             .to_bits()
     });
+    let current_suffix = current.as_ref().and_then(|occurrence| {
+        i.session
+            .album_context
+            .as_ref()
+            .and_then(|context| context.suffix_for(occurrence))
+    });
     let response = SessionSnapshot {
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
@@ -331,6 +347,7 @@ pub(super) fn commit(
         seek_audio: false,
         seek_epoch: i.control_epoch.load(Ordering::Acquire),
         gain_bits,
+        qualified_suffix: current_suffix,
     };
     i.album.order.push_back(p.command_id.clone());
     i.album

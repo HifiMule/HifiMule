@@ -9,6 +9,50 @@ pub enum AlbumValidationError {
     Invalid,
 }
 
+/// The same bounded admission plan is used by RPC and production-pipeline fixtures.
+pub(crate) struct AlbumPlan {
+    pub sources: Vec<super::model::TrackSource>,
+    pub policy: super::loudness::AlbumLoudnessPolicy,
+    pub representations: Vec<String>,
+}
+
+pub(crate) fn prepare_album(
+    mut album: crate::domain::models::AlbumWithTracks,
+    source: &super::model::AlbumSource,
+) -> Result<AlbumPlan, AlbumValidationError> {
+    album.tracks = order_album_tracks(album.tracks)?;
+    let policy = super::loudness::resolve_album_policy_for(&album, &source.album_id);
+    let representations = if policy.scalar() != 1.0 {
+        album
+            .tracks
+            .iter()
+            .map(|song| {
+                song.suffix
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let sources = album
+        .tracks
+        .into_iter()
+        .map(|song| super::model::TrackSource {
+            server_id: source.server_id.clone(),
+            track_id: song.id,
+        })
+        .collect();
+    Ok(AlbumPlan {
+        sources,
+        policy,
+        representations,
+    })
+}
+
 /// Validates and deterministically orders a complete provider album without
 /// deduplicating deliberate repeated occurrences.
 pub fn order_album_tracks(mut tracks: Vec<Song>) -> Result<Vec<Song>, AlbumValidationError> {

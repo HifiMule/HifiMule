@@ -81,6 +81,7 @@ enum OwnerCommand {
         AlbumReservation,
         Vec<TrackSource>,
         super::loudness::AlbumLoudnessPolicy,
+        Vec<String>,
         mpsc::Sender<PResult<SessionSnapshot>>,
     ),
     ListOutputs(ListOutputsParams, mpsc::Sender<PResult<OutputList>>),
@@ -221,10 +222,15 @@ impl PlaybackSession {
             instance_id: inner.instance_id.clone(),
             session_id: inner.session.session_id.clone(),
             predecessor_occurrence_id: predecessor_id.clone(),
-            successor,
+            successor: successor.clone(),
             queue_revision: inner.session.queue_revision,
             control_epoch,
             preparation_generation: self.generation_serial.load(Ordering::Acquire),
+            qualified_suffix: inner
+                .session
+                .album_context
+                .as_ref()
+                .and_then(|context| context.suffix_for(&successor)),
             gain_bits,
         })
     }
@@ -958,7 +964,7 @@ fn owner_loop(
                 };
                 let _ = reply.send(with_metadata(result, &i));
             }
-            Ok(OwnerCommand::CommitAlbum(reservation, sources, policy, reply)) => {
+            Ok(OwnerCommand::CommitAlbum(reservation, sources, policy, representations, reply)) => {
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
@@ -968,6 +974,7 @@ fn owner_loop(
                         reservation,
                         sources,
                         policy,
+                        representations,
                         &generation_serial,
                     )
                 };
@@ -1296,7 +1303,7 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::ReserveAlbum(_, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
-        OwnerCommand::CommitAlbum(_, _, _, reply) => {
+        OwnerCommand::CommitAlbum(_, _, _, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::ListOutputs(_, reply) => {
@@ -1796,6 +1803,12 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
         seek_audio: false,
         seek_epoch: i.control_epoch.load(Ordering::Acquire),
+        qualified_suffix: current.as_ref().and_then(|occurrence| {
+            i.session
+                .album_context
+                .as_ref()
+                .and_then(|context| context.suffix_for(occurrence))
+        }),
         gain_bits: current
             .as_ref()
             .and_then(|occurrence| {
@@ -2894,6 +2907,26 @@ fn commit_terminal(
         if let Some(current) = response.current.as_mut() {
             current.availability = availability(&i.db, &current.source.server_id)?;
         }
+        // The projection began with the predecessor snapshot. Transport effects
+        // must use the destination occurrence's frozen policy after the commit.
+        response.gain_bits = response
+            .current
+            .as_ref()
+            .map_or(1.0f32.to_bits(), |current| {
+                terminal
+                    .session
+                    .album_context
+                    .as_ref()
+                    .map_or(1.0, |context| context.scalar_for(current))
+                    .to_bits()
+            });
+        response.qualified_suffix = response.current.as_ref().and_then(|current| {
+            terminal
+                .session
+                .album_context
+                .as_ref()
+                .and_then(|context| context.suffix_for(current))
+        });
         response.playback.can_go_next = if let Some(current) = response.current.as_ref() {
             i.db.playback_successor(&i.session.session_id, current.ordinal)
                 .map_err(storage)?

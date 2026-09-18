@@ -77,6 +77,8 @@ pub struct SessionSnapshot {
     /// Frozen occurrence gain, excluded from the public playback wire contract.
     #[serde(skip)]
     pub(crate) gain_bits: u32,
+    #[serde(skip)]
+    pub(crate) qualified_suffix: Option<String>,
     pub schema_version: u32,
     pub instance_id: String,
     pub session_id: String,
@@ -471,6 +473,8 @@ pub(crate) struct FrozenAlbumContext {
     pub source: AlbumSource,
     pub member_count: u64,
     pub membership_digest: String,
+    #[serde(default)]
+    pub representations: Vec<String>,
     pub policy: super::loudness::AlbumLoudnessPolicy,
 }
 
@@ -489,7 +493,28 @@ impl FrozenAlbumContext {
         {
             return Err("invalid album membership digest");
         }
+        if (self.policy.scalar() != 1.0 && self.representations.len() != self.member_count as usize)
+            || (self.policy.scalar() == 1.0 && !self.representations.is_empty())
+            || self
+                .representations
+                .iter()
+                .any(|suffix| !matches!(suffix.as_str(), "wav" | "flac" | "m4a" | "mp3"))
+        {
+            return Err("missing or invalid admitted representations");
+        }
         self.policy.validate()
+    }
+
+    pub(crate) fn suffix_for(&self, occurrence: &Occurrence) -> Option<String> {
+        if occurrence.source.server_id == self.source.server_id
+            && occurrence.ordinal < self.member_count
+        {
+            self.representations
+                .get(occurrence.ordinal as usize)
+                .cloned()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn scalar_for(&self, occurrence: &Occurrence) -> f32 {

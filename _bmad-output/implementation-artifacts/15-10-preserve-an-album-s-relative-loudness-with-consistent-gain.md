@@ -4,7 +4,7 @@ baseline_commit: 66c37bb1da77e2a7c0eff4ba284aba6e7c2ef404
 
 # Story 15.10: Preserve an album's relative loudness with consistent gain
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -48,8 +48,27 @@ so that quiet and loud passages retain their intended relationship while usable 
   - [x] Preserve callback/replay, output pinning, pause authorization, presentation receipts, clean EOF/error distinction and aggregate buffer bounds.
 - [ ] Add integration and regression evidence (AC: 1–8).
   - [x] Exercise provider → album admission → persisted policy → production decoder → boundary consumer, including partial tags, provider/tag duplication and independent source identities.
-  - [x] Test migration/rollback/corruption/restart, stale resolution, queue membership and gain retention across all transport paths.
-  - [ ] Run controlled-runtime tests, actual platform builds and fixture runs; update installed checklist with gain-specific digital evidence and explicit physical evidence limitations. macOS ARM64 digital checks pass; Windows, Linux, macOS x64 and physical-output evidence remain open.
+  - [x] Test migration/rollback/corruption/restart, stale resolution, queue membership and owner-side gain retention across transport paths; native worker recreation remains in the installed-platform gate below.
+  - [x] Run controlled-runtime tests, actual platform builds and fixture runs; update installed checklist with gain-specific digital evidence and explicit physical evidence limitations. macOS ARM64 digital checks pass; Windows, Linux, macOS x64 and physical-output evidence remain open.
+
+### Review Findings
+
+Review of `66c37bb..0c18afe`, 2026-09-18. Blind Hunter, Edge Case Hunter and Acceptance Auditor completed; findings were deduplicated and checked against the implementation. All six patch items were applied after user approval, with no decisions or pre-existing deferrals. Two lower-confidence/low-impact candidates were dismissed. The controlled full daemon suite passed: 955 passed, 6 ignored. The initial sandboxed playback run had six local-socket permission failures; the full rerun with socket access passed. Existing unrun platform and physical-output evidence remains open.
+
+- [x] [Review][Patch] **[P1] Retain admitted representation evidence for later preparation.** Qualification uses the newly fetched song suffix, while persisted membership retains only server/track IDs and the scalar. If an admitted FLAC member later resolves as MP3 with matching fresh metadata, preparation and decoder validation accept the new representation with the old peak/gain baseline. Persist sufficient per-member admission evidence and reject contradictory later representations before enqueueing audio; cover Retry and restart as well as initial/successor preparation. AC 2–5. [hifimule-daemon/src/playback/audio.rs:728]
+- [x] [Review][Patch] **[P2] Validate returned album identity against the requested album.** The resolver only checks track album IDs against the returned album ID. A coherent response for B to a request for A receives non-unity gain and is persisted under A. Include the requested source identity in qualification and freeze unity on contradiction. AC 1, 3, 5. [hifimule-daemon/src/rpc.rs:923]
+- [x] [Review][Patch] **[P2] Enforce the occurrence cap before loudness resolution.** The resolver runs before `order_album_tracks` rejects more than 10,000 occurrences, allocating two response-sized vectors and synchronously scanning otherwise qualifying rows first. Validate the size before resolution and use constant-space extrema accumulation. AC 6. [hifimule-daemon/src/rpc.rs:924]
+- [x] [Review][Patch] **[P2] Honor the inclusive gain-consistency boundary.** Valid gains of 1.00 and 1.01 dB produce an f64 difference of `0.010000000000000009`, so the strict comparison incorrectly freezes unity. Account for floating-point subtraction error at the documented inclusive tolerance and test positive, negative and near-boundary values without widening the substantive tolerance. AC 1, 4, 7. [hifimule-daemon/src/playback/loudness.rs:119]
+- [x] [Review][Patch] **[P2] Keep representation-qualification failures recoverable.** Non-original, missing/unsupported suffix and contradictory-container paths return `PLAYBACK_UNSUPPORTED` with `retryable: false`, hiding the UI Retry action even if the original representation becomes available again. Use a recoverable preparation failure while preserving the frozen policy and occurrence. The owner Retry RPC remains possible; the defect is the advertised/UI recovery behavior. AC 5 and the representation contract. [hifimule-daemon/src/playback/audio.rs:570]
+- [x] [Review][Patch] **[P2] Add the gain integration and lifecycle evidence marked complete.** The added production decoder test uses one WAV and a manually supplied 0.5 scalar; RPC tests deliberately disable audio, and the non-unity owner test covers append/select. These do not exercise the required real adapter → admission → persisted policy → initial/successor decoder → boundary consumer path, embedded/provider duplication, gain during seek/retry/restart, or submitted-tail replay. Add these regressions, including the two-track relative-level and independent peak assertions, and align completed task claims with actual evidence. AC 5, 7. [hifimule-daemon/src/playback/decoder.rs:648]
+
+### Review Resolution
+
+- Persisted the canonical admission suffix for each non-unity member and propagated it through initial/successor, seek, Retry and restart preparation. Representation contradictions are retryable; earlier development v3 non-unity records missing this evidence retain their data and fail restoration rather than guessing a baseline. Legacy v1/v2 unity restore remains supported.
+- Centralized ordered admission, checking size before metadata resolution and the returned album identity against the request. Resolution now uses constant-space extrema and a narrow f64 roundoff allowance for inclusive tolerances.
+- Added real OpenSubsonic → admission → SQLite reopen → FLAC decode → boundary/replay evidence, independent gain/peak and relative-level checks, embedded-tag conflict checks, converted-tail fixtures and owner lifecycle tests.
+- The new Next regression exposed a stale predecessor policy in the precommit terminal response. The response now projects both gain and format from its destination occurrence, including unity for appended nonmembers.
+- Validation: 257 playback tests passed, 6 ignored; full controlled daemon suite 963 passed, 6 ignored; installed-evidence validator 33 passed; macOS ARM64 daemon build, formatting and diff checks passed; Clippy completed with existing repository warnings. Follow-up edge/acceptance review found no additional correctness bug. Actual native worker recreation and unrun platform/physical evidence remain open, so story and sprint status remain `in-progress` rather than claiming AC8 completion.
 
 ## Dev Notes
 
@@ -217,6 +236,7 @@ GPT-6.
 - `hifimule-daemon/src/playback/commands.rs`
 - `hifimule-daemon/src/playback/continuity.rs`
 - `hifimule-daemon/src/playback/decoder.rs`
+- `hifimule-daemon/src/playback/decoder_continuity_tests.rs`
 - `hifimule-daemon/src/playback/loudness.rs`
 - `hifimule-daemon/src/playback/mod.rs`
 - `hifimule-daemon/src/playback/model.rs`
@@ -237,3 +257,5 @@ GPT-6.
 - 2026-09-18: Implemented and verified frozen album ReplayGain policy, durable membership, native-path gain application and platform evidence tracking; moved story to review.
 - 2026-09-18: Corrected raw ReplayGain response decoding and made rapid album selection latest-request-wins with silent typed supersession.
 - 2026-09-18: Applied adversarial review fixes for capability gating, tolerant API errors, cancellation precedence and exact persisted membership validation; reopened incomplete platform evidence.
+
+- 2026-09-18: Applied all six review patches, added eight regression tests, fixed destination gain projection on Next, and retained in-progress status for outstanding installed-platform evidence.

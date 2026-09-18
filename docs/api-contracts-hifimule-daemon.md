@@ -929,7 +929,12 @@ scale. The supported bounds are `albumGain ∈ [-60, +30]` and
 album membership and track count; every occurrence must contain a usable pair.
 Across occurrences, gain spread must be at most 0.01 dB and peak spread at most
 `max(1e-6, 1e-4 × maximumPeak)`. Resolution uses the minimum accepted gain and
-maximum accepted peak, so provider order cannot change the result.
+maximum accepted peak, so provider order cannot change the result. Inclusive
+boundaries allow only f64 subtraction roundoff (four machine epsilons scaled
+to the compared magnitudes). The 10,000-occurrence cap is checked before
+normalization, which computes extrema with constant additional space.
+The returned album ID must equal the requested album ID before non-unity
+qualification.
 
 The common scalar is resolved once in f64 with zero preamp:
 
@@ -951,20 +956,29 @@ The v1 qualification is OpenSubsonic metadata for original PCM-in-WAV, FLAC,
 AAC/ALAC-in-M4A and MP3. Missing or contradictory suffix/content type, Opus,
 Vorbis, WMA, an alternative/transcoded representation, and any later codec or
 container contradiction keep unity or fail preparation before non-unity audio.
-FFmpeg confirms the opened container/codec before adjusted PCM is queued. The
+Each non-unity member retains its canonical admission suffix by occurrence
+ordinal. Fresh initial, seek, retry and successor descriptions must match it;
+matching a newly reported suffix against itself is insufficient. Preparation
+contradictions report retryable `SOURCE_UNAVAILABLE`, preserving the policy and
+allowing explicit Retry. FFmpeg confirms the opened container/codec before
+adjusted PCM is queued. The
 peak claim concerns the provider's declared decoded sample domain. Resampling,
 downmix, inter-sample peaks, OS processing, interface volume and analog output
 remain outside that claim.
 
 The private persisted context contains policy version, portable server and album
-identity, original occurrence count, selected gain/peak bits, scalar bits,
+identity, original occurrence count, membership digest, ordered canonical
+member suffixes for non-unity policies, selected gain/peak bits, scalar bits,
 provenance reason and fallback reason. Queue and context commit in one SQLite
 transaction. Original members retain the policy across seek, Retry, Next,
 prepared handoff, Pause/Resume, output recreation and paused restart. Appended
 occurrences use unity; successful Clear, ReplaceQueue, PlayTrack or PlayAlbum
 replaces the context, while a failed replacement preserves the prior queue and
 policy. Corrupt or future policy records fail restoration rather than being
-reinterpreted as unity.
+reinterpreted as unity. Earlier development v3 non-unity records without
+member-format evidence also fail restoration while retaining their data; no
+format is inferred during offline restore. Legacy v1/v2 sessions and unity v3
+sessions remain restorable without member-format evidence.
 
 The worker multiplies packed f32 output once after swresample and before each
 bounded PCM insertion, including resampler drain. Exact unity bypasses the

@@ -593,6 +593,7 @@ mod tests {
             },
             member_count: 2,
             membership_digest,
+            representations: vec!["flac".into(); 2],
             policy: super::super::loudness::AlbumLoudnessPolicy {
                 version: super::super::loudness::ALBUM_LOUDNESS_POLICY_VERSION,
                 scalar_bits: 0.75f32.to_bits(),

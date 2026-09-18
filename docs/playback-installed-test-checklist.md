@@ -545,3 +545,31 @@ the target `core`/`std` artifacts and the host does not provide the matching
 native audio/FFmpeg linker environment, so neither produced a target binary.
 Windows, Linux, macOS x64, all physical-output rows and the complete installed
 gain matrix therefore remain explicitly unverified.
+
+
+Review remediation verification (2026-09-18, `0c18afe` plus the review working
+changes) added a real OpenSubsonic HTTP adapter fixture, the shared ordered
+admission plan, a file-backed SQLite reopen, frozen initial/successor policies,
+and production FLAC decode into boundary and submitted-tail consumers. Two
+4,003-frame stereo tracks at 48 kHz contain exact zeros and signed amplitudes
+of 0.25 and 0.5. Provider gains of -6, 0 and +6 dB with album peak 0.5 are checked
+against independent f64 calculations, including the +6 dB peak cap. Deliberately
+conflicting embedded ReplayGain tags do not change those samples or their 2:1
+level ratio. A seek to frame 123 retains the expected 3,880 frames; repeated
+Pause with partial replay retains the original scaled samples without a second
+multiplication. The same test reopens the database and asserts paused restore.
+
+Additional WAV fixtures cover mono/stereo conversion in both 44.1/48 kHz
+directions with gains 0.5 and 1.5, per-sample comparison to the version-matched
+FFmpeg CLI, and converted peak reporting. Owner tests cover seek, Next, presented
+handoff, duplicate presentation, source/output failure and Retry, transactional
+failure and storage Retry, restart/restore Retry, failed replacement and Next
+into an appended nonmember. The last case exposed and fixed the predecessor
+policy being copied into the destination response.
+
+Current verification: 257 playback tests passed (6 ignored), 963 full daemon
+tests passed (6 ignored), 33 installed-evidence validator tests passed, and the
+macOS ARM64 daemon built successfully. These are digital and owner-state tests;
+actual native worker recreation, physical captures, Windows/Linux runtime runs
+and macOS x64 runs remain open. Existing platform rows are not upgraded by these
+local results.

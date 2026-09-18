@@ -22,6 +22,7 @@ pub(crate) struct SuccessorCandidate {
     pub control_epoch: u64,
     pub preparation_generation: u64,
     pub gain_bits: u32,
+    pub qualified_suffix: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
