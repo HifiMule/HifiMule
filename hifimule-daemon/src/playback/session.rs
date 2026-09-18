@@ -482,6 +482,27 @@ impl PlaybackSession {
         enqueue_event(&mut events, serial, epoch, generation_id, event);
     }
 
+    /// Installed output workers already own a serial-fenced generation. Avoid
+    /// taking the owner lock while it waits for a native pause acknowledgment.
+    pub(crate) fn publish_pipeline_event(
+        &self,
+        serial: u64,
+        generation_id: String,
+        event: PlaybackEvent,
+        epoch: u64,
+    ) {
+        if self.fenced.load(Ordering::Acquire)
+            || self.generation_serial.load(Ordering::Acquire) != serial
+        {
+            return;
+        }
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if self.generation_serial.load(Ordering::Acquire) != serial {
+            return;
+        }
+        enqueue_event(&mut events, serial, epoch, generation_id, event);
+    }
+
     pub(crate) fn output_gate(&self) -> Arc<AtomicBool> {
         self.output_gate.clone()
     }
@@ -750,6 +771,11 @@ fn owner_loop(
                 &generation_serial,
                 fenced.load(Ordering::Acquire),
             );
+            let previous = i.session.current_occurrence_id.clone();
+            let _ = reconcile_presented_handoff(&mut i, &generation_serial);
+            if previous != i.session.current_occurrence_id {
+                reset_ingress(&i, &ingress);
+            }
             if i.pending_terminal
                 .as_ref()
                 .is_some_and(|pending| pending.generation_id != i.generation_id)
@@ -811,6 +837,7 @@ fn owner_loop(
                         representation,
                         successor_offset_frames,
                         sample_rate,
+                        seek,
                     } = &event
                     {
                         let _ = adopt_presented_handoff(
@@ -821,6 +848,7 @@ fn owner_loop(
                             representation.clone(),
                             *successor_offset_frames,
                             *sample_rate,
+                            seek.clone(),
                             &generation_serial,
                         );
                         reset_ingress(&i, &ingress);
@@ -1196,7 +1224,10 @@ fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<(
 
 fn refresh_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
     let mut p = ingress.lock().unwrap_or_else(|e| e.into_inner());
-    if p.generation_id != i.generation_id {
+    if p.generation_id != i.generation_id
+        || p.occurrence_id != i.session.current_occurrence_id
+        || (i.session.state == TransportState::Paused && p.position_ms > i.session.position_ms)
+    {
         reset_progress(i, &mut p);
     }
 }
@@ -1788,6 +1819,16 @@ fn control_inner(
             "session identity is stale",
         ));
     }
+    let before = i.session.current_occurrence_id.clone();
+    reconcile_presented_handoff(i, generation_serial)?;
+    let mut reconciled = p.clone();
+    if matches!(p.action, ControlAction::Pause | ControlAction::Stop)
+        && before.as_deref() == Some(p.occurrence_id.as_str())
+        && before != i.session.current_occurrence_id
+    {
+        reconciled.occurrence_id = i.session.current_occurrence_id.clone().unwrap_or_default();
+    }
+    let p = &reconciled;
     if p.expected_generation_id != i.generation_id
         || i.session.current_occurrence_id.as_deref() != Some(&p.occurrence_id)
     {
@@ -1898,7 +1939,23 @@ fn control_inner(
         i.dirty = false;
     }
     let mut committed_snapshot = None;
+    if p.action == ControlAction::Pause {
+        // Native stop/cork establishes the cancellation point before the owner
+        // changes its epoch. A matching presented receipt wins this race.
+        let before = i.session.current_occurrence_id.clone();
+        super::audio::global().control(ControlAction::Pause);
+        reconcile_presented_handoff(i, generation_serial)?;
+        if before == i.session.current_occurrence_id
+            && let Some(position) = super::audio::global().captured_position(&i.generation_id)
+        {
+            i.session.position_ms = position;
+        }
+    }
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
+    if matches!(p.action, ControlAction::Pause | ControlAction::Resume) {
+        super::audio::global()
+            .retain_control_epoch(&i.generation_id, i.control_epoch.load(Ordering::Acquire));
+    }
     i.state_sequence = i
         .state_sequence
         .checked_add(1)
@@ -1906,7 +1963,6 @@ fn control_inner(
     match p.action {
         ControlAction::Pause => {
             i.output_gate.store(false, Ordering::Release);
-            super::audio::global().control(ControlAction::Pause);
             i.session.state = TransportState::Paused;
             i.playback.status = PlaybackStatus::Paused;
         }
@@ -2040,6 +2096,7 @@ fn seek_inner(
     p: &SeekParams,
     generation_serial: &AtomicU64,
 ) -> PResult<SessionSnapshot> {
+    reconcile_presented_handoff(i, generation_serial)?;
     if i.pending_terminal.is_some() {
         return Err(PlaybackError::conflict(
             "PERSISTENCE_FAILED",
@@ -2527,6 +2584,38 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn reconcile_presented_handoff(i: &mut Inner, generation_serial: &AtomicU64) -> PResult<()> {
+    if i.pending_terminal.is_some() {
+        return Ok(());
+    }
+    if let Some(PlaybackEvent::HandoffPresented {
+        token,
+        metadata,
+        duration_ms,
+        representation,
+        successor_offset_frames,
+        sample_rate,
+        seek,
+    }) = super::audio::global().presented_handoff(&i.generation_id)
+        && i.session.current_occurrence_id.as_deref()
+            == Some(token.predecessor_occurrence_id.as_str())
+    {
+        adopt_presented_handoff(
+            i,
+            token,
+            metadata,
+            duration_ms,
+            representation,
+            successor_offset_frames,
+            sample_rate,
+            seek,
+            generation_serial,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn adopt_presented_handoff(
     i: &mut Inner,
     token: super::continuity::HandoffToken,
@@ -2535,6 +2624,7 @@ fn adopt_presented_handoff(
     representation: String,
     successor_offset_frames: u64,
     sample_rate: u32,
+    seek: SeekCapability,
     generation_serial: &AtomicU64,
 ) -> PResult<()> {
     if token.instance_id != i.instance_id
@@ -2600,7 +2690,7 @@ fn adopt_presented_handoff(
         metadata: Some(metadata),
         duration_ms: Some(duration_ms),
         representation: Some(representation),
-        seek: SeekCapability::unavailable("seek.prepared_handoff"),
+        seek,
         pending_seek: None,
         seek_outcome: None,
         error: None,
@@ -2613,6 +2703,7 @@ fn adopt_presented_handoff(
     }
     i.state_sequence = i.state_sequence.saturating_add(1);
     i.dirty = false;
+    super::audio::global().acknowledge_handoff(&i.generation_id);
     Ok(())
 }
 
@@ -3796,6 +3887,7 @@ mod tests {
             representation: "flac".into(),
             successor_offset_frames: 12_000,
             sample_rate: 48_000,
+            seek: SeekCapability::jellyfin_pcm_wav(),
         };
         playback.publish_event(applied.generation_id.clone(), event.clone());
         playback.publish_event(applied.generation_id.clone(), event);
@@ -3804,6 +3896,13 @@ mod tests {
         assert_eq!(adopted.generation_id, applied.generation_id);
         assert_eq!(adopted.current.unwrap().occurrence_id, second.occurrence_id);
         assert_eq!(adopted.position_ms, 250);
+        assert!(adopted.playback.seek.available);
+        let stored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(
+            stored.current_occurrence_id.as_deref(),
+            Some(second.occurrence_id.as_str())
+        );
+        assert_eq!(stored.position_ms, 250);
         assert_eq!(
             db.playback_outcome(&first.occurrence_id)
                 .unwrap()

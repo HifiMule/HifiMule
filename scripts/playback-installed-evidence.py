@@ -694,7 +694,7 @@ def validate_record(record: dict) -> list[str]:
 
 def validate_continuity_evidence(record: dict) -> list[str]:
     """Require measured physical captures, independently from decoder evidence."""
-    if record.get("continuityEvidenceVersion") != 1:
+    if type(record.get("continuityEvidenceVersion")) is not int or record.get("continuityEvidenceVersion") != 1:
         return ["Story 15.9 continuity evidence is missing or has an unsupported version"]
     continuity = record.get("continuity")
     rows = continuity.get("rows") if isinstance(continuity, dict) else None
@@ -708,8 +708,10 @@ def validate_continuity_evidence(record: dict) -> list[str]:
             errors.append(f"{label} is invalid")
             continue
         required_text = ("backend", "architecture", "runtime", "endpointFormat",
-                         "captureMethod", "fixtureSha256", "captureSha256")
-        if any(not isinstance(row.get(key), str) or not row[key].strip() for key in required_text):
+                         "captureMethod", "fixtureSha256", "captureSha256",
+                         "rawCapturePath", "driftAccountingMethod")
+        if any(not isinstance(row.get(key), str) or not row[key].strip() or row[key].strip().lower() == "unverified"
+               for key in required_text):
             errors.append(f"{label} has missing runtime, endpoint, fixture or capture identity")
             continue
         if not re.fullmatch(r"[0-9a-f]{64}", row["fixtureSha256"]) \
@@ -717,11 +719,13 @@ def validate_continuity_evidence(record: dict) -> list[str]:
             errors.append(f"{label} has an invalid fixture or capture hash")
         offsets = row.get("boundaryOffsetsFrames")
         sequence = row.get("occurrenceSequence")
-        if (not isinstance(offsets, list) or not offsets
-                or not all(type(value) is int and value >= 0 for value in offsets)
-                or offsets != sorted(offsets)):
+        valid_offsets = (isinstance(offsets, list) and bool(offsets)
+                         and all(type(value) is int and value >= 0 for value in offsets)
+                         and all(left < right for left, right in zip(offsets, offsets[1:])))
+        if not valid_offsets:
             errors.append(f"{label} has invalid boundary offsets")
-        if (not isinstance(sequence, list) or len(sequence) != len(offsets) + 1
+        if (not isinstance(sequence, list) or not valid_offsets
+                or len(sequence) != len(offsets) + 1
                 or not all(isinstance(value, str) and value.strip() for value in sequence)
                 or len(set(sequence)) != len(sequence)):
             errors.append(f"{label} has invalid occurrence identity sequence")
@@ -730,11 +734,28 @@ def validate_continuity_evidence(record: dict) -> list[str]:
         if any(type(row.get(key)) is not int or row[key] < 0 for key in numeric):
             errors.append(f"{label} has invalid counters")
             continue
+        # A single alignment offset applies to the entire raw capture. Per-side
+        # realignment can erase the very discontinuity this evidence measures.
+        if row.get("alignmentMethod") != "single-global-offset":
+            errors.append(f"{label} requires a single global capture alignment")
+        if type(row.get("alignmentOffsetFrames")) is not int:
+            errors.append(f"{label} has an invalid global alignment offset")
+        for key in ("timingResolutionFrames", "timingToleranceFrames", "clockDriftPpm"):
+            value = row.get(key)
+            if (type(value) not in (int, float)
+                    or (type(value) is float and not math.isfinite(value))
+                    or (key == "timingResolutionFrames" and value <= 0)
+                    or (key == "timingToleranceFrames" and value < 0)):
+                errors.append(f"{label} has invalid {key}")
+        if REMOTE_URL.search(row["rawCapturePath"]) or "\x00" in row["rawCapturePath"]:
+            errors.append(f"{label} requires a local raw capture artifact path")
         outcome = row.get("outcome")
-        if outcome not in {"passed", "unsupported"}:
+        if outcome not in ("passed", "unsupported"):
             errors.append(f"{label} has an invalid outcome")
         if outcome == "passed":
             supported += 1
+            if row.get("listeningResult") != "passed":
+                errors.append(f"{label} lacks a passing supplementary listening result")
             if (row["openCount"] != 1 or row["closeCount"] != 1
                     or row["underruns"] != 0 or row["maxGapFrames"] != 0
                     or row["missingFrames"] != 0 or row["duplicateFrames"] != 0):

@@ -106,6 +106,7 @@ pub(super) fn run_output(
     provider_duration_ms: u64,
     mut seek_commit: Option<(String, u64)>,
     boundary_pending: Arc<AtomicBool>,
+    handoff: Arc<HandoffReceipt>,
 ) -> Result<(), PlaybackPipelineError> {
     let preference = session
         .selected_output(&generation)
@@ -140,7 +141,7 @@ pub(super) fn run_output(
     });
     let decoder_seek_landing = seek_landing_frame.clone();
     let stream_failure = reader.failure_state();
-    let decoder = crate::playback::output::DecoderWorker::spawn(cancel.clone(), move || {
+    let decoder = crate::playback::output::DecoderWorker::spawn_result(cancel.clone(), move || {
         decode_stream_with_seek(
             reader,
             Some(&hint),
@@ -156,8 +157,11 @@ pub(super) fn run_output(
             decoder_cancel,
         )
     });
-    let mut consumer =
-        BoundaryPcmConsumer::new(channels as usize, rate as usize * channels as usize / 10);
+    let mut consumer = BoundaryPcmConsumer::with_gate(
+        channels as usize,
+        rate as usize * channels as usize / 10,
+        gate.clone(),
+    );
     let mut ledger = PresentationLedger::new();
     let mut scratch = vec![0f32; rate as usize * channels as usize / 100];
     let mut occurrence = session
@@ -191,13 +195,14 @@ pub(super) fn run_output(
     let mut successor_preparation = None;
     let mut successor_ready = false;
     let mut boundary_played_frame = None;
-    let mut successor_submitted_frames = 0u64;
+    let mut submitted_audio_frames = 0u64;
+    let mut boundary_audio_frame = 0u64;
     let mut handoff_published = false;
     let mut presentation_base_frames = 0u64;
-    let mut latest_presented_frames = 0u64;
     let activity_clock = std::time::Instant::now();
     let mut report_stall = || {
-        session.publish_event_at_epoch(
+        session.publish_pipeline_event(
+            expected_serial,
             generation.clone(),
             PlaybackEvent::Failed {
                 code: "OUTPUT_RETIREMENT_PENDING".into(),
@@ -206,8 +211,28 @@ pub(super) fn run_output(
             event_epoch.load(Ordering::Acquire),
         )
     };
+    let (pause_tx, pause_rx) = mpsc::sync_channel::<mpsc::SyncSender<bool>>(1);
     let result = (|| {
         loop {
+            if let Ok(reply) = pause_rx.try_recv() {
+                let result = output.pause_snapshot(&mut report_stall);
+                if let Ok(played) = result {
+                    let frames = ledger.advance(played);
+                    if boundary_played_frame.is_some_and(|boundary| played >= boundary) {
+                        handoff.pulse_presented(frames.saturating_sub(boundary_audio_frame));
+                    }
+                    position_ms.store(
+                        base_position_ms
+                            + frames
+                                .saturating_sub(presentation_base_frames)
+                                .saturating_mul(1000)
+                                / u64::from(rate),
+                        Ordering::Release,
+                    );
+                }
+                let _ = reply.send(result.is_ok());
+                result.map_err(PlaybackPipelineError::output_policy)?;
+            }
             if cancel.load(Ordering::Acquire)
                 || generation_serial.load(Ordering::Acquire) != expected_serial
             {
@@ -234,7 +259,25 @@ pub(super) fn run_output(
                     metadata,
                     representation,
                     preparation,
+                    seek_mechanism,
                 } = prepared;
+                let qualified = Arc::new(AtomicU64::new(0));
+                let decoder_qualified = qualified.clone();
+                handoff.arm(
+                    PlaybackEvent::HandoffPresented {
+                        token: token.clone(),
+                        metadata: metadata.clone(),
+                        duration_ms,
+                        representation: representation.clone(),
+                        successor_offset_frames: 0,
+                        sample_rate: rate,
+                        seek: crate::playback::model::SeekCapability::unavailable(
+                            "seek.unqualified",
+                        ),
+                    },
+                    qualified,
+                    channels,
+                );
                 let target_slot = 1usize.saturating_sub(active_slot);
                 let queue = if target_slot == 0 {
                     pcm.clone()
@@ -242,23 +285,25 @@ pub(super) fn run_output(
                     successor_pcm.clone()
                 };
                 let decoder_cancel = cancel.clone();
-                let worker =
-                    crate::playback::output::DecoderWorker::spawn(cancel.clone(), move || {
+                let worker = crate::playback::output::DecoderWorker::spawn_result(
+                    cancel.clone(),
+                    move || {
                         decode_stream_with_seek(
                             reader,
                             Some(&decoder_hint),
                             rate,
                             channels,
                             0,
-                            None,
+                            seek_mechanism,
                             false,
                             Some(duration_ms),
-                            None,
+                            Some(decoder_qualified),
                             None,
                             queue,
                             decoder_cancel,
                         )
-                    });
+                    },
+                );
                 if target_slot == 0 {
                     slot_a_decoder = Some(worker);
                     slot_a_ready = false;
@@ -271,16 +316,53 @@ pub(super) fn run_output(
             }
             let slot_a_finished = slot_a_decoder
                 .as_ref()
-                .is_some_and(|worker| worker.is_finished());
+                .is_some_and(|worker| worker.clean_eof());
             let slot_b_finished = successor_decoder
                 .as_ref()
-                .is_some_and(|worker| worker.is_finished());
+                .is_some_and(|worker| worker.clean_eof());
+            let active_failed = if active_slot == 0 {
+                &slot_a_decoder
+            } else {
+                &successor_decoder
+            }
+            .as_ref()
+            .is_some_and(|worker| worker.failed());
+            if active_failed && (successor_identity.is_none() || !handoff.submitted()) {
+                let worker = if active_slot == 0 {
+                    slot_a_decoder.take()
+                } else {
+                    successor_decoder.take()
+                };
+                return Err(decoder_failure(worker.expect("failed decoder exists")));
+            }
             let prepared_slot = 1usize.saturating_sub(active_slot);
             let (prepared_queue, prepared_finished, prepared_ready) = if prepared_slot == 0 {
                 (&pcm, slot_a_finished, &mut slot_a_ready)
             } else {
                 (&successor_pcm, slot_b_finished, &mut successor_ready)
             };
+            let prepared_failed = if prepared_slot == 0 {
+                &slot_a_decoder
+            } else {
+                &successor_decoder
+            }
+            .as_ref()
+            .is_some_and(|worker| worker.failed());
+            if successor_identity.is_some() && !handoff.submitted() && prepared_failed {
+                *prepared_ready = false;
+                let worker = if prepared_slot == 0 {
+                    slot_a_decoder.take()
+                } else {
+                    successor_decoder.take()
+                };
+                if let Some(worker) = worker {
+                    let _ = worker.join();
+                }
+                while prepared_queue.pop().is_some() {}
+                successor_identity = None;
+                successor_preparation = None;
+                handoff.clear();
+            }
             if successor_identity.is_some()
                 && !*prepared_ready
                 && (prepared_queue.len() >= rate as usize * channels as usize / 10
@@ -331,7 +413,8 @@ pub(super) fn run_output(
                             base_position_ms = 0;
                             position_ms.store(0, Ordering::Release);
                         }
-                        session.publish_event_at_epoch(
+                        session.publish_pipeline_event(
+                            expected_serial,
                             generation.clone(),
                             seek_qualification_event(duration),
                             event_epoch.load(Ordering::Acquire),
@@ -358,7 +441,8 @@ pub(super) fn run_output(
                         }
                         base_position_ms = actual_position_ms;
                         position_ms.store(actual_position_ms, Ordering::Release);
-                        session.publish_event_at_epoch(
+                        session.publish_pipeline_event(
+                            expected_serial,
                             generation.clone(),
                             PlaybackEvent::SeekCommitted {
                                 operation_id,
@@ -369,6 +453,7 @@ pub(super) fn run_output(
                         );
                     }
                     ready = true;
+                    _output_control.configure_pulse(pause_tx.clone());
                 }
             }
             if ready
@@ -394,10 +479,16 @@ pub(super) fn run_output(
                     if let Some(offset) = rendered.boundary_frame {
                         boundary_pending.store(true, Ordering::Release);
                         boundary_played_frame = Some(write_start.saturating_add(offset as u64));
+                        handoff
+                            .boundary_frame
+                            .store(write_start.saturating_add(offset as u64), Ordering::Release);
+                        boundary_audio_frame = submitted_audio_frames.saturating_add(
+                            (rendered.rendered.samples - rendered.successor_samples)
+                                / u64::from(channels),
+                        );
                     }
+                    submitted_audio_frames += rendered.rendered.samples / u64::from(channels);
                     active_slot = rendered.active_slot;
-                    successor_submitted_frames = successor_submitted_frames
-                        .saturating_add(rendered.successor_samples / u64::from(channels));
                     if !submission_cursor.record(
                         cursor,
                         len,
@@ -439,10 +530,16 @@ pub(super) fn run_output(
                     if let Some(offset) = rendered.boundary_frame {
                         boundary_pending.store(true, Ordering::Release);
                         boundary_played_frame = Some(write_start.saturating_add(offset as u64));
+                        handoff
+                            .boundary_frame
+                            .store(write_start.saturating_add(offset as u64), Ordering::Release);
+                        boundary_audio_frame = submitted_audio_frames.saturating_add(
+                            (rendered.rendered.samples - rendered.successor_samples)
+                                / u64::from(channels),
+                        );
                     }
+                    submitted_audio_frames += rendered.rendered.samples / u64::from(channels);
                     active_slot = rendered.active_slot;
-                    successor_submitted_frames = successor_submitted_frames
-                        .saturating_add(rendered.successor_samples / u64::from(channels));
                     if !submission_cursor.record(
                         cursor,
                         len,
@@ -459,24 +556,14 @@ pub(super) fn run_output(
             }
             if let Some(played) = output.played_frames() {
                 let frames = ledger.advance(played);
-                latest_presented_frames = frames;
-                if !handoff_published
-                    && boundary_played_frame.is_some_and(|boundary| played >= boundary)
-                    && let (Some(boundary), Some((token, metadata, duration_ms, representation))) =
-                        (boundary_played_frame, successor_identity.as_ref())
-                {
-                    session.publish_event_at_epoch(
+                if boundary_played_frame.is_some_and(|boundary| played >= boundary) {
+                    handoff.pulse_presented(frames.saturating_sub(boundary_audio_frame));
+                }
+                if !handoff_published && let Some(event) = handoff.presented(epoch) {
+                    session.publish_pipeline_event(
+                        expected_serial,
                         generation.clone(),
-                        PlaybackEvent::HandoffPresented {
-                            token: token.clone(),
-                            metadata: metadata.clone(),
-                            duration_ms: *duration_ms,
-                            representation: representation.clone(),
-                            successor_offset_frames: played
-                                .saturating_sub(boundary)
-                                .min(successor_submitted_frames),
-                            sample_rate: rate,
-                        },
+                        event,
                         epoch,
                     );
                     handoff_published = true;
@@ -500,17 +587,13 @@ pub(super) fn run_output(
             if handoff_published
                 && let Some((token, _, _, _)) = successor_identity.as_ref()
                 && occurrence != token.successor_occurrence_id
-                && session
-                    .snapshot()
-                    .ok()
-                    .and_then(|snapshot| snapshot.current)
-                    .is_some_and(|current| current.occurrence_id == token.successor_occurrence_id)
+                && handoff.adopted.load(Ordering::Acquire)
             {
                 occurrence = token.successor_occurrence_id.clone();
                 sequence = 0;
                 base_position_ms = 0;
                 last_frames = 0;
-                presentation_base_frames = latest_presented_frames;
+                presentation_base_frames = boundary_audio_frame;
                 let retired = if active_slot == 0 {
                     successor_decoder.take()
                 } else {
@@ -529,16 +612,17 @@ pub(super) fn run_output(
                 successor_identity = None;
                 successor_preparation = None;
                 boundary_played_frame = None;
-                successor_submitted_frames = 0;
                 handoff_published = false;
                 boundary_pending.store(false, Ordering::Release);
+                handoff.clear();
             }
             if let Some(active) = activity.observe(
                 enabled,
                 last_frames,
                 activity_clock.elapsed().as_millis() as u64,
             ) {
-                session.publish_event_at_epoch(
+                session.publish_pipeline_event(
+                    expected_serial,
                     generation.clone(),
                     if active {
                         PlaybackEvent::Active
@@ -594,7 +678,13 @@ pub(super) fn run_output(
             PlaybackPipelineError::from_decode_error_and_stream_state(e, &stream_failure)
         })?;
     let decoded_ms = decoded.emitted_frames.saturating_mul(1000) / u64::from(rate);
-    session.publish_event_at_epoch(
+    if decoded.emitted_frames == 0 {
+        return Err(PlaybackPipelineError::decode(anyhow::anyhow!(
+            "decoder produced no audio"
+        )));
+    }
+    session.publish_pipeline_event(
+        expected_serial,
         generation,
         PlaybackEvent::Completed {
             position_ms: base_position_ms.saturating_add(decoded_ms),

@@ -607,6 +607,15 @@ macro_rules! impl_platform_host {
                 }
             }
 
+            fn pause_with_snapshot(&self) -> Result<crate::PauseSnapshot, crate::Error> {
+                match self.0 {
+                    $(
+                        $(#[cfg($feat)])?
+                        StreamInner::$HostVariant(ref s) => s.pause_with_snapshot(),
+                    )*
+                }
+            }
+
             fn buffer_size(&self) -> Result<crate::FrameCount, crate::Error> {
                 match self.0 {
                     $(

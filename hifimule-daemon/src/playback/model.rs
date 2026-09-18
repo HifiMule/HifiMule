@@ -273,6 +273,7 @@ pub enum PlaybackEvent {
         representation: String,
         successor_offset_frames: u64,
         sample_rate: u32,
+        seek: SeekCapability,
     },
     Completed {
         position_ms: u64,

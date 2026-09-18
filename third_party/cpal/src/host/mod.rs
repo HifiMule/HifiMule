@@ -1,3 +1,6 @@
+#[cfg(any(windows, test))]
+mod presentation_epoch;
+
 #[cfg(any(
     target_os = "linux",
     target_os = "dragonfly",

@@ -96,6 +96,7 @@ pub struct SubmittedFrame {
     samples: [f32; 2],
     channels: u8,
     logical_audio: bool,
+    boundary: bool,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -105,6 +106,7 @@ impl SubmittedFrame {
             samples,
             channels: channels as u8,
             logical_audio,
+            boundary: false,
         }
     }
 }
@@ -157,10 +159,10 @@ impl SubmittedTail {
         if pending_frames > retained {
             return Err(TailReconcileError::SnapshotExceedsRetainedTail);
         }
-        if pending_frames > replay.capacity() as u64 {
+        let waiting = replay.len();
+        if pending_frames.saturating_add(waiting as u64) > replay.capacity() as u64 {
             return Err(TailReconcileError::ReplayCapacityExceeded);
         }
-        while replay.pop().is_some() {}
         for _ in 0..retained - pending_frames {
             let _ = self.frames.pop();
         }
@@ -170,6 +172,15 @@ impl SubmittedTail {
             replay
                 .push(frame)
                 .map_err(|_| TailReconcileError::ReplayCapacityExceeded)?;
+        }
+        // Native padding precedes frames that have not yet been resubmitted.
+        // Rotate the old replay prefix behind the newly appended native suffix.
+        // Reconciliation runs only after native callbacks have stopped.
+        for _ in 0..waiting {
+            let frame = replay.pop().expect("stopped replay queue");
+            replay
+                .push(frame)
+                .expect("rotation preserves bounded capacity");
         }
         Ok(ReconciledTail {
             pending_frames,
@@ -194,6 +205,7 @@ pub struct BoundaryPcmConsumer {
     refill: usize,
     buffering: bool,
     successor: bool,
+    gate: Option<Arc<AtomicBool>>,
 }
 
 impl BoundaryPcmConsumer {
@@ -203,6 +215,13 @@ impl BoundaryPcmConsumer {
             refill,
             buffering: true,
             successor: false,
+            gate: None,
+        }
+    }
+    pub fn with_gate(channels: usize, refill: usize, gate: Arc<AtomicBool>) -> Self {
+        Self {
+            gate: Some(gate),
+            ..Self::new(channels, refill)
         }
     }
 
@@ -228,12 +247,18 @@ impl BoundaryPcmConsumer {
             active_slot: usize::from(self.successor),
         };
         for (index, frame) in output.chunks_mut(self.channels).enumerate() {
+            let enabled = enabled
+                && self
+                    .gate
+                    .as_ref()
+                    .is_none_or(|gate| gate.load(Ordering::Acquire));
             let (current, current_finished, other, other_ready) = if self.successor {
                 (slot_b, slot_b_finished, slot_a, slot_a_ready)
             } else {
                 (slot_a, slot_a_finished, slot_b, slot_b_ready)
             };
-            if current_finished
+            if enabled
+                && current_finished
                 && current.len() < self.channels
                 && other_ready
                 && other.len() >= self.channels
@@ -263,7 +288,7 @@ impl BoundaryPcmConsumer {
                 }
                 result.rendered.samples += self.channels as u64;
                 result.rendered.last_audio_frame = Some(index + 1);
-                if result.boundary_frame.is_some() || result.active_slot != 0 {
+                if result.boundary_frame.is_some() {
                     result.successor_samples += self.channels as u64;
                 }
             } else {
@@ -301,13 +326,24 @@ impl BoundaryPcmConsumer {
             active_slot: usize::from(self.successor),
         };
         for (index, output_frame) in output.chunks_mut(self.channels).enumerate() {
+            let enabled = enabled
+                && self
+                    .gate
+                    .as_ref()
+                    .is_none_or(|gate| gate.load(Ordering::Acquire));
             if enabled && let Some(replayed) = replay.pop() {
+                if replayed.boundary {
+                    result.boundary_frame = Some(index);
+                }
                 for (channel, target) in output_frame.iter_mut().enumerate() {
                     *target = T::from_sample(replayed.samples[channel]);
                 }
                 if replayed.logical_audio {
                     result.rendered.samples += self.channels as u64;
                     result.rendered.last_audio_frame = Some(index + 1);
+                    if result.boundary_frame.is_some() {
+                        result.successor_samples += self.channels as u64;
+                    }
                 }
                 tail.record(replayed);
                 continue;
@@ -317,7 +353,8 @@ impl BoundaryPcmConsumer {
             } else {
                 (active, active_finished, successor, successor_ready)
             };
-            if current_finished
+            if enabled
+                && current_finished
                 && current.len() < self.channels
                 && other_ready
                 && other.len() >= self.channels
@@ -349,7 +386,7 @@ impl BoundaryPcmConsumer {
                 }
                 result.rendered.samples += self.channels as u64;
                 result.rendered.last_audio_frame = Some(index + 1);
-                if result.boundary_frame.is_some() || result.active_slot != 0 {
+                if result.boundary_frame.is_some() {
                     result.successor_samples += self.channels as u64;
                 }
             } else {
@@ -358,7 +395,9 @@ impl BoundaryPcmConsumer {
                     self.buffering = true;
                 }
             }
-            tail.record(SubmittedFrame::new(samples, self.channels, ready));
+            let mut submitted = SubmittedFrame::new(samples, self.channels, ready);
+            submitted.boundary = ready && result.boundary_frame == Some(index);
+            tail.record(submitted);
         }
         result
     }
@@ -479,6 +518,23 @@ pub struct PresentationClock {
     until_ns: AtomicU64,
     callback_sequence: AtomicU64,
 }
+
+#[derive(Default)]
+pub struct CallbackWatchdog {
+    previous: Option<(u64, std::time::SystemTime)>,
+}
+impl CallbackWatchdog {
+    pub fn lost(&mut self, epoch: u64, now: std::time::SystemTime) -> bool {
+        let lost = self.previous.is_some_and(|(old_epoch, last)| {
+            old_epoch == epoch
+                && now
+                    .duration_since(last)
+                    .map_or(true, |gap| gap > Duration::from_secs(2))
+        });
+        self.previous = Some((epoch, now));
+        lost
+    }
+}
 impl PresentationClock {
     pub fn new() -> Self {
         Self {
@@ -506,6 +562,15 @@ impl PresentationClock {
     pub fn end_callback(&self) {
         self.callback_sequence.fetch_add(1, Ordering::SeqCst);
     }
+    pub fn wait_for_callback(&self) {
+        while !self
+            .callback_sequence
+            .load(Ordering::SeqCst)
+            .is_multiple_of(2)
+        {
+            std::thread::yield_now();
+        }
+    }
     pub fn drained_when(&self, empty: impl FnOnce() -> bool) -> bool {
         let before = self.callback_sequence.load(Ordering::SeqCst);
         before.is_multiple_of(2)
@@ -518,26 +583,41 @@ impl PresentationClock {
 pub struct DecoderWorker<T> {
     handle: Option<std::thread::JoinHandle<T>>,
     cancel: Arc<AtomicBool>,
-    pub finished: Arc<AtomicBool>,
+    outcome: Arc<AtomicU64>,
 }
 impl<T: Send + 'static> DecoderWorker<T> {
+    #[cfg(test)]
     pub fn spawn(cancel: Arc<AtomicBool>, work: impl FnOnce() -> T + Send + 'static) -> Self {
-        let finished = Arc::new(AtomicBool::new(false));
-        let done = finished.clone();
+        Self::spawn_checked(cancel, work, |_| true)
+    }
+    fn spawn_checked(
+        cancel: Arc<AtomicBool>,
+        work: impl FnOnce() -> T + Send + 'static,
+        succeeded: impl FnOnce(&T) -> bool + Send + 'static,
+    ) -> Self {
+        let outcome = Arc::new(AtomicU64::new(0));
+        let done = outcome.clone();
         let handle = std::thread::spawn(move || {
-            struct Finished(Arc<AtomicBool>);
+            struct Finished(Arc<AtomicU64>);
             impl Drop for Finished {
                 fn drop(&mut self) {
-                    self.0.store(true, Ordering::Release);
+                    // A panic is a failure, never clean decoder EOF.
+                    let _ = self
+                        .0
+                        .compare_exchange(0, 2, Ordering::Release, Ordering::Relaxed);
                 }
             }
             let _finished = Finished(done);
-            work()
+            let result = work();
+            _finished
+                .0
+                .store(if succeeded(&result) { 1 } else { 2 }, Ordering::Release);
+            result
         });
         Self {
             handle: Some(handle),
             cancel,
-            finished,
+            outcome,
         }
     }
     pub fn is_finished(&self) -> bool {
@@ -545,8 +625,22 @@ impl<T: Send + 'static> DecoderWorker<T> {
             .as_ref()
             .is_none_or(|handle| handle.is_finished())
     }
+    pub fn clean_eof(&self) -> bool {
+        self.outcome.load(Ordering::Acquire) == 1
+    }
+    pub fn failed(&self) -> bool {
+        self.outcome.load(Ordering::Acquire) == 2
+    }
     pub fn join(mut self) -> std::thread::Result<T> {
         self.handle.take().expect("owned decoder").join()
+    }
+}
+impl<T: Send + 'static, E: Send + 'static> DecoderWorker<Result<T, E>> {
+    pub fn spawn_result(
+        cancel: Arc<AtomicBool>,
+        work: impl FnOnce() -> Result<T, E> + Send + 'static,
+    ) -> Self {
+        Self::spawn_checked(cancel, work, Result::is_ok)
     }
 }
 impl<T> Drop for DecoderWorker<T> {
@@ -561,6 +655,135 @@ impl<T> Drop for DecoderWorker<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn intentional_native_pause_does_not_trip_callback_watchdog() {
+        let now = std::time::SystemTime::now();
+        let mut watchdog = CallbackWatchdog::default();
+        assert!(!watchdog.lost(1, now));
+        assert!(!watchdog.lost(3, now + Duration::from_secs(60)));
+        assert!(watchdog.lost(3, now + Duration::from_secs(63)));
+    }
+
+    #[test]
+    fn disabled_callbacks_never_activate_or_timestamp_a_prepared_boundary() {
+        for native_tail in [false, true] {
+            let a = ArrayQueue::<f32>::new(4);
+            let b = ArrayQueue::new(4);
+            b.push(0.25).unwrap();
+            b.push(0.75).unwrap();
+            let gate = Arc::new(AtomicBool::new(false));
+            let mut consumer = BoundaryPcmConsumer::with_gate(2, 2, gate.clone());
+            let tail = SubmittedTail::new(4);
+            let replay = ArrayQueue::new(4);
+            let mut buffer = [9.0f32; 2];
+            let rendered = if native_tail {
+                consumer.render_with_tail(
+                    &mut buffer,
+                    &a,
+                    true,
+                    true,
+                    &b,
+                    true,
+                    true,
+                    &replay,
+                    &tail,
+                    true,
+                )
+            } else {
+                consumer.render(&mut buffer, &a, true, true, &b, true, true, true)
+            };
+            assert_eq!(rendered.boundary_frame, None);
+            assert_eq!(rendered.active_slot, 0);
+            assert_eq!(buffer, [0.0; 2]);
+            assert_eq!(b.len(), 2);
+            gate.store(true, Ordering::Release);
+            let rendered = consumer.render(&mut buffer, &a, true, true, &b, true, true, true);
+            assert_eq!(rendered.boundary_frame, Some(0));
+            assert_eq!(buffer, [0.25, 0.75]);
+        }
+    }
+
+    #[test]
+    fn repeated_pause_preserves_native_prefix_then_unsubmitted_replay_and_boundary() {
+        let a = ArrayQueue::new(4);
+        let b = ArrayQueue::new(4);
+        for x in [1.0, 2.0] {
+            a.push(x).unwrap();
+        }
+        for x in [3.0, 4.0] {
+            b.push(x).unwrap();
+        }
+        let mut consumer = BoundaryPcmConsumer::new(1, 1);
+        let tail = SubmittedTail::new(8);
+        let replay = ArrayQueue::new(8);
+        consumer.render_with_tail(
+            &mut [0.0f32; 4],
+            &a,
+            true,
+            true,
+            &b,
+            true,
+            true,
+            &replay,
+            &tail,
+            true,
+        );
+        assert_eq!(tail.reconcile(3, &replay).unwrap().logical_audio_frames, 3);
+        assert_eq!(tail.reconcile(0, &replay).unwrap().logical_audio_frames, 0);
+        assert_eq!(replay.len(), 3);
+        let mut first = [0.0f32; 1];
+        consumer.render_with_tail(
+            &mut first, &a, true, true, &b, true, true, &replay, &tail, true,
+        );
+        assert_eq!(first, [2.0]);
+        tail.reconcile(1, &replay).unwrap(); // native frame still unheard; 3/4 still unsubmitted
+        let mut remaining = [0.0f32; 3];
+        let rendered = consumer.render_with_tail(
+            &mut remaining,
+            &a,
+            true,
+            true,
+            &b,
+            true,
+            true,
+            &replay,
+            &tail,
+            true,
+        );
+        assert_eq!(remaining, [2.0, 3.0, 4.0]);
+        assert_eq!(rendered.boundary_frame, Some(1));
+        assert_eq!(rendered.successor_samples, 2);
+        assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn failed_decoder_thread_is_never_clean_eof() {
+        for panic in [false, true] {
+            let worker = DecoderWorker::spawn_result(
+                Arc::new(AtomicBool::new(false)),
+                move || -> Result<(), &str> {
+                    if panic {
+                        panic!("decoder panic");
+                    }
+                    Err("truncated source after a decoded prefix")
+                },
+            );
+            while !worker.is_finished() {
+                std::thread::yield_now();
+            }
+            assert!(worker.failed());
+            assert!(!worker.clean_eof());
+            let _ = worker.join();
+        }
+        let worker =
+            DecoderWorker::spawn_result(Arc::new(AtomicBool::new(false)), || Ok::<_, &str>(()));
+        while !worker.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(worker.clean_eof());
+        assert!(!worker.failed());
+        worker.join().unwrap().unwrap();
+    }
     #[test]
     fn server_activity_coalesces_ticks_and_reports_refill_without_reviving_paused_audio() {
         let mut state = PresentationActivity::default();

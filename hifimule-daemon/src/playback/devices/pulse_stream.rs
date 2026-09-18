@@ -296,6 +296,17 @@ impl PinnedStream {
         Ok(())
     }
 
+    pub fn pause_snapshot(&mut self, on_stall: &mut impl FnMut()) -> Result<u64, &'static str> {
+        self.set_paused(true, on_stall)?;
+        let done = Rc::new(Cell::new(None));
+        let callback = done.clone();
+        let _operation = self
+            .stream
+            .update_timing_info(Some(Box::new(move |ok| callback.set(Some(ok)))));
+        self.wait_ack(done, on_stall)?;
+        self.played_frames().ok_or("OUTPUT_SWITCH_FAILED")
+    }
+
     pub fn drain(&mut self, on_stall: &mut impl FnMut()) -> Result<(), &'static str> {
         let done = Rc::new(Cell::new(None));
         let callback = done.clone();

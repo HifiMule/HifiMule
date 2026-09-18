@@ -296,6 +296,7 @@ pub struct StreamInner {
     pub event: Foundation::HANDLE,
     // True if the stream is currently playing. False if paused.
     pub playing: bool,
+    pub(crate) presentation_epoch: crate::host::presentation_epoch::PresentationEpoch,
     // Number of frames of audio data in the underlying buffer allocated by WASAPI.
     pub max_frames_in_buffer: FrameCount,
     // Callback size in frames.
@@ -623,14 +624,20 @@ fn pause_snapshot(stream: &mut StreamInner) -> Result<PauseSnapshot, Error> {
                 .context("Failed to capture stopped output padding")?,
         );
         let snapshot = PauseSnapshot {
-            presented_frames: position.saturating_mul(u64::from(stream.config.sample_rate))
-                / frequency,
+            presented_frames: stream.presentation_epoch.presented_frames(
+                position,
+                frequency,
+                stream.config.sample_rate,
+            ),
             pending_frames,
         };
         stream
             .audio_client
             .Reset()
             .context("Failed to flush stopped output buffer")?;
+        stream
+            .presentation_epoch
+            .did_reset(snapshot.presented_frames);
         Ok(snapshot)
     }
 }
@@ -754,12 +761,23 @@ fn run_output(
         }
     };
     let mut frames_written: u64 = 0;
+    let mut reset_generation = run_ctxt.stream.presentation_epoch.generation();
 
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
             ControlFlow::Break(()) => break,
             ControlFlow::Continue(false) => continue,
             ControlFlow::Continue(true) => {}
+        }
+        // Stop can leave an audio event signalled. Do not call the application
+        // again after its acknowledged pause until a Play command is processed.
+        if !run_ctxt.stream.playing {
+            continue;
+        }
+        let current_generation = run_ctxt.stream.presentation_epoch.generation();
+        if current_generation != reset_generation {
+            frames_written = 0;
+            reset_generation = current_generation;
         }
         let render_client = match run_ctxt.stream.client_flow {
             AudioClientFlow::Render { ref render_client } => render_client.clone(),

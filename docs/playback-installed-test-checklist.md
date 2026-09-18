@@ -355,7 +355,14 @@ and loaded libraries, CPAL/Pulse versions, endpoint identity hash, fixed output
 rate/layout/format, fixture hashes, preparation result, predecessor and successor
 occurrence IDs, boundary and presented frame offsets, stream open/close counts,
 underruns, capture method, raw capture path and hash, comparison tolerance, and
-listening result.
+listening result. The continuity row requires `rawCapturePath` (a local artifact
+path), `captureSha256`, `alignmentMethod: "single-global-offset"`, and a signed
+integer `alignmentOffsetFrames` applied to the entire capture. Record positive
+finite `timingResolutionFrames`, nonnegative finite `timingToleranceFrames`,
+finite signed `clockDriftPpm`, and a nonempty `driftAccountingMethod` describing
+how drift was measured and accounted for. A passed row requires
+`listeningResult: "passed"`; listening supplements the capture comparison.
+Missing, malformed, or `unverified` capture details cannot certify success.
 
 Use one globally aligned capture. Do not align each side of the boundary
 independently. Compare the captured boundary window against independently decoded,
@@ -372,11 +379,22 @@ For Pause, record the request and backend acknowledgment points. The boundary wi
 only if the backend reports it presented by that acknowledgment; unpresented
 successor samples must not leak and later Resume must neither skip nor duplicate.
 
-For legacy Apple AAC/M4A, record all four compatibility markers: MOV-family
-container, AAC codec, `iTunNORM`, and first compressed packet
-`20 00 20 00 00 80 0e`. The decoder removes exactly 2112 input frames only when
-all four match. Confirm that intentional silence following that interval remains;
-files missing any marker stay untrimmed and are not certified by this rule.
+For legacy Apple AAC/M4A without validated start-padding metadata, retain the
+entire FFmpeg-decoded signal and record the representation as uncertified for
+continuity. `iTunNORM`, the MOV/AAC combination and an AAC filler packet do not
+authorize an inferred 2112-frame trim. Verify that intentional silence remains
+intact, including files carrying those tags.
+
+For MP3, record whether the source supplies a truthful byte length. The decoded
+continuity matrix covers known-length Xing/LAME fixtures. Unknown-length streams
+retain ordinary playback but remain uncertified because FFmpeg 9 omits terminal
+padding in that path; provider duration is never a substitute.
+
+The production decoder continuity tests require a reference FFmpeg executable
+on `PATH`, or `HIFIMULE_TEST_FFMPEG` pointing to it. They reject a mismatch between
+its avcodec/avformat/avutil/swresample versions and the linked daemon runtime.
+They compare all samples and frame counts after independent per-track conversion
+and drain; they do not supply physical-output evidence.
 
 Mark each platform row `unverified` until the physical capture and raw artifact
 are present. Source tests and decoder fixtures may support diagnosis but cannot

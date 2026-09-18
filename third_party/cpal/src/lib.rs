@@ -530,7 +530,9 @@ pub use timestamp::{
 };
 
 /// Native output position captured after a pause request has been acknowledged.
-/// Frame counts use the stream's configured sample rate and start at stream play.
+/// Frame counts use the stream's configured sample rate. Presented frames are cumulative
+/// from the first play across acknowledged pauses and native buffer resets; discarded
+/// pending frames are excluded until actually replayed and presented.
 /// Pending frames have been removed from the backend before this value is returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PauseSnapshot {

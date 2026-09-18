@@ -138,6 +138,12 @@ def continuity_row():
         "runtime": "cpal-0.18.2/ffmpeg-9.0.1", "endpointFormat": "48000Hz/stereo/f32",
         "captureMethod": "loopback-capture", "measurementKind": "physical-capture",
         "fixtureSha256": "d" * 64, "captureSha256": "e" * 64,
+        "rawCapturePath": "captures/windows-x64/album-boundaries.wav",
+        "alignmentMethod": "single-global-offset", "alignmentOffsetFrames": 240,
+        "timingResolutionFrames": 1, "timingToleranceFrames": 0,
+        "clockDriftPpm": -2.5,
+        "driftAccountingMethod": "Linear clock fit over the full capture; no boundary realignment.",
+        "listeningResult": "passed",
         "occurrenceSequence": ["occurrence-a", "occurrence-b", "occurrence-c"],
         "boundaryOffsetsFrames": [96017, 168028], "preparationStatus": "ready-before-boundary",
         "openCount": 1, "closeCount": 1, "underruns": 0, "maxGapFrames": 0,
@@ -288,10 +294,58 @@ class InstalledEvidenceTests(unittest.TestCase):
             self.assertTrue(evidence.validate_continuity_evidence(changed))
 
     def test_continuity_evidence_rejects_malformed_types_without_exceptions(self):
-        for value in (None, True, {}, "1"):
+        malformed = (None, True, False, {}, "1", 1.5, [], [None], [True], [{}],
+                     [1, "2"], [2, 1], [1, 1], [-1, 2])
+        for field in ("boundaryOffsetsFrames", "occurrenceSequence", "underruns", "outcome"):
+            for value in malformed:
+                with self.subTest(field=field, value=value):
+                    record = self.complete_record()
+                    record["continuity"]["rows"][0][field] = value
+                    self.assertTrue(evidence.validate_continuity_evidence(record))
+        for version in (None, True, "1", 1.0, [], {}):
             record = self.complete_record()
-            record["continuity"]["rows"][0]["underruns"] = value
+            record["continuityEvidenceVersion"] = version
             self.assertTrue(evidence.validate_continuity_evidence(record))
+
+    def test_continuity_requires_reproducible_capture_fields(self):
+        fields = ("rawCapturePath", "alignmentMethod", "alignmentOffsetFrames",
+                  "timingResolutionFrames", "timingToleranceFrames", "clockDriftPpm",
+                  "driftAccountingMethod", "listeningResult")
+        for field in fields:
+            with self.subTest(missing=field):
+                record = self.complete_record()
+                del record["continuity"]["rows"][0][field]
+                self.assertTrue(evidence.validate_continuity_evidence(record))
+        for field in fields:
+            for value in (None, True, [], {}, "", "unverified"):
+                with self.subTest(field=field, value=value):
+                    record = self.complete_record()
+                    record["continuity"]["rows"][0][field] = value
+                    self.assertTrue(evidence.validate_continuity_evidence(record))
+
+    def test_continuity_rejects_nonreproducible_alignment_and_measurements(self):
+        changes = ({"alignmentMethod": "independent-boundary-alignment"},
+                   {"alignmentOffsetFrames": 0.5}, {"timingResolutionFrames": 0},
+                   {"timingToleranceFrames": -1}, {"listeningResult": "failed"},
+                   {"rawCapturePath": "https://example.invalid/capture.wav"})
+        for change in changes:
+            with self.subTest(change=change):
+                record = self.complete_record()
+                record["continuity"]["rows"][0].update(change)
+                self.assertTrue(evidence.validate_continuity_evidence(record))
+        for field in ("timingResolutionFrames", "timingToleranceFrames", "clockDriftPpm"):
+            for value in (float("nan"), float("inf"), -float("inf")):
+                record = self.complete_record()
+                record["continuity"]["rows"][0][field] = value
+                self.assertTrue(evidence.validate_continuity_evidence(record))
+
+    def test_continuity_accepts_documented_signed_alignment_and_clock_drift(self):
+        for drift in (-12.5, 0, 12.5):
+            record = self.complete_record()
+            record["continuity"]["rows"][0].update(
+                alignmentOffsetFrames=-240, clockDriftPpm=drift,
+                timingResolutionFrames=0.5, timingToleranceFrames=0.5)
+            self.assertEqual(evidence.validate_continuity_evidence(record), [])
 
     def test_album_evidence_rejects_incorrect_order_identity_and_transport(self):
         def invalid(cause, change):

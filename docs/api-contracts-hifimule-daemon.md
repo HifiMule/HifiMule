@@ -806,13 +806,16 @@ The output format is fixed for the output epoch. Each occurrence is decoded and
 resampled independently into that rate and mono/stereo layout, including decoder
 and resampler drain. The boundary is the exact output-frame offset after the
 predecessor's final valid frame. PCM WAV, FLAC, ALAC/M4A, MP3 with validated
-delay/padding metadata, AAC/M4A with validated container timing, the certified
-legacy Apple AAC combination (`iTunNORM`, MOV-family container, AAC codec, and
-the exact seven-byte Apple filler packet) with 2112 input priming samples, and Opus/Ogg
-pre-skip/end trimming are the initial qualification matrix. Missing or ambiguous
-padding metadata never authorizes inferred trimming. No subset of the legacy
-Apple markers authorizes that compatibility trim. Raw AAC, AIFF, Vorbis, and
-WMA remain ordinary-playback formats until separately qualified.
+delay/padding metadata and a known source byte length, AAC/M4A with validated container timing, and Opus/Ogg
+pre-skip/end trimming form the initial decoder matrix. FFmpeg applies their
+validated padding metadata; HifiMule does not add a second trim. Missing or
+ambiguous padding metadata never authorizes inferred trimming. Legacy Apple AAC
+without declared start padding remains untrimmed and is not continuity-certified:
+`iTunNORM` and a filler packet do not establish an exact encoder delay. Raw AAC,
+AIFF, Vorbis, and WMA remain ordinary-playback formats until separately qualified.
+Unknown-length MP3 streams remain ordinary playback: the controlled FFmpeg 9
+nonseekable demuxer does not reliably apply terminal Xing padding without byte
+size. HifiMule neither guesses that size nor trims to provider duration.
 
 Owner advancement occurs only after the backend reports that the boundary was
 presented. The acknowledgment includes the token, boundary frame, and played
@@ -834,8 +837,10 @@ occurrence. It never guesses from callback consumption or provider duration.
 
 Implementation qualification: WASAPI uses acknowledged `Stop`, exact stopped
 padding, `Reset`, and a fixed-capacity submitted-tail ledger; Resume replays the
-discarded suffix once before new PCM. Pulse retains its server-side cork and
-played-frame ledger. CoreAudio currently uses the synchronous consumption gate
+discarded suffix once before new PCM, preserving any still-queued replay across
+repeated pauses. Clock snapshots retain a cumulative origin across native resets.
+Pulse waits for server-side cork acknowledgment and refreshed played-frame timing
+before the owner reconciles a boundary. A failed acknowledgment retires the pipeline. CoreAudio currently uses the synchronous consumption gate
 only: its callback timestamps estimate presentation but do not prove an exact
 stop cursor, so HifiMule does not use them to flush/replay native buffers.
 

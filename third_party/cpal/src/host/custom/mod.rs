@@ -206,6 +206,7 @@ trait DeviceErased: Send + Sync {
 trait StreamErased: Send + Sync {
     fn play(&self) -> Result<(), Error>;
     fn pause(&self) -> Result<(), Error>;
+    fn pause_with_snapshot(&self) -> Result<crate::PauseSnapshot, Error>;
     fn now(&self) -> StreamInstant;
     fn buffer_size(&self) -> Result<FrameCount, Error>;
 }
@@ -339,6 +340,10 @@ where
         <T as StreamTrait>::pause(self)
     }
 
+    fn pause_with_snapshot(&self) -> Result<crate::PauseSnapshot, Error> {
+        <T as StreamTrait>::pause_with_snapshot(self)
+    }
+
     fn now(&self) -> StreamInstant {
         <T as StreamTrait>::now(self)
     }
@@ -462,11 +467,62 @@ impl StreamTrait for Stream {
         self.0.pause()
     }
 
+    fn pause_with_snapshot(&self) -> Result<crate::PauseSnapshot, Error> {
+        self.0.pause_with_snapshot()
+    }
+
     fn now(&self) -> StreamInstant {
         self.0.now()
     }
 
     fn buffer_size(&self) -> Result<FrameCount, Error> {
         self.0.buffer_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{PauseSnapshot, StreamInstant, traits::StreamTrait};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct SnapshotStream(Arc<AtomicUsize>);
+    impl StreamTrait for SnapshotStream {
+        fn play(&self) -> Result<(), crate::Error> {
+            Ok(())
+        }
+        fn pause(&self) -> Result<(), crate::Error> {
+            panic!("ordinary pause must not be used")
+        }
+        fn pause_with_snapshot(&self) -> Result<PauseSnapshot, crate::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(PauseSnapshot {
+                presented_frames: 1234,
+                pending_frames: 56,
+            })
+        }
+        fn buffer_size(&self) -> Result<u32, crate::Error> {
+            Ok(128)
+        }
+        fn now(&self) -> StreamInstant {
+            StreamInstant::from_nanos(0)
+        }
+    }
+
+    #[test]
+    fn public_stream_forwards_acknowledged_pause_to_backend() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = super::Stream::from_stream(SnapshotStream(calls.clone()));
+        let stream = crate::Stream::from(backend);
+        assert_eq!(
+            stream.pause_with_snapshot().unwrap(),
+            PauseSnapshot {
+                presented_frames: 1234,
+                pending_frames: 56,
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
