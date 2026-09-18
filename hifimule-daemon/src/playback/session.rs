@@ -418,14 +418,7 @@ impl PlaybackSession {
             .events
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if events.iter().any(|(old, _, _, _)| *old > serial) {
-            return;
-        }
-        let kind = event_kind(&event);
-        events.retain(|(old, _, _, prior)| *old == serial && event_kind(prior) != kind);
-        // One metadata, one activity, one terminal slot. Status updates can never
-        // evict a terminal result, even when the command mailbox is saturated.
-        events.push_back((serial, epoch, generation_id, event));
+        enqueue_event(&mut events, serial, epoch, generation_id, event);
     }
 
     pub(crate) fn output_gate(&self) -> Arc<AtomicBool> {
@@ -699,13 +692,40 @@ fn owner_loop(
         if !pending.is_empty() {
             let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
             for (_, epoch, generation_id, event) in pending {
-                if matches!(event_kind(&event), 1 | 3)
+                if matches!(event_kind(&event), 1 | 3 | 4 | 5)
                     && epoch != i.control_epoch.load(Ordering::Acquire)
                 {
                     continue;
                 }
                 if !fenced.load(Ordering::Acquire) && i.generation_id == generation_id {
-                    let checkpoint_seek = matches!(&event, PlaybackEvent::SeekCommitted { .. });
+                    let event = match event {
+                        PlaybackEvent::SeekPipelineFailed {
+                            operation_id,
+                            code,
+                            retryable,
+                        } => {
+                            if i.playback
+                                .pending_seek
+                                .as_ref()
+                                .is_some_and(|p| p.operation_id == operation_id)
+                            {
+                                PlaybackEvent::SeekFailed {
+                                    operation_id,
+                                    code: "SEEK_FAILED".into(),
+                                    retryable: true,
+                                }
+                            } else if i.playback.seek_outcome.as_ref().is_some_and(|s| {
+                                s.operation_id == operation_id && s.status == "succeeded"
+                            }) {
+                                PlaybackEvent::Failed { code, retryable }
+                            } else {
+                                continue;
+                            }
+                        }
+                        event => event,
+                    };
+                    let checkpoint_seek = matches!(&event, PlaybackEvent::SeekCommitted { operation_id, .. }
+                        if i.playback.pending_seek.as_ref().is_some_and(|p| &p.operation_id == operation_id));
                     let output_lost = matches!(&event, PlaybackEvent::Failed { code, .. } if code == "OUTPUT_LOST");
                     if output_lost {
                         i.output_gate.store(false, Ordering::Release);
@@ -715,13 +735,19 @@ fn owner_loop(
                         {
                             i.session.position_ms = i.session.position_ms.max(position);
                         }
+                        supersede_pending_seek(&mut i);
                         generation_serial.fetch_add(1, Ordering::AcqRel);
                         super::audio::global().control(ControlAction::Stop);
                         i.generation_id = Uuid::new_v4().to_string();
                         i.dirty = true;
                     }
+                    let previous_position = i.session.position_ms;
                     apply_playback_event(&mut i, event);
-                    refresh_ingress(&i, &ingress);
+                    if checkpoint_seek || i.session.position_ms < previous_position {
+                        reset_ingress(&i, &ingress);
+                    } else {
+                        refresh_ingress(&i, &ingress);
+                    }
                     if output_lost || checkpoint_seek {
                         let _ = checkpoint_inner(&mut i);
                     }
@@ -980,12 +1006,32 @@ fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<(
 fn refresh_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
     let mut p = ingress.lock().unwrap_or_else(|e| e.into_inner());
     if p.generation_id != i.generation_id {
-        p.generation_id = i.generation_id.clone();
-        p.occurrence_id = i.session.current_occurrence_id.clone();
-        p.sequence = None;
-        p.position_ms = i.session.position_ms;
-        p.pending = None;
+        reset_progress(i, &mut p);
     }
+}
+fn reset_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
+    reset_progress(i, &mut ingress.lock().unwrap_or_else(|e| e.into_inner()));
+}
+fn reset_progress(i: &Inner, p: &mut ProgressIngress) {
+    p.generation_id = i.generation_id.clone();
+    p.occurrence_id = i.session.current_occurrence_id.clone();
+    p.sequence = None;
+    p.position_ms = i.session.position_ms;
+    p.pending = None;
+}
+
+// Output transitions abandon preparation without carrying its intent into a new generation.
+fn supersede_pending_seek(i: &mut Inner) {
+    if let Some(pending) = i.playback.pending_seek.take() {
+        i.playback.seek_outcome = Some(SeekOutcome {
+            operation_id: pending.operation_id,
+            requested_position_ms: pending.requested_position_ms,
+            actual_position_ms: None,
+            status: "superseded".into(),
+            error: None,
+        });
+    }
+    i.seek_resume_after_commit = false;
 }
 fn publish_health(i: &Inner, health: &Mutex<PlaybackHealth>) {
     *health.lock().unwrap_or_else(|e| e.into_inner()) = PlaybackHealth {
@@ -1857,9 +1903,27 @@ fn retain_dedup(i: &mut Inner, p: ApplySessionParams, r: PResult<ApplyResult>) {
     }
 }
 
+fn enqueue_event(
+    events: &mut VecDeque<(u64, u64, String, PlaybackEvent)>,
+    serial: u64,
+    epoch: u64,
+    generation: String,
+    event: PlaybackEvent,
+) {
+    if events.iter().any(|(old, _, _, _)| *old > serial) {
+        return;
+    }
+    let kind = event_kind(&event);
+    events.retain(|(old, _, _, prior)| *old == serial && event_kind(prior) != kind);
+    // Bounded independent slots prevent metadata and successful commits being evicted.
+    events.push_back((serial, epoch, generation, event));
+}
+
 fn event_kind(event: &PlaybackEvent) -> u8 {
     match event {
-        PlaybackEvent::Resolved { .. } | PlaybackEvent::SeekQualified(_) => 0,
+        PlaybackEvent::Resolved { .. } => 0,
+        PlaybackEvent::SeekQualified { .. } => 4,
+        PlaybackEvent::SeekPipelineFailed { .. } => 5,
         PlaybackEvent::Active | PlaybackEvent::Buffering => 1,
         PlaybackEvent::Completed { .. } | PlaybackEvent::Failed { .. } => 2,
         PlaybackEvent::SeekCommitted { .. } | PlaybackEvent::SeekFailed { .. } => 3,
@@ -1877,7 +1941,8 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             i.playback.metadata = Some(metadata);
             i.playback.duration_ms = duration_ms;
             i.playback.representation = Some(representation);
-            if i.playback.pending_seek.is_none()
+            if seek.reason.as_deref() != Some("seek.validating")
+                && i.playback.pending_seek.is_none()
                 && i.playback.status == PlaybackStatus::Loading
                 && duration_ms
                     .is_some_and(|duration| duration > 0 && i.session.position_ms == duration)
@@ -1891,12 +1956,28 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 SeekCapability::unavailable("seek.duration_unavailable")
             };
         }
-        PlaybackEvent::SeekQualified(capability) => {
-            i.playback.seek = if i.playback.duration_ms.is_some_and(|duration| duration > 0) {
-                capability
-            } else {
-                SeekCapability::unavailable("seek.duration_unavailable")
-            };
+        PlaybackEvent::SeekQualified {
+            capability,
+            duration_ms,
+        } => {
+            if let Some(duration) = duration_ms.filter(|duration| *duration > 0) {
+                i.playback.duration_ms = Some(duration);
+            }
+            if i.playback.pending_seek.is_none()
+                && i.playback.status == PlaybackStatus::Loading
+                && i.playback
+                    .duration_ms
+                    .is_some_and(|duration| duration > 0 && i.session.position_ms == duration)
+            {
+                i.session.position_ms = 0;
+                i.dirty = true;
+            }
+            i.playback.seek =
+                if capability.available && !duration_ms.is_some_and(|duration| duration > 0) {
+                    SeekCapability::unavailable("seek.duration_unavailable")
+                } else {
+                    capability
+                };
         }
         PlaybackEvent::Active if i.output_gate.load(Ordering::Acquire) => {
             i.session.state = TransportState::Playing;
@@ -1975,6 +2056,7 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             });
         }
         PlaybackEvent::SeekFailed { .. } => {}
+        PlaybackEvent::SeekPipelineFailed { .. } => unreachable!("normalized by owner"),
         PlaybackEvent::Failed { code, retryable } => {
             // This event has already passed the owner's generation fence. A
             // retirement warning is not terminal: the worker is still owned.
@@ -3408,5 +3490,206 @@ mod tests {
         assert_eq!(end.playback.status, PlaybackStatus::Completed);
         assert_eq!(end.current, committed.current);
         playback.stop_and_join().unwrap();
+    }
+    #[test]
+    fn review_backward_seek_accepts_progress_and_checkpoints_before_old_cursor() {
+        let (db, playback, selected) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let qualified = qualified_seek(&playback, &selected);
+        let occurrence = qualified.current.as_ref().unwrap().occurrence_id.clone();
+        playback
+            .report_progress(&qualified.generation_id, &occurrence, 1, 8_000)
+            .unwrap();
+        playback.final_checkpoint().unwrap();
+        let before = playback.snapshot().unwrap();
+        let pending = playback
+            .seek_with_guard(seek(&before, 2_000), None)
+            .unwrap();
+        playback.publish_event_at_epoch(
+            pending.generation_id.clone(),
+            PlaybackEvent::SeekCommitted {
+                operation_id: pending.playback.pending_seek.unwrap().operation_id,
+                requested_position_ms: 2_000,
+                actual_position_ms: 2_012,
+            },
+            pending.seek_epoch,
+        );
+        assert_eq!(playback.snapshot().unwrap().position_ms, 2_012);
+        playback
+            .report_progress(&pending.generation_id, &occurrence, 1, 2_100)
+            .unwrap();
+        playback.final_checkpoint().unwrap();
+        assert_eq!(playback.snapshot().unwrap().position_ms, 2_100);
+        assert_eq!(
+            db.load_playback_session().unwrap().unwrap().position_ms,
+            2_100
+        );
+    }
+
+    #[test]
+    fn review_seek_pipeline_failure_after_commit_is_terminal() {
+        for code in ["DECODE_FAILED", "SOURCE_UNAVAILABLE", "OUTPUT_LOST"] {
+            let (_, playback, selected) = queued();
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let qualified = qualified_seek(&playback, &selected);
+            let pending = playback
+                .seek_with_guard(seek(&qualified, 2_000), None)
+                .unwrap();
+            let operation = pending.playback.pending_seek.unwrap().operation_id;
+            playback.publish_event_at_epoch(
+                pending.generation_id.clone(),
+                PlaybackEvent::SeekCommitted {
+                    operation_id: operation.clone(),
+                    requested_position_ms: 2_000,
+                    actual_position_ms: 2_012,
+                },
+                pending.seek_epoch,
+            );
+            // Do not drain the commit first: the error must not coalesce it away.
+            playback.publish_event_at_epoch(
+                pending.generation_id.clone(),
+                PlaybackEvent::SeekPipelineFailed {
+                    operation_id: operation,
+                    code: code.into(),
+                    retryable: true,
+                },
+                pending.seek_epoch,
+            );
+            let failed = playback.snapshot().unwrap();
+            assert_eq!(failed.playback.status, PlaybackStatus::Error);
+            assert_eq!(failed.playback.error.unwrap().code, code);
+            assert_eq!(failed.position_ms, 2_012);
+            assert_eq!(failed.playback.seek_outcome.unwrap().status, "succeeded");
+            assert!(!playback.output_gate().load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn review_seek_pipeline_failure_before_commit_keeps_old_cursor() {
+        let (_, playback, selected) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let qualified = qualified_seek(&playback, &selected);
+        let pending = playback
+            .seek_with_guard(seek(&qualified, 2_000), None)
+            .unwrap();
+        playback.publish_event_at_epoch(
+            pending.generation_id,
+            PlaybackEvent::SeekPipelineFailed {
+                operation_id: pending.playback.pending_seek.unwrap().operation_id,
+                code: "DECODE_FAILED".into(),
+                retryable: true,
+            },
+            pending.seek_epoch,
+        );
+        let failed = playback.snapshot().unwrap();
+        assert_eq!(failed.position_ms, qualified.position_ms);
+        assert_eq!(failed.playback.seek_outcome.unwrap().status, "failed");
+        assert_eq!(failed.playback.error.unwrap().code, "SEEK_FAILED");
+    }
+
+    #[test]
+    fn review_qualification_and_resolution_have_independent_slots() {
+        let (_, playback, selected) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let resolved = PlaybackEvent::Resolved {
+            metadata: PlaybackTrackMetadata {
+                source: selected.current.as_ref().unwrap().source.clone(),
+                title: "fixture".into(),
+                artist: None,
+                album: None,
+            },
+            duration_ms: Some(10_000),
+            representation: "wav".into(),
+            seek: SeekCapability::unavailable("seek.validating"),
+        };
+        let qualified = PlaybackEvent::SeekQualified {
+            capability: SeekCapability::jellyfin_pcm_wav(),
+            duration_ms: Some(10_500),
+        };
+        // Exercise coalescing while holding the event queue so the owner cannot drain it.
+        let serial = playback
+            .generation_guard(&selected.generation_id)
+            .unwrap()
+            .1;
+        {
+            let mut events = playback.events.lock().unwrap();
+            enqueue_event(
+                &mut events,
+                serial,
+                playback.control_epoch(),
+                selected.generation_id.clone(),
+                resolved,
+            );
+            enqueue_event(
+                &mut events,
+                serial,
+                playback.control_epoch(),
+                selected.generation_id.clone(),
+                qualified,
+            );
+            assert_eq!(events.len(), 2);
+        }
+        let snapshot = playback.snapshot().unwrap();
+        assert_eq!(
+            snapshot.playback.metadata.as_ref().unwrap().title,
+            "fixture"
+        );
+        assert_eq!(snapshot.playback.duration_ms, Some(10_500));
+        assert!(snapshot.playback.seek.available);
+        let completed = playback
+            .seek_with_guard(seek(&snapshot, 10_500), None)
+            .unwrap();
+        assert_eq!(completed.position_ms, 10_500);
+    }
+    #[test]
+    fn review_restored_verified_end_restarts_progress_after_media_resolution() {
+        let (db, playback, selected) = queued();
+        let qualified = qualified_seek(&playback, &selected);
+        playback.publish_event(
+            qualified.generation_id,
+            PlaybackEvent::SeekQualified {
+                capability: SeekCapability::jellyfin_pcm_wav(),
+                duration_ms: Some(10_500),
+            },
+        );
+        let qualified = playback.snapshot().unwrap();
+        playback
+            .seek_with_guard(seek(&qualified, 10_500), None)
+            .unwrap();
+        playback.stop_and_join().unwrap();
+        let restored = PlaybackSession::restore(db, "verified-end-restore".into());
+        let _cleanup = OwnerThreadCleanup(restored.clone());
+        let loading = restored
+            .native_control(NativeControlIntent::Play, None)
+            .unwrap();
+        let occurrence = loading.current.as_ref().unwrap().occurrence_id.clone();
+        restored.publish_event(
+            loading.generation_id.clone(),
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: loading.current.unwrap().source,
+                    title: "fixture".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(10_000),
+                representation: "wav".into(),
+                seek: SeekCapability::unavailable("seek.validating"),
+            },
+        );
+        assert_eq!(restored.snapshot().unwrap().position_ms, 10_500);
+        restored.publish_event(
+            loading.generation_id.clone(),
+            PlaybackEvent::SeekQualified {
+                capability: SeekCapability::unavailable("seek.platform_unqualified"),
+                duration_ms: Some(10_500),
+            },
+        );
+        assert_eq!(restored.snapshot().unwrap().position_ms, 0);
+        restored
+            .report_progress(&loading.generation_id, &occurrence, 1, 100)
+            .unwrap();
+        restored.final_checkpoint().unwrap();
+        assert_eq!(restored.snapshot().unwrap().position_ms, 100);
     }
 }

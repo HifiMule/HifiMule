@@ -290,3 +290,63 @@ test('authoritative clock advances only while fresh and reanchors backward', asy
   assert.equal(slider.value, '1000');
   h.component.destroy();
 });
+
+
+test('progress polls preserve a dragged thumb and keep elapsed authoritative', async () => {
+  const initial = snapshot('playing');
+  initial.positionMs = 1000;
+  initial.playback.durationMs = 10000;
+  initial.playback.seek = { available: true };
+  const h = harness(initial); await h.tick();
+  const slider = h.container.querySelector('input'); slider.focus();
+  slider.value = '7000'; slider.listeners.get('input')();
+  assert.equal(h.component.elapsed.textContent, '0:01');
+  h.setSnapshot({ ...initial, stateSequence: '2', positionMs: 2000 }); await h.tick();
+  assert.equal(slider.value, '7000');
+  assert.equal(h.component.elapsed.textContent, '0:02');
+  assert.equal(h.document.activeElement, slider);
+  h.component.destroy();
+});
+
+test('queued scrub is abandoned when its occurrence or session is replaced', async () => {
+  for (const replaceSession of [false, true]) {
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    const calls = [];
+    const initial = snapshot('paused');
+    initial.playback.durationMs = 10000;
+    initial.playback.seek = { available: true };
+    const h = harness(initial, async () => {}, { seek: async (position, observed) => {
+      calls.push([position, observed.current.occurrenceId]); return pending;
+    }});
+    await h.tick();
+    const first = h.component.submitSeek(4000);
+    await h.component.submitSeek(7000);
+    const replacement = { ...initial, stateSequence: '9', generationId: 'replacement',
+      sessionId: replaceSession ? 'other-session' : initial.sessionId,
+      current: replaceSession ? initial.current : { ...initial.current, occurrenceId: 'other-track' } };
+    h.setSnapshot(replacement); await h.tick();
+    release({ ...initial, stateSequence: '2' }); await first;
+    for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+    assert.deepEqual(calls, [[4000, 'occurrence']]);
+    assert.equal(h.component.snapshot, replacement);
+    h.component.destroy();
+  }
+});
+
+test('seek rejection renders without a state change and retry clears the error', async () => {
+  const initial = snapshot('paused');
+  initial.playback.durationMs = 10000;
+  initial.playback.seek = { available: true };
+  let reject = true;
+  const h = harness(initial, async () => {}, { seek: async () => {
+    if (reject) throw { data: { code: 'INVALID_SEEK' } };
+    return initial;
+  }});
+  await h.tick(); await h.component.submitSeek(11000);
+  assert.match(text(h.container), /playback.error.INVALID_SEEK/);
+  await h.tick(); assert.match(text(h.container), /playback.error.INVALID_SEEK/);
+  reject = false; await h.component.submitSeek(1000);
+  assert.doesNotMatch(text(h.container), /playback.error.INVALID_SEEK/);
+  h.component.destroy();
+});

@@ -20,7 +20,8 @@ export class PlaybackControls {
     private readonly outputToggle = document.createElement('sl-icon-button');
     private commandError = '';
     private previewMs: number | undefined;
-    private queuedSeekMs: number | undefined;
+    private queuedSeek: { positionMs: number; identity: string } | undefined;
+    private scrubbing = false;
     private seekBusy = false;
     private anchorPositionMs = 0;
     private anchorAt = 0;
@@ -53,11 +54,13 @@ export class PlaybackControls {
         this.timeline.addEventListener('input', () => {
             const value = Number(this.timeline.value);
             if (Number.isSafeInteger(value) && value >= 0) {
+                this.scrubbing = true;
                 this.previewMs = value;
                 this.renderTimeline();
             }
         });
         this.timeline.addEventListener('change', () => {
+            this.scrubbing = false;
             const value = Number(this.timeline.value);
             if (Number.isSafeInteger(value) && value >= 0) void this.submitSeek(value);
         });
@@ -115,10 +118,15 @@ export class PlaybackControls {
             if (!this.disposed && (!previous || snapshot.instanceId !== previous.instanceId
                 || snapshot.sessionId !== previous.sessionId
                 || BigInt(snapshot.stateSequence) > BigInt(previous.stateSequence))) {
+                if (this.seekIdentity(previous) !== this.seekIdentity(snapshot)) {
+                    this.scrubbing = false;
+                    this.previewMs = undefined;
+                    this.queuedSeek = undefined;
+                }
                 this.snapshot = snapshot;
                 this.anchorPositionMs = snapshot.positionMs;
                 this.anchorAt = this.now();
-                if (!snapshot.playback.pendingSeek
+                if (!this.scrubbing && !this.seekBusy && !snapshot.playback.pendingSeek
                     && snapshot.playback.seekOutcome?.status !== 'pending') this.previewMs = undefined;
                 this.render(snapshot);
                 if (!previous || snapshot.instanceId !== previous.instanceId) {
@@ -175,7 +183,6 @@ export class PlaybackControls {
     }
 
     private shownPositionMs(): number {
-        if (this.previewMs !== undefined) return this.previewMs;
         const snapshot = this.snapshot;
         if (!snapshot) return 0;
         let position = this.anchorPositionMs;
@@ -193,10 +200,10 @@ export class PlaybackControls {
         const available = Boolean(snapshot?.current && snapshot.playback.seek?.available && duration > 0);
         const shown = Math.round(this.shownPositionMs());
         this.timeline.max = String(duration > 0 ? duration : 1);
-        this.timeline.value = String(Math.min(shown, duration > 0 ? duration : 0));
+        this.timeline.value = String(Math.min(this.previewMs ?? shown, duration > 0 ? duration : 0));
         this.timeline.disabled = !available;
         this.timeline.setAttribute('aria-valuetext', t('playback.seek.value', {
-            elapsed: this.formatTime(shown), duration: duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration'),
+            elapsed: this.formatTime(this.previewMs ?? shown), duration: duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration'),
         }));
         this.elapsed.textContent = this.formatTime(shown);
         this.duration.textContent = duration > 0 ? this.formatTime(duration) : t('playback.seek.unknown_duration');
@@ -220,30 +227,44 @@ export class PlaybackControls {
         return globalThis.performance?.now?.() ?? Date.now();
     }
 
+    private seekIdentity(snapshot: PlaybackSessionSnapshot | undefined): string {
+        return JSON.stringify([snapshot?.instanceId, snapshot?.sessionId, snapshot?.current?.occurrenceId]);
+    }
+
     private async submitSeek(positionMs: number): Promise<void> {
         if (this.disposed || !this.snapshot || !this.snapshot.playback.seek.available) return;
-        if (this.seekBusy) { this.queuedSeekMs = positionMs; return; }
+        const identity = this.seekIdentity(this.snapshot);
+        if (this.seekBusy) { this.queuedSeek = { positionMs, identity }; return; }
         this.seekBusy = true;
+        this.commandError = '';
+        this.render(this.snapshot);
         const observed = this.snapshot;
         try {
             const current = await playbackSeek(positionMs, observed);
-            if (!this.disposed && this.snapshot?.instanceId === observed.instanceId
-                && BigInt(current.stateSequence) >= BigInt(this.snapshot.stateSequence)) {
+            if (!this.disposed && this.seekIdentity(this.snapshot) === identity
+                && this.seekIdentity(current) === identity
+                && BigInt(current.stateSequence) > BigInt(this.snapshot!.stateSequence)) {
                 this.snapshot = current;
                 this.anchorPositionMs = current.positionMs;
                 this.anchorAt = this.now();
-                this.render(current);
             }
         } catch (error) {
-            const code = (error as { data?: { code?: string } })?.data?.code;
-            this.commandError = code ? t(`playback.error.${code}`) : t('playback.command_error');
-            this.previewMs = undefined;
+            if (this.seekIdentity(this.snapshot) === identity) {
+                const code = (error as { data?: { code?: string } })?.data?.code;
+                this.commandError = code ? t(`playback.error.${code}`) : t('playback.command_error');
+                this.previewMs = undefined;
+            }
         } finally {
             this.seekBusy = false;
-            const queued = this.queuedSeekMs;
-            this.queuedSeekMs = undefined;
-            if (queued !== undefined && queued !== positionMs) void this.submitSeek(queued);
-            else if (!this.disposed) this.renderTimeline();
+            const queued = this.queuedSeek;
+            this.queuedSeek = undefined;
+            if (queued && queued.identity === this.seekIdentity(this.snapshot)
+                && queued.positionMs !== positionMs) {
+                void this.submitSeek(queued.positionMs);
+            } else if (!this.disposed && this.snapshot) {
+                if (!this.scrubbing && !this.snapshot.playback.pendingSeek) this.previewMs = undefined;
+                this.render(this.snapshot);
+            }
         }
     }
 

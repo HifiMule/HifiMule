@@ -216,6 +216,33 @@ class InstalledEvidenceTests(unittest.TestCase):
         ]
         self.assertTrue(any("four required" in error for error in evidence.validate_record(record)))
 
+    def test_seek_evidence_cannot_certify_a_fully_disabled_feature(self):
+        row = seek_row()
+        row.update(enabled=False, disabledReason="unverified installed target", ordinaryPlayback="passed")
+        errors = evidence.validate_seek_evidence({"seekEvidenceVersion": 1, "seek": {"rows": [row]}})
+        self.assertTrue(any("usable seek combination" in error for error in errors))
+
+    def test_seek_evidence_rejects_unchanged_landing_despite_changed_requests(self):
+        row = seek_row()
+        for item in row["observations"]:
+            item.update(priorCommittedPositionMs=3000, landedPositionMs=3000,
+                        committedPositionMs=3000, fixtureOraclePositionMs=3000, absoluteErrorMs=0)
+        errors = evidence.validate_seek_evidence({"seekEvidenceVersion": 1, "seek": {"rows": [row]}})
+        self.assertTrue(any("no-op" in error for error in errors))
+        self.assertTrue(any("requested target" in error for error in errors))
+
+    def test_seek_evidence_requires_transport_intent_and_strict_numbers(self):
+        for changes in ({"transportBefore": "paused", "transportAfter": "active"},
+                        {"transportAfter": "completed"}, {"committedPositionMs": True},
+                        {"durationMs": 0}):
+            with self.subTest(changes=changes):
+                row = seek_row()
+                row["observations"][0].update(changes)
+                self.assertTrue(evidence.validate_seek_evidence(
+                    {"seekEvidenceVersion": 1, "seek": {"rows": [row]}}))
+        self.assertTrue(evidence.validate_seek_evidence(
+            {"seekEvidenceVersion": True, "seek": {"rows": [seek_row()]}}))
+
     def test_seek_evidence_rejects_noop_false_landing_and_identity_changes(self):
         record = self.complete_record()
         row = record["seek"]["rows"][0]

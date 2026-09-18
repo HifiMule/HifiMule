@@ -4,7 +4,7 @@ baseline_commit: 78d963ed5efee7fdaed6d291fcd120700d3432ee
 
 # Story 15.7: Seek within a track and see the actual playback position
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -49,10 +49,41 @@ so that I can replay a passage or continue from a chosen position without restar
 - [x] Add accessible seek/elapsed UI using the current controls (AC: 1–3, 5, 7).
   - [x] Add elapsed/duration, keyboard-operable slider, local scrub preview, pending/error/unavailable feedback and bounded interpolation.
   - [x] Preserve mounted focus, independent output selection, responsive compact output dropdown and polling cleanup. Add English/French/Spanish/German catalog strings.
-- [x] Add integration, fixture and installed evidence coverage (AC: 1–9).
+- [ ] Add integration, fixture and installed evidence coverage (AC: 1–9).
   - [x] Exercise the real RPC/native ingress → service → owner → audio seam, not only enum mappings; add deterministic race barriers and mock HTTP failures.
   - [x] Extend UI clock tests, persistence/restart tests and installed collector validation to reject no-op, stale or contradictory success evidence.
-  - [x] Run relevant checks below and record exact provider/format/backend/OS/architecture evidence and remaining unavailable environments honestly.
+  - [ ] Run required installed provider/format/backend/OS/architecture qualification; local automated checks pass as recorded below, but installed evidence remains unavailable.
+
+### Review Findings
+
+Review date: 2026-09-18. Scope: `78d963e..c03a5af`; full Blind Hunter, Edge Case Hunter and Acceptance Auditor review. The user authorized applying every patch. Ten findings are fixed; the qualification gate is patched, but its installed-evidence/usable-combination requirement remains open. The pre-existing macOS conversion issue is unchanged.
+
+- [x] [Review][Patch] **P1 — Reset progress admission to the committed backward-seek cursor.** Admission initializes the new generation's ingress position from the old cursor; commit changes the session cursor, but `refresh_ingress` only resets on a generation change. Subsequent positions below the old cursor are rejected as `STALE_PROGRESS`, freezing progress/checkpoints until playback catches up. Reset the ingress baseline on the matching commit and test backward commit followed by real progress. AC7–8. [hifimule-daemon/src/playback/session.rs:1927]
+- [x] [Review][Patch] **P1 — Publish ordinary pipeline failures after seek completion.** The worker retains `worker_seek_failure` for its entire lifetime and maps later output/HTTP/decode errors to `SeekFailed`; the owner ignores that event once `pending_seek` is cleared. Audio can stop while the snapshot remains active. Distinguish preparation failure from failure after commit. AC5. [hifimule-daemon/src/playback/audio.rs:807]
+- [x] [Review][Patch] **P1 — Supersede pending seeks on output generation changes.** Output selection/loss rotates generation without clearing `pending_seek`; the old preparation is fenced out, but later Resume enters the pending-seek branch and never dispatches replacement audio. Clear the abandoned operation with a superseded outcome on these transitions. AC4–5. [hifimule-daemon/src/playback/session.rs:1518; hifimule-daemon/src/playback/session/output_selection.rs:355]
+- [x] [Review][Patch] **P1 — Reconcile duration with decoded media before admitting exact-end success.** Duration still comes exclusively from integer provider seconds. The exact-end branch checkpoints that value without validating actual media end; a 10.5-second WAV advertised as 10 seconds completes early, while overstated metadata can persist a cursor beyond EOF. Derive/validate the qualified duration and reject discrepancies. AC1–3. [hifimule-daemon/src/playback/audio.rs:649; hifimule-daemon/src/playback/session.rs:1687]
+- [ ] [Review][Patch] **P1 — Gate enablement on the required provider/format/platform qualification.** Runtime container/codec recognition enables PCM WAV seeking across platforms, although the installed checklist explicitly leaves the required platform evidence unverified. Keep unqualified combinations disabled and record numeric landing/transport evidence before enabling them; retain at least one genuinely qualified usable path as required by the story. AC9. [hifimule-daemon/src/playback/decoder.rs:161; hifimule-daemon/src/playback/audio.rs:1110] **Partial resolution:** the per-track runtime gate now exposes only Jellyfin original PCM-WAV after FFmpeg verifies codec/container, reconciles media duration, and enforces the 50 ms landing budget. This permits installed evidence collection without enabling Navidrome or other unimplemented formats. Platform qualification and at least one accepted installed row remain required, so this item is intentionally unchecked.
+- [x] [Review][Patch] **P2 — Keep resolution and qualification in separate event slots.** `Resolved` and `SeekQualified` have the same coalescing kind. If qualification arrives before the owner's next drain, it removes the metadata/duration event, leaving duration absent and seeking unavailable. Preserve both events or merge their payloads. AC2, AC7. [hifimule-daemon/src/playback/session.rs:1862]
+- [x] [Review][Patch] **P2 — Preserve an active scrub across polls and separate preview from elapsed time.** A newer ordinary snapshot clears `previewMs` before release, and the preview also replaces the committed elapsed label. Reproduction: a 7000 ms drag becomes 1500 ms after one progress poll. Track active scrubbing separately and keep the elapsed display authoritative. AC1, AC7 and UI contract. [hifimule-ui/src/components/PlaybackControls.ts:121; hifimule-ui/src/components/PlaybackControls.ts:201]
+- [x] [Review][Patch] **P2 — Fence queued scrubs by session and occurrence identity.** `queuedSeekMs` stores only a number and dispatches against the latest snapshot. Reproduction: queue 7000 ms behind a pending seek, replace the track, then resolve the first RPC; the queued request targets the replacement occurrence. Clear or reject stale queued intent on identity changes. AC4, AC7. [hifimule-ui/src/components/PlaybackControls.ts:245]
+- [x] [Review][Patch] **P2 — Render rejected seek errors immediately.** The catch stores `commandError`, but finally calls only `renderTimeline`; unchanged snapshots do not trigger `render`. Reproduction confirms `INVALID_SEEK` is stored but absent from the alert. Render the error and clear it when a new command begins. AC3, AC5. [hifimule-ui/src/components/PlaybackControls.ts:237]
+- [x] [Review][Patch] **P2 — Deduplicate native discontinuities by committed operation identity.** Comparing only the last landed position suppresses a second successful seek to the same position when publication misses its intermediate pending state. Preserve operation identity through coalesced native projection and emit once per successful discontinuity. AC6. [hifimule-daemon/src/playback/native.rs:560]
+- [x] [Review][Patch] **P2 — Reject seek evidence that never reaches the requested target.** The validator compares landing with the oracle but never ties either to the requested target; forward/backward coverage uses requests alone. Reproduction with both actual/oracle/committed positions fixed at the prior 3000 ms and requests at 4000/2000 ms returns no errors. Validate target accuracy and actual movement, including transport preservation. AC9 and evidence contract. [scripts/playback-installed-evidence.py:519]
+- [x] [Review][Defer] **P2 — Reject finite macOS time values outside Duration's range.** `Duration::from_secs_f64` can panic for oversized finite values; use the checked conversion. This conversion already existed before the reviewed diff, so classified deferred as pre-existing rather than an introduced defect. [third_party/souvlaki/src/platform/macos/mod.rs:300] — deferred, pre-existing
+
+Validation: daemon playback selection passed **183 tests, 6 ignored** after rerunning outside sandbox restrictions; UI suite **17 passed**; playback evidence suites **20 passed**. Additional scratch reproductions confirmed scrub reset, invisible rejection, cross-occurrence queued seek and accepted no-op evidence. Installed audio/hardware qualification was not performed. One preliminary Linux argument-count concern was dismissed after confirming the cfg-selected function alias; no review layer failed.
+
+### Review Patch Validation (2026-09-18)
+
+- Reset ingress on committed backward seeks and restored terminal-cursor restart; tests verify subsequent progress and persisted position before reaching the old cursor.
+- Preserve independent resolution, qualification, commit and pipeline-failure event slots. The owner distinguishes preparation failure from post-commit failure, and output changes supersede abandoned seek state.
+- Reconcile FFmpeg PCM stream duration with whole-second provider metadata; exact-end uses verified milliseconds, and contradictory durations do not qualify. Ordinary unsupported-WAV terminal resume remains covered.
+- Preserve scrub previews through polling while displaying authoritative elapsed time, fence queued scrubs by instance/session/occurrence, render RPC rejections immediately, and acknowledge native discontinuities by operation identity.
+- Reject no-op/wrong-target evidence, invalid numeric fields, transport mismatches and entirely disabled acceptance matrices.
+- Playback suite after restoring the runtime-qualified PCM-WAV path: **193 passed, 6 ignored**. All new review regressions passed, including qualification, decoded duration, seek landing, backward progress and race coverage.
+- Provider suite **125 passed**; UI suite **20 passed**; evidence suites **23 passed**; i18n **7 passed**; UI TypeScript/Vite build passed. Daemon Clippy passed with existing warnings outside the touched playback code. Targeted Rust formatting and `git diff --check` passed.
+- Installed Windows/Linux/macOS seek qualification was not available in this run. Runtime-verified Jellyfin original PCM-WAV seeking is enabled to collect that evidence; other providers/formats remain unavailable. This does not complete AC9. Story and sprint status remain `in-progress`; ten patch findings are closed and one is partially resolved.
+- Field follow-up: the user confirmed that Jellyfin WAV seeking works on macOS after the runtime-gate correction. The report is qualitative and lacks the architecture, PCM depth and numeric landing data required for an AC9-installed row.
 
 ## Dev Notes
 
@@ -236,6 +267,7 @@ Story preparation: Codex. Implementation: GPT-6 (Codex).
 - `hifimule-daemon/src/playback/model.rs`
 - `hifimule-daemon/src/playback/native.rs`
 - `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/output_selection.rs`
 - `hifimule-daemon/src/providers/jellyfin.rs`
 - `hifimule-daemon/src/providers/mod.rs`
 - `hifimule-daemon/src/providers/subsonic.rs`
@@ -263,5 +295,7 @@ Story preparation: Codex. Implementation: GPT-6 (Codex).
 - `third_party/souvlaki/src/publication.rs`
 
 ### Change Log
+
+- 2026-09-18: Applied ten review fixes and restored the narrowly implemented Jellyfin original PCM-WAV runtime path after per-track FFmpeg verification. Reopened story to in-progress for installed seek qualification; runtime availability is not recorded as platform acceptance evidence.
 
 - 2026-09-18: Implemented authoritative current-track seeking, actual-position UI/native publication, runtime PCM-WAV qualification, durable commits, race/error handling, fixtures and installed-evidence validation. Marked ready for review.

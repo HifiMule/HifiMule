@@ -102,6 +102,7 @@ pub fn decode_stream(
         false,
         None,
         None,
+        None,
         pcm,
         cancel,
     )
@@ -116,7 +117,8 @@ pub fn decode_stream_with_seek(
     start_frame: u64,
     seek_candidate: bool,
     media_seek_requested: bool,
-    seek_qualified: Option<Arc<AtomicBool>>,
+    provider_duration_ms: Option<u64>,
+    decoded_duration_ms: Option<Arc<AtomicU64>>,
     seek_landing_frame: Option<Arc<AtomicU64>>,
     pcm: Arc<ArrayQueue<f32>>,
     cancel: Arc<AtomicBool>,
@@ -154,20 +156,48 @@ pub fn decode_stream_with_seek(
     let stream_index = stream.index();
     let stream_time_base = stream.time_base();
     let stream_start = stream.start_time();
+    let stream_duration = stream.duration();
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
     let mut decoder = context.decoder().audio()?;
+    let mut validated_duration_ms = None;
     if seek_candidate {
         let container = input.format().name().to_ascii_lowercase();
         let codec = decoder.id().name();
         let qualified = container.split(',').any(|name| name == "wav")
             && matches!(codec, "pcm_s16le" | "pcm_s24le" | "pcm_s32le");
         if qualified {
-            if let Some(seek_qualified) = &seek_qualified {
-                seek_qualified.store(true, Ordering::Release);
+            validated_duration_ms = validated_pcm_duration_ms(
+                stream_duration,
+                stream_time_base.numerator(),
+                stream_time_base.denominator(),
+                provider_duration_ms,
+            );
+            if let (Some(duration), Some(observed)) = (validated_duration_ms, &decoded_duration_ms)
+            {
+                observed.store(duration, Ordering::Release);
             }
-        } else if media_seek_requested {
-            anyhow::bail!("representation failed WAV/PCM seek qualification");
         }
+        if media_seek_requested && validated_duration_ms.is_none() {
+            anyhow::bail!("representation or duration failed WAV/PCM seek qualification");
+        }
+    }
+    let start_frame = if !media_seek_requested
+        && validated_duration_ms
+            .or(provider_duration_ms)
+            .filter(|duration| *duration > 0)
+            .is_some_and(|duration| {
+                start_frame == duration.saturating_mul(u64::from(output_rate)) / 1000
+            }) {
+        0 // A restored terminal cursor restarts only on explicit Resume.
+    } else {
+        start_frame
+    };
+    if media_seek_requested
+        && validated_duration_ms.is_some_and(|duration| {
+            start_frame >= duration.saturating_mul(u64::from(output_rate)) / 1000
+        })
+    {
+        anyhow::bail!("seek target is not before validated media end");
     }
     if media_seek_requested && start_frame > 0 {
         let relative_us = start_frame
@@ -397,6 +427,29 @@ pub fn decode_stream_with_seek(
         frames,
         emitted_frames: emitted_samples / u64::from(output_channels),
     })
+}
+
+// Provider duration is whole seconds. Reconcile sub-second rounding, but never
+// qualify a contradictory (one second or more) or absent duration as a precise end.
+fn validated_pcm_duration_ms(
+    ticks: i64,
+    numerator: i32,
+    denominator: i32,
+    provider: Option<u64>,
+) -> Option<u64> {
+    if ticks <= 0 || numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    let duration = u64::try_from(
+        i128::from(ticks)
+            .checked_mul(i128::from(numerator))?
+            .checked_mul(1000)?
+            / i128::from(denominator),
+    )
+    .ok()?;
+    let provider = provider.filter(|duration| *duration > 0)?;
+    (duration > 0 && duration <= 9_007_199_254_740_991 && duration.abs_diff(provider) < 1000)
+        .then_some(duration)
 }
 
 #[cfg(test)]
@@ -633,7 +686,7 @@ mod tests {
         );
         let pcm = Arc::new(ArrayQueue::new(220_000));
         let landing = media_seek.then(|| Arc::new(AtomicU64::new(UNKNOWN_SEEK_LANDING_FRAME)));
-        let qualified = Arc::new(AtomicBool::new(false));
+        let qualified = Arc::new(AtomicU64::new(0));
         decode_stream_with_seek(
             reader,
             Some(name),
@@ -642,6 +695,7 @@ mod tests {
             start_frame,
             seek_candidate,
             media_seek,
+            Some(2_000),
             Some(qualified.clone()),
             landing.clone(),
             pcm.clone(),
@@ -656,9 +710,9 @@ mod tests {
             .map(|landing| landing.load(Ordering::Acquire))
             .filter(|landing| *landing != UNKNOWN_SEEK_LANDING_FRAME);
         if media_seek {
-            assert!(qualified.load(Ordering::Acquire));
+            assert!(qualified.load(Ordering::Acquire) > 0);
         }
-        (samples, landing, qualified.load(Ordering::Acquire))
+        (samples, landing, qualified.load(Ordering::Acquire) > 0)
     }
 
     #[test]
@@ -1044,5 +1098,98 @@ mod tests {
         file.flush().unwrap();
         let result = decode_test_file(file.path()).unwrap();
         assert_eq!(result.frames, 192_000);
+    }
+    #[test]
+    fn review_pcm_duration_reconciles_rounding_but_rejects_conflicting_metadata() {
+        assert_eq!(
+            validated_pcm_duration_ms(504_000, 1, 48_000, Some(10_000)),
+            Some(10_500)
+        );
+        assert_eq!(
+            validated_pcm_duration_ms(504_000, 1, 48_000, Some(11_000)),
+            Some(10_500)
+        );
+        for provider in [None, Some(0), Some(9_000), Some(12_000)] {
+            assert_eq!(
+                validated_pcm_duration_ms(504_000, 1, 48_000, provider),
+                None
+            );
+        }
+        assert_eq!(validated_pcm_duration_ms(0, 1, 48_000, Some(10_000)), None);
+        assert_eq!(validated_pcm_duration_ms(504_000, 1, 0, Some(10_000)), None);
+    }
+
+    #[test]
+    fn review_decoded_duration_comes_from_pcm_stream_and_restored_end_restarts() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated-seek-pcm16.wav");
+        for (provider, start_frame, media_seek, succeeds) in [
+            (Some(2_000), 96_000, false, true),
+            (Some(5_000), 48_000, true, false),
+        ] {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let reader = BoundedHttpReader::from_source(
+                std::fs::File::open(&path).unwrap(),
+                cancel.clone(),
+                Arc::new(AtomicU64::new(0)),
+            );
+            let observed = Arc::new(AtomicU64::new(0));
+            let pcm = Arc::new(ArrayQueue::new(220_000));
+            let result = decode_stream_with_seek(
+                reader,
+                Some("stream.wav"),
+                48_000,
+                2,
+                start_frame,
+                true,
+                media_seek,
+                provider,
+                Some(observed.clone()),
+                None,
+                pcm.clone(),
+                cancel,
+            );
+            assert_eq!(result.is_ok(), succeeds);
+            if succeeds {
+                assert_eq!(observed.load(Ordering::Acquire), 2_000);
+                assert_eq!(
+                    pcm.len(),
+                    192_000,
+                    "restored exact end must restart from the beginning"
+                );
+            } else {
+                assert_eq!(observed.load(Ordering::Acquire), 0);
+            }
+        }
+    }
+    #[test]
+    fn review_unsupported_wav_preserves_ordinary_terminal_resume() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated-seek-pcm-f32.wav");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reader = BoundedHttpReader::from_source(
+            std::fs::File::open(path).unwrap(),
+            cancel.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let observed = Arc::new(AtomicU64::new(0));
+        let pcm = Arc::new(ArrayQueue::new(220_000));
+        decode_stream_with_seek(
+            reader,
+            Some("stream.wav"),
+            48_000,
+            2,
+            96_000,
+            true,
+            false,
+            Some(2_000),
+            Some(observed.clone()),
+            None,
+            pcm.clone(),
+            cancel,
+        )
+        .unwrap();
+        assert_eq!(observed.load(Ordering::Acquire), 0);
+        assert_eq!(pcm.len(), 192_000);
     }
 }

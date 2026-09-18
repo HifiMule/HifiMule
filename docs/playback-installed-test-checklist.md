@@ -304,3 +304,23 @@ The collector rejects no-op forward/backward success, request-equals-result
 without an independent oracle, changed identity/queue, pending/failed targets
 shown as committed, contradictory duplicate matrix rows and missing or
 unsupported evidence versions.
+
+
+Review follow-up (2026-09-18): no installed seek combination is currently
+qualified. The runtime-verified Jellyfin original PCM-WAV candidate is available
+for collecting that evidence; decoder/unit tests alone do not qualify a target.
+The validator now rejects an entirely disabled matrix as Story 15.7 acceptance,
+unchanged actual/oracle cursors behind different requested targets, wrong-direction
+landings, target error above 50 ms, and transport-intent mismatches. This safe
+interim gate does **not** satisfy the mandatory usable-seek acceptance criterion.
+Record the required installed observations before marking exact
+provider/codec/backend/OS/architecture combinations qualified for release.
+
+### Provisional field observations
+
+- 2026-09-18 — macOS, Jellyfin, WAV: user reports that seeking works after the
+  runtime qualification fix. This confirms that the control becomes available
+  and produces a usable seek on one real setup. Architecture, PCM depth,
+  requested/landed positions, numeric error, transport before/after, backend,
+  buffer peaks and package revision were not supplied, so this observation is
+  not yet an AC9-qualified installed row.

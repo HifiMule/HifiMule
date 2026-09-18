@@ -457,7 +457,7 @@ def validate_native_evidence(record: dict) -> list[str]:
 
 
 def validate_seek_evidence(record: dict) -> list[str]:
-    if record.get("seekEvidenceVersion") != 1:
+    if type(record.get("seekEvidenceVersion")) is not int or record.get("seekEvidenceVersion") != 1:
         return ["Story 15.7 seek evidence is missing or has an unsupported version"]
     seek = record.get("seek")
     rows = seek.get("rows") if isinstance(seek, dict) else None
@@ -465,6 +465,7 @@ def validate_seek_evidence(record: dict) -> list[str]:
         return ["Story 15.7 seek evidence has no provider/representation/backend rows"]
     errors = []
     combinations = {}
+    enabled_rows = 0
     for index, row in enumerate(rows):
         label = f"seek row {index}"
         if not isinstance(row, dict):
@@ -486,6 +487,7 @@ def validate_seek_evidence(record: dict) -> list[str]:
             if not str(row.get("disabledReason", "")).strip() or row.get("ordinaryPlayback") != "passed":
                 errors.append(f"{label} disabled capability lacks reason or ordinary-playback pass")
             continue
+        enabled_rows += 1
         if row.get("provider") != "jellyfin" or row.get("representation") != "original" \
                 or row.get("container") != "wav" \
                 or row.get("codec") not in {"pcm_s16le", "pcm_s24le", "pcm_s32le"}:
@@ -503,7 +505,7 @@ def validate_seek_evidence(record: dict) -> list[str]:
                 errors.append(f"{item_label} is invalid")
                 continue
             numeric = ("requestedPositionMs", "priorCommittedPositionMs", "landedPositionMs",
-                       "fixtureOraclePositionMs", "absoluteErrorMs", "durationMs",
+                       "fixtureOraclePositionMs", "committedPositionMs", "absoluteErrorMs", "durationMs",
                        "compressedHighWaterBytes", "pcmHighWaterBytes")
             if any(type(item.get(field)) not in (int, float) or isinstance(item.get(field), bool)
                    or not math.isfinite(item[field]) or item[field] < 0 for field in numeric):
@@ -511,11 +513,18 @@ def validate_seek_evidence(record: dict) -> list[str]:
                 continue
             if any(type(item[field]) is not int for field in
                    ("requestedPositionMs", "priorCommittedPositionMs", "landedPositionMs",
-                    "fixtureOraclePositionMs", "durationMs", "compressedHighWaterBytes",
+                    "fixtureOraclePositionMs", "committedPositionMs", "durationMs", "compressedHighWaterBytes",
                     "pcmHighWaterBytes")):
                 errors.append(f"{item_label} positions and buffer peaks must be integers")
-            if item["requestedPositionMs"] > item["durationMs"]:
-                errors.append(f"{item_label} requests beyond duration")
+            if item["durationMs"] <= 0 or any(item[field] > item["durationMs"] for field in
+                    ("requestedPositionMs", "priorCommittedPositionMs", "landedPositionMs", "fixtureOraclePositionMs", "committedPositionMs")):
+                errors.append(f"{item_label} has an unavailable duration or position beyond duration")
+            if any(item[field] > 9_007_199_254_740_991 for field in
+                    ("requestedPositionMs", "priorCommittedPositionMs", "landedPositionMs", "fixtureOraclePositionMs", "committedPositionMs", "durationMs")):
+                errors.append(f"{item_label} exceeds safe integer positions")
+            target_error = abs(item["fixtureOraclePositionMs"] - item["requestedPositionMs"])
+            if target_error > 50 or abs(item["landedPositionMs"] - item["requestedPositionMs"]) > 50:
+                errors.append(f"{item_label} did not reach the requested target within 50 ms")
             expected_error = abs(item["landedPositionMs"] - item["fixtureOraclePositionMs"])
             if item["absoluteErrorMs"] != expected_error or expected_error > 50:
                 errors.append(f"{item_label} does not independently prove a landing within 50 ms")
@@ -528,10 +537,17 @@ def validate_seek_evidence(record: dict) -> list[str]:
             if item.get("queueRevisionAfter") != item.get("queueRevision") \
                     or item.get("occurrenceIdAfter") != item.get("occurrenceId"):
                 errors.append(f"{item_label} changes queue or occurrence identity")
-            if item["requestedPositionMs"] > item["priorCommittedPositionMs"]:
+            delta = item["requestedPositionMs"] - item["priorCommittedPositionMs"]
+            actual_delta = item["fixtureOraclePositionMs"] - item["priorCommittedPositionMs"]
+            if delta != 0 and (actual_delta == 0 or (delta > 0) != (actual_delta > 0)):
+                errors.append(f"{item_label} claims a successful no-op or wrong-direction seek")
+            elif target_error <= 50 and delta > 0:
                 directions.add("forward")
-            elif item["requestedPositionMs"] < item["priorCommittedPositionMs"]:
+            elif target_error <= 50 and delta < 0:
                 directions.add("backward")
+            expected_transport = "completed" if item["requestedPositionMs"] == item["durationMs"] else item.get("transportBefore")
+            if item.get("transportAfter") != expected_transport:
+                errors.append(f"{item_label} does not preserve transport intent or terminal completion")
             if item.get("transportBefore") not in {"active", "paused"} \
                     or item.get("transportAfter") not in {"active", "paused", "completed"}:
                 errors.append(f"{item_label} has invalid transport outcome")
@@ -540,6 +556,8 @@ def validate_seek_evidence(record: dict) -> list[str]:
                 errors.append(f"{item_label} exceeds bounded playback storage")
         if not {"forward", "backward"}.issubset(directions):
             errors.append(f"{label} has no-op or incomplete forward/backward evidence")
+    if enabled_rows == 0:
+        errors.append("Story 15.7 requires at least one qualified, usable seek combination")
     return errors
 
 

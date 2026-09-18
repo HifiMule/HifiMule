@@ -258,7 +258,10 @@ pub enum PlaybackEvent {
         representation: String,
         seek: SeekCapability,
     },
-    SeekQualified(SeekCapability),
+    SeekQualified {
+        capability: SeekCapability,
+        duration_ms: Option<u64>,
+    },
     Active,
     Buffering,
     Completed {
@@ -270,6 +273,12 @@ pub enum PlaybackEvent {
         actual_position_ms: u64,
     },
     SeekFailed {
+        operation_id: String,
+        code: String,
+        retryable: bool,
+    },
+    // The owner distinguishes preparation failure from a later pipeline failure.
+    SeekPipelineFailed {
         operation_id: String,
         code: String,
         retryable: bool,

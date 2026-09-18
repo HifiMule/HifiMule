@@ -349,6 +349,7 @@ fn select_inner(
         i.session.position_ms = i.session.position_ms.max(position);
         i.dirty = true;
     }
+    supersede_pending_seek(i);
     serial.fetch_add(1, Ordering::AcqRel);
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
     i.generation_id = Uuid::new_v4().to_string();
@@ -473,6 +474,7 @@ pub(super) fn reconcile_outputs(
             i.dirty = true;
         }
         super::super::audio::global().control(ControlAction::Stop);
+        supersede_pending_seek(i);
         serial.fetch_add(1, Ordering::AcqRel);
         i.generation_id = Uuid::new_v4().to_string();
         // The generation-tagged worker still owns the stream until output_closed.
@@ -1349,6 +1351,92 @@ mod tests {
             serde_json::to_value(params(&session.snapshot().unwrap(), &endpoint)).unwrap();
         json["unexpected"] = true.into();
         assert!(serde_json::from_value::<SelectOutputParams>(json).is_err());
+        session.stop_and_join().unwrap();
+    }
+    #[test]
+    fn review_output_switch_supersedes_seek_and_resume_dispatches_again() {
+        let (_dir, session, endpoint) = fixture_with_outputs(true);
+        let before = session.snapshot().unwrap();
+        session
+            .select_output(params(&before, &endpoint), None)
+            .unwrap();
+        let before = committed(&session);
+        session
+            .apply(ApplySessionParams {
+                schema_version: 1,
+                instance_id: before.instance_id,
+                session_id: before.session_id,
+                command_id: Uuid::new_v4().to_string(),
+                expected_queue_revision: before.queue_revision,
+                operation: SessionOperation::PlayTrack {
+                    source: TrackSource {
+                        server_id: "server".into(),
+                        track_id: "track".into(),
+                    },
+                },
+            })
+            .unwrap();
+        let current = session.snapshot().unwrap();
+        session.publish_event(
+            current.generation_id.clone(),
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: current.current.as_ref().unwrap().source.clone(),
+                    title: "fixture".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(10_000),
+                representation: "wav".into(),
+                seek: SeekCapability::jellyfin_pcm_wav(),
+            },
+        );
+        let qualified = session.snapshot().unwrap();
+        let pending = session
+            .seek_with_guard(
+                SeekParams {
+                    schema_version: 1,
+                    instance_id: qualified.instance_id,
+                    session_id: qualified.session_id,
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: qualified.generation_id,
+                    occurrence_id: qualified.current.unwrap().occurrence_id,
+                    position_ms: 4_000,
+                },
+                None,
+            )
+            .unwrap();
+        let replacement = session
+            .list_outputs(ListOutputsParams { schema_version: 1 })
+            .unwrap()
+            .outputs
+            .into_iter()
+            .find(|o| o.output_id != endpoint.output_id)
+            .unwrap();
+        session
+            .select_output(params(&pending, &replacement), None)
+            .unwrap();
+        let switched = committed(&session);
+        assert!(switched.playback.pending_seek.is_none());
+        assert_eq!(
+            switched.playback.seek_outcome.as_ref().unwrap().status,
+            "superseded"
+        );
+        session.publish_event_at_epoch(
+            pending.generation_id,
+            PlaybackEvent::SeekCommitted {
+                operation_id: pending.playback.pending_seek.unwrap().operation_id,
+                requested_position_ms: 4_000,
+                actual_position_ms: 4_000,
+            },
+            pending.seek_epoch,
+        );
+        assert_eq!(session.snapshot().unwrap().position_ms, 0);
+        let resumed = session
+            .native_control(NativeControlIntent::Play, None)
+            .unwrap();
+        assert!(resumed.resume_audio);
+        assert!(resumed.playback.pending_seek.is_none());
         session.stop_and_join().unwrap();
     }
 }

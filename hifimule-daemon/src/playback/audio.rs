@@ -650,11 +650,16 @@ impl AudioEngine {
         // Persisted sessions intentionally omit transient Completed metadata.
         // Once the same duration is resolved, an explicit Resume from its
         // terminal cursor restarts from zero just like a live Completed resume.
-        let start_ms = if seek_operation_id.is_none() && start_ms == duration_ms {
-            0
-        } else {
-            start_ms
-        };
+        let pcm_wav_candidate = description.representations.iter().any(|representation| {
+            representation.seek_mechanism
+                == Some(crate::providers::PlaybackSeekMechanism::JellyfinOriginalPcmWav)
+        });
+        let start_ms =
+            if !pcm_wav_candidate && seek_operation_id.is_none() && start_ms == duration_ms {
+                0
+            } else {
+                start_ms
+            };
         let _start_guard = self.starts.lock().await;
         require_preparation_epoch(&session, expected_epoch)?;
         session
@@ -793,6 +798,7 @@ impl AudioEngine {
                     worker_position,
                     preparation,
                     seek_candidate,
+                    duration_ms,
                     worker_seek,
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
@@ -809,10 +815,10 @@ impl AudioEngine {
                                 code: error.code().into(),
                                 retryable: error.retryable(),
                             },
-                            |(operation_id, _)| PlaybackEvent::SeekFailed {
+                            |(operation_id, _)| PlaybackEvent::SeekPipelineFailed {
                                 operation_id,
-                                code: "SEEK_FAILED".into(),
-                                retryable: true,
+                                code: error.code().into(),
+                                retryable: error.retryable(),
                             },
                         );
                         session.publish_event_at_epoch(
@@ -863,6 +869,20 @@ impl AudioEngine {
             )));
         }
         Ok(())
+    }
+}
+
+// Runtime qualification enables only the implemented Jellyfin original PCM-WAV
+// path after FFmpeg has verified its format and reconciled media duration. The
+// installed matrix remains a separate release-evidence concern.
+fn seek_qualification_event(duration_ms: u64) -> PlaybackEvent {
+    PlaybackEvent::SeekQualified {
+        capability: if duration_ms > 0 {
+            super::model::SeekCapability::jellyfin_pcm_wav()
+        } else {
+            super::model::SeekCapability::unavailable("seek.duration_unavailable")
+        },
+        duration_ms: (duration_ms > 0).then_some(duration_ms),
     }
 }
 
@@ -942,6 +962,7 @@ fn run_output(
     position_ms: Arc<AtomicU64>,
     preparation: super::http_source::Preparation,
     seek_candidate: bool,
+    provider_duration_ms: u64,
     seek_commit: Option<(String, u64)>,
 ) -> Result<(), PlaybackPipelineError> {
     let stream_failure = reader.failure_state();
@@ -988,7 +1009,7 @@ fn run_output(
     let channels = config.channels;
     let hint = hint.to_string();
     let media_seek_requested = seek_commit.is_some();
-    let seek_qualified = Arc::new(AtomicBool::new(false));
+    let seek_qualified = Arc::new(AtomicU64::new(0));
     let decoder_seek_qualified = seek_qualified.clone();
     let seek_landing_frame =
         media_seek_requested.then(|| Arc::new(AtomicU64::new(UNKNOWN_SEEK_LANDING_FRAME)));
@@ -1002,6 +1023,7 @@ fn run_output(
             start_ms.saturating_mul(u64::from(rate)) / 1000,
             seek_candidate,
             media_seek_requested,
+            Some(provider_duration_ms),
             Some(decoder_seek_qualified),
             decoder_seek_landing,
             decoder_pcm,
@@ -1108,14 +1130,22 @@ fn run_output(
         )));
     }
     if seek_candidate {
-        let capability = if seek_qualified.load(Ordering::Acquire) {
-            super::model::SeekCapability::jellyfin_pcm_wav()
-        } else {
-            super::model::SeekCapability::unavailable("seek.representation_unqualified")
-        };
+        let duration = seek_qualified.load(Ordering::Acquire);
+        if !media_seek_requested
+            && start_ms > 0
+            && start_ms
+                == if duration > 0 {
+                    duration
+                } else {
+                    provider_duration_ms
+                }
+        {
+            base_position_ms.store(0, Ordering::Release);
+            position_ms.store(0, Ordering::Release);
+        }
         session.publish_event_at_epoch(
             generation.clone(),
-            PlaybackEvent::SeekQualified(capability),
+            seek_qualification_event(duration),
             event_epoch.load(Ordering::Acquire),
         );
     }
@@ -2044,5 +2074,32 @@ mod tests {
         assert!(!error.contains("credential-must-not-escape"));
         redirect.assert_async().await;
         document.assert_async().await;
+    }
+    #[test]
+    fn review_runtime_qualification_enables_only_verified_pcm_wav_duration() {
+        for duration in [0, 2_000, 10_500] {
+            let PlaybackEvent::SeekQualified {
+                capability,
+                duration_ms,
+            } = seek_qualification_event(duration)
+            else {
+                panic!("qualification event expected")
+            };
+            assert_eq!(duration_ms, (duration > 0).then_some(duration));
+            if duration > 0 {
+                assert!(capability.available);
+                assert_eq!(
+                    capability.mechanism.as_deref(),
+                    Some("ffmpeg-post-open-media-time-seek")
+                );
+                assert_eq!(capability.decoded_landing_tolerance_ms, Some(50));
+            } else {
+                assert!(!capability.available);
+                assert_eq!(
+                    capability.reason.as_deref(),
+                    Some("seek.duration_unavailable")
+                );
+            }
+        }
     }
 }

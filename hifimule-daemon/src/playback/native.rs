@@ -157,6 +157,7 @@ pub struct NativePlaybackView {
     pub occurrence_id: Option<String>,
     pub pending_seek_operation_id: Option<String>,
     pub seeked_position_ms: Option<u64>,
+    pub seeked_operation_id: Option<String>,
     pub commands: NativeCommandMask,
     pub failure_code: Option<String>,
 }
@@ -178,6 +179,7 @@ impl Default for NativePlaybackView {
             occurrence_id: None,
             pending_seek_operation_id: None,
             seeked_position_ms: None,
+            seeked_operation_id: None,
             commands: NativeCommandMask::default(),
             failure_code: None,
         }
@@ -251,6 +253,10 @@ impl NativePlaybackView {
                 (outcome.status == "succeeded")
                     .then_some(outcome.actual_position_ms)
                     .flatten()
+            }),
+            seeked_operation_id: snapshot.playback.seek_outcome.as_ref().and_then(|outcome| {
+                (outcome.status == "succeeded" && outcome.actual_position_ms.is_some())
+                    .then(|| outcome.operation_id.clone())
             }),
             commands: NativeCommandMask {
                 play: resumable && !active,
@@ -557,8 +563,13 @@ impl<B: NativeBackend> NativeMediaOwner<B> {
                 .set_playback(playback)
                 .map_err(|error| format!("native playback update failed: {error}"))?;
         }
-        if let Some(position_ms) = view.seeked_position_ms
-            && last.and_then(|last| last.seeked_position_ms) != Some(position_ms)
+        if let (Some(position_ms), Some(operation_id)) =
+            (view.seeked_position_ms, view.seeked_operation_id.as_ref())
+            && last.is_none_or(|last| {
+                last.instance_id != view.instance_id
+                    || last.session_id != view.session_id
+                    || last.seeked_operation_id.as_ref() != Some(operation_id)
+            })
         {
             let micros = position_ms
                 .checked_mul(1000)
@@ -1207,7 +1218,11 @@ mod tests {
             NativeMediaOwner::register_with(ingress.clone(), || Ok(TestBackend(state.clone())))
                 .unwrap();
         state.lock().unwrap().calls.clear();
-        ingress.latest.lock().unwrap().seeked_position_ms = Some(4_012);
+        {
+            let mut view = ingress.latest.lock().unwrap();
+            view.seeked_position_ms = Some(4_012);
+            view.seeked_operation_id = Some("first-seek".into());
+        }
         owner.refresh().unwrap();
         owner.refresh().unwrap();
         assert_eq!(
@@ -1219,6 +1234,20 @@ mod tests {
                 .filter(|call| matches!(call, Call::Seeked(4_012_000)))
                 .count(),
             1
+        );
+        // Publication may coalesce away pending state. Same cursor, distinct operation.
+        ingress.latest.lock().unwrap().seeked_operation_id = Some("second-seek".into());
+        owner.refresh().unwrap();
+        owner.refresh().unwrap();
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| matches!(call, Call::Seeked(4_012_000)))
+                .count(),
+            2
         );
     }
 

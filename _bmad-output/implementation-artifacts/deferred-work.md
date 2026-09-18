@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Deferred from: code review of 15-7-seek-within-a-track-and-see-the-actual-playback-position.md (2026-09-18)
+
+- **Finite macOS seek time can exceed Duration's range** (`third_party/souvlaki/src/platform/macos/mod.rs:300`). The existing `Duration::from_secs_f64(position)` conversion panics for sufficiently large finite nonnegative values; the new finite/sign guard does not reject those values. Use `Duration::try_from_secs_f64` and reject overflow before the native callback. Deferred as pre-existing during review, not a user-approved exception to the story's checked-conversion requirement.
+
 Status: open
 Last updated: 2026-06-20
 

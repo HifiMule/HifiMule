@@ -893,17 +893,29 @@ does not repeat audio work; reuse with different payload returns
 `COMMAND_ID_REUSED`. Successful committed cursors use the existing transactional
 checkpoint path. Pending, failed and superseded targets are never persisted.
 
-### Initial qualified capability matrix
+### Initial candidate capability matrix
 
 | Provider | Representation | Mechanism | Timestamp origin | Decoded landing tolerance | Presentation allowance | Status |
 | --- | --- | --- | --- | ---: | --- | --- |
-| Jellyfin | Original WAV with FFmpeg-verified `pcm_s16le`, `pcm_s24le` or `pcm_s32le`; authenticated validated byte ranges | FFmpeg post-open media-time seek, decoder/resampler reset and bounded pre-roll trim | Audio stream start time and time base, reconciled to output frame zero | ≤ 50 ms | CPAL callback accounting ≈25 ms; Pulse played-frame accounting ≈5 ms; owner sample 250 ms + snapshot 500 ms + repaint 100 ms | Enabled only after runtime verification |
+| Jellyfin | Original WAV with FFmpeg-verified `pcm_s16le`, `pcm_s24le` or `pcm_s32le`; authenticated validated byte ranges | FFmpeg post-open media-time seek, decoder/resampler reset and bounded pre-roll trim | Audio stream start time and time base, reconciled to output frame zero | ≤ 50 ms | CPAL callback accounting ≈25 ms; Pulse played-frame accounting ≈5 ms; owner sample 250 ms + snapshot 500 ms + repaint 100 ms | Runtime enabled after per-track verification; installed acceptance remains pending by target |
 | Jellyfin | FLAC, MP3, AAC, ALAC, Opus, Vorbis, AIFF, WMA or transcoded/changed representation | None qualified | — | — | — | Disabled; ordinary playback retained |
 | Subsonic/OpenSubsonic | Raw stream, any format | None qualified | — | — | — | Disabled; ordinary playback retained |
 
 `range_supported`, filename extension, `Accept-Ranges`, or one successful HTTP
 206 response never enables seeking by itself. The provider must identify the
 qualified original candidate and FFmpeg must verify the actual WAV/PCM stream.
+Runtime format recognition is necessary but does not certify a platform. The
+implemented Jellyfin PCM-WAV path is exposed only after FFmpeg verifies the
+opened stream and its media duration. Installed observations still determine
+which target rows satisfy release acceptance; runtime success does not by itself
+promote a Windows, Linux, or macOS row to qualified evidence.
+
+For PCM WAV candidates, FFmpeg stream duration/time base supplies the millisecond
+end cursor. Whole-second provider metadata is reconciled when the difference is
+less than 1000 ms; a difference of 1000 ms or more prevents qualification and
+fails an attempted media seek. Exact-end admission uses the validated cursor,
+not the provider's rounded seconds. Restoring that cursor and explicitly resuming
+restarts at zero, including progress admission and backend position accounting.
 Zero/missing duration, changed validators, ignored/wrong ranges and truncated
 responses disable or fail seeking explicitly.
 
@@ -915,7 +927,8 @@ conversion and a 10-second FastForward/Rewind step. macOS accepts only finite,
 nonnegative public position-change values. All normalized commands enter the
 same owner admission and effect path as UI seeking. A native `Seeked(i64)` is a
 success-driven discontinuity acknowledgement, never an admission receipt or a
-routine progress signal.
+routine progress signal. Publication tracks the committed operation identity,
+so distinct seeks to the same position still produce distinct acknowledgements.
 
 Transport race outcomes are fixed: a later admitted seek wins; Pause changes
 the post-commit intent to paused; Stop, track replacement, output switch/loss
