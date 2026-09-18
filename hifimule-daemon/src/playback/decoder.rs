@@ -137,7 +137,11 @@ pub fn decode_stream_with_seek(
     // the truthful non-seekable contract for that demuxer. Containers such as
     // MP4 still need bounded seeking to locate their metadata.
     let flac_stream = reader.peek_prefix(4)? == b"fLaC";
-    let sequential_stream = flac_stream || reader_is_mp3(&mut reader, filename_hint)?;
+    // Preserve the proven sequential probe/playback path for ordinary FLAC and
+    // MP3 starts. A user seek starts a fresh decoder and enables random access
+    // only for that validated media-time operation.
+    let sequential_stream =
+        !media_seek_requested && (flac_stream || reader_is_mp3(&mut reader, filename_hint)?);
     let io = if sequential_stream {
         ffmpeg::format::context::StreamIo::from_read_with_capacity(reader, 32 * 1024)?
     } else {
@@ -167,7 +171,8 @@ pub fn decode_stream_with_seek(
         let codec = decoder.id().name();
         let qualified = seek_representation_matches(seek_mechanism, &container, codec);
         if qualified {
-            validated_duration_ms = validated_stream_duration_ms(
+            validated_duration_ms = validated_seek_duration_ms(
+                seek_mechanism,
                 stream_duration,
                 stream_time_base.numerator(),
                 stream_time_base.denominator(),
@@ -216,8 +221,19 @@ pub fn decode_stream_with_seek(
             i64::try_from(scaled.max(0))
                 .map_err(|_| anyhow::anyhow!("stream timestamp origin overflow"))?
         };
+        // Compressed codecs may need packets before the requested timestamp to
+        // reconstruct predictor or bit-reservoir state. Decode a bounded lead-in
+        // and discard it below so the first emitted sample still maps to target.
+        let preroll_us = if matches!(
+            seek_mechanism,
+            Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav)
+        ) {
+            0
+        } else {
+            50_000
+        };
         let timestamp = origin_us
-            .checked_add(relative_us)
+            .checked_add(relative_us.saturating_sub(preroll_us))
             .ok_or_else(|| anyhow::anyhow!("seek timestamp overflow"))?;
         input
             .seek(timestamp, ..timestamp.saturating_add(1))
@@ -446,17 +462,21 @@ fn seek_representation_matches(
             has_container("mov") && matches!(codec, "aac" | "alac")
         }
         PlaybackSeekMechanism::JellyfinOriginalOpus => has_container("ogg") && codec == "opus",
+        PlaybackSeekMechanism::JellyfinOriginalMp3 => has_container("mp3") && codec == "mp3",
+        PlaybackSeekMechanism::JellyfinOriginalFlac => has_container("flac") && codec == "flac",
     }
 }
 
-fn validated_stream_duration_ms(
+fn validated_seek_duration_ms(
+    mechanism: PlaybackSeekMechanism,
     ticks: i64,
     numerator: i32,
     denominator: i32,
     provider: Option<u64>,
 ) -> Option<u64> {
+    let provider = provider.filter(|duration| *duration > 0)?;
     if ticks <= 0 || numerator <= 0 || denominator <= 0 {
-        return None;
+        return matches!(mechanism, PlaybackSeekMechanism::JellyfinOriginalMp3).then_some(provider);
     }
     let duration = u64::try_from(
         i128::from(ticks)
@@ -465,7 +485,6 @@ fn validated_stream_duration_ms(
             / i128::from(denominator),
     )
     .ok()?;
-    let provider = provider.filter(|duration| *duration > 0)?;
     (duration > 0 && duration <= 9_007_199_254_740_991 && duration.abs_diff(provider) < 1000)
         .then_some(duration)
 }
@@ -775,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn qualified_m4a_and_opus_matrix_lands_on_independent_fixture_samples() {
+    fn qualified_compressed_matrix_lands_on_independent_fixture_samples() {
         for (name, mechanism, max_mean_error) in [
             (
                 "generated-seek-aac.m4a",
@@ -791,6 +810,16 @@ mod tests {
                 "generated-seek-opus.oga",
                 PlaybackSeekMechanism::JellyfinOriginalOpus,
                 0.015,
+            ),
+            (
+                "generated-seek-mp3.mp3",
+                PlaybackSeekMechanism::JellyfinOriginalMp3,
+                0.02,
+            ),
+            (
+                "generated-seek-flac.flac",
+                PlaybackSeekMechanism::JellyfinOriginalFlac,
+                1.0e-6,
             ),
         ] {
             let (all, _, _) = collect_seek_fixture(name, 0, None, false);
@@ -834,6 +863,19 @@ mod tests {
     }
 
     #[test]
+    fn mp3_qualification_uses_positive_provider_duration_when_probe_duration_is_unknown() {
+        let (samples, landing, qualified) = collect_seek_fixture(
+            "generated-seek-mp3.mp3",
+            0,
+            Some(PlaybackSeekMechanism::JellyfinOriginalMp3),
+            false,
+        );
+        assert!(qualified);
+        assert!(landing.is_none());
+        assert!(!samples.is_empty());
+    }
+
+    #[test]
     fn seek_mechanism_requires_the_matching_opened_container_and_codec() {
         assert!(seek_representation_matches(
             PlaybackSeekMechanism::JellyfinOriginalM4a,
@@ -859,6 +901,16 @@ mod tests {
             PlaybackSeekMechanism::JellyfinOriginalOpus,
             "ogg",
             "vorbis"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalMp3,
+            "mp3",
+            "mp3"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalFlac,
+            "flac",
+            "flac"
         ));
     }
 
@@ -1214,28 +1266,68 @@ mod tests {
         assert_eq!(result.frames, 192_000);
     }
     #[test]
-    fn review_pcm_duration_reconciles_rounding_but_rejects_conflicting_metadata() {
+    fn review_stream_duration_reconciles_rounding_but_rejects_conflicting_metadata() {
         assert_eq!(
-            validated_stream_duration_ms(504_000, 1, 48_000, Some(10_000)),
+            validated_seek_duration_ms(
+                PlaybackSeekMechanism::JellyfinOriginalPcmWav,
+                504_000,
+                1,
+                48_000,
+                Some(10_000)
+            ),
             Some(10_500)
         );
         assert_eq!(
-            validated_stream_duration_ms(504_000, 1, 48_000, Some(11_000)),
+            validated_seek_duration_ms(
+                PlaybackSeekMechanism::JellyfinOriginalPcmWav,
+                504_000,
+                1,
+                48_000,
+                Some(11_000)
+            ),
             Some(10_500)
         );
         for provider in [None, Some(0), Some(9_000), Some(12_000)] {
             assert_eq!(
-                validated_stream_duration_ms(504_000, 1, 48_000, provider),
+                validated_seek_duration_ms(
+                    PlaybackSeekMechanism::JellyfinOriginalPcmWav,
+                    504_000,
+                    1,
+                    48_000,
+                    provider
+                ),
                 None
             );
         }
         assert_eq!(
-            validated_stream_duration_ms(0, 1, 48_000, Some(10_000)),
+            validated_seek_duration_ms(
+                PlaybackSeekMechanism::JellyfinOriginalPcmWav,
+                0,
+                1,
+                48_000,
+                Some(10_000)
+            ),
             None
         );
         assert_eq!(
-            validated_stream_duration_ms(504_000, 1, 0, Some(10_000)),
+            validated_seek_duration_ms(
+                PlaybackSeekMechanism::JellyfinOriginalPcmWav,
+                504_000,
+                1,
+                0,
+                Some(10_000)
+            ),
             None
+        );
+        assert_eq!(
+            validated_seek_duration_ms(
+                PlaybackSeekMechanism::JellyfinOriginalMp3,
+                0,
+                1,
+                48_000,
+                Some(10_000)
+            ),
+            Some(10_000)
         );
     }
 

@@ -230,7 +230,8 @@ class InstalledEvidenceTests(unittest.TestCase):
 
     def test_seek_evidence_accepts_the_first_compressed_jellyfin_batch(self):
         for container, codec in (("m4a", "aac"), ("m4a", "alac"),
-                                 ("ogg", "opus"), ("oga", "opus"), ("opus", "opus")):
+                                 ("ogg", "opus"), ("oga", "opus"), ("opus", "opus"),
+                                 ("mp3", "mp3"), ("flac", "flac")):
             with self.subTest(container=container, codec=codec):
                 self.assertEqual(evidence.validate_seek_evidence({
                     "seekEvidenceVersion": 1,

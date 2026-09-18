@@ -71,7 +71,10 @@ The first compressed-seek batch uses the same chirp source at 48 kHz stereo:
 | generated-seek-aac.m4a | `-c:a aac -b:a 192k -movflags +faststart` | `5b58c4468dbf37c486169e118ef1da8d33ef390dd61fadd3ffb9658562813047` |
 | generated-seek-alac.m4a | `-c:a alac -movflags +faststart` | `4107813df0d1ec3a62eab6f8c2719c1aa31c761e21901848d1f09b3839f77624` |
 | generated-seek-opus.oga | `-c:a libopus -b:a 128k -f ogg` | `923ea534601de489acb8e906ba5d087c521ecf53ff64152a7f3c2ddc43d696cd` |
+| generated-seek-mp3.mp3 | `-c:a libmp3lame -b:a 192k` | `ff9e12af33183572b801a5c661f123e6ca473222624f8b1cb53106977edfc919` |
+| generated-seek-flac.flac | `-c:a flac` | `7e0f5e1008f1d9a24edc79863d3fe2108a967a2a7ce4496cc3beddcb31e02a39` |
 
 The decoder tests correlate compressed seek output against the full decoded
 chirp within the 50 ms landing budget. This accounts for codec delay without
-accepting a count-only landing.
+accepting a count-only landing. Compressed seeks decode a bounded 50 ms lead-in
+before trimming to the target, including the MP3 bit-reservoir history.

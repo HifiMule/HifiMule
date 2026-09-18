@@ -44,6 +44,8 @@ pub enum PlaybackSeekMechanism {
     JellyfinOriginalPcmWav,
     JellyfinOriginalM4a,
     JellyfinOriginalOpus,
+    JellyfinOriginalMp3,
+    JellyfinOriginalFlac,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

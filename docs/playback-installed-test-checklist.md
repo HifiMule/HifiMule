@@ -291,8 +291,9 @@ audible outcome. The decoded error must be at most 50 ms. Native API and physica
 control observations are separate fields.
 
 Required installed rows are Windows x64, Linux x64, macOS x64 and macOS ARM64
-for each enabled Jellyfin original combination: PCM-in-WAV, AAC/ALAC-in-M4A and
-Opus-in-Ogg (`oga` or `opus` suffix). A disabled provider/format row must include a
+for each enabled Jellyfin original combination: PCM-in-WAV, AAC/ALAC-in-M4A,
+Opus-in-Ogg (`ogg`, `oga` or `opus` suffix), MP3 and FLAC. A disabled
+provider/format row must include a
 reason and ordinary-playback result. Existing Stories 15.4–15.6 records remain
 historical evidence and cannot satisfy seek acceptance. At story implementation
 time, installed runs unavailable on the current host remain explicitly
@@ -314,6 +315,14 @@ installed rows were not supplied. The user also confirmed that all three first
 compressed-batch combinations work on macOS: Jellyfin original AAC-in-M4A,
 ALAC-in-M4A and Opus-in-Ogg. These compressed results are also qualitative;
 deterministic decoder tests alone do not supply the missing installed metrics.
+The second candidate batch adds runtime-verified Jellyfin original MP3 and FLAC
+for installed testing. MP3 uses bounded decoder pre-roll to reconstruct its bit
+reservoir before target trimming.
+Field follow-up: Jellyfin FLAC seeking works on macOS. MP3 initially remained
+unavailable because sequential probing did not expose FFmpeg stream duration,
+despite Jellyfin providing the displayed duration; MP3 now accepts that positive
+provider duration when stream duration is unavailable and still verifies the
+opened MP3 codec/container plus the decoded seek landing.
 The validator now rejects an entirely disabled matrix as Story 15.7 acceptance,
 unchanged actual/oracle cursors behind different requested targets, wrong-direction
 landings, target error above 50 ms, and transport-intent mismatches. This safe

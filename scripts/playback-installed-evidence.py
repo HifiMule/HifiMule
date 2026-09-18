@@ -494,6 +494,8 @@ def validate_seek_evidence(record: dict) -> list[str]:
             or (row.get("container") == "m4a" and row.get("codec") in {"aac", "alac"})
             or (row.get("container") in {"ogg", "oga", "opus"}
                 and row.get("codec") == "opus")
+            or (row.get("container") == "mp3" and row.get("codec") == "mp3")
+            or (row.get("container") == "flac" and row.get("codec") == "flac")
         )
         if row.get("provider") != "jellyfin" or row.get("representation") != "original" \
                 or not qualified_media:

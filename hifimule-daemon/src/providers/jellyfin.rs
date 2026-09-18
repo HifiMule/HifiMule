@@ -924,6 +924,8 @@ fn jellyfin_seek_mechanism(suffix: Option<&str>) -> Option<PlaybackSeekMechanism
         "wav" | "wave" => Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav),
         "m4a" => Some(PlaybackSeekMechanism::JellyfinOriginalM4a),
         "opus" | "oga" | "ogg" => Some(PlaybackSeekMechanism::JellyfinOriginalOpus),
+        "mp3" => Some(PlaybackSeekMechanism::JellyfinOriginalMp3),
+        "flac" => Some(PlaybackSeekMechanism::JellyfinOriginalFlac),
         _ => None,
     }
 }
@@ -2528,14 +2530,15 @@ fn seek_capability_is_limited_to_verified_jellyfin_original_candidates() {
             Some(PlaybackSeekMechanism::JellyfinOriginalOpus)
         );
     }
-    for suffix in [
-        None,
-        Some("aac"),
-        Some("alac"),
-        Some("flac"),
-        Some("mp3"),
-        Some("wav?transcoded=true"),
-    ] {
+    assert_eq!(
+        jellyfin_seek_mechanism(Some("MP3")),
+        Some(PlaybackSeekMechanism::JellyfinOriginalMp3)
+    );
+    assert_eq!(
+        jellyfin_seek_mechanism(Some("flac")),
+        Some(PlaybackSeekMechanism::JellyfinOriginalFlac)
+    );
+    for suffix in [None, Some("aac"), Some("alac"), Some("wav?transcoded=true")] {
         assert_eq!(jellyfin_seek_mechanism(suffix), None);
     }
 }
