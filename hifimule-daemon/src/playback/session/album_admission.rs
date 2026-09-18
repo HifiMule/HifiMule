@@ -175,10 +175,12 @@ pub(super) fn reserve(
         ));
     }
     parse_revision(&params.expected_queue_revision)?;
+    prune_dedup(i);
     if i.dedup.contains_key(&params.command_id)
         || i.control_dedup.contains_key(&params.command_id)
         || i.seek_dedup.contains_key(&params.command_id)
         || i.output_dedup.contains_key(&params.command_id)
+        || i.preview_dedup.contains_key(&params.command_id)
     {
         return Err(PlaybackError::conflict(
             "COMMAND_ID_REUSED",

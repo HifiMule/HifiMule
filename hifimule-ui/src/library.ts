@@ -22,12 +22,12 @@ import {
     getImageUrl,
     rpcCall,
     playbackPlayTrack,
-    playbackPreviewTrack,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { createAlbumPlayButton } from './components/AlbumPlayButton';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { TracksBrowseView } from './components/TracksBrowseView';
+import { createTrackPreviewButton } from './components/TrackPreviewButton';
 import { basketStore } from './state/basket';
 import { t } from './i18n';
 import { showToast, ERROR_TOAST_DURATION } from './toast';
@@ -1054,18 +1054,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
             catch (error) { showToast((error as Error).message, 'danger'); }
         });
         row.appendChild(play);
-        const preview = document.createElement('sl-icon-button') as any;
-        preview.name = 'soundwave';
-        preview.label = t('playback.preview_track', { title: item.name });
-        preview.disabled = !playbackSource;
-        preview.addEventListener('mousedown', (event: Event) => event.stopPropagation());
-        preview.addEventListener('click', async (event: Event) => {
-            event.stopPropagation();
-            if (!playbackSource) return;
-            try { await playbackPreviewTrack(playbackSource.serverId, playbackSource.trackId); }
-            catch (error) { showToast((error as Error).message, 'danger'); }
-        });
-        row.appendChild(preview);
+        row.appendChild(createTrackPreviewButton(item.serverId, item.id, item.name));
     }
     if (item.type === 'MusicAlbum') {
         const play = createAlbumPlayButton(item.id, item.serverId, item.name);

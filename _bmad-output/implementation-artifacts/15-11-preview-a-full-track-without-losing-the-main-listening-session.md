@@ -4,7 +4,7 @@ baseline_commit: bd215ee1e65aa2a300fdbe246dcb30f664733984
 
 # Story 15.11: Preview a full track without losing the main listening session
 
-Status: review
+Status: done
 
 ## Story
 
@@ -55,6 +55,27 @@ so that I can assess music for a playlist or basket and then return to where I w
   - [x] Add owner/persistence/RPC/native regressions, production decoder return tests, failure/race injection and local outcome tests described below.
   - [x] Build daemon and UI; run controlled-runtime suites and installed-platform checks; record missing prerequisites honestly.
   - [x] Update API contracts and installed playback checklist with preview semantics, v4 recovery, evidence and limitations.
+
+### Review Findings
+
+- [x] [Review][Patch] Route seek validation through the active Preview occurrence instead of the suspended main occurrence [hifimule-daemon/src/playback/session.rs:2802]
+- [x] [Review][Patch] Build native transport commands from the active Preview identity, position and state [hifimule-daemon/src/playback/session.rs:2913]
+- [x] [Review][Patch] Retain the pending-return cursor marker after return preparation fails so Stop cannot reset it to zero [hifimule-daemon/src/playback/session.rs:973]
+- [x] [Review][Patch] Surface and preserve persistence failures from natural completion and failed-return checkpointing [hifimule-daemon/src/playback/session.rs:988]
+- [x] [Review][Patch] Commit Preview admission or replacement before retiring the currently valid transport state [hifimule-daemon/src/playback/session.rs:2069]
+- [x] [Review][Patch] Quiesce and capture audition audio before committing Return or Stop terminal evidence [hifimule-daemon/src/playback/session.rs:2681]
+- [x] [Review][Patch] Persist technical failure outcomes even when the next action is Return, Stop, supersession or restart [hifimule-daemon/src/playback/session.rs:946]
+- [x] [Review][Patch] Derive fully-heard evidence from continuous presentation rather than progress or EOF endpoints [hifimule-daemon/src/playback/session.rs:1025]
+- [x] [Review][Patch] Mark Preview failure and output-loss state dirty and checkpoint its inhibition and failure evidence [hifimule-daemon/src/playback/session.rs:946]
+- [x] [Review][Patch] Mark Preview Pause state dirty so its captured position and paused state survive restart [hifimule-daemon/src/playback/session.rs:2695]
+- [x] [Review][Patch] Reject Retry and error-state Resume when the Preview failure is non-retryable [hifimule-daemon/src/playback/session.rs:2713]
+- [x] [Review][Patch] Apply the shared ten-minute receipt expiry and cross-command ID collision policy to Preview commands [hifimule-daemon/src/playback/session.rs:1207]
+- [x] [Review][Patch] Reject an orphan playback_audition row instead of initializing a clean session over it [hifimule-daemon/src/playback/persistence.rs:128]
+- [x] [Review][Patch] Pause the active Preview projection when output-preference persistence fails [hifimule-daemon/src/playback/session/output_selection.rs:438]
+- [x] [Review][Patch] Validate audition outcome cursors before converting u64 values to SQLite i64 [hifimule-daemon/src/playback/persistence.rs:620]
+- [x] [Review][Patch] Validate audition duration before converting it to SQLite i64 and exposing it on the safe-integer wire contract [hifimule-daemon/src/playback/persistence.rs:748]
+- [x] [Review][Patch] Reject invalid persisted audition and saved-main transport-state combinations during restoration [hifimule-daemon/src/playback/persistence.rs:726]
+- [x] [Review][Patch] Replace source-regex Preview surface checks with behavioral DOM tests for invocation, selection and focus [scripts/tests/playback-ui.test.mjs:177]
 
 ## Dev Notes
 
@@ -249,6 +270,7 @@ GPT-6.
 - Reused the common provider/audio dispatch with destination main gain/suffix and explicit pending-return recovery; output loss inhibits automatic resume.
 - Added accessible Preview actions to all three browser track surfaces, Preview status/Return controls and EN/FR/ES/DE error/label parity.
 - Updated API and installed-test documentation. Automated coverage is green; physical installed-platform evidence remains open and is not claimed.
+- Applied all 18 code-review patches covering Preview transport identity, durable failure/return state, safe persistence bounds, receipt expiry, recovery validation and behavioral browser coverage.
 
 ### File List
 
@@ -267,6 +289,7 @@ GPT-6.
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-i18n/catalog.json`
 - `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/components/TrackPreviewButton.ts`
 - `hifimule-ui/src/components/PlaybackControls.ts`
 - `hifimule-ui/src/components/TracksBrowseView.ts`
 - `hifimule-ui/src/library.ts`
@@ -278,3 +301,4 @@ GPT-6.
 - 2026-09-18: Created Story 15.11 implementation context and marked it ready-for-dev.
 - 2026-09-18: Implemented full-track Preview with preserved main-session return, v4 local audition evidence, shared audio/native/RPC integration and browser controls; moved to review with automated gates green and installed physical evidence left open.
 - 2026-09-18: Fixed Preview remaining in Loading after output open by projecting audio-gate authorization from the active transport; added main-present, standalone and paused-preview regressions.
+- 2026-09-18: Completed adversarial code review, applied all 18 accepted patches, expanded regression coverage and moved the story to done.

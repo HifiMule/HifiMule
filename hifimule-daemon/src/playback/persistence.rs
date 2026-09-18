@@ -126,11 +126,13 @@ impl Database {
             Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)?, album_context })
         }).optional()?;
         if loaded.is_none() {
-            let count: i64 =
+            let occurrence_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM playback_occurrences", [], |r| {
                     r.get(0)
                 })?;
-            if count != 0 {
+            let audition_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM playback_audition", [], |r| r.get(0))?;
+            if occurrence_count != 0 || audition_count != 0 {
                 return Err(anyhow!("INVALID_SESSION"));
             }
         }
@@ -323,7 +325,9 @@ impl Database {
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
-        insert_audition_outcome(&tx, audition, "superseded", None, None)?;
+        if !audition_outcome_exists(&tx, &audition.audition_id)? {
+            insert_audition_outcome(&tx, audition, "superseded", None, None)?;
+        }
         let deleted = tx.execute(
             "DELETE FROM playback_audition WHERE singleton_id=1 AND audition_id=?1",
             [&audition.audition_id],
@@ -510,6 +514,14 @@ impl Database {
         Ok(())
     }
 
+    pub fn persist_playback_state(&self, session: &PersistedSession) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        update_session(&tx, session)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn load_playback_audition(&self) -> Result<Option<PersistedAudition>> {
         self.init_playback()?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -579,7 +591,9 @@ impl Database {
         }
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
-        insert_audition_outcome(&tx, previous, disposition, failure_code, None)?;
+        if !audition_outcome_exists(&tx, &previous.audition_id)? {
+            insert_audition_outcome(&tx, previous, disposition, failure_code, None)?;
+        }
         let deleted = tx.execute(
             "DELETE FROM playback_audition WHERE singleton_id=1 AND audition_id=?1",
             [&previous.audition_id],
@@ -604,7 +618,9 @@ impl Database {
         validate_audition(session, audition)?;
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
-        insert_audition_outcome(&tx, audition, disposition, failure_code, duration_ms)?;
+        if !audition_outcome_exists(&tx, &audition.audition_id)? {
+            insert_audition_outcome(&tx, audition, disposition, failure_code, duration_ms)?;
+        }
         let deleted = tx.execute(
             "DELETE FROM playback_audition WHERE singleton_id=1 AND audition_id=?1",
             [&audition.audition_id],
@@ -626,13 +642,11 @@ impl Database {
             return Err(anyhow!("invalid audition outcome page size"));
         }
         let after = after_outcome_id.unwrap_or(0);
+        let after = i64::try_from(after).map_err(|_| anyhow!("invalid audition outcome cursor"))?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut statement = conn.prepare("SELECT outcome_id,audition_id,parent_session_id,server_id,track_id,disposition,terminal_position_ms,duration_ms,failure_code,contiguous_heard_ms,coverage_unknown,seek_discontinuous,fully_heard FROM playback_audition_outcomes WHERE outcome_id>?1 ORDER BY outcome_id LIMIT ?2")?;
         statement
-            .query_map(
-                params![after as i64, limit as i64],
-                audition_outcome_from_row,
-            )?
+            .query_map(params![after, limit as i64], audition_outcome_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -646,6 +660,30 @@ impl Database {
         if changed != 1 {
             return Err(anyhow!("active audition changed"));
         }
+        Ok(())
+    }
+
+    pub fn record_audition_failure(
+        &self,
+        session: &PersistedSession,
+        audition: &PersistedAudition,
+        failure_code: &str,
+        duration_ms: Option<u64>,
+    ) -> Result<()> {
+        validate_audition(session, audition)?;
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        update_audition(&tx, audition)?;
+        if !audition_outcome_exists(&tx, &audition.audition_id)? {
+            insert_audition_outcome(
+                &tx,
+                audition,
+                "technicalFailure",
+                Some(failure_code),
+                duration_ms,
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -731,6 +769,16 @@ fn validate_audition(session: &PersistedSession, audition: &PersistedAudition) -
         || audition.saved_main_position_ms > 9_007_199_254_740_991
         || audition.contiguous_heard_ms > 9_007_199_254_740_991
         || audition.saved_main_occurrence_id != session.current_occurrence_id
+        || !matches!(
+            audition.state,
+            TransportState::Paused | TransportState::Buffering | TransportState::Playing
+        )
+        || matches!(audition.saved_main_intent, TransportState::Stopping)
+        || (audition.saved_main_occurrence_id.is_none()
+            && (audition.saved_main_position_ms != 0
+                || audition.saved_main_intent != TransportState::Idle))
+        || (audition.saved_main_occurrence_id.is_some()
+            && audition.saved_main_intent == TransportState::Idle)
     {
         return Err(anyhow!("INVALID_SESSION"));
     }
@@ -752,22 +800,25 @@ fn insert_audition_outcome(
     failure_code: Option<&str>,
     duration_ms: Option<u64>,
 ) -> Result<()> {
-    if !matches!(
-        disposition,
-        "naturalCompletion"
-            | "stopped"
-            | "returned"
-            | "replaced"
-            | "superseded"
-            | "technicalFailure"
-            | "interrupted"
-    ) || failure_code.is_some_and(|code| {
-        code.is_empty()
-            || code.len() > 128
-            || !code
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    }) {
+    if duration_ms.is_some_and(|duration| duration > 9_007_199_254_740_991)
+        || !matches!(
+            disposition,
+            "naturalCompletion"
+                | "stopped"
+                | "returned"
+                | "replaced"
+                | "superseded"
+                | "technicalFailure"
+                | "interrupted"
+        )
+        || failure_code.is_some_and(|code| {
+            code.is_empty()
+                || code.len() > 128
+                || !code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+    {
         return Err(anyhow!("invalid audition outcome"));
     }
     let fully_heard = disposition == "naturalCompletion"
@@ -776,8 +827,28 @@ fn insert_audition_outcome(
         && duration_ms.is_some_and(|duration| audition.contiguous_heard_ms >= duration);
     tx.execute(
         "INSERT INTO playback_audition_outcomes(audition_id,parent_session_id,server_id,track_id,disposition,terminal_position_ms,duration_ms,failure_code,contiguous_heard_ms,coverage_unknown,seek_discontinuous,fully_heard) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-        params![audition.audition_id,audition.parent_session_id,audition.source.server_id,audition.source.track_id,disposition,audition.position_ms as i64,duration_ms.map(|value| value as i64),failure_code,audition.contiguous_heard_ms as i64,audition.coverage_unknown,audition.seek_discontinuous,fully_heard],
+        params![audition.audition_id,audition.parent_session_id,audition.source.server_id,audition.source.track_id,disposition,audition.position_ms as i64,duration_ms.map(i64::try_from).transpose()?,failure_code,audition.contiguous_heard_ms as i64,audition.coverage_unknown,audition.seek_discontinuous,fully_heard],
     )?;
+    Ok(())
+}
+
+fn audition_outcome_exists(tx: &rusqlite::Transaction<'_>, audition_id: &str) -> Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM playback_audition_outcomes WHERE audition_id=?1)",
+        [audition_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn update_audition(tx: &rusqlite::Transaction<'_>, audition: &PersistedAudition) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE playback_audition SET position_ms=?1,transport_state=?2,resume_inhibited=?3,contiguous_heard_ms=?4,coverage_unknown=?5,seek_discontinuous=?6 WHERE singleton_id=1 AND audition_id=?7",
+        params![audition.position_ms as i64,state_name(audition.state),audition.resume_inhibited,audition.contiguous_heard_ms as i64,audition.coverage_unknown,audition.seek_discontinuous,audition.audition_id],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("active audition changed"));
+    }
     Ok(())
 }
 
@@ -1232,6 +1303,94 @@ mod tests {
         assert_eq!(outcomes[1].disposition, "returned");
         assert!(!outcomes[1].fully_heard);
         assert!(db.audition_outcomes(None, 201).is_err());
+        assert!(
+            db.audition_outcomes(Some(i64::MAX as u64 + 1), 100)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn orphan_or_invalid_audition_state_blocks_restoration() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let main = occurrence("ignored", 0, "main");
+        let committed = session(1, Some(main.occurrence_id.clone()), 4_200);
+        db.persist_playback_structure(&committed, &[main]).unwrap();
+        let audition = PersistedAudition {
+            audition_id: Uuid::new_v4().to_string(),
+            parent_session_id: committed.session_id.clone(),
+            source: TrackSource {
+                server_id: "portable-server".into(),
+                track_id: "preview".into(),
+            },
+            position_ms: 0,
+            state: TransportState::Buffering,
+            saved_main_occurrence_id: committed.current_occurrence_id.clone(),
+            saved_main_position_ms: 4_200,
+            saved_main_intent: TransportState::Playing,
+            resume_inhibited: false,
+            contiguous_heard_ms: 0,
+            coverage_unknown: false,
+            seek_discontinuous: false,
+        };
+        db.persist_audition_admission(&committed, &audition)
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE playback_audition SET transport_state='stopping'",
+                [],
+            )
+            .unwrap();
+        let invalid = db.load_playback_audition().unwrap().unwrap();
+        assert!(validate_audition(&committed, &invalid).is_err());
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM playback_sessions", [])
+            .unwrap();
+        assert!(db.load_playback_session().is_err());
+    }
+
+    #[test]
+    fn audition_outcome_rejects_duration_outside_the_wire_safe_integer_range() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let main = occurrence("ignored", 0, "main");
+        let committed = session(1, Some(main.occurrence_id.clone()), 0);
+        db.persist_playback_structure(&committed, &[main]).unwrap();
+        let audition = PersistedAudition {
+            audition_id: Uuid::new_v4().to_string(),
+            parent_session_id: committed.session_id.clone(),
+            source: TrackSource {
+                server_id: "portable-server".into(),
+                track_id: "preview".into(),
+            },
+            position_ms: 0,
+            state: TransportState::Paused,
+            saved_main_occurrence_id: committed.current_occurrence_id.clone(),
+            saved_main_position_ms: 0,
+            saved_main_intent: TransportState::Paused,
+            resume_inhibited: false,
+            contiguous_heard_ms: 0,
+            coverage_unknown: false,
+            seek_discontinuous: false,
+        };
+        db.persist_audition_admission(&committed, &audition)
+            .unwrap();
+        assert!(
+            db.finish_audition(
+                &committed,
+                &audition,
+                "returned",
+                None,
+                Some(9_007_199_254_740_992),
+            )
+            .is_err()
+        );
+        assert_eq!(db.load_playback_audition().unwrap(), Some(audition));
     }
 
     #[test]

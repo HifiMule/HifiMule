@@ -255,9 +255,12 @@ pub(super) fn select_output(
         ));
     }
     album_admission::prune(i, false);
+    prune_dedup(i);
     if album_admission::contains_command(i, &p.command_id)
         || i.dedup.contains_key(&p.command_id)
         || i.control_dedup.contains_key(&p.command_id)
+        || i.seek_dedup.contains_key(&p.command_id)
+        || i.preview_dedup.contains_key(&p.command_id)
     {
         return Err(PlaybackError::conflict(
             "COMMAND_ID_REUSED",
@@ -390,6 +393,7 @@ pub(super) fn reconcile_outputs(
         return;
     };
     let before = i.output.clone();
+    let mut checkpoint_output_state = false;
     let inventory = runtime.discovery.inventory(false);
     if !fenced
         && runtime.initialize_missing_default
@@ -439,7 +443,12 @@ pub(super) fn reconcile_outputs(
                 i.output.error = Some(failure("OUTPUT_PREFERENCE_SAVE_FAILED"));
                 i.output.status = "error".into();
                 i.output_gate.store(false, Ordering::Release);
-                if i.session.current_occurrence_id.is_some() {
+                if let Some(preview) = i.preview.as_mut() {
+                    preview.state = TransportState::Paused;
+                    i.playback.status = PlaybackStatus::Paused;
+                    i.dirty = true;
+                    checkpoint_output_state = true;
+                } else if i.session.current_occurrence_id.is_some() {
                     i.session.state = TransportState::Paused;
                     i.playback.status = PlaybackStatus::Paused;
                 }
@@ -497,6 +506,7 @@ pub(super) fn reconcile_outputs(
             preview.resume_inhibited = true;
             preview.state = TransportState::Paused;
             i.playback.status = PlaybackStatus::Paused;
+            i.dirty = true;
         } else if i.session.current_occurrence_id.is_some() {
             i.session.state = TransportState::Paused;
             i.playback.status = PlaybackStatus::Paused;
@@ -517,6 +527,9 @@ pub(super) fn reconcile_outputs(
             "unavailable"
         }
         .into();
+    }
+    if checkpoint_output_state {
+        let _ = checkpoint_inner(i);
     }
     if before != i.output {
         i.state_sequence += 1;

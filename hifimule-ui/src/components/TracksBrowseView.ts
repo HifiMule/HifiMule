@@ -7,13 +7,13 @@ import {
     BrowseAlbum,
     BrowseTrack,
     playbackPlayTrack,
-    playbackPreviewTrack,
 } from '../rpc';
 import { MediaCard } from './MediaCard';
 import { createAlbumPlayButton } from './AlbumPlayButton';
 import { basketStore, BasketItem } from '../state/basket';
 import { showToast } from '../toast';
 import { t } from '../i18n';
+import { createTrackPreviewButton } from './TrackPreviewButton';
 
 const ARTIST_LIMIT = 200;
 const ALBUM_LIMIT = 50;
@@ -572,18 +572,8 @@ export class TracksBrowseView {
         });
         row.appendChild(playBtn);
 
-        const previewBtn = document.createElement('sl-icon-button') as any;
-        previewBtn.name = 'soundwave';
-        previewBtn.label = t('playback.preview_track', { title: track.title });
-        previewBtn.disabled = !playbackSource;
+        const previewBtn = createTrackPreviewButton(track.serverId, track.id, track.title) as any;
         previewBtn.style.fontSize = '1.1rem';
-        previewBtn.addEventListener('mousedown', (event: Event) => event.stopPropagation());
-        previewBtn.addEventListener('click', async (event: Event) => {
-            event.stopPropagation();
-            if (!playbackSource) return;
-            try { await playbackPreviewTrack(playbackSource.serverId, playbackSource.trackId); }
-            catch (error) { showToast((error as Error).message, 'danger'); }
-        });
         row.appendChild(previewBtn);
 
         const isInBasket = basketStore.has(track.id);

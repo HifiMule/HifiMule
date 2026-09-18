@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-18  # Story 15.11 implemented; installed-platform and physical-output evidence remains open
+last_updated: 2026-09-18  # Story 15.11 code review complete; installed-platform and physical-output evidence remains open
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -194,7 +194,7 @@ development_status:
   15-8-play-an-album-in-order-and-advance-through-its-tracks: done
   15-9-preserve-album-continuity-across-prepared-track-boundaries: done
   15-10-preserve-an-album-s-relative-loudness-with-consistent-gain: done
-  15-11-preview-a-full-track-without-losing-the-main-listening-session: review
+  15-11-preview-a-full-track-without-losing-the-main-listening-session: done
   15-12-access-playback-as-an-always-available-destination: backlog
   15-13-edit-the-upcoming-listening-queue: backlog
   15-14-control-listening-from-a-floating-playback-bar-across-views: backlog
