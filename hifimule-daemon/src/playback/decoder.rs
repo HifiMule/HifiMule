@@ -155,6 +155,8 @@ pub fn decode_stream_with_seek(
                     .as_ref()
                     .is_some_and(|preparation| preparation.check().is_err())
         })?;
+    let container_name = input.format().name().to_ascii_lowercase();
+    let has_legacy_apple_gapless_marker = input.metadata().get("iTunNORM").is_some();
     let stream = input
         .streams()
         .find(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
@@ -167,7 +169,7 @@ pub fn decode_stream_with_seek(
     let mut decoder = context.decoder().audio()?;
     let mut validated_duration_ms = None;
     if let Some(seek_mechanism) = seek_mechanism {
-        let container = input.format().name().to_ascii_lowercase();
+        let container = container_name.clone();
         let codec = decoder.id().name();
         let qualified = seek_representation_matches(seek_mechanism, &container, codec);
         if qualified {
@@ -249,6 +251,7 @@ pub fn decode_stream_with_seek(
     let mut resampler: Option<ffmpeg::software::resampling::Context> = None;
     let mut frames = 0u64;
     let mut emitted_samples = 0u64;
+    let gapless_discard_samples = std::cell::Cell::new(0u64);
     let mut discard_samples = if media_seek_requested {
         0
     } else {
@@ -345,6 +348,10 @@ pub fn decode_stream_with_seek(
             converted.set_rate(output_rate);
             converter.run(&frame, &mut converted)?;
             for (sample_index, sample) in converted.plane::<f32>(0).iter().enumerate() {
+                if gapless_discard_samples.get() > 0 {
+                    gapless_discard_samples.set(gapless_discard_samples.get() - 1);
+                    continue;
+                }
                 if discard_samples > 0 {
                     discard_samples -= 1;
                     continue;
@@ -386,6 +393,20 @@ pub fn decode_stream_with_seek(
             continue;
         }
         packet_count += 1;
+        if packet_count == 1
+            && !media_seek_requested
+            && legacy_apple_aac_priming(
+                &container_name,
+                decoder.id().name(),
+                has_legacy_apple_gapless_marker,
+                packet.data().unwrap_or_default(),
+            )
+        {
+            gapless_discard_samples.set(
+                rescale_priming_samples(2_112, decoder.rate(), output_rate)
+                    .saturating_mul(u64::from(output_channels)),
+            );
+        }
         decoder.send_packet(&packet).with_context(|| {
             format!("send audio packet {packet_count} ({} bytes)", packet.size())
         })?;
@@ -445,6 +466,29 @@ pub fn decode_stream_with_seek(
         frames,
         emitted_frames: emitted_samples / u64::from(output_channels),
     })
+}
+
+const LEGACY_APPLE_AAC_FILL_PACKET: &[u8] = &[0x20, 0x00, 0x20, 0x00, 0x00, 0x80, 0x0e];
+
+fn legacy_apple_aac_priming(
+    container: &str,
+    codec: &str,
+    has_itunes_marker: bool,
+    first_packet: &[u8],
+) -> bool {
+    has_itunes_marker
+        && codec == "aac"
+        && container
+            .split(',')
+            .any(|name| matches!(name, "mov" | "mp4" | "m4a"))
+        && first_packet == LEGACY_APPLE_AAC_FILL_PACKET
+}
+
+fn rescale_priming_samples(samples: u64, input_rate: u32, output_rate: u32) -> u64 {
+    samples
+        .saturating_mul(u64::from(output_rate))
+        .saturating_add(u64::from(input_rate) / 2)
+        / u64::from(input_rate).max(1)
 }
 
 // Provider duration is whole seconds. Reconcile sub-second rounding, but never
@@ -507,6 +551,22 @@ mod tests {
         BoundedHttpReader, COMPRESSED_CAPACITY_BYTES, COMPRESSED_CHUNK_BYTES,
     };
     use std::io::{Read, Write};
+
+    #[test]
+    fn legacy_apple_aac_priming_requires_every_independent_marker() {
+        let packet = LEGACY_APPLE_AAC_FILL_PACKET;
+        assert!(legacy_apple_aac_priming("mov,mp4,m4a", "aac", true, packet));
+        assert!(!legacy_apple_aac_priming("aac", "aac", true, packet));
+        assert!(!legacy_apple_aac_priming("mov,mp4,m4a", "alac", true, packet));
+        assert!(!legacy_apple_aac_priming("mov,mp4,m4a", "aac", false, packet));
+        assert!(!legacy_apple_aac_priming(
+            "mov,mp4,m4a",
+            "aac",
+            true,
+            &[0; 7]
+        ));
+        assert_eq!(rescale_priming_samples(2_112, 44_100, 48_000), 2_299);
+    }
 
     #[test]
     fn review_source_error_cannot_be_clean_decoder_eof() {
@@ -626,6 +686,18 @@ mod tests {
         let (result, samples) = decode_test_file_at(std::path::Path::new(&path), 0).unwrap();
         assert!(result.frames > 0, "decoded no frames");
         assert!(samples > 0, "decoded no PCM samples");
+    }
+
+    #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_GAPLESS_AAC; never committed as a fixture"]
+    fn diagnostic_legacy_apple_aac_applies_only_the_certified_priming() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_GAPLESS_AAC").unwrap();
+        let result = decode_test_file(std::path::Path::new(&path)).unwrap();
+        assert_eq!(
+            result.frames.saturating_sub(result.emitted_frames),
+            2_299,
+            "the 44.1 kHz legacy Apple marker must discard exactly 2112 input frames at 48 kHz"
+        );
     }
 
     #[test]

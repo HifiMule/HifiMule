@@ -593,19 +593,11 @@ pub(super) fn run_output(
         .map_err(|e| {
             PlaybackPipelineError::from_decode_error_and_stream_state(e, &stream_failure)
         })?;
-    let decoded_ms = if media_seek_requested {
-        decoded.emitted_frames.saturating_mul(1000) / u64::from(rate)
-    } else {
-        decoded.frames.saturating_mul(1000) / u64::from(rate)
-    };
+    let decoded_ms = decoded.emitted_frames.saturating_mul(1000) / u64::from(rate);
     session.publish_event_at_epoch(
         generation,
         PlaybackEvent::Completed {
-            position_ms: if media_seek_requested {
-                base_position_ms.saturating_add(decoded_ms)
-            } else {
-                decoded_ms
-            },
+            position_ms: base_position_ms.saturating_add(decoded_ms),
         },
         event_epoch.load(Ordering::Acquire),
     );

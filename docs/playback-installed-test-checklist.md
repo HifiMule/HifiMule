@@ -372,6 +372,12 @@ For Pause, record the request and backend acknowledgment points. The boundary wi
 only if the backend reports it presented by that acknowledgment; unpresented
 successor samples must not leak and later Resume must neither skip nor duplicate.
 
+For legacy Apple AAC/M4A, record all four compatibility markers: MOV-family
+container, AAC codec, `iTunNORM`, and first compressed packet
+`20 00 20 00 00 80 0e`. The decoder removes exactly 2112 input frames only when
+all four match. Confirm that intentional silence following that interval remains;
+files missing any marker stay untrimmed and are not certified by this rule.
+
 Mark each platform row `unverified` until the physical capture and raw artifact
 are present. Source tests and decoder fixtures may support diagnosis but cannot
 promote an unverified physical row.

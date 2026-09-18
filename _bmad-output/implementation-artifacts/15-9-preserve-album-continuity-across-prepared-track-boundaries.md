@@ -193,6 +193,8 @@ The user selected the native-extension route. The repository now pins a source p
 
 ### Completion Notes List
 
+- Field follow-up: Linux and macOS listening confirmed continuous output for normally separated tracks but exposed a short break on continuous legacy AAC albums. The supplied `Brain Damage`/`Eclipse` M4A pair decoded with about 51 ms of unmarked successor priming. Added a four-marker legacy Apple AAC rule that removes exactly 2112 input frames without silence detection; both supplied SHA-256 fixtures passed the opt-in production diagnostic. Two MP3 pairs were also analyzed: `Anytime`/`We Believe in Love` contains about two seconds of encoded terminal silence that must be preserved, while `Hotel Hobbies`/`Warm Wet Circles` has active audio on both sides and valid LAME/Xing gapless metadata, making it a clean continuity fixture. The playback suite now passes **220 tests**, with 7 hardware/external-fixture diagnostics ignored.
+- Supplied FLAC follow-up: `On s’aime pas`/`Les Regrets` is a clean lossless boundary with active audio on both sides and only a sub-millisecond natural zero crossing. Both cover-art-bearing files passed the production FLAC decoder diagnostic under controlled FFmpeg 9.0.1. No FLAC trimming rule is needed; any audible pause on this pair would be player-added.
 - Implemented indexed, occurrence-aware successor resolution and one-slot provider preparation with deadline/cancellation fencing, repeated-source preservation, separate compressed readers, aggregate diagnostics, and reusable two-slot decoder ownership.
 - CPAL and Pulse now keep the native stream alive across ready boundaries, join tail/head in one render/write span, acknowledge presentation before the atomic owner transition, retire the previous decoder slot, and prepare the following occurrence without rotating the playback generation.
 - Pause closes consumption immediately. WASAPI acknowledges Stop and replays the exact unpresented submitted suffix; CoreAudio and Pulse retire a pipeline when a submitted boundary lacks a coherent native cutoff, so Resume restarts from durable state instead of guessing.
@@ -214,6 +216,7 @@ The user selected the native-extension route. The repository now pins a source p
 - `docs/playback-installed-test-checklist.md`
 - `hifimule-daemon/audio-runtime.json`
 - `hifimule-daemon/src/playback/continuity.rs`
+- `hifimule-daemon/src/playback/decoder.rs`
 - `hifimule-daemon/src/playback/audio.rs`
 - `hifimule-daemon/src/playback/audio/pulse_output.rs`
 - `hifimule-daemon/src/playback/commands.rs`
@@ -228,6 +231,7 @@ The user selected the native-extension route. The repository now pins a source p
 - `Cargo.toml`
 - `Cargo.lock`
 - `third_party/cpal/`
+- `_bmad-output/implementation-artifacts/investigations/aac-gapless-priming-investigation.md`
 
 ### Change Log
 

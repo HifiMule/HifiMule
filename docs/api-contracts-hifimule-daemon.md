@@ -806,9 +806,12 @@ The output format is fixed for the output epoch. Each occurrence is decoded and
 resampled independently into that rate and mono/stereo layout, including decoder
 and resampler drain. The boundary is the exact output-frame offset after the
 predecessor's final valid frame. PCM WAV, FLAC, ALAC/M4A, MP3 with validated
-delay/padding metadata, AAC/M4A with validated container timing, and Opus/Ogg
+delay/padding metadata, AAC/M4A with validated container timing, the certified
+legacy Apple AAC combination (`iTunNORM`, MOV-family container, AAC codec, and
+the exact seven-byte Apple filler packet) with 2112 input priming samples, and Opus/Ogg
 pre-skip/end trimming are the initial qualification matrix. Missing or ambiguous
-padding metadata never authorizes inferred trimming. Raw AAC, AIFF, Vorbis, and
+padding metadata never authorizes inferred trimming. No subset of the legacy
+Apple markers authorizes that compatibility trim. Raw AAC, AIFF, Vorbis, and
 WMA remain ordinary-playback formats until separately qualified.
 
 Owner advancement occurs only after the backend reports that the boundary was

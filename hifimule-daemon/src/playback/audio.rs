@@ -1844,23 +1844,16 @@ fn run_output(
                         &stream_failure,
                     )
                 })?;
-            let decoded_ms = if media_seek_requested {
-                result.emitted_frames
-            } else {
-                result.frames
-            }
-            .saturating_mul(1000)
+            let decoded_ms = result
+                .emitted_frames
+                .saturating_mul(1000)
                 / u64::from(rate);
             session.publish_event_at_epoch(
                 generation,
                 PlaybackEvent::Completed {
-                    position_ms: if media_seek_requested {
-                        base_position_ms
-                            .load(Ordering::Acquire)
-                            .saturating_add(decoded_ms)
-                    } else {
-                        decoded_ms
-                    },
+                    position_ms: base_position_ms
+                        .load(Ordering::Acquire)
+                        .saturating_add(decoded_ms),
                 },
                 event_epoch.load(Ordering::Acquire),
             );
