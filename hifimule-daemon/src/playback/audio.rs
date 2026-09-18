@@ -650,16 +650,16 @@ impl AudioEngine {
         // Persisted sessions intentionally omit transient Completed metadata.
         // Once the same duration is resolved, an explicit Resume from its
         // terminal cursor restarts from zero just like a live Completed resume.
-        let pcm_wav_candidate = description.representations.iter().any(|representation| {
-            representation.seek_mechanism
-                == Some(crate::providers::PlaybackSeekMechanism::JellyfinOriginalPcmWav)
-        });
-        let start_ms =
-            if !pcm_wav_candidate && seek_operation_id.is_none() && start_ms == duration_ms {
-                0
-            } else {
-                start_ms
-            };
+        let seek_candidate = description
+            .representations
+            .iter()
+            .any(|representation| representation.seek_mechanism.is_some());
+        let start_ms = if !seek_candidate && seek_operation_id.is_none() && start_ms == duration_ms
+        {
+            0
+        } else {
+            start_ms
+        };
         let _start_guard = self.starts.lock().await;
         require_preparation_epoch(&session, expected_epoch)?;
         session
@@ -689,10 +689,10 @@ impl AudioEngine {
         require_preparation_epoch(&session, expected_epoch)?;
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
-        let seek_candidate = representation.seek_mechanism
-            == Some(crate::providers::PlaybackSeekMechanism::JellyfinOriginalPcmWav)
-            && representation.request.range_supported
-            && duration_ms > 0;
+        let seek_mechanism = representation
+            .seek_mechanism
+            .filter(|_| representation.request.range_supported && duration_ms > 0);
+        let seek_candidate = seek_mechanism.is_some();
         if seek_operation_id.is_some() && !seek_candidate {
             return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
                 "representation is not qualified for media-time seeking"
@@ -797,7 +797,7 @@ impl AudioEngine {
                     worker_endpoint,
                     worker_position,
                     preparation,
-                    seek_candidate,
+                    seek_mechanism,
                     duration_ms,
                     worker_seek,
                 )
@@ -961,7 +961,7 @@ fn run_output(
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
     preparation: super::http_source::Preparation,
-    seek_candidate: bool,
+    seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     provider_duration_ms: u64,
     seek_commit: Option<(String, u64)>,
 ) -> Result<(), PlaybackPipelineError> {
@@ -1009,6 +1009,7 @@ fn run_output(
     let channels = config.channels;
     let hint = hint.to_string();
     let media_seek_requested = seek_commit.is_some();
+    let seek_candidate = seek_mechanism.is_some();
     let seek_qualified = Arc::new(AtomicU64::new(0));
     let decoder_seek_qualified = seek_qualified.clone();
     let seek_landing_frame =
@@ -1021,7 +1022,7 @@ fn run_output(
             rate,
             channels,
             start_ms.saturating_mul(u64::from(rate)) / 1000,
-            seek_candidate,
+            seek_mechanism,
             media_seek_requested,
             Some(provider_duration_ms),
             Some(decoder_seek_qualified),
@@ -2076,7 +2077,7 @@ mod tests {
         document.assert_async().await;
     }
     #[test]
-    fn review_runtime_qualification_enables_only_verified_pcm_wav_duration() {
+    fn review_runtime_qualification_enables_only_verified_media_duration() {
         for duration in [0, 2_000, 10_500] {
             let PlaybackEvent::SeekQualified {
                 capability,

@@ -291,7 +291,8 @@ audible outcome. The decoded error must be at most 50 ms. Native API and physica
 control observations are separate fields.
 
 Required installed rows are Windows x64, Linux x64, macOS x64 and macOS ARM64
-for Jellyfin original PCM-in-WAV. A disabled provider/format row must include a
+for each enabled Jellyfin original combination: PCM-in-WAV, AAC/ALAC-in-M4A and
+Opus-in-Ogg (`oga` or `opus` suffix). A disabled provider/format row must include a
 reason and ordinary-playback result. Existing Stories 15.4–15.6 records remain
 historical evidence and cannot satisfy seek acceptance. At story implementation
 time, installed runs unavailable on the current host remain explicitly
@@ -306,9 +307,13 @@ shown as committed, contradictory duplicate matrix rows and missing or
 unsupported evidence versions.
 
 
-Review follow-up (2026-09-18): no installed seek combination is currently
-qualified. The runtime-verified Jellyfin original PCM-WAV candidate is available
-for collecting that evidence; decoder/unit tests alone do not qualify a target.
+Review follow-up (2026-09-18): the user reported Jellyfin PCM-WAV seeking works
+on both macOS and Linux test systems. These are qualitative field results; the
+architecture, PCM depth and numeric landing observations needed for formal
+installed rows were not supplied. The user also confirmed that all three first
+compressed-batch combinations work on macOS: Jellyfin original AAC-in-M4A,
+ALAC-in-M4A and Opus-in-Ogg. These compressed results are also qualitative;
+deterministic decoder tests alone do not supply the missing installed metrics.
 The validator now rejects an entirely disabled matrix as Story 15.7 acceptance,
 unchanged actual/oracle cursors behind different requested targets, wrong-direction
 landings, target error above 50 ms, and transport-intent mismatches. This safe

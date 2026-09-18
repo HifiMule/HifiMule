@@ -916,14 +916,16 @@ impl MediaProvider for JellyfinProvider {
 }
 
 fn jellyfin_seek_mechanism(suffix: Option<&str>) -> Option<PlaybackSeekMechanism> {
-    suffix
-        .is_some_and(|suffix| {
-            matches!(
-                suffix.trim_start_matches('.').to_ascii_lowercase().as_str(),
-                "wav" | "wave"
-            )
-        })
-        .then_some(PlaybackSeekMechanism::JellyfinOriginalPcmWav)
+    match suffix?
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "wav" | "wave" => Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav),
+        "m4a" => Some(PlaybackSeekMechanism::JellyfinOriginalM4a),
+        "opus" | "oga" | "ogg" => Some(PlaybackSeekMechanism::JellyfinOriginalOpus),
+        _ => None,
+    }
 }
 
 pub(crate) fn library_from_view(view: JellyfinView) -> Option<Library> {
@@ -2509,14 +2511,31 @@ mod tests {
     }
 }
 #[test]
-fn seek_capability_is_limited_to_jellyfin_original_wav_candidates() {
+fn seek_capability_is_limited_to_verified_jellyfin_original_candidates() {
     for suffix in [Some("wav"), Some("WAVE"), Some(".Wav")] {
         assert_eq!(
             jellyfin_seek_mechanism(suffix),
             Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav)
         );
     }
-    for suffix in [None, Some("flac"), Some("mp3"), Some("wav?transcoded=true")] {
+    assert_eq!(
+        jellyfin_seek_mechanism(Some("m4a")),
+        Some(PlaybackSeekMechanism::JellyfinOriginalM4a)
+    );
+    for suffix in [Some("opus"), Some("OGA"), Some(".Opus"), Some("ogg")] {
+        assert_eq!(
+            jellyfin_seek_mechanism(suffix),
+            Some(PlaybackSeekMechanism::JellyfinOriginalOpus)
+        );
+    }
+    for suffix in [
+        None,
+        Some("aac"),
+        Some("alac"),
+        Some("flac"),
+        Some("mp3"),
+        Some("wav?transcoded=true"),
+    ] {
         assert_eq!(jellyfin_seek_mechanism(suffix), None);
     }
 }

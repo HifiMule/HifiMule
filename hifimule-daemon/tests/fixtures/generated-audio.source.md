@@ -63,3 +63,15 @@ ordinary playback still decodes the complete file.
 The changing instantaneous frequency gives each media-time region a distinct
 sample sequence, so a count-only or uniform-wave false landing cannot pass the
 fixture comparison.
+
+The first compressed-seek batch uses the same chirp source at 48 kHz stereo:
+
+| Name | Encoder options | SHA-256 |
+| --- | --- | --- |
+| generated-seek-aac.m4a | `-c:a aac -b:a 192k -movflags +faststart` | `5b58c4468dbf37c486169e118ef1da8d33ef390dd61fadd3ffb9658562813047` |
+| generated-seek-alac.m4a | `-c:a alac -movflags +faststart` | `4107813df0d1ec3a62eab6f8c2719c1aa31c761e21901848d1f09b3839f77624` |
+| generated-seek-opus.oga | `-c:a libopus -b:a 128k -f ogg` | `923ea534601de489acb8e906ba5d087c521ecf53ff64152a7f3c2ddc43d696cd` |
+
+The decoder tests correlate compressed seek output against the full decoded
+chirp within the 50 ms landing budget. This accounts for codec delay without
+accepting a count-only landing.

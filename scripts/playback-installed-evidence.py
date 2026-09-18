@@ -488,9 +488,15 @@ def validate_seek_evidence(record: dict) -> list[str]:
                 errors.append(f"{label} disabled capability lacks reason or ordinary-playback pass")
             continue
         enabled_rows += 1
+        qualified_media = (
+            (row.get("container") == "wav"
+             and row.get("codec") in {"pcm_s16le", "pcm_s24le", "pcm_s32le"})
+            or (row.get("container") == "m4a" and row.get("codec") in {"aac", "alac"})
+            or (row.get("container") in {"ogg", "oga", "opus"}
+                and row.get("codec") == "opus")
+        )
         if row.get("provider") != "jellyfin" or row.get("representation") != "original" \
-                or row.get("container") != "wav" \
-                or row.get("codec") not in {"pcm_s16le", "pcm_s24le", "pcm_s32le"}:
+                or not qualified_media:
             errors.append(f"{label} enables an unqualified provider/representation")
         if row.get("mechanism") != "ffmpeg-post-open-media-time-seek":
             errors.append(f"{label} has an unqualified seek mechanism")

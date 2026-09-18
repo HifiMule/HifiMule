@@ -86,6 +86,12 @@ def seek_row():
     }
 
 
+def seek_row_for(container, codec):
+    row = seek_row()
+    row.update(container=container, codec=codec)
+    return row
+
+
 
 class InstalledEvidenceTests(unittest.TestCase):
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
@@ -221,6 +227,20 @@ class InstalledEvidenceTests(unittest.TestCase):
         row.update(enabled=False, disabledReason="unverified installed target", ordinaryPlayback="passed")
         errors = evidence.validate_seek_evidence({"seekEvidenceVersion": 1, "seek": {"rows": [row]}})
         self.assertTrue(any("usable seek combination" in error for error in errors))
+
+    def test_seek_evidence_accepts_the_first_compressed_jellyfin_batch(self):
+        for container, codec in (("m4a", "aac"), ("m4a", "alac"),
+                                 ("ogg", "opus"), ("oga", "opus"), ("opus", "opus")):
+            with self.subTest(container=container, codec=codec):
+                self.assertEqual(evidence.validate_seek_evidence({
+                    "seekEvidenceVersion": 1,
+                    "seek": {"rows": [seek_row_for(container, codec)]},
+                }), [])
+        errors = evidence.validate_seek_evidence({
+            "seekEvidenceVersion": 1,
+            "seek": {"rows": [seek_row_for("ogg", "vorbis")]},
+        })
+        self.assertTrue(any("unqualified provider" in error for error in errors))
 
     def test_seek_evidence_rejects_unchanged_landing_despite_changed_requests(self):
         row = seek_row()

@@ -4,6 +4,8 @@ use ffmpeg_next::{self as ffmpeg, ChannelLayout, format::Sample, frame::Audio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::providers::PlaybackSeekMechanism;
+
 pub const UNKNOWN_SEEK_LANDING_FRAME: u64 = u64::MAX;
 
 pub struct DecodeSummary {
@@ -98,7 +100,7 @@ pub fn decode_stream(
         output_rate,
         output_channels,
         start_frame,
-        false,
+        None,
         false,
         None,
         None,
@@ -115,7 +117,7 @@ pub fn decode_stream_with_seek(
     output_rate: u32,
     output_channels: u16,
     start_frame: u64,
-    seek_candidate: bool,
+    seek_mechanism: Option<PlaybackSeekMechanism>,
     media_seek_requested: bool,
     provider_duration_ms: Option<u64>,
     decoded_duration_ms: Option<Arc<AtomicU64>>,
@@ -160,13 +162,12 @@ pub fn decode_stream_with_seek(
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
     let mut decoder = context.decoder().audio()?;
     let mut validated_duration_ms = None;
-    if seek_candidate {
+    if let Some(seek_mechanism) = seek_mechanism {
         let container = input.format().name().to_ascii_lowercase();
         let codec = decoder.id().name();
-        let qualified = container.split(',').any(|name| name == "wav")
-            && matches!(codec, "pcm_s16le" | "pcm_s24le" | "pcm_s32le");
+        let qualified = seek_representation_matches(seek_mechanism, &container, codec);
         if qualified {
-            validated_duration_ms = validated_pcm_duration_ms(
+            validated_duration_ms = validated_stream_duration_ms(
                 stream_duration,
                 stream_time_base.numerator(),
                 stream_time_base.denominator(),
@@ -178,7 +179,7 @@ pub fn decode_stream_with_seek(
             }
         }
         if media_seek_requested && validated_duration_ms.is_none() {
-            anyhow::bail!("representation or duration failed WAV/PCM seek qualification");
+            anyhow::bail!("representation or duration failed media seek qualification");
         }
     }
     let start_frame = if !media_seek_requested
@@ -431,7 +432,24 @@ pub fn decode_stream_with_seek(
 
 // Provider duration is whole seconds. Reconcile sub-second rounding, but never
 // qualify a contradictory (one second or more) or absent duration as a precise end.
-fn validated_pcm_duration_ms(
+fn seek_representation_matches(
+    mechanism: PlaybackSeekMechanism,
+    container: &str,
+    codec: &str,
+) -> bool {
+    let has_container = |expected| container.split(',').any(|name| name == expected);
+    match mechanism {
+        PlaybackSeekMechanism::JellyfinOriginalPcmWav => {
+            has_container("wav") && matches!(codec, "pcm_s16le" | "pcm_s24le" | "pcm_s32le")
+        }
+        PlaybackSeekMechanism::JellyfinOriginalM4a => {
+            has_container("mov") && matches!(codec, "aac" | "alac")
+        }
+        PlaybackSeekMechanism::JellyfinOriginalOpus => has_container("ogg") && codec == "opus",
+    }
+}
+
+fn validated_stream_duration_ms(
     ticks: i64,
     numerator: i32,
     denominator: i32,
@@ -672,7 +690,7 @@ mod tests {
     fn collect_seek_fixture(
         name: &str,
         start_frame: u64,
-        seek_candidate: bool,
+        seek_mechanism: Option<PlaybackSeekMechanism>,
         media_seek: bool,
     ) -> (Vec<f32>, Option<u64>, bool) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -693,7 +711,7 @@ mod tests {
             48_000,
             2,
             start_frame,
-            seek_candidate,
+            seek_mechanism,
             media_seek,
             Some(2_000),
             Some(qualified.clone()),
@@ -722,10 +740,14 @@ mod tests {
             "generated-seek-pcm24.wav",
             "generated-seek-pcm32.wav",
         ] {
-            let (all, _, _) = collect_seek_fixture(name, 0, false, false);
+            let (all, _, _) = collect_seek_fixture(name, 0, None, false);
             for target_frame in [1u64, 36_000, 90_000, 36_000] {
-                let (sought, actual_landing, qualified) =
-                    collect_seek_fixture(name, target_frame, true, true);
+                let (sought, actual_landing, qualified) = collect_seek_fixture(
+                    name,
+                    target_frame,
+                    Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav),
+                    true,
+                );
                 assert!(qualified, "{name}");
                 let expected_offset = target_frame as usize * 2;
                 let compared = sought.len().min(9_600);
@@ -753,9 +775,101 @@ mod tests {
     }
 
     #[test]
+    fn qualified_m4a_and_opus_matrix_lands_on_independent_fixture_samples() {
+        for (name, mechanism, max_mean_error) in [
+            (
+                "generated-seek-aac.m4a",
+                PlaybackSeekMechanism::JellyfinOriginalM4a,
+                0.015,
+            ),
+            (
+                "generated-seek-alac.m4a",
+                PlaybackSeekMechanism::JellyfinOriginalM4a,
+                1.0e-6,
+            ),
+            (
+                "generated-seek-opus.oga",
+                PlaybackSeekMechanism::JellyfinOriginalOpus,
+                0.015,
+            ),
+        ] {
+            let (all, _, _) = collect_seek_fixture(name, 0, None, false);
+            for target_frame in [36_000u64, 90_000, 36_000] {
+                let (sought, actual_landing, qualified) =
+                    collect_seek_fixture(name, target_frame, Some(mechanism), true);
+                assert!(qualified, "{name}");
+                let compared = sought.len().min(2_048);
+                assert!(compared > 0, "{name} at {target_frame}");
+                let tolerance_frames = 48_000usize * 50 / 1000;
+                let first_frame = (target_frame as usize).saturating_sub(tolerance_frames);
+                let last_frame = (target_frame as usize + tolerance_frames)
+                    .min((all.len().saturating_sub(compared)) / 2);
+                let (matched_frame, mean_error) = (first_frame..=last_frame)
+                    .map(|candidate| {
+                        let offset = candidate * 2;
+                        let error = sought[..compared]
+                            .iter()
+                            .zip(&all[offset..offset + compared])
+                            .map(|(actual, expected)| f64::from((actual - expected).abs()))
+                            .sum::<f64>()
+                            / compared as f64;
+                        (candidate, error)
+                    })
+                    .min_by(|left, right| left.1.total_cmp(&right.1))
+                    .unwrap();
+                assert!(
+                    mean_error < max_mean_error,
+                    "{name} at {target_frame}: mean sample error {mean_error}"
+                );
+                assert!(
+                    matched_frame.abs_diff(target_frame as usize) <= tolerance_frames,
+                    "correlated landing for {name} at {target_frame}"
+                );
+                assert!(
+                    actual_landing.unwrap().abs_diff(target_frame) <= 48_000 * 50 / 1000,
+                    "reported landing for {name} at {target_frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seek_mechanism_requires_the_matching_opened_container_and_codec() {
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalM4a,
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "aac"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalM4a,
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "alac"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalOpus,
+            "ogg",
+            "opus"
+        ));
+        assert!(!seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalM4a,
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "mp3"
+        ));
+        assert!(!seek_representation_matches(
+            PlaybackSeekMechanism::JellyfinOriginalOpus,
+            "ogg",
+            "vorbis"
+        ));
+    }
+
+    #[test]
     fn unsupported_wav_candidate_keeps_ordinary_playback_usable() {
-        let (samples, landing, qualified) =
-            collect_seek_fixture("generated-seek-pcm-f32.wav", 0, true, false);
+        let (samples, landing, qualified) = collect_seek_fixture(
+            "generated-seek-pcm-f32.wav",
+            0,
+            Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav),
+            false,
+        );
         assert!(!qualified);
         assert!(landing.is_none());
         assert!(samples.len() >= 96_000);
@@ -1102,21 +1216,27 @@ mod tests {
     #[test]
     fn review_pcm_duration_reconciles_rounding_but_rejects_conflicting_metadata() {
         assert_eq!(
-            validated_pcm_duration_ms(504_000, 1, 48_000, Some(10_000)),
+            validated_stream_duration_ms(504_000, 1, 48_000, Some(10_000)),
             Some(10_500)
         );
         assert_eq!(
-            validated_pcm_duration_ms(504_000, 1, 48_000, Some(11_000)),
+            validated_stream_duration_ms(504_000, 1, 48_000, Some(11_000)),
             Some(10_500)
         );
         for provider in [None, Some(0), Some(9_000), Some(12_000)] {
             assert_eq!(
-                validated_pcm_duration_ms(504_000, 1, 48_000, provider),
+                validated_stream_duration_ms(504_000, 1, 48_000, provider),
                 None
             );
         }
-        assert_eq!(validated_pcm_duration_ms(0, 1, 48_000, Some(10_000)), None);
-        assert_eq!(validated_pcm_duration_ms(504_000, 1, 0, Some(10_000)), None);
+        assert_eq!(
+            validated_stream_duration_ms(0, 1, 48_000, Some(10_000)),
+            None
+        );
+        assert_eq!(
+            validated_stream_duration_ms(504_000, 1, 0, Some(10_000)),
+            None
+        );
     }
 
     #[test]
@@ -1141,7 +1261,7 @@ mod tests {
                 48_000,
                 2,
                 start_frame,
-                true,
+                Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav),
                 media_seek,
                 provider,
                 Some(observed.clone()),
@@ -1180,7 +1300,7 @@ mod tests {
             48_000,
             2,
             96_000,
-            true,
+            Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav),
             false,
             Some(2_000),
             Some(observed.clone()),

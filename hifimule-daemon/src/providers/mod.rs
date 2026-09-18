@@ -42,6 +42,8 @@ pub enum PlaybackProvenance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackSeekMechanism {
     JellyfinOriginalPcmWav,
+    JellyfinOriginalM4a,
+    JellyfinOriginalOpus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

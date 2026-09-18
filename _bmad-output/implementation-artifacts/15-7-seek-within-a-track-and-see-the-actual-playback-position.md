@@ -62,7 +62,7 @@ Review date: 2026-09-18. Scope: `78d963e..c03a5af`; full Blind Hunter, Edge Case
 - [x] [Review][Patch] **P1 — Publish ordinary pipeline failures after seek completion.** The worker retains `worker_seek_failure` for its entire lifetime and maps later output/HTTP/decode errors to `SeekFailed`; the owner ignores that event once `pending_seek` is cleared. Audio can stop while the snapshot remains active. Distinguish preparation failure from failure after commit. AC5. [hifimule-daemon/src/playback/audio.rs:807]
 - [x] [Review][Patch] **P1 — Supersede pending seeks on output generation changes.** Output selection/loss rotates generation without clearing `pending_seek`; the old preparation is fenced out, but later Resume enters the pending-seek branch and never dispatches replacement audio. Clear the abandoned operation with a superseded outcome on these transitions. AC4–5. [hifimule-daemon/src/playback/session.rs:1518; hifimule-daemon/src/playback/session/output_selection.rs:355]
 - [x] [Review][Patch] **P1 — Reconcile duration with decoded media before admitting exact-end success.** Duration still comes exclusively from integer provider seconds. The exact-end branch checkpoints that value without validating actual media end; a 10.5-second WAV advertised as 10 seconds completes early, while overstated metadata can persist a cursor beyond EOF. Derive/validate the qualified duration and reject discrepancies. AC1–3. [hifimule-daemon/src/playback/audio.rs:649; hifimule-daemon/src/playback/session.rs:1687]
-- [ ] [Review][Patch] **P1 — Gate enablement on the required provider/format/platform qualification.** Runtime container/codec recognition enables PCM WAV seeking across platforms, although the installed checklist explicitly leaves the required platform evidence unverified. Keep unqualified combinations disabled and record numeric landing/transport evidence before enabling them; retain at least one genuinely qualified usable path as required by the story. AC9. [hifimule-daemon/src/playback/decoder.rs:161; hifimule-daemon/src/playback/audio.rs:1110] **Partial resolution:** the per-track runtime gate now exposes only Jellyfin original PCM-WAV after FFmpeg verifies codec/container, reconciles media duration, and enforces the 50 ms landing budget. This permits installed evidence collection without enabling Navidrome or other unimplemented formats. Platform qualification and at least one accepted installed row remain required, so this item is intentionally unchecked.
+- [ ] [Review][Patch] **P1 — Gate enablement on the required provider/format/platform qualification.** Runtime container/codec recognition enables selected Jellyfin original formats, although the installed checklist explicitly leaves the required numeric platform evidence unverified. Keep unqualified combinations disabled and record numeric landing/transport evidence before enabling them; retain at least one genuinely qualified usable path as required by the story. AC9. [hifimule-daemon/src/playback/decoder.rs:161; hifimule-daemon/src/playback/audio.rs:1110] **Partial resolution:** the per-track runtime gate exposes Jellyfin original PCM-WAV, AAC/ALAC-in-M4A and Opus-in-Ogg only after FFmpeg verifies the opened codec/container, reconciles media duration, and enforces the 50 ms landing budget. The user qualitatively confirmed Jellyfin WAV on macOS; the compressed batch is ready for installed testing. Navidrome, MP3 and FLAC remain disabled. Platform qualification and accepted numeric installed rows remain required, so this item is intentionally unchecked.
 - [x] [Review][Patch] **P2 — Keep resolution and qualification in separate event slots.** `Resolved` and `SeekQualified` have the same coalescing kind. If qualification arrives before the owner's next drain, it removes the metadata/duration event, leaving duration absent and seeking unavailable. Preserve both events or merge their payloads. AC2, AC7. [hifimule-daemon/src/playback/session.rs:1862]
 - [x] [Review][Patch] **P2 — Preserve an active scrub across polls and separate preview from elapsed time.** A newer ordinary snapshot clears `previewMs` before release, and the preview also replaces the committed elapsed label. Reproduction: a 7000 ms drag becomes 1500 ms after one progress poll. Track active scrubbing separately and keep the elapsed display authoritative. AC1, AC7 and UI contract. [hifimule-ui/src/components/PlaybackControls.ts:121; hifimule-ui/src/components/PlaybackControls.ts:201]
 - [x] [Review][Patch] **P2 — Fence queued scrubs by session and occurrence identity.** `queuedSeekMs` stores only a number and dispatches against the latest snapshot. Reproduction: queue 7000 ms behind a pending seek, replace the track, then resolve the first RPC; the queued request targets the replacement occurrence. Clear or reject stale queued intent on identity changes. AC4, AC7. [hifimule-ui/src/components/PlaybackControls.ts:245]
@@ -83,7 +83,9 @@ Validation: daemon playback selection passed **183 tests, 6 ignored** after reru
 - Playback suite after restoring the runtime-qualified PCM-WAV path: **193 passed, 6 ignored**. All new review regressions passed, including qualification, decoded duration, seek landing, backward progress and race coverage.
 - Provider suite **125 passed**; UI suite **20 passed**; evidence suites **23 passed**; i18n **7 passed**; UI TypeScript/Vite build passed. Daemon Clippy passed with existing warnings outside the touched playback code. Targeted Rust formatting and `git diff --check` passed.
 - Installed Windows/Linux/macOS seek qualification was not available in this run. Runtime-verified Jellyfin original PCM-WAV seeking is enabled to collect that evidence; other providers/formats remain unavailable. This does not complete AC9. Story and sprint status remain `in-progress`; ten patch findings are closed and one is partially resolved.
-- Field follow-up: the user confirmed that Jellyfin WAV seeking works on macOS after the runtime-gate correction. The report is qualitative and lacks the architecture, PCM depth and numeric landing data required for an AC9-installed row.
+- Field follow-up: the user confirmed that Jellyfin WAV seeking works on macOS and Linux after the runtime-gate correction. The reports are qualitative and lack the architecture, PCM depth and numeric landing data required for AC9-installed rows.
+- First compressed extension batch: Jellyfin original AAC/ALAC-in-M4A and Opus-in-Ogg now use distinct provider candidates plus post-open FFmpeg codec/container verification. Non-periodic chirp fixtures correlate decoded landings within 50 ms; MP3, FLAC and Navidrome remain unchanged pending later batches.
+- Compressed field follow-up: the user confirmed that Jellyfin original AAC-in-M4A, ALAC-in-M4A and Opus-in-Ogg all seek successfully on macOS. The report is qualitative and does not complete the numeric AC9 evidence row.
 
 ## Dev Notes
 
@@ -228,7 +230,7 @@ Story preparation: Codex. Implementation: GPT-6 (Codex).
 ### Implementation Plan
 
 - Extend schema-v1 playback state and the serialized owner with strict seek admission, shared deduplication, generation/epoch fencing, explicit pending/outcome state, exact-end behavior and durable actual-position commits.
-- Qualify only Jellyfin original PCM WAV after FFmpeg inspects the opened stream; perform bounded demuxer seek, decoder flush, pre-roll trim and measured landing publication through the existing CPAL/Pulse pipeline.
+- Qualify only selected Jellyfin original combinations after FFmpeg inspects the opened stream: PCM WAV, AAC/ALAC-in-M4A and Opus-in-Ogg. Perform bounded demuxer seek, decoder flush, pre-roll trim and measured landing publication through the existing CPAL/Pulse pipeline.
 - Route UI and native requests through `PlaybackCommandService`, add accessible timeline behavior and native discontinuity publication, then validate contracts, races, persistence, fixtures and installed-evidence schema.
 
 ### Debug Log References
@@ -242,11 +244,13 @@ Story preparation: Codex. Implementation: GPT-6 (Codex).
 - `rtk proxy node scripts/build-daemon.mjs clippy -p hifimule-daemon` — passed with existing repository warnings; two story-local suggestions were corrected afterward.
 - Targeted `rustfmt --check` for every changed Rust file and `rtk git diff --check` passed. The repository-wide `cargo fmt --all -- --check` remains blocked by pre-existing formatting drift in unrelated MTP files.
 - Windows cross-check could not run because the active Rust toolchain lacks its target core; Linux and installed Windows/macOS hardware evidence remain explicitly unverified in the installed checklist.
+- First compressed seek batch: playback suite **180 passed, 6 ignored**; evidence validator **22 passed**; daemon Clippy passed with existing unrelated warnings.
 
 ### Completion Notes List
 
 - Added strict `playback.seek` admission with shared command identity, pending/committed separation, supersession fencing, exact-end behavior, pause intent preservation and checkpoint retry semantics.
 - Implemented runtime-qualified Jellyfin original WAV seeking for FFmpeg-verified PCM s16le/s24le/s32le. Decoder landing is independently measured and bounded to 50 ms; unsupported WAV codecs retain ordinary playback.
+- Extended runtime qualification to Jellyfin original AAC/ALAC-in-M4A and Opus-in-Ogg. Deterministic compressed fixtures use chirp correlation for codec-delay-safe landing evidence; mismatched codecs retain ordinary playback without seek.
 - Added authenticated range identity checks, including ETag/Last-Modified replacement rejection, bounded pre-roll trimming and actual-position progress bases for CPAL and Pulse.
 - Added native relative/absolute seek parity, occurrence-based MPRIS track IDs, success-driven typed `Seeked`, checked macOS/Windows conversions and terminal-position projection.
 - Added the accessible UI timeline, explicit scrub commit/coalescing, authoritative 750 ms interpolation, four-locale strings, deterministic fixtures, persistence/race tests and strict `seekEvidenceVersion: 1` validation.
@@ -273,6 +277,9 @@ Story preparation: Codex. Implementation: GPT-6 (Codex).
 - `hifimule-daemon/src/providers/subsonic.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-daemon/tests/fixtures/generated-audio.source.md`
+- `hifimule-daemon/tests/fixtures/generated-seek-aac.m4a`
+- `hifimule-daemon/tests/fixtures/generated-seek-alac.m4a`
+- `hifimule-daemon/tests/fixtures/generated-seek-opus.oga`
 - `hifimule-daemon/tests/fixtures/generated-seek-pcm-f32.wav`
 - `hifimule-daemon/tests/fixtures/generated-seek-pcm16.wav`
 - `hifimule-daemon/tests/fixtures/generated-seek-pcm24.wav`
@@ -295,6 +302,12 @@ Story preparation: Codex. Implementation: GPT-6 (Codex).
 - `third_party/souvlaki/src/publication.rs`
 
 ### Change Log
+
+- 2026-09-18: Added the first compressed seek batch for Jellyfin original AAC/ALAC-in-M4A and Opus-in-Ogg with post-open verification and deterministic correlated landing tests. MP3, FLAC and Navidrome remain disabled.
+
+- 2026-09-18: Recorded user-confirmed Jellyfin WAV seeking on Linux; macOS and Linux now have qualitative passes, with formal numeric installed evidence still pending.
+
+- 2026-09-18: Recorded user-confirmed macOS seeking for all three first-batch Jellyfin compressed combinations: AAC-M4A, ALAC-M4A and Opus.
 
 - 2026-09-18: Applied ten review fixes and restored the narrowly implemented Jellyfin original PCM-WAV runtime path after per-track FFmpeg verification. Reopened story to in-progress for installed seek qualification; runtime availability is not recorded as platform acceptance evidence.
 
