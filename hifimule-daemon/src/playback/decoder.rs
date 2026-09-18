@@ -227,6 +227,7 @@ pub fn decode_stream_with_seek(
         let preroll_us = if matches!(
             seek_mechanism,
             Some(PlaybackSeekMechanism::JellyfinOriginalPcmWav)
+                | Some(PlaybackSeekMechanism::NavidromeOriginalPcmWav)
         ) {
             0
         } else {
@@ -455,15 +456,20 @@ fn seek_representation_matches(
 ) -> bool {
     let has_container = |expected| container.split(',').any(|name| name == expected);
     match mechanism {
-        PlaybackSeekMechanism::JellyfinOriginalPcmWav => {
+        PlaybackSeekMechanism::JellyfinOriginalPcmWav
+        | PlaybackSeekMechanism::NavidromeOriginalPcmWav => {
             has_container("wav") && matches!(codec, "pcm_s16le" | "pcm_s24le" | "pcm_s32le")
         }
-        PlaybackSeekMechanism::JellyfinOriginalM4a => {
+        PlaybackSeekMechanism::JellyfinOriginalM4a
+        | PlaybackSeekMechanism::NavidromeOriginalM4a => {
             has_container("mov") && matches!(codec, "aac" | "alac")
         }
-        PlaybackSeekMechanism::JellyfinOriginalOpus => has_container("ogg") && codec == "opus",
-        PlaybackSeekMechanism::JellyfinOriginalMp3 => has_container("mp3") && codec == "mp3",
-        PlaybackSeekMechanism::JellyfinOriginalFlac => has_container("flac") && codec == "flac",
+        PlaybackSeekMechanism::JellyfinOriginalOpus
+        | PlaybackSeekMechanism::NavidromeOriginalOpus => has_container("ogg") && codec == "opus",
+        PlaybackSeekMechanism::JellyfinOriginalMp3
+        | PlaybackSeekMechanism::NavidromeOriginalMp3 => has_container("mp3") && codec == "mp3",
+        PlaybackSeekMechanism::JellyfinOriginalFlac
+        | PlaybackSeekMechanism::NavidromeOriginalFlac => has_container("flac") && codec == "flac",
     }
 }
 
@@ -476,7 +482,12 @@ fn validated_seek_duration_ms(
 ) -> Option<u64> {
     let provider = provider.filter(|duration| *duration > 0)?;
     if ticks <= 0 || numerator <= 0 || denominator <= 0 {
-        return matches!(mechanism, PlaybackSeekMechanism::JellyfinOriginalMp3).then_some(provider);
+        return matches!(
+            mechanism,
+            PlaybackSeekMechanism::JellyfinOriginalMp3
+                | PlaybackSeekMechanism::NavidromeOriginalMp3
+        )
+        .then_some(provider);
     }
     let duration = u64::try_from(
         i128::from(ticks)
@@ -909,6 +920,31 @@ mod tests {
         ));
         assert!(seek_representation_matches(
             PlaybackSeekMechanism::JellyfinOriginalFlac,
+            "flac",
+            "flac"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::NavidromeOriginalPcmWav,
+            "wav",
+            "pcm_s24le"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::NavidromeOriginalM4a,
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "alac"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::NavidromeOriginalOpus,
+            "ogg",
+            "opus"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::NavidromeOriginalMp3,
+            "mp3",
+            "mp3"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::NavidromeOriginalFlac,
             "flac",
             "flac"
         ));

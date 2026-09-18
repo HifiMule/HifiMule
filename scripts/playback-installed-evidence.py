@@ -497,7 +497,8 @@ def validate_seek_evidence(record: dict) -> list[str]:
             or (row.get("container") == "mp3" and row.get("codec") == "mp3")
             or (row.get("container") == "flac" and row.get("codec") == "flac")
         )
-        if row.get("provider") != "jellyfin" or row.get("representation") != "original" \
+        if row.get("provider") not in {"jellyfin", "navidrome"} \
+                or row.get("representation") != "original" \
                 or not qualified_media:
             errors.append(f"{label} enables an unqualified provider/representation")
         if row.get("mechanism") != "ffmpeg-post-open-media-time-seek":

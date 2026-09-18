@@ -898,12 +898,13 @@ checkpoint path. Pending, failed and superseded targets are never persisted.
 | Provider | Representation | Mechanism | Timestamp origin | Decoded landing tolerance | Presentation allowance | Status |
 | --- | --- | --- | --- | ---: | --- | --- |
 | Jellyfin | Original WAV (`pcm_s16le`, `pcm_s24le`, `pcm_s32le`), M4A (`aac`, `alac`), Ogg (`opus`), MP3 or FLAC verified after FFmpeg opens the stream; authenticated validated byte ranges | FFmpeg post-open media-time seek, decoder/resampler reset and bounded pre-roll trim | Audio stream start time and time base, reconciled to output frame zero | ≤ 50 ms | CPAL callback accounting ≈25 ms; Pulse played-frame accounting ≈5 ms; owner sample 250 ms + snapshot 500 ms + repaint 100 ms | Runtime enabled after per-track verification; installed acceptance remains pending by target |
-| Jellyfin | FLAC, MP3, AAC, ALAC, Opus, Vorbis, AIFF, WMA or transcoded/changed representation | None qualified | — | — | — | Disabled; ordinary playback retained |
-| Subsonic/OpenSubsonic | Raw stream, any format | None qualified | — | — | — | Disabled; ordinary playback retained |
+| Jellyfin | Vorbis, AIFF, WMA, unsupported codec/container pairing or transcoded/changed representation | None qualified | — | — | — | Disabled; ordinary playback retained |
+| Navidrome | Original raw WAV, M4A AAC/ALAC, Ogg Opus, MP3 or FLAC after an authenticated ping reports `type=navidrome`; authenticated validated byte ranges | Same FFmpeg mechanism and bounded pre-roll as Jellyfin | Audio stream start time and time base, reconciled to output frame zero | ≤ 50 ms | Same platform accounting as Jellyfin | Runtime enabled after per-track and server verification; installed acceptance remains pending |
+| Other Subsonic/OpenSubsonic | Raw stream, any format | None qualified | — | — | — | Disabled; ordinary playback retained |
 
 `range_supported`, filename extension, `Accept-Ranges`, or one successful HTTP
 206 response never enables seeking by itself. The provider must identify the
-qualified original candidate and FFmpeg must verify the actual WAV/PCM stream.
+qualified original candidate and FFmpeg must verify the actual container/codec stream.
 Runtime format recognition is necessary but does not certify a platform. The
 implemented Jellyfin PCM-WAV path is exposed only after FFmpeg verifies the
 opened stream and its media duration. Installed observations still determine

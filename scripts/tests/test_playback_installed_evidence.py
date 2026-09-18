@@ -243,6 +243,18 @@ class InstalledEvidenceTests(unittest.TestCase):
         })
         self.assertTrue(any("unqualified provider" in error for error in errors))
 
+    def test_seek_evidence_accepts_navidrome_raw_original_formats(self):
+        for container, codec in (("wav", "pcm_s16le"), ("m4a", "aac"),
+                                 ("m4a", "alac"), ("ogg", "opus"),
+                                 ("mp3", "mp3"), ("flac", "flac")):
+            with self.subTest(container=container, codec=codec):
+                row = seek_row_for(container, codec)
+                row["provider"] = "navidrome"
+                self.assertEqual(evidence.validate_seek_evidence({
+                    "seekEvidenceVersion": 1,
+                    "seek": {"rows": [row]},
+                }), [])
+
     def test_seek_evidence_rejects_unchanged_landing_despite_changed_requests(self):
         row = seek_row()
         for item in row["observations"]:

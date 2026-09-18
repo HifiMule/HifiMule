@@ -214,6 +214,29 @@ impl SubsonicProvider {
     }
 }
 
+fn navidrome_seek_mechanism(
+    suffix: Option<&str>,
+) -> Option<crate::providers::PlaybackSeekMechanism> {
+    use crate::providers::PlaybackSeekMechanism;
+
+    match suffix?
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "wav" | "wave" => Some(PlaybackSeekMechanism::NavidromeOriginalPcmWav),
+        "m4a" => Some(PlaybackSeekMechanism::NavidromeOriginalM4a),
+        "opus" | "oga" | "ogg" => Some(PlaybackSeekMechanism::NavidromeOriginalOpus),
+        "mp3" => Some(PlaybackSeekMechanism::NavidromeOriginalMp3),
+        "flac" => Some(PlaybackSeekMechanism::NavidromeOriginalFlac),
+        _ => None,
+    }
+}
+
+fn is_navidrome_server_type(server_type: Option<&str>) -> bool {
+    server_type.is_some_and(|server_type| server_type.eq_ignore_ascii_case("navidrome"))
+}
+
 #[async_trait]
 impl MediaProvider for SubsonicProvider {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {
@@ -471,6 +494,13 @@ impl MediaProvider for SubsonicProvider {
 
     async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
         let song = self.get_song(song_id).await?;
+        // Only Navidrome's raw stream contract is qualified here. A fresh ping
+        // avoids extending its range guarantee to other compatible servers.
+        let ping = self.client.ping().await?;
+        let navidrome = is_navidrome_server_type(ping.server_type.as_deref());
+        let seek_mechanism = navidrome
+            .then(|| navidrome_seek_mechanism(song.suffix.as_deref()))
+            .flatten();
         let url = reqwest::Url::parse(&self.client.stream_url(
             song_id,
             &TranscodeProfile {
@@ -490,11 +520,11 @@ impl MediaProvider for SubsonicProvider {
                 sample_rate: None,
                 bit_depth: None,
                 provenance: PlaybackProvenance::Original,
-                seek_mechanism: None,
+                seek_mechanism,
                 request: PlaybackRequest {
                     url,
                     headers: reqwest::header::HeaderMap::new(),
-                    range_supported: false,
+                    range_supported: navidrome,
                 },
             }],
             song,
@@ -944,6 +974,7 @@ impl SubsonicClient {
         Ok(PingResult {
             open_subsonic: envelope.response.open_subsonic.unwrap_or(false),
             server_version: envelope.response.server_version,
+            server_type: envelope.response.server_type,
         })
     }
 
@@ -1621,6 +1652,8 @@ struct SubsonicResponse<T> {
     status: String,
     #[serde(default, rename = "version")]
     server_version: Option<String>,
+    #[serde(default, rename = "type")]
+    server_type: Option<String>,
     #[serde(rename = "openSubsonic")]
     open_subsonic: Option<bool>,
     error: Option<ApiErrorDto>,
@@ -1632,6 +1665,7 @@ struct SubsonicResponse<T> {
 struct PingResult {
     open_subsonic: bool,
     server_version: Option<String>,
+    server_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2190,6 +2224,88 @@ mod tests {
         assert_eq!(song.artist_name.as_deref(), Some("Artist"));
         assert_eq!(song.duration_seconds, 319);
         assert_eq!(song.bitrate_kbps, Some(320));
+    }
+
+    #[tokio::test]
+    async fn navidrome_raw_playback_enables_verified_seek_candidate() {
+        let mut server = Server::new_async().await;
+        let _song = server
+            .mock("GET", "/rest/getSong.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "song1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""song":{"id":"song1","title":"Track","duration":319,"suffix":"flac"}"#,
+            ))
+            .create_async()
+            .await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.0","openSubsonic":true}}"#)
+            .create_async()
+            .await;
+        let provider = SubsonicProvider::from_client_for_tests(
+            SubsonicClient::new(server.url(), USERNAME, PASSWORD).expect("client"),
+            true,
+        );
+
+        let playback = provider.resolve_playback("song1").await.expect("playback");
+
+        assert_eq!(playback.representations.len(), 1);
+        let representation = &playback.representations[0];
+        assert_eq!(
+            representation.seek_mechanism,
+            Some(crate::providers::PlaybackSeekMechanism::NavidromeOriginalFlac)
+        );
+        assert!(representation.request.range_supported);
+        assert_eq!(
+            representation
+                .request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "format")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("raw")
+        );
+    }
+
+    #[test]
+    fn navidrome_seek_candidates_are_limited_to_verified_format_families() {
+        use crate::providers::PlaybackSeekMechanism;
+
+        assert_eq!(
+            navidrome_seek_mechanism(Some("wav")),
+            Some(PlaybackSeekMechanism::NavidromeOriginalPcmWav)
+        );
+        assert_eq!(
+            navidrome_seek_mechanism(Some("m4a")),
+            Some(PlaybackSeekMechanism::NavidromeOriginalM4a)
+        );
+        assert_eq!(
+            navidrome_seek_mechanism(Some("ogg")),
+            Some(PlaybackSeekMechanism::NavidromeOriginalOpus)
+        );
+        assert_eq!(
+            navidrome_seek_mechanism(Some("mp3")),
+            Some(PlaybackSeekMechanism::NavidromeOriginalMp3)
+        );
+        assert_eq!(
+            navidrome_seek_mechanism(Some("flac")),
+            Some(PlaybackSeekMechanism::NavidromeOriginalFlac)
+        );
+        assert_eq!(navidrome_seek_mechanism(Some("wma")), None);
+        assert!(is_navidrome_server_type(Some("navidrome")));
+        assert!(is_navidrome_server_type(Some("Navidrome")));
+        assert!(!is_navidrome_server_type(Some("gonic")));
+        assert!(!is_navidrome_server_type(None));
     }
 
     #[tokio::test]

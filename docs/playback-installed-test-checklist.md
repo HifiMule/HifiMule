@@ -323,6 +323,13 @@ unavailable because sequential probing did not expose FFmpeg stream duration,
 despite Jellyfin providing the displayed duration; MP3 now accepts that positive
 provider duration when stream duration is unavailable and still verifies the
 opened MP3 codec/container plus the decoded seek landing.
+
+Navidrome candidate coverage uses its authenticated raw Subsonic stream only
+when a fresh ping reports `type=navidrome`. Test the same WAV, M4A AAC/ALAC,
+Ogg Opus, MP3 and FLAC rows separately from Jellyfin. The HTTP source must
+observe a valid `206` response with the requested `Content-Range`; ignored or
+malformed ranges fail the seek. Other Subsonic/OpenSubsonic implementations
+remain unavailable for seeking.
 The validator now rejects an entirely disabled matrix as Story 15.7 acceptance,
 unchanged actual/oracle cursors behind different requested targets, wrong-direction
 landings, target error above 50 ms, and transport-intent mismatches. This safe
