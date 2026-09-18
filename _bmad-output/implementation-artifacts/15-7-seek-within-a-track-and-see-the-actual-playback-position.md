@@ -4,7 +4,7 @@ baseline_commit: 78d963ed5efee7fdaed6d291fcd120700d3432ee
 
 # Story 15.7: Seek within a track and see the actual playback position
 
-Status: in-progress
+Status: done
 
 ## Story
 
