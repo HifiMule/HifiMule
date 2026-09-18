@@ -86,6 +86,10 @@ jobs:
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/linux-audio-runtime.mjs env "$TARGET_TRIPLE" "$GITHUB_ENV"
 
+      - name: Check Linux daemon
+        if: runner.os == 'Linux'
+        run: npm run build:daemon -- check -p hifimule-daemon
+
       - name: Provision controlled Windows audio runtime
         if: runner.os == 'Windows'
         shell: pwsh

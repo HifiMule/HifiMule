@@ -1,5 +1,6 @@
 use super::*;
 use crate::playback::{
+    decoder::decode_stream_with_seek,
     devices::pulse_stream::PinnedStream,
     output::{PcmConsumer, PresentationActivity, PresentationLedger},
 };
@@ -99,7 +100,7 @@ pub(super) fn run_output(
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
     preparation: crate::playback::http_source::Preparation,
-    seek_candidate: bool,
+    seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     provider_duration_ms: u64,
     mut seek_commit: Option<(String, u64)>,
 ) -> Result<(), PlaybackPipelineError> {
@@ -125,6 +126,7 @@ pub(super) fn run_output(
     let decoder_cancel = cancel.clone();
     let hint = hint.to_owned();
     let media_seek_requested = seek_commit.is_some();
+    let seek_candidate = seek_mechanism.is_some();
     let seek_qualified = Arc::new(AtomicU64::new(0));
     let decoder_seek_qualified = seek_qualified.clone();
     let seek_landing_frame = media_seek_requested.then(|| {
@@ -141,7 +143,7 @@ pub(super) fn run_output(
             rate,
             channels,
             start_ms.saturating_mul(u64::from(rate)) / 1000,
-            seek_candidate,
+            seek_mechanism,
             media_seek_requested,
             Some(provider_duration_ms),
             Some(decoder_seek_qualified),

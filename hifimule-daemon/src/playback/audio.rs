@@ -1,10 +1,13 @@
 #[cfg(target_os = "linux")]
 mod pulse_output;
+#[cfg(not(target_os = "linux"))]
 use super::decoder::{UNKNOWN_SEEK_LANDING_FRAME, decode_stream_with_seek};
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
 use super::streaming::{BoundedHttpReader, StreamFailureKind, StreamFailureState, StreamReadError};
 use crate::providers::{PlaybackDescription, PlaybackRequest, select_playback_representation};
-use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::traits::DeviceTrait;
+#[cfg(not(target_os = "linux"))]
+use cpal::traits::StreamTrait;
 use cpal::{FromSample, Sample, SizedSample};
 use crossbeam_queue::ArrayQueue;
 #[cfg(target_os = "linux")]

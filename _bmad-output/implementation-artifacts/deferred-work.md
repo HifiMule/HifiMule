@@ -293,3 +293,6 @@ If future review findings need follow-up, add them as new story scope or reopen 
 - source_spec: `_bmad-output/implementation-artifacts/spec-harden-playback-mutation-owner-test.md`
   summary: Provide deterministic playback-owner command-start synchronization for tests.
   evidence: The affected tests poll `executing` for up to one second; a test-only start notification would eliminate scheduler-sensitive busy waiting, but requires a broader owner-loop test seam.
+- source_spec: `_bmad-output/implementation-artifacts/spec-fix-linux-pulse-seek-build.md`
+  summary: Add targeted coverage that preserves the typed seek mechanism at the PulseAudio decoder boundary.
+  evidence: The Linux build catches an `Option`-to-boolean mismatch, but a behavior-level regression test would require extracting or exposing a testable decoder-argument seam.
