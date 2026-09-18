@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-18  # Story 15.7 review patches applied; installed seek qualification remains open
+last_updated: 2026-09-18  # Story 15.7 review patches applied; installed seek qualification remains open; Story 15.8 ready-for-dev
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -182,7 +182,7 @@ development_status:
   14-3-per-server-producer-fairness-and-priority-buckets: done  # review complete: 6 patches applied; 627 daemon tests pass
 
   # Epic 15 — Desktop Playback (epics.md; 29 approved planning stories)
-  # Stories 15.1–15.7 prepared; remaining dedicated story files and contract gates are pending.
+  # Stories 15.1–15.8 prepared; remaining dedicated story files and contract gates are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
   15-2-quit-safely-while-a-device-sync-is-running: done
@@ -191,7 +191,7 @@ development_status:
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: done
   15-6-control-playback-through-the-operating-system-with-the-window-closed: done
   15-7-seek-within-a-track-and-see-the-actual-playback-position: done
-  15-8-play-an-album-in-order-and-advance-through-its-tracks: backlog
+  15-8-play-an-album-in-order-and-advance-through-its-tracks: ready-for-dev
   15-9-preserve-album-continuity-across-prepared-track-boundaries: backlog
   15-10-preserve-an-album-s-relative-loudness-with-consistent-gain: backlog
   15-11-preview-a-full-track-without-losing-the-main-listening-session: backlog
