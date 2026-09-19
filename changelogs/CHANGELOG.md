@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.15.0 - 2026-09-20
+
+HifiMule can now play music directly from your configured servers. You can play a track or a complete album, build and edit an upcoming queue, seek through supported sources, choose your audio output, and keep the essential controls close at hand in a **floating playback bar** while you browse. A separate Preview action lets you audition a full track and return to your main listening session without losing your place.
+
+Listening now continues through the background service when you close the window, and reopening HifiMule reconnects to the same track, queue, and position. Your session is saved for a deliberately paused restore after relaunch, supported operating-system media controls work even with the window closed, and output loss pauses safely instead of moving sound to another speaker without permission.
+
+The new always-available **Playback** destination brings together the current track, upcoming queue, and listening history. Album order and relative loudness are preserved where the source provides reliable metadata, the library navigation bar is more compact, and shutdown now coordinates playback with device syncs so active writes and session checkpoints finish safely.
+
 ## v0.14.0 - 2026-09-09
 
 HifiMule now works with **Jellyfin 12** when legacy authentication is disabled. You can log in normally or reconnect with saved credentials, then browse your library, build Auto-Fill selections, manage playlists, sync music, and report plays without changing compatibility settings on your server.
