@@ -7,6 +7,10 @@ export class DestinationHub {
     private disposed = false;
     private timer?: ReturnType<typeof setTimeout>;
     private revision = '-1';
+    private refreshRequest = 0;
+    private selecting = false;
+    private selectedKind?: Destination['kind'];
+    private issueNodes = new Map<string, { element: HTMLDivElement; revision: string }>();
     private buttons = new Map<string, HTMLButtonElement>();
     private readonly list = document.createElement('div');
     private readonly issues = document.createElement('div');
@@ -32,16 +36,21 @@ export class DestinationHub {
     }
 
     async refresh(): Promise<void> {
-        if (this.disposed) return;
+        if (this.disposed || this.selecting) return;
+        if (this.timer !== undefined) clearTimeout(this.timer);
+        this.timer = undefined;
+        const request = ++this.refreshRequest;
         try {
             const state = await getDaemonState();
+            if (this.disposed || request !== this.refreshRequest) return;
             const programmatic = this.revision !== '-1' && state.destinationRevision !== this.revision;
             await this.applyState(state, programmatic);
         } catch { /* lifecycle UI owns connection errors */ }
-        if (!this.disposed) this.timer = globalThis.setTimeout(() => void this.refresh(), 1000);
+        if (!this.disposed && request === this.refreshRequest) this.timer = globalThis.setTimeout(() => void this.refresh(), 1000);
     }
 
     async applyState(state: DaemonDestinationState, programmatic = false): Promise<void> {
+        if (this.disposed) return;
         const previousSelected = [...this.buttons.values()].find(button => button.getAttribute('aria-pressed') === 'true')?.dataset.destinationKey;
         const ordered = [...state.destinations].sort((a, b) => a.kind === 'playback' ? -1 : b.kind === 'playback' ? 1 : 0);
         const mounted: HTMLButtonElement[] = [];
@@ -76,36 +85,61 @@ export class DestinationHub {
             if (button.parentElement !== this.list) this.list.append(button);
         }
         for (const [key] of this.buttons) if (!ordered.some(item => this.key(item) === key)) this.buttons.delete(key);
-        this.issues.replaceChildren(...(state.deviceDiscoveryIssues ?? []).map(issue => {
-            const element = document.createElement('div');
-            element.className = 'destination-hub__issue';
-            element.setAttribute('role', 'status');
-            element.textContent = t(`destination.failure.${issue.code}`, { name: issue.displayName ?? t('destination.device') });
-            return element;
-        }));
+        const issueIds = new Set<string>();
+        for (const issue of state.deviceDiscoveryIssues ?? []) {
+            issueIds.add(issue.discoveryId);
+            let node = this.issueNodes.get(issue.discoveryId);
+            if (!node) {
+                const element = document.createElement('div');
+                element.className = 'destination-hub__issue';
+                element.setAttribute('role', 'status');
+                node = { element, revision: '' };
+                this.issueNodes.set(issue.discoveryId, node);
+                this.issues.append(element);
+            }
+            if (node.revision !== issue.revision) {
+                node.element.textContent = t(`destination.failure.${issue.code}`, { name: issue.displayName ?? t('destination.device') });
+                node.revision = issue.revision;
+            }
+        }
+        for (const [id, node] of this.issueNodes) {
+            if (!issueIds.has(id)) { node.element.remove(); this.issueNodes.delete(id); }
+        }
         const selected = ordered.find(item => item.selected);
         if (programmatic && selected && this.key(selected) !== previousSelected) {
             const name = selected.kind === 'playback' ? t('destination.playback') : selected.name;
             this.announcement.textContent = t('destination.arrival_selected', { name });
         }
+        this.selectedKind = selected?.kind;
         this.revision = state.destinationRevision;
         if (selected && this.key(selected) !== previousSelected) this.onChange();
     }
 
     private async select(destination: Destination): Promise<void> {
-        if (destination.kind === 'pendingDevice') {
-            const modal = new InitDeviceModal(this.container, this.onChange);
-            await modal.open(destination.name, destination.pendingId, this.revision);
-            return;
+        if (this.selecting || this.disposed) return;
+        this.selecting = true;
+        ++this.refreshRequest;
+        if (this.timer !== undefined) clearTimeout(this.timer);
+        this.timer = undefined;
+        try {
+            if (this.selectedKind === 'device') await basketStore.flushPendingSave();
+            if (destination.kind === 'pendingDevice') {
+                const modal = new InitDeviceModal(this.container, this.onChange);
+                await modal.open(destination.name, destination.pendingId, this.revision);
+                return;
+            }
+            await destinationSelect(destination.kind === 'playback' ? { kind: 'playback' } : { kind: 'device', path: destination.path });
+            if (destination.kind === 'device') {
+                const basket = await import('../rpc').then(({ rpcCall }) => rpcCall('manifest_get_basket')) as any;
+                basketStore.hydrateFromDaemon(basket?.basketItems ?? []);
+            }
+            this.onChange();
+        } catch {
+            this.announcement.textContent = t('destination.selection_failed');
+        } finally {
+            this.selecting = false;
+            await this.refresh();
         }
-        if (destination.kind === 'device') await basketStore.flushPendingSave();
-        await destinationSelect(destination.kind === 'playback' ? { kind: 'playback' } : { kind: 'device', path: destination.path });
-        if (destination.kind === 'device') {
-            const basket = await import('../rpc').then(({ rpcCall }) => rpcCall('manifest_get_basket')) as any;
-            basketStore.hydrateFromDaemon(basket?.basketItems ?? []);
-        }
-        this.onChange();
-        await this.refresh();
     }
 
     private key(destination: Destination): string {

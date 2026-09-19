@@ -781,6 +781,12 @@ async fn handle_playback_list_occurrences(
 }
 
 const OCCURRENCE_DISPLAY_PROVIDER_CONCURRENCY: usize = 8;
+static OCCURRENCE_DISPLAY_PERMITS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            OCCURRENCE_DISPLAY_PROVIDER_CONCURRENCY,
+        ))
+    });
 
 async fn handle_playback_describe_occurrences(
     state: &AppState,
@@ -836,9 +842,7 @@ async fn handle_playback_describe_occurrences(
         occurrences.push(occurrence);
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(
-        OCCURRENCE_DISPLAY_PROVIDER_CONCURRENCY,
-    ));
+    let semaphore = Arc::clone(&OCCURRENCE_DISPLAY_PERMITS);
     let mut unique = HashMap::new();
     for occurrence in &occurrences {
         unique
@@ -6200,13 +6204,19 @@ async fn handle_sync_execute(
     let operation_id = uuid::Uuid::new_v4().to_string();
     let total_files = delta.adds.len() + delta.deletes.len();
     state
-        .sync_operation_manager
-        .create_operation_for_device(
+        .device_manager
+        .admit_sync_operation(
+            &state.sync_operation_manager,
             operation_id.clone(),
             total_files,
-            manifest.device_id.clone(),
+            &manifest.device_id,
         )
-        .await;
+        .await
+        .map_err(|_| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Sync target is no longer connected".into(),
+            data: None,
+        })?;
 
     // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
     // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
@@ -7897,7 +7907,12 @@ async fn handle_destination_select(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     #[derive(Deserialize)]
-    #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+    #[serde(
+        tag = "kind",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase",
+        deny_unknown_fields
+    )]
     enum Selection {
         Playback,
         Device { path: String },
@@ -8108,6 +8123,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_destination_selection_accepts_the_serialized_camelcase_identity() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let dir = tempfile::tempdir().unwrap();
+        state
+            .device_manager
+            .handle_device_unrecognized(
+                dir.path().into(),
+                Arc::new(crate::device_io::MscBackend::new(dir.path().into())),
+                None,
+            )
+            .await;
+        let wire =
+            serde_json::to_value(state.device_manager.get_destination_snapshot().await).unwrap();
+        let pending_id = wire["destinations"][1]["pendingId"].as_str().unwrap();
+        state.device_manager.select_playback().await;
+        handle_destination_select(
+            &state,
+            Some(json!({"kind":"pendingDevice", "pendingId":pending_id})),
+        )
+        .await
+        .unwrap();
+        let selected =
+            serde_json::to_value(state.device_manager.get_destination_snapshot().await).unwrap();
+        assert_eq!(selected["destinations"][1]["selected"], true);
+        assert!(
+            handle_destination_select(
+                &state,
+                Some(json!({"kind":"pendingDevice", "pending_id":pending_id}))
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn output_rpc_routes_strict_selection_replay_conflict_and_shutdown_admission() {
         use crate::playback::{
             config::OutputPreference,
@@ -8295,17 +8345,34 @@ mod tests {
             .iter()
             .map(|row| row["occurrenceId"].clone())
             .collect();
-        let described = handle_playback_describe_occurrences(
+        let display_params = Some(json!({
+            "schemaVersion": 1,
+            "sessionId": refreshed["data"]["sessionId"],
+            "expectedQueueRevision": refreshed["data"]["queueRevision"],
+            "occurrenceIds": occurrence_ids,
+        }));
+        // Two independent requests must both respect the same process-wide budget.
+        let permits = OCCURRENCE_DISPLAY_PERMITS
+            .acquire_many(OCCURRENCE_DISPLAY_PROVIDER_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let mut first = Box::pin(handle_playback_describe_occurrences(
             &state,
-            Some(json!({
-                "schemaVersion": 1,
-                "sessionId": refreshed["data"]["sessionId"],
-                "expectedQueueRevision": refreshed["data"]["queueRevision"],
-                "occurrenceIds": occurrence_ids,
-            })),
-        )
-        .await
-        .unwrap();
+            display_params.clone(),
+        ));
+        let mut second = Box::pin(handle_playback_describe_occurrences(&state, display_params));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), async {
+                tokio::join!(&mut first, &mut second)
+            })
+            .await
+            .is_err(),
+            "requests cannot bypass the shared provider limit"
+        );
+        drop(permits);
+        let (described, second) = tokio::join!(first, second);
+        let described = described.unwrap();
+        assert_eq!(described, second.unwrap());
         let described_rows = described["data"]["occurrences"].as_array().unwrap();
         assert_eq!(
             described_rows.len(),

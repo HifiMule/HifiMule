@@ -3384,3 +3384,240 @@ fn set_pipeline_round_trips_full_pipeline_with_camelcase_and_ref() {
     let back: AutoFillConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(back, cfg);
 }
+
+#[tokio::test]
+async fn destination_wire_preserves_distinct_pending_camelcase_identities() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let first = tempdir().unwrap();
+    let second = tempdir().unwrap();
+    for dir in [&first, &second] {
+        manager
+            .handle_device_unrecognized(dir.path().into(), msc(dir.path()), None)
+            .await;
+    }
+    let wire = serde_json::to_value(manager.get_destination_snapshot().await).unwrap();
+    let rows = wire["destinations"].as_array().unwrap();
+    assert_eq!(rows[0]["kind"], "playback");
+    assert!(rows[1]["pendingId"].is_string());
+    assert!(rows[2]["pendingId"].is_string());
+    assert_ne!(rows[1]["pendingId"], rows[2]["pendingId"]);
+    manager
+        .handle_device_detected(
+            first.path().into(),
+            make_manifest("managed", "Managed"),
+            msc(first.path()),
+        )
+        .await
+        .unwrap();
+    let wire = serde_json::to_value(manager.get_destination_snapshot().await).unwrap();
+    let device = wire["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "device")
+        .unwrap();
+    assert_eq!(device["deviceId"], "managed");
+    assert!(device.get("device_id").is_none());
+}
+
+#[tokio::test]
+async fn failed_discovery_retry_keeps_arrival_order_and_disappearance_clears_issue() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let mut observed = DiscoveryObservations::default();
+    assert!(observed.reconcile([path.clone()]).is_empty());
+    let original = observed.token(&path).unwrap();
+    manager
+        .report_discovery_failure(path.clone(), "DEVICE_READ_FAILED", None)
+        .await;
+    manager.select_playback().await;
+    assert!(observed.reconcile([path.clone()]).is_empty());
+    assert_eq!(observed.token(&path), Some(original));
+    manager
+        .handle_device_detected_at(
+            observed.token(&path).unwrap(),
+            path.clone(),
+            make_manifest("retried", "Retried"),
+            msc(dir.path()),
+        )
+        .await
+        .unwrap();
+    assert!(manager.get_current_device_path().await.is_none());
+    manager
+        .report_discovery_failure(path.clone(), "DEVICE_READ_FAILED", None)
+        .await;
+    let removed = observed.reconcile([]);
+    assert_eq!(removed, vec![path.clone()]);
+    for missing in removed {
+        manager.handle_device_removed(&missing).await;
+    }
+    assert!(manager.get_discovery_issues().await.is_empty());
+    observed.reconcile([path.clone()]);
+    assert!(observed.token(&path).unwrap() > original);
+    let reconnected = observed.token(&path).unwrap();
+    observed.forget(&path); // MTP storage loss without USB disappearance.
+    observed.reconcile([path.clone()]);
+    assert!(observed.token(&path).unwrap() > reconnected);
+}
+
+#[derive(Debug)]
+struct GatedInitDeviceIo {
+    inner: crate::device_io::MscBackend,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl crate::device_io::DeviceIO for GatedInitDeviceIo {
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.read_file(path).await
+    }
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_file(path, data).await
+    }
+    async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.write_with_verify(path, data).await
+    }
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        self.inner.delete_file(path).await
+    }
+    async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        self.inner.list_files(path).await
+    }
+    async fn free_space(&self) -> Result<u64> {
+        self.inner.free_space().await
+    }
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        self.inner.ensure_dir(path).await
+    }
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        self.inner.cleanup_empty_subdirs(path).await
+    }
+}
+
+#[tokio::test]
+async fn pending_setup_rejects_duplicate_submission_and_removal_during_commit() {
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let dir = tempdir().unwrap();
+    let io = Arc::new(GatedInitDeviceIo {
+        inner: crate::device_io::MscBackend::new(dir.path().into()),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    manager
+        .handle_device_unrecognized(dir.path().into(), io.clone(), None)
+        .await;
+    let pending = manager.get_unrecognized_device_snapshot().await.unwrap();
+    let revision = manager.get_destination_snapshot().await.revision;
+    let task = {
+        let manager = manager.clone();
+        let id = pending.pending_id.clone();
+        tokio::spawn(async move {
+            manager
+                .initialize_pending_device(&id, revision, "", None, None, "First".into(), None)
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), io.entered.notified())
+        .await
+        .unwrap();
+    let duplicate = manager
+        .initialize_pending_device(
+            &pending.pending_id,
+            revision,
+            "",
+            None,
+            None,
+            "Duplicate".into(),
+            None,
+        )
+        .await;
+    assert!(
+        duplicate
+            .unwrap_err()
+            .to_string()
+            .contains("already initializing")
+    );
+    manager
+        .handle_device_removed(&dir.path().to_path_buf())
+        .await;
+    io.release.notify_one();
+    assert!(
+        task.await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("no longer available")
+    );
+    assert!(manager.get_pending_devices_snapshot().await.is_empty());
+    assert_eq!(
+        manager.get_destination_snapshot().await.destinations.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_pending_setup_releases_reservation_for_retry() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let dir = tempdir().unwrap();
+    manager
+        .handle_device_unrecognized(
+            dir.path().into(),
+            FailingMirrorDeviceIo::new(dir.path()),
+            None,
+        )
+        .await;
+    let pending = manager.get_unrecognized_device_snapshot().await.unwrap();
+    let revision = manager.get_destination_snapshot().await.revision;
+    for _ in 0..2 {
+        let error = manager
+            .initialize_pending_device(
+                &pending.pending_id,
+                revision,
+                "",
+                None,
+                None,
+                "Retry".into(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("injected MTP mirror failure"));
+    }
+    assert_eq!(manager.get_pending_devices_snapshot().await.len(), 1);
+}
+
+#[tokio::test]
+async fn removed_sync_target_cannot_admit_new_operations() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let operations = crate::sync::SyncOperationManager::new();
+    let dir = tempdir().unwrap();
+    manager
+        .handle_device_detected(
+            dir.path().into(),
+            make_manifest("target", "Target"),
+            msc(dir.path()),
+        )
+        .await
+        .unwrap();
+    let admitted = manager
+        .admit_sync_operation(&operations, "before-removal".into(), 1, "target")
+        .await
+        .unwrap();
+    assert_eq!(admitted.device_id.as_deref(), Some("target"));
+    manager
+        .handle_device_removed(&dir.path().to_path_buf())
+        .await;
+    assert!(
+        manager
+            .admit_sync_operation(&operations, "after-removal".into(), 1, "target")
+            .await
+            .is_err()
+    );
+    assert!(operations.get_operation("after-removal").await.is_none());
+}

@@ -313,3 +313,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: code review of 15-8-play-an-album-in-order-and-advance-through-its-tracks.md (2026-09-18)
 
 - **Terminal event coalescing can erase failure before consumption** [hifimule-daemon/src/playback/session.rs:2116] — Failed and Completed share event kind 2. A Completed enqueued after Failed before owner consumption replaces the failure, permitting completion rather than preserving the technical failure. Confirmed unchanged in baseline `b9c2860`; deferred as pre-existing under the code-review workflow. Harden terminal precedence and cover both enqueue orders deterministically; Story 15.8 automatic advancement increases the consequence of the existing ingress gap.
+
+## Deferred from: code review of 15-12-access-playback-as-an-always-available-destination.md (2026-09-19)
+
+- R16 [P2] Physical basket guards are incomplete in existing entry points (`hifimule-ui/src/components/TracksBrowseView.ts:580`, `hifimule-ui/src/state/basket.ts:315`). Per-track buttons check server identity rather than a selected physical destination, and CSS pointer-event locks do not prevent keyboard/store mutations. Pre-existing at bf8f16f; remains an unmet Story 15.12 AC2/closed-gate requirement. Add a shared physical-target guard while retaining browsing and Play/Preview.

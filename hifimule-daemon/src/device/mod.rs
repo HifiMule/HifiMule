@@ -516,7 +516,11 @@ pub struct ConnectedDevice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Destination {
     Playback {
         id: String,
@@ -559,6 +563,8 @@ struct StoredDiscoveryIssue {
 }
 
 pub struct UnrecognizedDeviceState {
+    initialization: std::sync::Arc<tokio::sync::Mutex<()>>,
+    cancelled: tokio::sync::watch::Sender<bool>,
     pub pending_id: String,
     pub path: PathBuf,
     pub io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
@@ -667,6 +673,28 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
+    pub async fn admit_sync_operation(
+        &self,
+        operations: &crate::sync::SyncOperationManager,
+        operation_id: String,
+        files_total: usize,
+        device_id: &str,
+    ) -> Result<crate::sync::SyncOperation> {
+        let state = self.state.read().await;
+        if !state
+            .connected_devices
+            .values()
+            .any(|device| device.manifest.device_id == device_id)
+        {
+            return Err(anyhow::anyhow!("Sync target is no longer connected"));
+        }
+        let operation = operations
+            .create_operation_for_device(operation_id, files_total, device_id.to_owned())
+            .await;
+        drop(state);
+        Ok(operation)
+    }
+
     pub fn begin_destination_mutation(&self) -> u64 {
         next_destination_mutation()
     }
@@ -789,9 +817,14 @@ impl DeviceManager {
             {
                 let mut state = self.state.write().await;
                 state.connected_devices.insert(path.clone(), connected);
-                state
-                    .pending_devices
-                    .retain(|_, pending| pending.path != path);
+                state.pending_devices.retain(|_, pending| {
+                    if pending.path == path {
+                        pending.cancelled.send_replace(true);
+                        false
+                    } else {
+                        true
+                    }
+                });
                 state.discovery_issues.retain(|_, issue| issue.path != path);
                 if observation_token > state.latest_selection_token {
                     state.selected_device_path = Some(path.clone());
@@ -839,9 +872,14 @@ impl DeviceManager {
         {
             let mut state = self.state.write().await;
             state.connected_devices.insert(path.clone(), connected);
-            state
-                .pending_devices
-                .retain(|_, pending| pending.path != path);
+            state.pending_devices.retain(|_, pending| {
+                if pending.path == path {
+                    pending.cancelled.send_replace(true);
+                    false
+                } else {
+                    true
+                }
+            });
             state.discovery_issues.retain(|_, issue| issue.path != path);
             if observation_token > state.latest_selection_token {
                 state.selected_device_path = Some(path.clone());
@@ -908,14 +946,21 @@ impl DeviceManager {
         {
             let mut state = self.state.write().await;
             state.connected_devices.remove(&path);
-            state
-                .pending_devices
-                .retain(|_, pending| pending.path != path);
+            state.pending_devices.retain(|_, pending| {
+                if pending.path == path {
+                    pending.cancelled.send_replace(true);
+                    false
+                } else {
+                    true
+                }
+            });
             state.discovery_issues.retain(|_, issue| issue.path != path);
             let pending_id = uuid::Uuid::new_v4().to_string();
             state.pending_devices.insert(
                 pending_id.clone(),
                 UnrecognizedDeviceState {
+                    initialization: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                    cancelled: tokio::sync::watch::channel(false).0,
                     pending_id: pending_id.clone(),
                     path: path.clone(),
                     io: device_io,
@@ -943,6 +988,8 @@ impl DeviceManager {
                 .max_by_key(|pending| pending.observation_token),
         }?;
         Some(UnrecognizedDeviceState {
+            initialization: std::sync::Arc::clone(&pending.initialization),
+            cancelled: pending.cancelled.clone(),
             pending_id: pending.pending_id.clone(),
             path: pending.path.clone(),
             io: std::sync::Arc::clone(&pending.io),
@@ -957,6 +1004,8 @@ impl DeviceManager {
             .pending_devices
             .values()
             .map(|entry| UnrecognizedDeviceState {
+                initialization: std::sync::Arc::clone(&entry.initialization),
+                cancelled: entry.cancelled.clone(),
                 pending_id: entry.pending_id.clone(),
                 path: entry.path.clone(),
                 io: std::sync::Arc::clone(&entry.io),
@@ -1051,7 +1100,9 @@ impl DeviceManager {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &removed_pending {
-            state.pending_devices.remove(id);
+            if let Some(pending) = state.pending_devices.remove(id) {
+                pending.cancelled.send_replace(true);
+            }
         }
         let selected_removed = state.selected_device_path.as_ref() == Some(removed_path)
             || matches!(&state.selected_destination, SelectedDestination::Pending(id) if removed_pending.contains(id));
@@ -1434,7 +1485,7 @@ impl DeviceManager {
             }
         }
 
-        let pending = {
+        let (pending, _initialization) = {
             let state = self.state.read().await;
             if state.destination_revision != observed_destination_revision {
                 return Err(anyhow::anyhow!("Pending destination revision is stale"));
@@ -1443,14 +1494,41 @@ impl DeviceManager {
                 .pending_devices
                 .get(pending_id)
                 .ok_or_else(|| anyhow::anyhow!("Pending destination is no longer available"))?;
-            UnrecognizedDeviceState {
-                pending_id: pending.pending_id.clone(),
-                path: pending.path.clone(),
-                io: std::sync::Arc::clone(&pending.io),
-                friendly_name: pending.friendly_name.clone(),
-                observation_token: pending.observation_token,
-            }
+            let initialization = std::sync::Arc::clone(&pending.initialization)
+                .try_lock_owned()
+                .map_err(|_| anyhow::anyhow!("Pending destination is already initializing"))?;
+            (
+                UnrecognizedDeviceState {
+                    initialization: std::sync::Arc::clone(&pending.initialization),
+                    cancelled: pending.cancelled.clone(),
+                    pending_id: pending.pending_id.clone(),
+                    path: pending.path.clone(),
+                    io: std::sync::Arc::clone(&pending.io),
+                    friendly_name: pending.friendly_name.clone(),
+                    observation_token: pending.observation_token,
+                },
+                initialization,
+            )
         };
+        let mut cancelled = pending.cancelled.subscribe();
+        tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|removed| *removed) => Err(anyhow::anyhow!("Pending destination is no longer available")),
+            result = self.initialize_reserved_pending(
+                pending, folder_path, playlist_folder_path, transcoding_profile_id, name, icon,
+            ) => result,
+        }
+    }
+
+    async fn initialize_reserved_pending(
+        &self,
+        pending: UnrecognizedDeviceState,
+        folder_path: &str,
+        playlist_folder_path: Option<&str>,
+        transcoding_profile_id: Option<String>,
+        name: String,
+        icon: Option<String>,
+    ) -> Result<DeviceManifest> {
         let pending_id = pending.pending_id.clone();
         let observation_token = pending.observation_token;
         let device_root = pending.path;
@@ -1605,6 +1683,14 @@ impl DeviceManager {
 
         {
             let mut state = self.state.write().await;
+            // Removal/replacement during I/O must not resurrect a stale destination.
+            if !state.pending_devices.get(&pending_id).is_some_and(|entry| {
+                entry.observation_token == observation_token && entry.path == device_root
+            }) {
+                return Err(anyhow::anyhow!(
+                    "Pending destination is no longer available"
+                ));
+            }
             state.connected_devices.insert(
                 device_root.clone(),
                 ConnectedDevice {
@@ -2312,26 +2398,54 @@ fn has_msc_drive_for_device(_friendly_name: &str, _wpd_device_id: &str) -> bool 
     false
 }
 
+#[derive(Default)]
+struct DiscoveryObservations<K> {
+    tokens: std::collections::HashMap<K, u64>,
+}
+
+impl<K: Eq + std::hash::Hash + Clone> DiscoveryObservations<K> {
+    fn reconcile(&mut self, current: impl IntoIterator<Item = K>) -> Vec<K> {
+        let current: Vec<K> = current.into_iter().collect();
+        let present: std::collections::HashSet<&K> = current.iter().collect();
+        let removed = self
+            .tokens
+            .keys()
+            .filter(|key| !present.contains(key))
+            .cloned()
+            .collect();
+        self.tokens.retain(|key, _| present.contains(key));
+        for key in current {
+            self.tokens
+                .entry(key)
+                .or_insert_with(next_destination_mutation);
+        }
+        removed
+    }
+
+    fn forget(&mut self, key: &K) {
+        self.tokens.remove(key);
+    }
+
+    fn token(&self, key: &K) -> Option<u64> {
+        self.tokens.get(key).copied()
+    }
+}
+
 pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     println!("[Device] Observer thread started");
     let mut known_mounts = std::collections::HashSet::new();
+    let mut arrivals = DiscoveryObservations::default();
     let mut retry_state: std::collections::HashMap<PathBuf, (u32, std::time::Instant)> =
         std::collections::HashMap::new();
 
     loop {
         let current_mounts = get_mounts();
 
-        // Filter stale observer state through the current safe mount list each cycle.
-        // This evicts boot/system volumes captured by older binaries before new detection.
-        known_mounts.retain(|mount| {
-            if !current_mounts.contains(mount) {
-                let _ = tx.try_send(DeviceEvent::Removed(mount.clone()));
-                retry_state.remove(mount);
-                false
-            } else {
-                true
-            }
-        });
+        for mount in arrivals.reconcile(current_mounts.iter().cloned()) {
+            known_mounts.remove(&mount);
+            retry_state.remove(&mount);
+            let _ = tx.send(DeviceEvent::Removed(mount)).await;
+        }
 
         // Detect new mounts
         for mount in &current_mounts {
@@ -2345,7 +2459,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                 known_mounts.insert(mount.clone());
                 // Stamp the observation before any potentially slow probe so a late
                 // completion cannot override a newer explicit destination choice.
-                let observation_token = next_destination_mutation();
+                let observation_token = arrivals.token(mount).expect("observed mount");
                 match DeviceProber::probe(mount).await {
                     Ok(Some(manifest)) => {
                         retry_state.remove(mount);
@@ -2457,6 +2571,7 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
     enumerate: MtpEnumerator,
     poll_interval: Duration,
 ) {
+    let mut arrivals = DiscoveryObservations::default();
     let mut known_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut failed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut retry_state: std::collections::HashMap<String, (u32, std::time::Instant)> =
@@ -2486,6 +2601,18 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
             }
         };
 
+        let disconnected = arrivals.reconcile(devices.iter().map(|dev| dev.device_id.clone()));
+        for id in disconnected {
+            let was_known = known_ids.remove(&id);
+            let was_failed = failed_ids.remove(&id);
+            retry_state.remove(&id);
+            if was_known || was_failed {
+                let _ = tx
+                    .send(DeviceEvent::Removed(PathBuf::from(format!("mtp://{}", id))))
+                    .await;
+            }
+        }
+
         for dev in &devices {
             if !known_ids.contains(&dev.device_id) {
                 if retry_state
@@ -2506,7 +2633,7 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
                 let friendly_name = dev.friendly_name.clone();
                 // Capture ordering before opening or reading the device. MTP can block
                 // long enough for the user to make a newer selection meanwhile.
-                let observation_token = next_destination_mutation();
+                let observation_token = arrivals.token(&dev_id).expect("observed MTP device");
 
                 let backend =
                     tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone, None))
@@ -2584,20 +2711,6 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
             }
         }
 
-        let disconnected: Vec<String> = known_ids
-            .iter()
-            .chain(failed_ids.iter())
-            .filter(|id| !devices.iter().any(|d| &d.device_id == *id))
-            .cloned()
-            .collect();
-        for id in &disconnected {
-            let synthetic_path = PathBuf::from(format!("mtp://{}", id));
-            let _ = tx.send(DeviceEvent::Removed(synthetic_path)).await;
-            known_ids.remove(id);
-            failed_ids.remove(id);
-            retry_state.remove(id);
-        }
-
         // Liveness probe for known devices (~every 16 s). Handles the case where Android
         // disables MTP without triggering a USB re-enumerate, so the device stays in the
         // enumeration list but storage is no longer accessible.
@@ -2624,6 +2737,7 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
                         let synthetic_path = PathBuf::from(format!("mtp://{}", dev_id));
                         let _ = tx.send(DeviceEvent::Removed(synthetic_path)).await;
                         known_ids.remove(&dev_id);
+                        arrivals.forget(&dev_id);
                     }
                 }
                 // Ok(_) → storage still accessible; drop the handle immediately.

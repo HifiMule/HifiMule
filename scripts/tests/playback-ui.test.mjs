@@ -47,6 +47,16 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
   const source = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/PlaybackControls.ts', import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
+  const storeExports = {};
+  const storeSource = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/state/playback.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(storeSource, {
+    exports: storeExports,
+    setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
+    clearTimeout: id => timers.delete(id),
+    require: () => ({ playbackGetSession: async () => { calls++; return snapshot; } }),
+  });
   vm.runInNewContext(source, {
     exports, document, window, console, Date: class extends Date { static now() { return now; } },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
@@ -59,21 +69,7 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
           playbackSeek: outputRpc.seek ?? (async () => snapshot),
         }
       : name === '../state/playback'
-        ? { playbackStore: {
-            subscribe(callback) {
-              let active = true;
-              let previous;
-              const poll = async () => {
-                if (!active) return;
-                calls++;
-                callback(snapshot, previous);
-                previous = snapshot;
-                if (active) timers.set(++timerId, poll);
-              };
-              Promise.resolve().then(poll);
-              return () => { active = false; };
-            },
-          } }
+        ? { playbackStore: storeExports.playbackStore }
       : name === '../serverIdentity'
         ? { formatServerIdentity: server => ({ label: server.name || 'Jellyfin' }) }
         : { t: (key, values) => values?.source ? `${key}: ${values.source}` : key },
@@ -582,5 +578,22 @@ test('seek rejection renders without a state change and retry clears the error',
   await h.tick(); assert.match(text(h.container), /playback.error.INVALID_SEEK/);
   reject = false; await h.component.submitSeek(1000);
   assert.doesNotMatch(text(h.container), /playback.error.INVALID_SEEK/);
+  h.component.destroy();
+});
+
+test('real shared-store heartbeat delivers output discovery completion without a session change', async () => {
+  let calls = 0;
+  const h = harness(snapshot('paused'), async () => {}, {
+    list: async () => ({ instanceId: 'instance', outputs: ++calls === 1 ? [] : [
+      { outputId: 'discovered', displayName: 'Discovered output', detail: 'USB', available: true },
+    ] }),
+  });
+  await h.tick();
+  assert.equal(calls, 1);
+  const select = h.container.querySelector('select'); select.focus();
+  h.advance(1500); await h.tick();
+  assert.equal(calls, 2);
+  assert.match(text(select), /Discovered output/);
+  assert.equal(h.document.activeElement, select);
   h.component.destroy();
 });

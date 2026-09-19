@@ -111,7 +111,13 @@ export class PlaybackControls {
         this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
         void this.refreshServerLabels();
-        this.unsubscribePlayback = playbackStore.subscribe((snapshot, previous) => this.receiveSnapshot(snapshot, previous));
+        this.unsubscribePlayback = playbackStore.subscribe(
+            (snapshot, previous) => this.receiveSnapshot(snapshot, previous),
+            () => {
+                if (!this.container.isConnected) this.destroy();
+                else void this.refreshOutputs(false);
+            },
+        );
         this.scheduleRepaint();
     }
     destroy(): void {

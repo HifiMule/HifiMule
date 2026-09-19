@@ -35,13 +35,13 @@ class Element {
 const document = { activeElement: null, createElement: tag => new Element(tag) };
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
 
-function load(relative, mocks) {
+function load(relative, mocks, runtime = {}) {
   const exports = {};
   const source = ts.transpileModule(readFileSync(new URL(relative, import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(source, { exports, document, window: { addEventListener() {}, removeEventListener() {} }, console,
-    setTimeout: () => 1, clearTimeout() {}, require: name => mocks[name] ?? {} });
+    setTimeout: () => 1, clearTimeout() {}, require: name => mocks[name] ?? {}, ...runtime });
   return exports;
 }
 
@@ -55,6 +55,7 @@ test('destination hub renders Playback first and explicit selection never steals
   const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
     '../rpc': { getDaemonState: async () => state, destinationSelect: async selection => calls.push(selection) },
     '../i18n': { t: key => key }, './InitDeviceModal': { InitDeviceModal: class {} },
+    '../state/basket': { basketStore: { flushPendingSave: async () => {} } },
   });
   const container = new Element('nav');
   const hub = new DestinationHub(container, () => {});
@@ -66,6 +67,7 @@ test('destination hub renders Playback first and explicit selection never steals
   assert.equal(document.activeElement, buttons[1]);
   assert.equal(container.attributes['aria-label'], 'destination.group');
   await buttons[0].click();
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve();
   assert.equal(JSON.stringify(calls), JSON.stringify([{ kind: 'playback' }]));
   hub.destroy();
 });
@@ -114,6 +116,7 @@ test('playback destination keeps Preview separate and describes one bounded cano
   subscriber({ ...snapshot, stateSequence: '2' });
   for (let turn = 0; turn < 12; turn++) await Promise.resolve();
   const rerenderedBrowse = container.querySelectorAll('button').find(button => button.textContent === 'playback.queue.back_to_library');
+  assert.equal(metadataCalls, 1, "transport changes must reuse page metadata");
   assert.equal(rerenderedBrowse, browse, 'queue refresh must preserve the focused library action node');
   assert.equal(document.activeElement, browse);
   await browse.click();
@@ -162,6 +165,9 @@ test('playback destination keeps the library return action in recoverable error 
   assert.ok(browse, 'queue recovery must not trap the user away from the library');
   await browse.click();
   assert.equal(browseCalls, 1);
+  const retry = container.querySelectorAll('button').find(button => button.textContent === 'playback.retry');
+  await retry.click();
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve();
   assert.equal(refreshCalls, 1);
   destination.destroy();
 });
@@ -224,4 +230,158 @@ test('destination CSS makes hidden siblings authoritative and bounds Playback sc
   const browseRule = css.match(/\.playback-destination__browse\s*\{([\s\S]*?)\}/);
   assert.ok(browseRule, 'library return action must tolerate narrow translated labels');
   assert.match(browseRule[1], /overflow-wrap:\s*anywhere/);
+});
+
+async function settle() { for (let turn = 0; turn < 24; turn++) await Promise.resolve(); }
+function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
+function clockHarness() {
+  const timers = new Map(); let id = 0;
+  return { timers, runtime: { setTimeout: callback => { timers.set(++id, callback); return id; }, clearTimeout: id => timers.delete(id) },
+    async tick() { const entry = timers.entries().next().value; if (entry) { timers.delete(entry[0]); entry[1](); } await settle(); } };
+}
+const queueSnapshot = { instanceId: 'i', sessionId: 's', queueRevision: '1', stateSequence: '1', mode: 'main', playback: { metadata: null } };
+function queueHarness(rpc = {}, storeOverride) {
+  const clock = clockHarness(); let subscriber; let metadataCalls = 0;
+  const store = storeOverride ?? { subscribe(cb) { subscriber = cb; return () => {}; }, refresh: async () => queueSnapshot };
+  const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
+    '../state/playback': { playbackStore: store },
+    '../rpc': { serverList: async () => [], playbackListOccurrences: async (_s, cursor) => ({ occurrences: [{ occurrenceId: cursor ?? 'first' }], nextCursor: cursor ? null : 'second', totalOccurrenceCount: 101 }),
+      playbackDescribeOccurrences: async (_s, ids) => { metadataCalls++; return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })); }, ...rpc },
+    '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: s => ({ label: s.name }) },
+  }, clock.runtime);
+  const container = new Element('section'); const component = new PlaybackDestination(container, () => {});
+  return { component, container, clock, receive: s => subscriber(s), metadataCalls: () => metadataCalls,
+    button: key => container.querySelectorAll('button').find(b => b.textContent === key) };
+}
+
+test('queue paging keeps focus and ignores transport-only updates and repeated Next clicks', async () => {
+  const second = deferred(); let pageCalls = 0;
+  const h = queueHarness({ playbackListOccurrences: async (_s, cursor) => {
+    pageCalls++; return cursor ? second.promise : { occurrences: [{ occurrenceId: 'first' }], nextCursor: 'second', totalOccurrenceCount: 101 };
+  } });
+  h.receive(queueSnapshot); await settle();
+  const next = h.button('playback.queue.next'); next.focus();
+  await next.click(); await next.click(); await settle();
+  h.receive({ ...queueSnapshot, stateSequence: '2', mode: 'preview', playback: { metadata: { title: 'Audition' } } }); await settle();
+  assert.equal(pageCalls, 2);
+  second.resolve({ occurrences: [{ occurrenceId: 'second' }], nextCursor: null, totalOccurrenceCount: 101 }); await settle();
+  assert.equal(h.metadataCalls(), 2);
+  assert.equal(h.button('playback.queue.next'), next);
+  assert.equal(document.activeElement, next);
+  assert.match(text(h.container), /second/);
+  assert.equal(h.button('playback.queue.previous').getAttribute('aria-disabled'), 'false');
+  h.component.destroy();
+});
+
+test('obsolete queue page errors cannot replace a newer queue or reset its paging', async () => {
+  const old = deferred();
+  const h = queueHarness({ playbackListOccurrences: async s => s.queueRevision === '1' ? old.promise :
+    { occurrences: [{ occurrenceId: 'new-queue' }], nextCursor: 'next-new', totalOccurrenceCount: 200 } });
+  h.receive(queueSnapshot); await settle();
+  h.receive({ ...queueSnapshot, queueRevision: '2', stateSequence: '2' }); await settle();
+  old.reject(new Error('old failed page')); await settle();
+  assert.match(text(h.container), /new-queue/);
+  assert.doesNotMatch(text(h.container), /recoverable_error/);
+  assert.equal(h.button('playback.queue.next').getAttribute('aria-disabled'), 'false');
+  h.component.destroy();
+});
+
+test('paused queue recovers with an equal real-store snapshot and bounded retry', async () => {
+  const clock = clockHarness();
+  const { PlaybackStore } = load('../../hifimule-ui/src/state/playback.ts', { '../rpc': {} }, clock.runtime);
+  const store = new PlaybackStore(async () => queueSnapshot); store.accept(queueSnapshot);
+  let calls = 0;
+  const h = queueHarness({ playbackListOccurrences: async () => {
+    if (++calls === 1) throw new Error('temporary');
+    return { occurrences: [{ occurrenceId: 'recovered' }], nextCursor: null, totalOccurrenceCount: 1 };
+  } }, store);
+  await settle(); assert.equal(calls, 1);
+  await h.clock.tick();
+  assert.equal(calls, 2);
+  assert.match(text(h.container), /recovered/);
+  assert.equal(h.button('playback.retry').hidden, true);
+  h.component.destroy();
+  assert.equal(h.clock.timers.size, 0);
+});
+
+test('failed queue retries stop after three automatic attempts and expose manual retry', async () => {
+  let calls = 0;
+  const h = queueHarness({ playbackListOccurrences: async () => { calls++; throw new Error('offline'); } });
+  h.receive(queueSnapshot); await settle();
+  for (let i = 0; i < 5; i++) await h.clock.tick();
+  assert.equal(calls, 4); assert.equal(h.clock.timers.size, 0);
+  assert.equal(h.button('playback.retry').hidden, false);
+  h.component.destroy();
+});
+
+test('late and retried server labels update cached paused rows without reloading metadata', async () => {
+  const labels = deferred(); let calls = 0;
+  const h = queueHarness({ serverList: async () => { if (++calls === 1) throw new Error('temporary'); return labels.promise; } });
+  h.receive(queueSnapshot); await settle();
+  assert.match(text(h.container), /source_unavailable/);
+  await h.clock.tick(); labels.resolve([{ serverId: 'srv', name: 'Living Room' }]); await settle();
+  assert.match(text(h.container), /Living Room/);
+  assert.equal(h.metadataCalls(), 1);
+  h.component.destroy();
+});
+
+test('destination switches flush outgoing basket and retain one poll timer and stable issue nodes', async () => {
+  const clock = clockHarness(); const calls = []; const flush = deferred();
+  const state = { destinationRevision: '1', destinations: [{ kind: 'playback', selected: false }, { kind: 'device', path: '/a', name: 'A', selected: true }],
+    deviceDiscoveryIssues: [{ discoveryId: 'broken', revision: '1', code: 'DEVICE_READ_FAILED', displayName: 'Broken' }] };
+  const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
+    '../rpc': { getDaemonState: async () => state, destinationSelect: async () => { calls.push('select'); state.destinations[0].selected = true; state.destinations[1].selected = false; } },
+    '../state/basket': { basketStore: { flushPendingSave: async () => { calls.push('flush'); await flush.promise; } } },
+    '../i18n': { t: key => key },
+  }, clock.runtime);
+  const container = new Element('nav'); const hub = new DestinationHub(container, () => {}); await settle();
+  const issue = container.children[1].children[0];
+  await hub.refresh(); assert.equal(container.children[1].children[0], issue);
+  assert.equal(clock.timers.size, 1);
+  await container.querySelectorAll('button')[0].click(); await settle();
+  assert.deepEqual(calls, ['flush']);
+  flush.resolve(); await settle(); assert.deepEqual(calls, ['flush', 'select']);
+  for (let i = 0; i < 3; i++) { await container.querySelectorAll('button')[0].click(); await settle(); }
+  assert.equal(clock.timers.size, 1);
+  assert.equal(container.children[1].children[0], issue);
+  hub.destroy(); assert.equal(clock.timers.size, 0);
+});
+
+test('basket flush failure prevents destination selection', async () => {
+  let selections = 0;
+  const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
+    '../rpc': { getDaemonState: async () => ({ destinationRevision: '1', destinations: [
+      { kind: 'playback', selected: false }, { kind: 'device', path: '/a', name: 'A', selected: true }], deviceDiscoveryIssues: [] }), destinationSelect: async () => { selections++; } },
+    '../state/basket': { basketStore: { flushPendingSave: async () => { throw new Error('disk failure'); } } }, '../i18n': { t: key => key },
+  });
+  const container = new Element('nav'); const hub = new DestinationHub(container, () => {}); await settle();
+  await container.querySelectorAll('button')[0].click(); await settle();
+  assert.equal(selections, 0); assert.match(text(container), /destination.selection_failed/);
+  hub.destroy();
+});
+
+test('hub ignores superseded and disposed state requests', async () => {
+  const requests = []; const clock = clockHarness();
+  const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
+    '../rpc': { getDaemonState: () => { const req = deferred(); requests.push(req); return req.promise; } }, '../i18n': { t: key => key },
+  }, clock.runtime);
+  const container = new Element('nav'); const hub = new DestinationHub(container, () => {});
+  const latest = hub.refresh();
+  requests[1].resolve({ destinationRevision: '2', destinations: [{ kind: 'playback', selected: true }], deviceDiscoveryIssues: [] }); await latest;
+  requests[0].resolve({ destinationRevision: '1', destinations: [], deviceDiscoveryIssues: [] }); await settle();
+  assert.equal(container.querySelectorAll('button').length, 1); assert.equal(clock.timers.size, 1);
+  const pending = hub.refresh(); hub.destroy(); requests[2].resolve({ destinationRevision: '3', destinations: [], deviceDiscoveryIssues: [] }); await pending;
+  assert.equal(container.querySelectorAll('button').length, 1); assert.equal(clock.timers.size, 0);
+});
+
+test('partial offline queue metadata has an explicit retry without progress-driven requests', async () => {
+  let calls = 0;
+  const h = queueHarness({ playbackDescribeOccurrences: async () => [{ occurrenceId: 'first', source: { serverId: 'srv' },
+    status: ++calls === 1 ? 'sourceUnavailable' : 'available', title: calls === 1 ? null : 'Recovered song' }] });
+  h.receive(queueSnapshot); await settle();
+  assert.equal(h.button('playback.retry').hidden, false);
+  h.receive({ ...queueSnapshot, stateSequence: '2' }); await settle(); assert.equal(calls, 1);
+  await h.button('playback.retry').click(); await settle();
+  assert.match(text(h.container), /Recovered song/); assert.equal(h.button('playback.retry').hidden, true);
+  h.component.destroy();
 });

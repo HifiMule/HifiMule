@@ -452,6 +452,9 @@ pub fn start_daemon_core(
                         device::DeviceEvent::Removed(path) => {
                             daemon_log!("Device removed at {:?}", path);
                             let removed_device_id = device_manager.get_device_id_for_path(&path).await;
+                            // Close admission before scanning: earlier admissions are fully
+                            // published, and later ones cannot target the disconnected device.
+                            device_manager.handle_device_removed(&path).await;
                             let targets_removed_device = |device_id: Option<&str>| {
                                 removed_device_id
                                     .as_deref()
@@ -477,6 +480,7 @@ pub fn start_daemon_core(
                                                 "error.device_removed_during_sync",
                                             ),
                                         });
+                                        som_events.request_cancel(&op.id).await;
                                         som_events.update_operation(&op.id.clone(), op).await;
                                     }
                                 }
@@ -495,7 +499,6 @@ pub fn start_daemon_core(
                             } else {
                                 let _ = state_tx_clone.send(DaemonState::Idle);
                             }
-                            device_manager.handle_device_removed(&path).await;
                         }
                     }
                 }
@@ -1510,13 +1513,14 @@ async fn run_auto_sync_via_provider(
     );
 
     let operation_id = uuid::Uuid::new_v4().to_string();
-    sync_op_manager
-        .create_operation_for_device(
+    device_manager
+        .admit_sync_operation(
+            &sync_op_manager,
             operation_id.clone(),
             total_files,
-            manifest.device_id.clone(),
+            &manifest.device_id,
         )
-        .await;
+        .await?;
 
     let pending_ids: Vec<String> = delta
         .adds

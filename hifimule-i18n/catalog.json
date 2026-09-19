@@ -1,6 +1,7 @@
 {
   "en": {
     "destination.group": "Playback and device destinations",
+    "destination.selection_failed": "Could not change destination. Check that the device is available and try again.",
     "destination.playback": "Playback",
     "destination.device": "Device",
     "destination.setup": "Setup",
@@ -504,6 +505,7 @@
   },
   "fr": {
     "destination.group": "Destinations de lecture et appareils",
+    "destination.selection_failed": "Impossible de changer de destination. Vérifiez que l’appareil est disponible et réessayez.",
     "destination.playback": "Lecture",
     "destination.device": "Appareil",
     "destination.setup": "Configurer",
@@ -987,6 +989,7 @@
   },
   "es": {
     "destination.group": "Destinos de reproducción y dispositivos",
+    "destination.selection_failed": "No se pudo cambiar de destino. Comprueba que el dispositivo esté disponible e inténtalo de nuevo.",
     "destination.playback": "Reproducción",
     "destination.device": "Dispositivo",
     "destination.setup": "Configurar",
@@ -1470,6 +1473,7 @@
   },
   "de": {
     "destination.group": "Wiedergabe- und Geräteziele",
+    "destination.selection_failed": "Das Ziel konnte nicht gewechselt werden. Prüfen Sie, ob das Gerät verfügbar ist, und versuchen Sie es erneut.",
     "destination.playback": "Wiedergabe",
     "destination.device": "Gerät",
     "destination.setup": "Einrichten",

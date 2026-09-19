@@ -982,11 +982,21 @@ impl SyncOperationManager {
         operation_id: String,
         files_total: usize,
     ) -> SyncOperation {
+        self.create_targeted_operation(operation_id, files_total, None)
+            .await
+    }
+
+    async fn create_targeted_operation(
+        &self,
+        operation_id: String,
+        files_total: usize,
+        device_id: Option<String>,
+    ) -> SyncOperation {
         let timestamp = now_iso8601();
 
         let operation = SyncOperation {
             id: operation_id.clone(),
-            device_id: None,
+            device_id,
             status: SyncStatus::Running,
             started_at: timestamp,
             current_file: None,
@@ -1004,7 +1014,6 @@ impl SyncOperationManager {
 
         let mut ops = self.operations.write().await;
         ops.insert(operation_id.clone(), operation.clone());
-        drop(ops);
 
         let mut tokens = self.cancel_tokens.write().await;
         tokens.insert(
@@ -1022,11 +1031,8 @@ impl SyncOperationManager {
         files_total: usize,
         device_id: String,
     ) -> SyncOperation {
-        let mut operation = self.create_operation(operation_id, files_total).await;
-        operation.device_id = Some(device_id);
-        self.update_operation(&operation.id.clone(), operation.clone())
-            .await;
-        operation
+        self.create_targeted_operation(operation_id, files_total, Some(device_id))
+            .await
     }
 
     /// Signals the sync loop for the given operation to stop after the current file.
@@ -4198,6 +4204,35 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn targeted_admission_never_publishes_without_identity_or_cancellation() {
+        let manager = std::sync::Arc::new(super::SyncOperationManager::new());
+        let tokens = manager.cancel_tokens.write().await;
+        let task = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .create_operation_for_device("atomic-target".into(), 1, "device-a".into())
+                    .await
+            })
+        };
+        // Admission holds the operations lock until the cancellation token exists.
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                manager.get_all_operations()
+            )
+            .await
+            .is_err()
+        );
+        drop(tokens);
+        task.await.unwrap();
+        let operation = manager.get_operation("atomic-target").await.unwrap();
+        assert_eq!(operation.device_id.as_deref(), Some("device-a"));
+        assert!(manager.request_cancel("atomic-target").await);
+        assert!(manager.is_cancelled("atomic-target").await);
+    }
 
     async fn execute_test_provider_sync(
         delta: &SyncDelta,
