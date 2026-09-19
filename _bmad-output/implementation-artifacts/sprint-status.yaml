@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-19  # Approved release split: Back 15.15, compact browsing 15.16, packaging 15.17; Radio Epic 16
+last_updated: 2026-09-19  # Story 15.17 prepared for development; Epic 15 release verification remains pending implementation
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -200,7 +200,7 @@ development_status:
   15-14-control-listening-from-a-floating-playback-bar-across-views: done
   15-15-restart-the-current-track-or-return-to-the-previous-track: done
   15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels: done
-  15-17-ship-verified-playback-builds-for-windows-macos-and-linux: backlog
+  15-17-ship-verified-playback-builds-for-windows-macos-and-linux: ready-for-dev
   epic-15-retrospective: optional
 
   # Epic 16 — Radio/Recommendations (moved from old 15.15–15.28)
