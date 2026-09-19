@@ -12,10 +12,16 @@ export class PlaybackDestination {
     private previous: Array<string | null> = [];
     private loadIdentity = '';
     private labels = new Map<string, string>();
+    private readonly body = document.createElement('div');
 
-    constructor(private readonly container: HTMLElement) {
+    constructor(
+        container: HTMLElement,
+        private readonly onBrowseLibrary: () => void,
+    ) {
         container.classList.add('playback-destination');
         container.setAttribute('aria-label', t('destination.playback'));
+        this.body.className = 'playback-destination__body';
+        container.replaceChildren(this.heading(), this.body);
         this.unsubscribe = playbackStore.subscribe(snapshot => void this.receive(snapshot));
         void this.loadLabels();
     }
@@ -53,6 +59,7 @@ export class PlaybackDestination {
             this.nextCursor = page.nextCursor;
             this.render(observed, descriptions, page.totalOccurrenceCount);
         } catch {
+            if (this.disposed || identity !== this.loadIdentity) return;
             this.cursor = null; this.nextCursor = null; this.previous = [];
             this.renderError();
             try { await playbackStore.refresh(); } catch { /* explanation is already visible */ }
@@ -60,13 +67,6 @@ export class PlaybackDestination {
     }
 
     private render(snapshot: PlaybackSessionSnapshot, rows: OccurrenceDisplay[], total: number): void {
-        const heading = document.createElement('div');
-        heading.className = 'playback-destination__heading';
-        const title = document.createElement('h2');
-        title.textContent = t('destination.playback');
-        const readonly = document.createElement('span');
-        readonly.textContent = t('playback.queue.read_only');
-        heading.append(title, readonly);
         const audition = document.createElement('div');
         audition.className = 'playback-destination__preview';
         audition.hidden = snapshot.mode !== 'preview';
@@ -104,7 +104,26 @@ export class PlaybackDestination {
         const count = document.createElement('span');
         count.textContent = t('playback.queue.count', { count: total });
         paging.append(previous, count, next);
-        this.container.replaceChildren(heading, audition, list, paging);
+        this.body.replaceChildren(audition, list, paging);
+    }
+
+    private heading(): HTMLDivElement {
+        const heading = document.createElement('div');
+        heading.className = 'playback-destination__heading';
+        const title = document.createElement('h2');
+        title.textContent = t('destination.playback');
+        const actions = document.createElement('div');
+        actions.className = 'playback-destination__heading-actions';
+        const readonly = document.createElement('span');
+        readonly.textContent = t('playback.queue.read_only');
+        const browse = document.createElement('button');
+        browse.type = 'button';
+        browse.className = 'playback-destination__browse';
+        browse.textContent = t('playback.queue.back_to_library');
+        browse.addEventListener('click', this.onBrowseLibrary);
+        actions.append(readonly, browse);
+        heading.append(title, actions);
+        return heading;
     }
 
     private row(row: OccurrenceDisplay): HTMLLIElement {
@@ -120,6 +139,6 @@ export class PlaybackDestination {
         const error = document.createElement('p');
         error.setAttribute('role', 'status');
         error.textContent = t('playback.queue.recoverable_error');
-        this.container.replaceChildren(error);
+        this.body.replaceChildren(error);
     }
 }

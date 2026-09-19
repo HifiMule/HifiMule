@@ -81,7 +81,7 @@ test('playback store accepts only a new owner or strictly newer decimal sequence
 });
 
 test('playback destination keeps Preview separate and describes one bounded canonical page', async () => {
-  let subscriber; let metadataCalls = 0;
+  let subscriber; let metadataCalls = 0; let browseCalls = 0;
   const snapshot = { instanceId: 'i', sessionId: 's', queueRevision: '7', stateSequence: '1', mode: 'preview',
     preview: { auditionId: 'a' }, playback: { metadata: { title: 'Audition' } } };
   const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
@@ -99,7 +99,7 @@ test('playback destination keeps Preview separate and describes one bounded cano
   });
   const container = new Element('section');
   container.className = 'content layout-host';
-  const destination = new PlaybackDestination(container);
+  const destination = new PlaybackDestination(container, () => { browseCalls++; });
   subscriber(snapshot);
   for (let turn = 0; turn < 12; turn++) await Promise.resolve();
   assert.equal(metadataCalls, 1);
@@ -108,7 +108,89 @@ test('playback destination keeps Preview separate and describes one bounded cano
   assert.equal(container.classList.contains('playback-destination'), true);
   assert.match(text(container), /playback\.queue\.preview:Audition/);
   assert.equal((text(container).match(/Song/g) ?? []).length, 2);
+  const browse = container.querySelectorAll('button').find(button => button.textContent === 'playback.queue.back_to_library');
+  assert.ok(browse, 'Playback must always expose a native return-to-library action');
+  browse.focus();
+  subscriber({ ...snapshot, stateSequence: '2' });
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+  const rerenderedBrowse = container.querySelectorAll('button').find(button => button.textContent === 'playback.queue.back_to_library');
+  assert.equal(rerenderedBrowse, browse, 'queue refresh must preserve the focused library action node');
+  assert.equal(document.activeElement, browse);
+  await browse.click();
+  assert.equal(browseCalls, 1);
   destination.destroy();
+});
+
+test('disposed playback destination ignores a late rejected page', async () => {
+  let subscriber; let rejectPage; let refreshCalls = 0;
+  const snapshot = { instanceId: 'i', sessionId: 's', queueRevision: '7', stateSequence: '1', mode: 'main',
+    playback: { metadata: null } };
+  const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
+    '../state/playback': { playbackStore: { subscribe(callback) { subscriber = callback; return () => {}; }, refresh: async () => { refreshCalls++; return snapshot; } } },
+    '../rpc': {
+      serverList: async () => [],
+      playbackListOccurrences: async () => new Promise((_resolve, reject) => { rejectPage = reject; }),
+    },
+    '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: () => ({ label: '' }) },
+  });
+  const container = new Element('section');
+  const destination = new PlaybackDestination(container, () => {});
+  subscriber(snapshot);
+  for (let turn = 0; turn < 4; turn++) await Promise.resolve();
+  destination.destroy();
+  rejectPage(new Error('late failure'));
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+  assert.doesNotMatch(text(container), /playback\.queue\.recoverable_error/);
+  assert.equal(refreshCalls, 0);
+});
+
+test('playback destination keeps the library return action in recoverable error state', async () => {
+  let subscriber; let refreshCalls = 0; let browseCalls = 0;
+  const snapshot = { instanceId: 'i', sessionId: 's', queueRevision: '7', stateSequence: '1', mode: 'main',
+    playback: { metadata: null } };
+  const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
+    '../state/playback': { playbackStore: { subscribe(callback) { subscriber = callback; return () => {}; }, refresh: async () => { refreshCalls++; return snapshot; } } },
+    '../rpc': { serverList: async () => [], playbackListOccurrences: async () => { throw new Error('stale'); } },
+    '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: () => ({ label: '' }) },
+  });
+  const container = new Element('section');
+  const destination = new PlaybackDestination(container, () => { browseCalls++; });
+  subscriber(snapshot);
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+  assert.match(text(container), /playback\.queue\.recoverable_error/);
+  const browse = container.querySelectorAll('button').find(button => button.textContent === 'playback.queue.back_to_library');
+  assert.ok(browse, 'queue recovery must not trap the user away from the library');
+  await browse.click();
+  assert.equal(browseCalls, 1);
+  assert.equal(refreshCalls, 1);
+  destination.destroy();
+});
+
+test('main wires local library browsing without changing the daemon destination', () => {
+  const source = readFileSync(new URL('../../hifimule-ui/src/main.ts', import.meta.url), 'utf8');
+  assert.match(source, /new PlaybackDestination\(playback,\s*showLibrarySurface\)/);
+  const helper = source.match(/function showLibrarySurface\(\): void \{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.match(helper, /library\.hidden = false/);
+  assert.match(helper, /browse\.hidden = false/);
+  assert.match(helper, /playback\.hidden = true/);
+  assert.match(helper, /activePlaybackDestination\?\.destroy\(\)/);
+  assert.match(helper, /activePlaybackDestination = null/);
+  assert.match(helper, /playback\?\.replaceChildren\(\)/);
+  assert.match(helper, /browse\?\.querySelector<HTMLElement>\('button:not\(\[disabled\]\)'\)/);
+  assert.match(helper, /focusTarget\.focus\(\)/);
+  assert.match(helper, /library\.focus\(\)/);
+  assert.doesNotMatch(helper, /destinationSelect|playbackStore|activePlaybackControls|activeBasketSidebar/);
+  assert.match(source, /new DestinationHub\(destinationContainer, \(\) => \{ void refreshDestinationView\(\); \}\)/,
+    'activating the selected Playback destination must restore its queue');
+});
+
+test('library return action has complete locale parity', () => {
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  assert.deepEqual(Object.keys(catalog).sort(), ['de', 'en', 'es', 'fr']);
+  for (const locale of Object.keys(catalog)) {
+    assert.equal(typeof catalog[locale]['playback.queue.back_to_library'], 'string');
+    assert.ok(catalog[locale]['playback.queue.back_to_library'].trim().length > 0);
+  }
 });
 
 test('destination CSS makes hidden siblings authoritative and bounds Playback scrolling', () => {
@@ -134,4 +216,12 @@ test('destination CSS makes hidden siblings authoritative and bounds Playback sc
   const rowRule = css.match(/\.playback-destination__row\s*,\s*\.playback-destination__empty\s*\{([\s\S]*?)\}/);
   assert.ok(rowRule, 'Playback row wrapping rule must exist');
   assert.match(rowRule[1], /overflow-wrap:\s*anywhere/);
+
+  const actionsRule = css.match(/\.playback-destination__heading-actions\s*\{([\s\S]*?)\}/);
+  assert.ok(actionsRule, 'Playback heading actions must have a responsive layout');
+  assert.match(actionsRule[1], /min-width:\s*0/);
+  assert.match(actionsRule[1], /flex-wrap:\s*wrap/);
+  const browseRule = css.match(/\.playback-destination__browse\s*\{([\s\S]*?)\}/);
+  assert.ok(browseRule, 'library return action must tolerate narrow translated labels');
+  assert.match(browseRule[1], /overflow-wrap:\s*anywhere/);
 });

@@ -2246,13 +2246,15 @@ h2 {
 .destination-hub__issue { color: var(--amber-warn); font-size: .8rem; }
 .playback-destination { min-width: 0; padding: var(--space-md); }
 .playback-destination__heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
-.playback-destination__heading span { color: var(--ink-dim); font-size: .8rem; }
+.playback-destination__heading-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-xs); }
+.playback-destination__heading-actions span { color: var(--ink-dim); font-size: .8rem; }
+.playback-destination__browse { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .playback-destination__preview { padding: .55rem .7rem; border-inline-start: 3px solid var(--accent); background: var(--surface-fill); }
 .playback-destination__preview[hidden] { display: none; }
 .playback-destination__queue { display: grid; gap: 1px; padding: 0; list-style-position: inside; }
 .playback-destination__row, .playback-destination__empty { padding: .65rem; overflow-wrap: anywhere; background: var(--surface-fill); border-block-end: 1px solid var(--surface-border-soft); }
 .playback-destination__paging { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-block-start: var(--space-sm); }
-.playback-destination__paging button { padding: .4rem .65rem; color: inherit; background: var(--surface-fill); border: 1px solid var(--surface-border); border-radius: var(--radius); }
+.playback-destination__paging button, .playback-destination__browse { padding: .4rem .65rem; color: inherit; background: var(--surface-fill); border: 1px solid var(--surface-border); border-radius: var(--radius); }
 .device-settings-shortcut { display: flex; align-items: center; justify-content: space-between; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
@@ -2260,6 +2262,7 @@ h2 {
   .destination-hub { padding-inline: var(--space-sm); }
   .playback-destination { padding: var(--space-sm); }
   .playback-destination__heading { align-items: flex-start; flex-direction: column; gap: .25rem; }
+  .playback-destination__heading-actions { width: 100%; justify-content: space-between; }
   .playback-destination__paging { flex-wrap: wrap; }
 }
 

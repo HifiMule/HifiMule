@@ -7,6 +7,9 @@ import { t } from './i18n';
 import { withDeadline } from './lifecycleDeadline';
 import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } from './shutdownStatus';
 import { PlaybackControls } from './components/PlaybackControls';
+import { DestinationHub } from './components/DestinationHub';
+import { PlaybackDestination } from './components/PlaybackDestination';
+import { getDaemonState } from './rpc';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -18,6 +21,8 @@ setBasePath(new URL(isDev
 
 let activeBasketSidebar: any = null;
 let activePlaybackControls: PlaybackControls | null = null;
+let activeDestinationHub: DestinationHub | null = null;
+let activePlaybackDestination: PlaybackDestination | null = null;
 function disposePlaybackControls(): void {
     activePlaybackControls?.destroy();
     activePlaybackControls = null;
@@ -439,6 +444,8 @@ function renderMainLayout(_state: any = null) {
           </div>
         </header>
 
+        <div id="destination-hub-container"></div>
+
         <div id="browse-mode-bar"></div>
 
         <div id="playback-controls-container"></div>
@@ -446,6 +453,7 @@ function renderMainLayout(_state: any = null) {
         <div id="library-content" class="content">
           <!-- Media grid will be rendered here by library.ts -->
         </div>
+        <div id="playback-destination-container" class="content" hidden></div>
       </div>
 
       <div slot="end" class="basket-view" id="basket-sidebar-container">
@@ -468,6 +476,12 @@ function renderMainLayout(_state: any = null) {
     const playbackContainer = document.getElementById('playback-controls-container');
     if (playbackContainer) activePlaybackControls = new PlaybackControls(playbackContainer);
 
+    activeDestinationHub?.destroy();
+    const destinationContainer = document.getElementById('destination-hub-container');
+    if (destinationContainer) {
+        activeDestinationHub = new DestinationHub(destinationContainer, () => { void refreshDestinationView(); });
+    }
+
     // Initialize Basket Sidebar
     import('./components/BasketSidebar').then(({ BasketSidebar }) => {
         if (activeBasketSidebar) {
@@ -478,6 +492,43 @@ function renderMainLayout(_state: any = null) {
             activeBasketSidebar = new BasketSidebar(container);
         }
     });
+}
+
+async function refreshDestinationView(): Promise<void> {
+    const state = await getDaemonState();
+    const selected = state.destinations?.find(destination => destination.selected);
+    const playbackSelected = !selected || selected.kind === 'playback';
+    const library = document.getElementById('library-content');
+    const browse = document.getElementById('browse-mode-bar');
+    const playback = document.getElementById('playback-destination-container');
+    if (library) library.hidden = playbackSelected;
+    if (browse) browse.hidden = playbackSelected;
+    if (playback) playback.hidden = !playbackSelected;
+    if (playbackSelected && playback && !activePlaybackDestination) {
+        activePlaybackDestination = new PlaybackDestination(playback, showLibrarySurface);
+    } else if (!playbackSelected && activePlaybackDestination) {
+        activePlaybackDestination.destroy();
+        activePlaybackDestination = null;
+        playback?.replaceChildren();
+    }
+}
+
+function showLibrarySurface(): void {
+    const library = document.getElementById('library-content');
+    const browse = document.getElementById('browse-mode-bar');
+    const playback = document.getElementById('playback-destination-container');
+    if (library) library.hidden = false;
+    if (browse) browse.hidden = false;
+    if (playback) playback.hidden = true;
+    activePlaybackDestination?.destroy();
+    activePlaybackDestination = null;
+    playback?.replaceChildren();
+    const focusTarget = browse?.querySelector<HTMLElement>('button:not([disabled])');
+    if (focusTarget) focusTarget.focus();
+    else if (library) {
+        library.tabIndex = -1;
+        library.focus();
+    }
 }
 
 async function initSplashScreen(mainWin: Window | null, splashWin: Window | null) {
