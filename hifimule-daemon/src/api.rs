@@ -10,6 +10,19 @@ use std::sync::Mutex;
 
 const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist", "MusicArtist"];
 
+#[cfg(test)]
+const TEST_AUTHENTICATION_DEVICE_ID: &str = "HifiMule-Desktop-Test";
+
+#[cfg(test)]
+fn authentication_device_id() -> String {
+    TEST_AUTHENTICATION_DEVICE_ID.to_string()
+}
+
+#[cfg(not(test))]
+fn authentication_device_id() -> String {
+    CredentialManager::get_device_id().unwrap_or_else(|_| "HifiMule-Desktop-Fallback".to_string())
+}
+
 pub(crate) fn jellyfin_token_headers(token: &str) -> Result<HeaderMap> {
     CredentialManager::validate_token(token)?;
     // Validate before encoding so control characters cannot become valid input.
@@ -236,9 +249,14 @@ pub struct AuthenticationResult {
 
 impl JellyfinClient {
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        #[cfg(test)]
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client");
+        #[cfg(not(test))]
+        let client = reqwest::Client::new();
+        Self { client }
     }
 
     pub(crate) fn http_client(&self) -> &reqwest::Client {
@@ -740,10 +758,9 @@ impl JellyfinClient {
 
         let endpoint = format!("{}/Users/AuthenticateByName", url.trim_end_matches('/'));
 
-        // Authorization Header
-        // TODO: Use persistent DeviceId
-        let device_id = CredentialManager::get_device_id()
-            .unwrap_or_else(|_| "HifiMule-Desktop-Fallback".to_string());
+        // Tests use a deterministic identity without touching the process-global
+        // config path. Production retains its persisted machine identity.
+        let device_id = authentication_device_id();
         let auth_header = format!(
             "MediaBrowser Client=\"HifiMule\", Device=\"Desktop\", DeviceId=\"{}\", Version=\"{}\"",
             device_id,
@@ -1685,8 +1702,22 @@ static TEST_LEGACY_RAW: Mutex<Option<String>> = Mutex::new(None);
 /// ensuring each test starts with a clean credential state.
 #[cfg(test)]
 pub(crate) fn credential_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    let guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
-    *TEST_VAULT.lock().unwrap() = None;
+    let guard = CREDENTIAL_TEST_MUTEX.lock().unwrap_or_else(|poisoned| {
+        CREDENTIAL_TEST_MUTEX.clear_poison();
+        poisoned.into_inner()
+    });
+    *CONFIG_FILE_PATH.lock().unwrap_or_else(|poisoned| {
+        CONFIG_FILE_PATH.clear_poison();
+        poisoned.into_inner()
+    }) = None;
+    *TEST_VAULT.lock().unwrap_or_else(|poisoned| {
+        TEST_VAULT.clear_poison();
+        poisoned.into_inner()
+    }) = None;
+    *TEST_LEGACY_RAW.lock().unwrap_or_else(|poisoned| {
+        TEST_LEGACY_RAW.clear_poison();
+        poisoned.into_inner()
+    }) = None;
     guard
 }
 
@@ -2456,7 +2487,15 @@ mod tests {
 
         let _mock = server
             .mock("POST", "/Users/AuthenticateByName")
-            .match_header("Authorization", mockito::Matcher::Regex(r#"MediaBrowser Client="HifiMule".*"#.to_string()))
+            .match_header(
+                "Authorization",
+                format!(
+                    "MediaBrowser Client=\"HifiMule\", Device=\"Desktop\", DeviceId=\"{}\", Version=\"{}\"",
+                    TEST_AUTHENTICATION_DEVICE_ID,
+                    env!("CARGO_PKG_VERSION")
+                )
+                .as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"AccessToken": "new-token-123", "User": {"Id": "user1", "Name": "Alice"}, "SessionInfo": {}}"#)
@@ -2763,6 +2802,54 @@ mod tests {
         assert_eq!(url, test_url);
         assert_eq!(token, test_token);
         assert_eq!(user_id, Some("test-user-id".to_string()));
+    }
+
+    #[test]
+    fn test_authentication_device_id_performs_no_config_io() {
+        let _guard = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("must-not-be-created.json");
+        CredentialManager::set_config_path(config_path.clone());
+
+        assert_eq!(authentication_device_id(), TEST_AUTHENTICATION_DEVICE_ID);
+        assert_eq!(authentication_device_id(), TEST_AUTHENTICATION_DEVICE_ID);
+        assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn test_credential_lock_recovers_poison_and_resets_test_vaults() {
+        let initial_guard = credential_test_lock();
+        drop(initial_guard);
+        CredentialManager::set_config_path(PathBuf::from("stale-config-path"));
+
+        let panic = std::thread::spawn(|| {
+            let _guard = CREDENTIAL_TEST_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut vault_guard = TEST_VAULT.lock().unwrap();
+            let mut legacy_guard = TEST_LEGACY_RAW.lock().unwrap();
+            let mut vault = VaultContents::default();
+            vault.insert(
+                "stale-server".to_string(),
+                ServerCredentials {
+                    token_or_password: "stale-secret".to_string(),
+                    user_id: None,
+                },
+            );
+            *vault_guard = Some(vault);
+            *legacy_guard = Some("stale-legacy-data".to_string());
+            panic!("deliberately poison the credential test lock");
+        })
+        .join();
+        assert!(panic.is_err());
+
+        let _recovered_guard = credential_test_lock();
+        assert!(CredentialManager::load_vault().unwrap().is_empty());
+        assert!(TEST_LEGACY_RAW.lock().unwrap().is_none());
+        assert!(CONFIG_FILE_PATH.lock().unwrap().is_none());
+        assert!(!CREDENTIAL_TEST_MUTEX.is_poisoned());
+        assert!(!TEST_VAULT.is_poisoned());
+        assert!(!TEST_LEGACY_RAW.is_poisoned());
     }
 
     fn server_config_for_test(id: &str, server_type: &str) -> crate::db::ServerConfig {
