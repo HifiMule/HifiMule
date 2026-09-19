@@ -6,24 +6,35 @@ import test from "node:test";
 const root = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 const json = (path) => JSON.parse(read(path));
+const normalizeWorkflow = (workflow) => workflow.replace(/\r\n?/g, "\n");
 const jobBlock = (workflow, jobName) => {
-  const match = workflow.match(new RegExp(`^  ${jobName}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:|$(?![\\s\\S]))`, "m"));
+  const normalizedWorkflow = normalizeWorkflow(workflow);
+  const match = normalizedWorkflow.match(new RegExp(`^  ${jobName}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:|$(?![\\s\\S]))`, "m"));
   assert.ok(match, `workflow must define the ${jobName} job`);
   return match[0];
 };
 const permissionMap = (workflow, indent) => {
+  const normalizedWorkflow = normalizeWorkflow(workflow);
   const padding = " ".repeat(indent);
   const entryPadding = `${padding}  `;
   const header = `${padding}permissions:\n`;
-  const start = workflow.indexOf(header);
+  const start = normalizedWorkflow.indexOf(header);
   assert.notEqual(start, -1, "workflow block must define permissions");
 
   const permissions = {};
-  for (const line of workflow.slice(start + header.length).split("\n")) {
+  for (const line of normalizedWorkflow.slice(start + header.length).split("\n")) {
     const match = line.match(new RegExp(`^${entryPadding}([a-z-]+): (read|write|none)$`));
-    if (!match) break;
-    permissions[match[1]] = match[2];
+    if (match) {
+      assert.ok(!(match[1] in permissions), `workflow permissions contain duplicate entry: ${match[1]}`);
+      permissions[match[1]] = match[2];
+      continue;
+    }
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (/^\s*\t/.test(line)) assert.fail(`workflow permissions contain tab-indented entry: ${line.trim()}`);
+    if (line.match(/^ */)[0].length <= indent) break;
+    assert.fail(`workflow permissions contain malformed entry: ${line.trim()}`);
   }
+  assert.ok(Object.keys(permissions).length > 0, "workflow permissions must define read, write, or none entries");
   return permissions;
 };
 
@@ -84,6 +95,34 @@ test("smoke workflows use a read-only caller and callee permission contract", ()
   assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-candidate"), 4), readOnlyPermissions);
   assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "release"), 4), { contents: "write" });
   assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 1);
+});
+
+test("workflow permission parsing is independent of line endings", () => {
+  const releaseWorkflow = normalizeWorkflow(read(".github/workflows/release.yml"));
+  const smokeWorkflow = normalizeWorkflow(read(".github/workflows/smoke-test.yml"));
+  const expectedPermissions = {
+    smoke: { contents: "read", actions: "read" },
+    release: { contents: "write" },
+  };
+
+  for (const [name, newline] of [["LF", "\n"], ["CRLF", "\r\n"], ["CR", "\r"]]) {
+    const releaseVariant = releaseWorkflow.replaceAll("\n", newline);
+    const smokeVariant = smokeWorkflow.replaceAll("\n", newline);
+    const malformedVariant = ["permissions:", "  contents: read", "", "  actions: invalid", "jobs:"].join(newline);
+
+    assert.deepEqual(permissionMap(smokeVariant, 0), expectedPermissions.smoke, `${name} callee permissions`);
+    assert.deepEqual(permissionMap(jobBlock(releaseVariant, "smoke-release"), 4), expectedPermissions.smoke, `${name} smoke-release permissions`);
+    assert.deepEqual(permissionMap(jobBlock(releaseVariant, "smoke-candidate"), 4), expectedPermissions.smoke, `${name} smoke-candidate permissions`);
+    assert.deepEqual(permissionMap(jobBlock(releaseVariant, "release"), 4), expectedPermissions.release, `${name} release permissions`);
+    assert.throws(() => permissionMap(malformedVariant, 0), /malformed entry: actions: invalid/, `${name} malformed permission entry`);
+  }
+});
+
+test("workflow permission parsing still rejects missing and malformed-first blocks", () => {
+  assert.throws(() => permissionMap("name: Missing permissions\n", 0), /workflow block must define permissions/);
+  assert.throws(() => permissionMap("permissions:\r\n  contents: invalid\r\n", 0), /malformed entry: contents: invalid/);
+  assert.throws(() => permissionMap("permissions:\n  contents: read\n\tactions: write\n", 0), /tab-indented entry: actions: write/);
+  assert.throws(() => permissionMap("permissions:\n  contents: read\n  contents: write\n", 0), /duplicate entry: contents/);
 });
 
 test("release guide states certification boundaries and the four-row workflow", () => {
