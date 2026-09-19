@@ -781,7 +781,7 @@ impl Database {
         let move_key = anchor_ordinal.unwrap_or(i64::MAX);
         tx.execute_batch("DROP TABLE IF EXISTS temp.playback_move_rows")?;
         tx.execute(
-            "CREATE TEMP TABLE playback_move_rows AS SELECT occurrence_id,server_id,track_id, CASE WHEN occurrence_id=?1 THEN ?4 ELSE ordinal END AS move_key, CASE WHEN occurrence_id=?1 THEN 0 ELSE 1 END AS tie_key, ordinal AS old_ordinal FROM playback_occurrences WHERE session_id=?2 AND ordinal>?3",
+            "CREATE TEMP TABLE playback_move_rows AS SELECT occurrence_id,server_id,track_id,outcome,failure_code, CASE WHEN occurrence_id=?1 THEN ?4 ELSE ordinal END AS move_key, CASE WHEN occurrence_id=?1 THEN 0 ELSE 1 END AS tie_key, ordinal AS old_ordinal FROM playback_occurrences WHERE session_id=?2 AND ordinal>?3",
             params![occurrence_id, session.session_id, current_ordinal, move_key],
         )?;
         tx.execute(
@@ -789,7 +789,7 @@ impl Database {
             params![session.session_id, current_ordinal],
         )?;
         tx.execute(
-            "INSERT INTO playback_occurrences(session_id,occurrence_id,ordinal,server_id,track_id) SELECT ?1,occurrence_id,?2 + ROW_NUMBER() OVER (ORDER BY move_key,tie_key,old_ordinal),server_id,track_id FROM playback_move_rows",
+            "INSERT INTO playback_occurrences(session_id,occurrence_id,ordinal,server_id,track_id,outcome,failure_code) SELECT ?1,occurrence_id,?2 + ROW_NUMBER() OVER (ORDER BY move_key,tie_key,old_ordinal),server_id,track_id,outcome,failure_code FROM playback_move_rows",
             params![session.session_id, current_ordinal],
         )?;
         tx.execute_batch("DROP TABLE temp.playback_move_rows")?;

@@ -4,7 +4,7 @@ baseline_commit: 3efa4529c56c94a009d5ed02a64562a97b957c9a
 
 # Story 15.15: Restart the current track or return to the previous track
 
-Status: review
+Status: done
 
 ## Story
 
@@ -52,6 +52,17 @@ Dependencies: delivered Stories 15.1–15.14. No Epic 16 prerequisite. Story 15.
   - [x] Extend real production-module Rust/Node test harnesses with the matrix below; run focused tests, relevant broader regressions and the UI build.
   - [x] Verify actual UI keyboard activation and daemon playback behavior; do not treat DOM fixtures or mock native events as physical-key evidence.
   - [x] Document commands/results/limitations in the Dev Agent Record. Preserve existing done statuses and explicit release follow-ups.
+
+### Review Findings
+
+Review date: 2026-09-19. Scope: `3efa452..97d8545`, full story and Back audio regression spec. Blind Hunter, Edge Case Hunter and Acceptance Auditor completed; duplicates merged into four patch findings, with two additional candidates dismissed after checking surrounding behavior. No product decisions or deferred findings.
+
+- [x] [Review][Patch] R1 [P1] Preserve paused intent across repeated pending Back commands [hifimule-daemon/src/playback/session.rs:3353] — The first paused Back keeps transport Paused but sets playback status Loading. A second fresh Back before preparation completes treats Loading as playing intent and authorizes audible playback. The same defect exists in `preview_back_inner` at line 3448. Derive audibility from preserved transport intent and cover repeated paused main/Preview Back before worker readiness (AC 1, 4, 7).
+- [x] [Review][Patch] R2 [P2] Keep frozen current gain and qualified suffix on same-occurrence Back [hifimule-daemon/src/playback/session.rs:3376] — After an album queue becomes manual through editing, the current occurrence still carries its frozen gain and suffix. The unconditional `set_current_policy` call resets those to unity/None even when Back restarts that same occurrence. Recompute policy only when selecting a different occurrence; cover an edited album current with non-unity gain (frozen preparation contract).
+- [x] [Review][Patch] R3 [P2] Preserve legacy outcome fields when moving rewound upcoming rows [hifimule-daemon/src/playback/persistence.rs:784] — The temporary table and reinsertion omit `outcome` and `failure_code` while deleting/recreating every upcoming occurrence. Once Back makes previously visited rows upcoming, moving any track clears those immutable fields across the upcoming queue. Preserve both columns and test completed/failed legacy rows after rewind and move (AC 7; durable attempt contract).
+- [x] [Review][Patch] R4 [P2] Persist failed Back preparation as a terminal attempt failure [hifimule-daemon/src/playback/session.rs:4123] — `BackFailed` bypasses the ordinary technical-failure persistence path and updates only transient state. Its newly opened main attempt remains active, so Retry reuses it and later navigation can classify it as restarted/backNavigation instead of preserving the failure. Route preparation failure through the attempt-aware terminal transaction, retaining operation outcome and persistence-retry semantics (AC 3, 7, 8).
+
+Review verification: playback suite 317 passed / 6 intentional ignores; playback UI suite 47 passed. The initial sandboxed playback run had eight fixture-server permission failures; the rerun with local socket access passed. Physical keyboard/media-key and installed layout checks were not performed. All four patches subsequently applied with user authorization. Five new owner/persistence regression tests and an extended frozen-gain regression reproduced the defects before the fixes. Post-fix validation: `cargo test -p hifimule-daemon playback::` with the controlled FFmpeg environment passed 322 tests / 6 intentional ignores; `node --test scripts/tests/playback-ui.test.mjs` passed 47 tests; formatting and diff whitespace checks passed. Failure events now use the existing terminal transaction and storage-retry path, including Preview, while preserving the Back operation result. Story 15.17 still owns the unexecuted installed-platform checks.
 
 ## Dev Notes
 
@@ -218,6 +229,8 @@ Validation evidence (2026-09-19):
 - Added Rust and production-module Node regression coverage; the complete workspace and UI build pass. Installed physical keyboard/media-key and layout checks remain assigned to Story 15.17 and are not labeled passed here.
 
 ## Change Log
+
+- 2026-09-19: Closed review findings R1–R4: preserved paused intent during repeated Back, retained frozen current gain, preserved legacy outcomes across queue moves, and persisted failed preparation attempts with retry-safe recovery. Added regression coverage and marked story done.
 
 - 2026-09-19: Implemented replay-safe Back across daemon persistence/session/preparation, native controls and retained UI; added migration, long-history and end-to-end regression coverage.
 - 2026-09-19: Fixed macOS Back silence by reopening only the admitted replacement pipeline at worker readiness; hardened failure, supersession, native feedback and attempt-position races found during adversarial review.

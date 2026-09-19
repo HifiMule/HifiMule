@@ -1001,13 +1001,40 @@ fn owner_loop(
         if !pending.is_empty() {
             let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
             for (_, epoch, generation_id, event) in pending {
-                if matches!(event_kind(&event), 1 | 3 | 4 | 5)
+                if matches!(event_kind(&event), 1 | 3 | 4 | 5 | 7)
                     && epoch != i.control_epoch.load(Ordering::Acquire)
                 {
                     continue;
                 }
                 if !fenced.load(Ordering::Acquire) && i.generation_id == generation_id {
                     let event = match event {
+                        PlaybackEvent::BackFailed {
+                            operation_id,
+                            code,
+                            retryable,
+                        } => {
+                            if !i
+                                .playback
+                                .pending_back
+                                .as_ref()
+                                .is_some_and(|pending| pending.operation_id == operation_id)
+                            {
+                                continue;
+                            }
+                            i.playback.pending_back = None;
+                            i.playback.back_outcome = Some(BackOutcome {
+                                operation_id,
+                                status: "failed".into(),
+                                error: Some(PlaybackFailure {
+                                    code: code.clone(),
+                                    retryable,
+                                }),
+                            });
+                            // Back opened a new listening attempt before preparation.
+                            // Reuse the ordinary durable failure path (including
+                            // Preview and storage recovery) before publishing it.
+                            PlaybackEvent::Failed { code, retryable }
+                        }
                         PlaybackEvent::SeekPipelineFailed {
                             operation_id,
                             code,
@@ -3353,9 +3380,6 @@ fn back_control_inner(
     let intended_playing = matches!(
         i.session.state,
         TransportState::Playing | TransportState::Buffering
-    ) || matches!(
-        i.playback.status,
-        PlaybackStatus::Active | PlaybackStatus::Loading
     );
     let may_resume = intended_playing
         && i.output.error.is_none()
@@ -3373,7 +3397,9 @@ fn back_control_inner(
         .checked_add(1)
         .filter(|value| *value <= i64::MAX as u64)
         .ok_or_else(|| storage(anyhow::anyhow!("checkpoint sequence overflow")))?;
-    set_current_policy(&mut next, Some(&target));
+    if changed {
+        set_current_policy(&mut next, Some(&target));
+    }
     let close = i.db.active_playback_attempt().map_err(storage)?.map(|_| {
         if changed {
             "backNavigation"
@@ -3448,9 +3474,6 @@ fn preview_back_inner(
     let intended_playing = matches!(
         previous.state,
         TransportState::Playing | TransportState::Buffering
-    ) || matches!(
-        i.playback.status,
-        PlaybackStatus::Active | PlaybackStatus::Loading
     );
     let may_resume = intended_playing && i.output.error.is_none() && !previous.resume_inhibited;
     let mut replacement = previous.clone();
@@ -4120,33 +4143,8 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             }
             i.dirty = true;
         }
-        PlaybackEvent::BackFailed {
-            operation_id,
-            code,
-            retryable,
-        } if i
-            .playback
-            .pending_back
-            .as_ref()
-            .is_some_and(|pending| pending.operation_id == operation_id) =>
-        {
-            i.playback.pending_back = None;
-            i.output_gate.store(false, Ordering::Release);
-            if let Some(preview) = i.preview.as_mut() {
-                preview.state = TransportState::Paused;
-            } else {
-                i.session.state = TransportState::Paused;
-            }
-            let error = PlaybackFailure { code, retryable };
-            i.playback.status = PlaybackStatus::Error;
-            i.playback.error = Some(error.clone());
-            i.playback.back_outcome = Some(BackOutcome {
-                operation_id,
-                status: "failed".into(),
-                error: Some(error),
-            });
-        }
-        PlaybackEvent::BackCommitted { .. } | PlaybackEvent::BackFailed { .. } => {}
+        PlaybackEvent::BackCommitted { .. } => {}
+        PlaybackEvent::BackFailed { .. } => unreachable!("normalized by owner"),
         PlaybackEvent::Failed { code, retryable } => {
             // This event has already passed the owner's generation fence. A
             // retirement warning is not terminal: the worker is still owned.
@@ -4465,7 +4463,9 @@ fn commit_terminal(
             current.availability = availability(&i.db, &current.source.server_id)?;
         }
         response.main_current = response.current.clone();
-        set_current_policy(&mut terminal.session, response.current.as_ref());
+        if terminal.session.current_occurrence_id != i.session.current_occurrence_id {
+            set_current_policy(&mut terminal.session, response.current.as_ref());
+        }
         // The projection began with the predecessor snapshot. Transport effects
         // must use the destination occurrence's frozen policy after the commit.
         response.gain_bits = terminal.session.current_gain_bits;
@@ -6138,6 +6138,286 @@ mod tests {
         let snapshot = playback.snapshot().unwrap();
         assert_eq!(snapshot.generation_id, selected.generation_id);
         (db, playback, snapshot, applied.assigned_occurrences)
+    }
+
+    #[test]
+    fn review_back_move_preserves_rewound_legacy_outcomes_and_attempts() {
+        let (db, playback, mut current, rows) = repeated_back_fixture();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        for (row, outcome, code) in [
+            (&rows[1], "naturalCompletion", None),
+            (&rows[2], "technicalFailure", Some("DECODE_FAILED")),
+        ] {
+            db.conn.lock().unwrap().execute(
+                "UPDATE playback_occurrences SET outcome=?1,failure_code=?2 WHERE occurrence_id=?3",
+                rusqlite::params![outcome, code, row.occurrence_id],
+            ).unwrap();
+        }
+        for _ in 0..3 {
+            current = playback
+                .control_with_guard(transport(&current, ControlAction::Back), None)
+                .unwrap();
+        }
+        assert_eq!(
+            current.current.as_ref().unwrap().occurrence_id,
+            rows[0].occurrence_id
+        );
+        let attempts = db.playback_attempts(&current.session_id, None, 20).unwrap();
+        playback
+            .apply(params(
+                &current,
+                SessionOperation::MoveUpcoming {
+                    occurrence_id: rows[3].occurrence_id.clone(),
+                    before_occurrence_id: Some(rows[1].occurrence_id.clone()),
+                },
+            ))
+            .unwrap();
+        let reordered = db.playback_page(&current.session_id, None, 10).unwrap();
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|row| &row.occurrence_id)
+                .collect::<Vec<_>>(),
+            vec![
+                &rows[0].occurrence_id,
+                &rows[3].occurrence_id,
+                &rows[1].occurrence_id,
+                &rows[2].occurrence_id
+            ]
+        );
+        for (row, outcome, code) in [
+            (&rows[1], "naturalCompletion", None),
+            (&rows[2], "technicalFailure", Some("DECODE_FAILED")),
+        ] {
+            let stored: (Option<String>, Option<String>) = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT outcome,failure_code FROM playback_occurrences WHERE occurrence_id=?1",
+                    [&row.occurrence_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(stored, (Some(outcome.into()), code.map(str::to_owned)));
+        }
+        assert_eq!(
+            db.playback_attempts(&current.session_id, None, 20).unwrap(),
+            attempts
+        );
+    }
+
+    #[test]
+    fn review_back_repeated_pending_commands_preserve_paused_main_and_preview() {
+        for preview_mode in [false, true] {
+            let (_db, playback, main) = queued();
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let current = if preview_mode {
+                playback
+                    .preview_with_guard(preview_params(&main, "paused-back"), None)
+                    .unwrap()
+            } else {
+                main
+            };
+            let mut current = playback
+                .control_with_guard(transport(&current, ControlAction::Pause), None)
+                .unwrap();
+            for _ in 0..3 {
+                current = playback
+                    .control_with_guard(transport(&current, ControlAction::Back), None)
+                    .unwrap();
+                assert_eq!(current.playback.status, PlaybackStatus::Loading);
+                assert!(current.playback.pending_back.is_some());
+                assert!(!current.back_audible, "preview={preview_mode}");
+                assert!(!playback.output_gate().load(Ordering::Acquire));
+            }
+            let operation_id = current.playback.pending_back.unwrap().operation_id;
+            playback.publish_event_at_epoch(
+                current.generation_id,
+                PlaybackEvent::BackCommitted { operation_id },
+                current.back_epoch,
+            );
+            assert_eq!(
+                playback.snapshot().unwrap().playback.status,
+                PlaybackStatus::Paused
+            );
+            assert!(!playback.output_gate().load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn review_back_failure_records_terminal_attempt_before_retry_or_next() {
+        for action in [ControlAction::Retry, ControlAction::Next] {
+            let (db, playback, initial, _rows) = repeated_back_fixture();
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let admitted = playback
+                .control_with_guard(transport(&initial, ControlAction::Back), None)
+                .unwrap();
+            let attempt_id = db.active_playback_attempt().unwrap().unwrap();
+            let operation_id = admitted
+                .playback
+                .pending_back
+                .as_ref()
+                .unwrap()
+                .operation_id
+                .clone();
+            for _ in 0..2 {
+                playback.publish_event_at_epoch(
+                    admitted.generation_id.clone(),
+                    PlaybackEvent::BackFailed {
+                        operation_id: operation_id.clone(),
+                        code: "BACK_SOURCE_UNAVAILABLE".into(),
+                        retryable: true,
+                    },
+                    admitted.back_epoch,
+                );
+                let failed = playback.snapshot().unwrap();
+                assert_eq!(failed.playback.status, PlaybackStatus::Error);
+                assert!(failed.playback.pending_back.is_none());
+                assert_eq!(
+                    failed.playback.back_outcome.unwrap().operation_id,
+                    operation_id
+                );
+                assert!(db.active_playback_attempt().unwrap().is_none());
+                assert_eq!(
+                    db.load_playback_session().unwrap().unwrap().state,
+                    TransportState::Paused
+                );
+            }
+            let failed = playback.snapshot().unwrap();
+            playback
+                .control_with_guard(transport(&failed, action), None)
+                .unwrap();
+            assert_ne!(db.active_playback_attempt().unwrap().unwrap(), attempt_id);
+            let attempts = db.playback_attempts(&initial.session_id, None, 20).unwrap();
+            let failed_attempt = attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == attempt_id)
+                .unwrap();
+            assert_eq!(
+                failed_attempt.disposition.as_deref(),
+                Some("technicalFailure")
+            );
+            assert_eq!(
+                failed_attempt.failure_code.as_deref(),
+                Some("BACK_SOURCE_UNAVAILABLE")
+            );
+        }
+    }
+
+    #[test]
+    fn review_back_failure_storage_retry_commits_once_and_stays_paused() {
+        let (db, playback, initial) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let admitted = playback
+            .control_with_guard(transport(&initial, ControlAction::Back), None)
+            .unwrap();
+        let attempt_id = db.active_playback_attempt().unwrap().unwrap();
+        let operation_id = admitted
+            .playback
+            .pending_back
+            .as_ref()
+            .unwrap()
+            .operation_id
+            .clone();
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER fail_back_terminal BEFORE UPDATE ON playback_attempts BEGIN SELECT RAISE(ABORT,'injected terminal failure'); END;",
+        ).unwrap();
+        playback.publish_event_at_epoch(
+            admitted.generation_id,
+            PlaybackEvent::BackFailed {
+                operation_id: operation_id.clone(),
+                code: "BACK_SOURCE_UNAVAILABLE".into(),
+                retryable: true,
+            },
+            admitted.back_epoch,
+        );
+        let failed = playback.snapshot().unwrap();
+        assert_eq!(
+            failed.playback.error.as_ref().unwrap().code,
+            "PERSISTENCE_FAILED"
+        );
+        assert_eq!(
+            db.active_playback_attempt().unwrap().as_deref(),
+            Some(attempt_id.as_str())
+        );
+        assert!(!playback.output_gate().load(Ordering::Acquire));
+        assert_eq!(
+            playback
+                .control_with_guard(transport(&failed, ControlAction::Back), None)
+                .unwrap_err()
+                .code,
+            "PERSISTENCE_FAILED"
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_back_terminal")
+            .unwrap();
+        let recovered = playback
+            .control_with_guard(transport(&failed, ControlAction::Retry), None)
+            .unwrap();
+        assert_eq!(
+            recovered.playback.error.as_ref().unwrap().code,
+            "BACK_SOURCE_UNAVAILABLE"
+        );
+        assert_eq!(
+            recovered
+                .playback
+                .back_outcome
+                .as_ref()
+                .unwrap()
+                .operation_id,
+            operation_id
+        );
+        assert!(!recovered.resume_audio);
+        assert!(!playback.output_gate().load(Ordering::Acquire));
+        assert!(db.active_playback_attempt().unwrap().is_none());
+        let attempts = db.playback_attempts(&initial.session_id, None, 20).unwrap();
+        let failed_attempt = attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == attempt_id)
+            .unwrap();
+        assert_eq!(
+            failed_attempt.disposition.as_deref(),
+            Some("technicalFailure")
+        );
+    }
+
+    #[test]
+    fn review_back_preview_failure_is_durable_before_retry() {
+        let (db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let preview = playback
+            .preview_with_guard(preview_params(&main, "failed-back"), None)
+            .unwrap();
+        let admitted = playback
+            .control_with_guard(transport(&preview, ControlAction::Back), None)
+            .unwrap();
+        let audition_id = admitted.current.as_ref().unwrap().occurrence_id.clone();
+        playback.publish_event_at_epoch(
+            admitted.generation_id,
+            PlaybackEvent::BackFailed {
+                operation_id: admitted.playback.pending_back.unwrap().operation_id,
+                code: "BACK_SOURCE_UNAVAILABLE".into(),
+                retryable: true,
+            },
+            admitted.back_epoch,
+        );
+        let failed = playback.snapshot().unwrap();
+        let outcomes = db.audition_outcomes(None, 20).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].audition_id, audition_id);
+        assert_eq!(outcomes[0].disposition, "technicalFailure");
+        assert_eq!(
+            outcomes[0].failure_code.as_deref(),
+            Some("BACK_SOURCE_UNAVAILABLE")
+        );
+        let retried = playback
+            .control_with_guard(transport(&failed, ControlAction::Retry), None)
+            .unwrap();
+        assert_ne!(retried.current.unwrap().occurrence_id, audition_id);
+        assert_eq!(db.audition_outcomes(None, 20).unwrap(), outcomes);
     }
 
     #[test]
@@ -8267,6 +8547,13 @@ mod tests {
         assert_eq!(returned.position_ms, 4_200);
         assert_eq!(returned.gain_bits, main.gain_bits);
         assert_eq!(returned.qualified_suffix, main.qualified_suffix);
+        let restarted = playback
+            .control_with_guard(transport(&returned, ControlAction::Back), None)
+            .unwrap();
+        assert_eq!(restarted.current, main.current);
+        assert_eq!(restarted.position_ms, 0);
+        assert_eq!(restarted.gain_bits, main.gain_bits);
+        assert_eq!(restarted.qualified_suffix, main.qualified_suffix);
         drop(cleanup);
         let restored = PlaybackSession::restore(db, "review-queue-relaunch".into());
         let _restored_cleanup = OwnerThreadCleanup(restored.clone());
