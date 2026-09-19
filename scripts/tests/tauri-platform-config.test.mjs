@@ -24,3 +24,8 @@ test("effective native-library resource mappings are non-overlapping by platform
   assert.deepEqual(native(merge(base, macos)), { "bundled-libs/*": "bundled-libs/" });
   assert.deepEqual(native(merge(base, linux)), { "bundled-libs/*": "bundled-libs/" });
 });
+
+test("NSIS stops the daemon before copying its runtime DLLs", () => {
+  const hooks = readFileSync(resolve(root, "hifimule-ui/src-tauri/nsis/hooks.nsh"), "utf8");
+  assert.match(hooks, /!macro NSIS_HOOK_PREINSTALL[\s\S]*?!insertmacro CheckIfAppIsRunning "hifimule-daemon\.exe" "\$\{PRODUCTNAME\}"[\s\S]*?!macroend/);
+});

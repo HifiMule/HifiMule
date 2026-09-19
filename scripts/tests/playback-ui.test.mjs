@@ -557,6 +557,7 @@ test('Shoelace cannot override hidden transport actions', () => {
 test('transport messages overlay the content without changing bar height', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.playback-controls\s*\{[\s\S]*?flex-wrap:\s*wrap;/);
+  assert.match(styles, /\.playback-controls\s*\{[\s\S]*?z-index:\s*1;/);
   assert.match(styles, /\.playback-controls__messages\s*\{[^}]*position:\s*absolute;/);
   assert.match(styles, /inset-block-end:\s*calc\(100% \+ var\(--space-xs\)\)/);
 });
@@ -899,6 +900,8 @@ test('persistent guidance can be dismissed and reopened without polling reopenin
   initial.mode = 'preview'; initial.preview = { hasMainSession: true };
   const h = harness(initial); await h.tick();
   const toggle = h.component.messagesToggle;
+  assert.equal(h.component.hints.get(toggle).attributes.placement, 'top-end');
+  assert.equal(h.component.hints.get(toggle).attributes.distance, '16');
   assert.match(h.component.messages.className, /is-visible/);
   toggle.focus(); await toggle.click();
   assert.equal(h.component.messages.className, 'playback-controls__messages');

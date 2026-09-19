@@ -2193,6 +2193,10 @@ h2 {
 /* Final flex child: the real wrapped bar height reserves browser space. */
 .playback-controls {
     position: relative;
+    /* The guidance panel is positioned above this bar. Keep the entire bar's
+       stacking context above adjacent scroll surfaces so they cannot paint
+       over its text. */
+    z-index: 1;
     isolation: isolate;
     flex: 0 0 auto;
     min-width: 0;

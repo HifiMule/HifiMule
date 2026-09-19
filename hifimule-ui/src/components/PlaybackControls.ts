@@ -169,7 +169,7 @@ export class PlaybackControls {
         this.surfaceToggle.addEventListener('click', () => this.onSurfaceChange(this.surface === 'library' ? 'playback' : 'library'));
         const actions = document.createElement('div');
         actions.className = 'playback-controls__actions';
-        actions.append(...[this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle), this.hint(this.refresh));
+        actions.append(...[this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh));
         this.messages.className = 'playback-controls__messages';
         this.messages.append(this.status, this.seekStatus, this.error);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
@@ -356,10 +356,11 @@ export class PlaybackControls {
         this.hints?.get(button)?.setAttribute('content', label);
     }
 
-    private hint(button: HTMLElement, placement = 'top'): HTMLElement {
+    private hint(button: HTMLElement, placement = 'top', distance?: number): HTMLElement {
         const hint = document.createElement('sl-tooltip');
         hint.setAttribute('content', button.getAttribute('aria-label') ?? '');
         hint.setAttribute('placement', placement);
+        if (distance !== undefined) hint.setAttribute('distance', String(distance));
         hint.setAttribute('hoist', '');
         hint.append(button);
         this.hints.set(button, hint);

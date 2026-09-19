@@ -1,6 +1,12 @@
 ; HifiMule NSIS installer hooks
 ; Preserves an existing startup opt-in without enrolling fresh/disabled users.
 
+; The daemon loads the bundled audio DLLs. Stop it before Tauri copies any
+; resources so an upgrade does not first fail on a locked DLL.
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro CheckIfAppIsRunning "hifimule-daemon.exe" "${PRODUCTNAME}"
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
   StrCmp $0 "" +2
