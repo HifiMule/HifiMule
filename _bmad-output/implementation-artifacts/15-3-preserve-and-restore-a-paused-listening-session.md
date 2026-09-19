@@ -97,7 +97,7 @@ The decisions in this section are the implementation contract selected during st
 
 - `schemaVersion: 1` identifies the playback wire contract; persistence has its own version `1`. Do not change the lifecycle protocol version for these additive playback APIs.
 - `instanceId` is the existing daemon owner identity. `sessionId` and `occurrenceId` are daemon-generated UUID strings. Every insertion generates a distinct occurrence, even for identical tracks. Never deduplicate occurrences by track ID.
-- `source: { serverId, trackId }` uses the existing **portable** server ID plus opaque nonempty provider track ID. It does not use the machine-local server UUID. Recording identity is deliberately absent until recording deduplication is implemented in 15.18; source identity must not masquerade as recording identity.
+- `source: { serverId, trackId }` uses the existing **portable** server ID plus opaque nonempty provider track ID. It does not use the machine-local server UUID. Recording identity is deliberately absent until recording deduplication is implemented in 16.4; source identity must not masquerade as recording identity.
 - `queueRevision`, `stateSequence` and persisted checkpoint sequence use canonical nonnegative decimal strings on the JSON wire (SQLite signed 64-bit nonnegative integers internally). Reject overflow rather than wrap. `positionMs` is a nonnegative integer JSON number, bounded by JavaScript's safe integer range and by known duration when available. Reject fractional/negative/nonfinite/out-of-range values. Unknown duration remains unknown; do not invent one or mix seconds/ticks/samples.
 - A singleton durable session row exists even when cleared. It retains `sessionId` and monotonic `queueRevision` across clear/restart, preventing old commands from targeting a recreated zero-revision session. Explicit future new-listening-session behavior can rotate identity in its own story.
 - Normal externally usable states here are `idle` (empty queue, null current, position zero) and `paused` (nonempty queue, valid current). Model the architecture's `buffering`, `playing` and `stopping` variants for future integration and restoration fixtures, but do not expose a fake Play/Resume command. Loading persisted active states always produces paused. Restoration failure is a separate `restoration.status: "error"` with structured reason, not healthy idle.
@@ -236,7 +236,7 @@ Record command-driven daemon restart evidence on Windows, macOS and Linux agains
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Story 15.3; Epic 15 requirements, dependencies and implementation gates; Stories 15.4/15.11/15.13/15.16/15.18/15.23]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Story 15.3; Epic 15 requirements, dependencies and implementation gates; Stories 15.4/15.11/15.13/16.2/16.4/16.9]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback State and Ownership; Implementation Contracts; Project Structure; Validation Refinements; portable server identities]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — FR56/58/60, state integrity and source privacy]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — accessibility, headless feedback and existing visual conventions]

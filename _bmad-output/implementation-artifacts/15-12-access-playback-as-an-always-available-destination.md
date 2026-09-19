@@ -16,7 +16,7 @@ so that I can listen and curate my local listening queue without attaching a syn
 
 **Dependencies:** Stories 15.1–15.11 are done in sprint tracking. Prepared 2026-09-19 against `bf8f16f` (Review 15.11). Reuse the existing daemon-owned main/preview session, output selection, versioned local output configuration, authoritative session snapshot and paged occurrence API. Story 15.11 leaves installed Windows/Linux/macOS physical-output evidence open; do not convert that inherited limitation into a passing claim here.
 
-**Scope:** Typed destination navigation, deterministic physical-device arrival/removal behavior, a read-only Playback destination backed by the authoritative main queue, existing output/configuration status, unconfigured-device setup, actionable device-open failures, responsive accessibility and physical-action isolation. Story 15.13 owns queue mutation, 15.14 the floating bar, 15.15 Playback source/selection settings, and 15.16–20 Radio/Play something. No playback engine/provider/persistence redesign, fake mounted Playback device, manifest field, auto-fill copy, server playlist mutation, basket export, audio dependency upgrade or automatic listening report belongs here.
+**Scope:** Typed destination navigation, deterministic physical-device arrival/removal behavior, a read-only Playback destination backed by the authoritative main queue, existing output/configuration status, unconfigured-device setup, actionable device-open failures, responsive accessibility and physical-action isolation. Story 15.13 owns queue mutation, 15.14 the floating bar, 16.1 Playback source/selection settings, and 16.2–16.6 Radio/Play something. No playback engine/provider/persistence redesign, fake mounted Playback device, manifest field, auto-fill copy, server playlist mutation, basket export, audio dependency upgrade or automatic listening report belongs here.
 
 ## Acceptance Criteria
 
@@ -232,7 +232,7 @@ Remain inside the existing Rust daemon, authenticated JSON-RPC/Tauri bridge and 
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Playback Extension inventory; Epic 15; Story 15.12; Stories 15.13–15.15 boundaries]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Playback Extension inventory; Epic 15; Story 15.12; Stories 15.13–15.14 and 16.1 boundaries]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — amended FR33; Playback Extension FR55/FR59; P-NFR4–6]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback State and Ownership; UI and Session Control; Implementation Contracts; deployment sequence/project structure]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — Device Hub; responsive breakpoints; accessibility; superseded visual tokens noted above]

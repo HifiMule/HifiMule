@@ -1059,20 +1059,20 @@ Playback architecture workflow: UI/session-control integration approved; deploym
 
 Run playback in the signed-in user's daemon on Windows, macOS and Linux. Reuse the existing daemon native event loop for media controls. Introduce single-instance coordination so UI and startup launches cannot create competing players. Package a controlled FFmpeg runtime and verify actual loaded library versions in release validation. Test every shipping architecture; the ARM64 VM experiments do not establish Windows/Linux x64 compatibility.
 
-Implementation sequence:
-1. Daemon lifecycle: UI-independent lifetime, single instance, safe quit and paused restoration.
-2. Basic player: server streaming, native controls, output selection and disconnect handling.
-3. Albums/previews: gapless preparation, format conversion and preserved-session auditions.
-4. Playback destination: independent settings, floating controls and manual queue editing.
-5. Radio: shared selection engine, bounded replenishment, artist transitions and deduplication.
-6. Library integration: listening reports, supported feedback, playlist and basket exports.
-7. Reliability/release: adaptive quality, real-sync stress tests, resource measurements and packaged-platform checks.
+Implementation sequence (2026-09-19 approved release split):
+1. Retain delivered lifecycle, player/native output, albums/previews and manual Playback UI (15.1–15.14).
+2. Add shared Back transport (15.15) and compact icon-and-small-label browse navigation (15.16), then verify/package the manual release (15.17).
+3. Add automatic-selection settings and Radio (16.1–16.6).
+4. Add source-server reporting/preferences and immutable exports (16.7–16.11).
+5. Add adaptation, conditional backoff and sustained/installed validation of the expanded release (16.12–16.14).
 
-Begin streaming experiments during stage 2 to discover adaptation constraints early. The stages are dependency order, not permission to omit cross-platform support or delay basic error handling until release.
+Reuse early streaming measurements when preparing adaptation; the manual release does not claim adaptive quality or conditional backoff. The stages are dependency order, not permission to omit cross-platform support or delay basic error handling until release.
 
 Playback architecture workflow: core decision categories approved; implementation contracts and edge cases under review.
 
 ### Playback Implementation Contracts — Approved
+
+Back uses one daemon-owned command for the bar and supported native Previous/keyboard delivery. Use authoritative main-track position: above 3,000 ms restart; at or below 3,000 ms select the preceding retained occurrence, falling back to current-track restart without wrapping. During Preview restart only the audition. Preserve paused intent, output-loss inhibition, source identity, accepted forward order and immutable outcomes; specify replay identity, persistence and command admission in Story 15.15. Generation fences prevent obsolete preparation from publishing audio. Compact browse navigation in 15.16 changes presentation in the existing library mode bar, not playback ownership or browse semantics.
 
 One session manager serializes mutations from UI, native controls and background work. Queue edits carry the expected queue revision; stale edits return a conflict and current revision so the caller refreshes before retrying. Position updates do not increment the queue-edit revision. Command IDs suppress duplicate queue mutations within a documented retention window; this is not a promise of indefinite or remote exactly-once execution.
 
@@ -1176,7 +1176,7 @@ Checklist (architecture-wide implementation readiness, not workflow completion):
 
 ### Playback Implementation Handoff
 
-Create playback epics/stories in the approved seven-stage sequence. Each story must close its applicable contract/version gate and define meaningful acceptance checks before execution. Start with daemon lifecycle, single-instance coordination and safe restoration; preserve physical sync safety and existing provider routing. Carry all accepted product behavior into the playback requirements/epics so older PRD assumptions cannot override this extension.
+Continue stories in the approved Epic 15/16 sequence above; Story 15.17 closes manual-release packaging and Story 16.14 owns installed validation of later features. Each story must close its applicable contract/version gate and define meaningful acceptance checks before execution. The lifecycle foundation is delivered; prepare Back (15.15) next and preserve physical sync safety and existing provider routing. Carry all accepted product behavior into the playback requirements/epics so older PRD assumptions cannot override this extension.
 
 Keep experiments/playback-probe as the audio regression reference. No production playback code was added by this architecture workflow. Do not treat prior ARM64 VM tests as shipping-architecture certification.
 

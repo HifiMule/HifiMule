@@ -204,7 +204,7 @@ Use the actual release matrix from `.github/workflows/release.yml` and `smoke-te
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — API & Communication Patterns; Playback Deployment and Implementation Sequence; Playback Project Structure; Playback Architecture Validation Results; Playback Implementation Handoff]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — Headless Sync Feedback; Responsive Design & Accessibility]
 - [Source: `_bmad-output/planning-artifacts/project-context.md` — managed-sync safety and provider abstraction principles]
-- [Source: `_bmad-output/planning-artifacts/playback-epic-validation.md` and `playback-story-review.md` — approved 29-story scope and per-story preparation gates]
+- [Source: `_bmad-output/planning-artifacts/playback-epic-validation.md` and `playback-story-review.md` — approved Epic 15/16 scope and per-story preparation gates (2026-09-19 amendment)]
 - [Source: `_bmad-output/implementation-artifacts/playback-session-results.md` — Integration implications and limits]
 - [Source: production files in the change/preservation map; `Cargo.lock`; `.github/workflows/release.yml`]
 

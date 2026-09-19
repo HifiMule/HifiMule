@@ -16,7 +16,7 @@ so that I can assess music for a playlist or basket and then return to where I w
 
 **Dependencies:** Stories 15.1–15.10. Prepared 2026-09-18 against the baseline above. Sprint tracking marks 15.10 done, while its dedicated story remains in-progress and records missing installed Windows/Linux/macOS x64, native-worker recreation and physical-output evidence. Treat that discrepancy as an inherited evidence limitation; do not rewrite predecessor status or claim unrun acceptance.
 
-**Scope:** One preserved main session, one full-track audition, explicit Return, local audition outcomes, durable recovery and existing-browser controls. No server listening reports (15.21), playlist/basket export (15.23–25), Radio, new loudness policy, editable queue UI (15.13), Playback destination (15.12), floating bar (15.14), quality adaptation or dependency upgrade. Existing playlist/basket actions remain available and retain their meaning.
+**Scope:** One preserved main session, one full-track audition, explicit Return, local audition outcomes, durable recovery and existing-browser controls. No server listening reports (16.7), playlist/basket export (16.9–16.11), Radio, new loudness policy, editable queue UI (15.13), Playback destination (15.12), floating bar (15.14), quality adaptation or dependency upgrade. Existing playlist/basket actions remain available and retain their meaning.
 
 ## Acceptance Criteria
 
@@ -129,7 +129,7 @@ Checkpoint main + first audition admission together. Replace/end audition + term
 
 Terminal dispositions: `naturalCompletion`, `stopped`, `returned`, `replaced`, `superseded`, `technicalFailure`, `interrupted`. A UUID identifies one audition lifecycle; Retry of a terminal failed attempt creates a new attempt identity with the same original main checkpoint, so prior failure is not overwritten. Store source, audition/attempt identity, terminal position, known duration if available, sanitized failure code, and conservative consumption evidence separately from main outcomes. No server reporting, scrobble calls, favorite changes or dislike inference.
 
-A natural EOF alone is not proof of full listening after a seek. Track presentation-driven continuous coverage from the start with fixed-size state (contiguous heard prefix, coverage completeness/unknown flag, and seek/discontinuity flag); pauses/buffering do not add listening time, replay cannot double-count, and forward holes/unknown presentation evidence prevent `fullyHeard=true`. EOF with known full contiguous coverage is distinguishable from seek-to-end, stop, replacement or decoder failure. Keep uncertain eligibility explicit for 15.21; do not invent remote reporting thresholds here. Page disk outcomes through internal storage/query helpers only in this story; no history UI or new public history RPC is required (default 100, max 200) and retain only bounded active evidence in memory; no ever-growing vector of sample ranges or full history. On restart, finalization of an active row as interrupted and clearing it is idempotent. If an attempt already failed, do not append a second contradictory terminal record.
+A natural EOF alone is not proof of full listening after a seek. Track presentation-driven continuous coverage from the start with fixed-size state (contiguous heard prefix, coverage completeness/unknown flag, and seek/discontinuity flag); pauses/buffering do not add listening time, replay cannot double-count, and forward holes/unknown presentation evidence prevent `fullyHeard=true`. EOF with known full contiguous coverage is distinguishable from seek-to-end, stop, replacement or decoder failure. Keep uncertain eligibility explicit for 16.7; do not invent remote reporting thresholds here. Page disk outcomes through internal storage/query helpers only in this story; no history UI or new public history RPC is required (default 100, max 200) and retain only bounded active evidence in memory; no ever-growing vector of sample ranges or full history. On restart, finalization of an active row as interrupted and clearing it is idempotent. If an attempt already failed, do not append a second contradictory terminal record.
 
 ### Audio return and concurrency guardrails
 
@@ -230,7 +230,7 @@ Remain within the daemon playback owner, existing SQLite database, provider abst
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.11; 15.10 gain; 15.12–14 UI/queue scope; 15.19 preview gain extension; 15.21 reporting]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.11; 15.10 gain; 15.12–15.14 UI/queue scope; 16.5 preview gain extension; 16.7 reporting]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — Playback Extension, FR58/60/62–64/76, P-NFR2/4–6, UJ-P3]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback Session Model, Audio Pipeline, UI and Session Control, Implementation Contracts, Project Structure and Validation Refinements]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md`; `_bmad-output/planning-artifacts/project-context.md` — existing UI/accessibility and provider/sync boundaries, subject to playback amendments]

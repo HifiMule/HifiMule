@@ -145,3 +145,18 @@ HifiMule utilizes a **"Detachable Sidebar"** strategy. The UI remains fully func
 ### 6.4 Testing Strategy
 *   **Visual Regression:** Testing "Vibrant Hub" aesthetics against diverse OS themes.
 *   **A11y Audits:** Automated Lighthouse/Axe verification within the Tauri environment.
+
+
+## 7. Desktop Playback release refinement — 2026-09-19
+
+The approved course correction separates the manual release (Epic 15) from Radio/Recommendations (Epic 16). Playback-specific requirements remain in epics.md; these additions refine the existing navigation and implemented two-row playing bar.
+
+### 7.1 Playing-bar Back (Story 15.15)
+
+Add Back alongside transport in the existing two-row bar. Above three seconds restart the main track; at or below three seconds select the previous occurrence, or restart the current track if none exists. During Preview restart only the audition. Use the shared daemon command, including supported native Previous/keyboard delivery, with localized names/help, visible focus and truthful availability. Preserve output safety and paused intent. Keep Library/Playing navigation and useful manual idle browsing/Resume until working Play something arrives in 16.6.
+
+### 7.2 Compact browse navigation (Story 15.16)
+
+Refine §5.1 Navigation: Tracks, Albums, Recently Added and every other supported browse mode use consistent recognizable icons and smaller visible localized labels with reduced spacing/bulk. Preserve capability filtering, current/loading state, existing mode-switch semantics and the grid/list toggle. Reuse Shoelace tokens; keep readable contrast, usable targets, full accessible names and visible focus. Any abbreviated label has a full hover/focus hint. Set icon mapping, sizing and wrapping/accessible overflow during story preparation, then compare actual before/after layouts at matching widths/languages. All modes remain reachable at narrow library widths and 200% text scaling without clipping, overlap or horizontal page overflow. Avoid global button/track typography changes.
+
+Story 15.17 verifies both changes in the installed manual release; Story 16.14 later verifies the expanded Radio experience. Historical UI evidence is not automatically promoted by this amendment.

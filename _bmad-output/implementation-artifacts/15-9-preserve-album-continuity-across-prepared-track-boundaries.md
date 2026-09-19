@@ -16,7 +16,7 @@ so that live recordings, continuous compositions and intentional pauses sound as
 
 **Dependencies:** Stories 15.1–15.8. Prepared 2026-09-18 against the baseline above. Ordered album transport and its review fixes are implemented. Sprint tracking currently marks 15.8 done, while its story header says in-progress and installed-platform acceptance remains open. Preserve that discrepancy as an evidence limitation; do not infer platform qualification or change the predecessor's status in this story.
 
-**Scope:** One prepared album successor, continuous native output, occurrence-aware presentation handoff, verified padding/conversion and reproducible continuity evidence. Gain remains unchanged. Album gain (15.10), Preview (15.11), destination/queue/floating redesign (15.12–14), Radio, reporting, quality adaptation (15.26), sync throttling/stress and extended reliability remain separate. No promise of uninterrupted playback when preparation misses the boundary. No new provider API, browser audio, second daemon or event loop is required.
+**Scope:** One prepared album successor, continuous native output, occurrence-aware presentation handoff, verified padding/conversion and reproducible continuity evidence. Gain remains unchanged. Album gain (15.10), Preview (15.11), destination/queue/floating redesign (15.12–15.14), Radio, reporting, quality adaptation (16.12), sync throttling/stress and extended reliability remain separate. No promise of uninterrupted playback when preparation misses the boundary. No new provider API, browser audio, second daemon or event loop is required.
 
 ## Acceptance Criteria
 

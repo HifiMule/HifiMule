@@ -1,4 +1,10 @@
-# Stories 15.4–15.6 installed playback checklist
+# Installed playback checklist — Epic 15 manual release and Epic 16 extension
+
+## Current release ownership — 2026-09-19
+
+Story 15.17 owns installed verification of the manual playback release, including Back (15.15) and compact browse navigation (15.16). Story 16.14 later extends the installed matrix to Radio, reporting/preferences, snapshots/exports, adaptive quality and conditional sync protection. Radio features are not prerequisites for 15.17.
+
+Stories 15.1–15.14 are currently marked done. Older in-progress wording below describes the historical verification runs; outstanding checkboxes and deferred issues are not automatically resolved by that status. Packaging must reconcile applicable evidence and defects (including recorded 15.12 R16 and 15.14 R8/R9), resolving release blockers or recording an explicit scoped disposition. No result below is promoted by the planning change.
 
 Use a clean installed package for each row: Windows x64, Linux x64, macOS x64,
 and macOS ARM64. Do not count a source-tree run or VM-only ARM64 run as installed

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-19  # Story 15.14: seven review patches applied; real-application validation and deferred issues remain
+last_updated: 2026-09-19  # Approved release split: Back 15.15, compact browsing 15.16, packaging 15.17; Radio Epic 16
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -181,7 +181,7 @@ development_status:
   14-2-bounded-producer-writer-pipeline: done  # review complete: 4 patches applied
   14-3-per-server-producer-fairness-and-priority-buckets: done  # review complete: 6 patches applied; 627 daemon tests pass
 
-  # Epic 15 — Desktop Playback (epics.md; 29 approved planning stories)
+  # Epic 15 — Desktop Playback (17 stories; approved 2026-09-19 course correction)
   # Stories 15.1–15.14 prepared; remaining dedicated story files and contract gates are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
@@ -198,19 +198,25 @@ development_status:
   15-12-access-playback-as-an-always-available-destination: done
   15-13-edit-the-upcoming-listening-queue: done
   15-14-control-listening-from-a-floating-playback-bar-across-views: done
-  15-15-configure-playback-selection-and-start-its-first-selected-track: backlog
-  15-16-replenish-radio-within-a-bounded-upcoming-queue: backlog
-  15-17-continue-radio-through-meaningful-artist-connections: backlog
-  15-18-avoid-duplicate-radio-recordings-across-configured-servers: backlog
-  15-19-match-radio-track-loudness-using-available-metadata: backlog
-  15-20-start-radio-with-play-something-without-opening-the-main-window: backlog
-  15-21-report-listening-accurately-to-the-source-server: backlog
-  15-22-save-supported-like-and-dislike-preferences-on-the-source-server: backlog
-  15-23-save-an-immutable-local-listening-snapshot: backlog
-  15-24-save-a-listening-snapshot-as-playlists-on-its-source-servers: backlog
-  15-25-add-a-listening-snapshot-to-a-connected-device-basket-or-replace-it: backlog
-  15-26-adapt-playback-quality-at-track-boundaries-using-buffer-health: backlog
-  15-27-protect-playback-during-sync-without-unnecessary-throttling: backlog
-  15-28-keep-long-listening-sessions-bounded-and-recoverable: backlog
-  15-29-ship-verified-playback-builds-for-windows-macos-and-linux: backlog
+  15-15-restart-the-current-track-or-return-to-the-previous-track: backlog
+  15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels: backlog
+  15-17-ship-verified-playback-builds-for-windows-macos-and-linux: backlog
   epic-15-retrospective: optional
+
+  # Epic 16 — Radio/Recommendations (moved from old 15.15–15.28)
+  epic-16: backlog
+  16-1-configure-playback-selection-and-start-its-first-selected-track: backlog
+  16-2-replenish-radio-within-a-bounded-upcoming-queue: backlog
+  16-3-continue-radio-through-meaningful-artist-connections: backlog
+  16-4-avoid-duplicate-radio-recordings-across-configured-servers: backlog
+  16-5-match-radio-track-loudness-using-available-metadata: backlog
+  16-6-start-radio-with-play-something-without-opening-the-main-window: backlog
+  16-7-report-listening-accurately-to-the-source-server: backlog
+  16-8-save-supported-like-and-dislike-preferences-on-the-source-server: backlog
+  16-9-save-an-immutable-local-listening-snapshot: backlog
+  16-10-save-a-listening-snapshot-as-playlists-on-its-source-servers: backlog
+  16-11-add-a-listening-snapshot-to-a-connected-device-basket-or-replace-it: backlog
+  16-12-adapt-playback-quality-at-track-boundaries-using-buffer-health: backlog
+  16-13-protect-playback-during-sync-without-unnecessary-throttling: backlog
+  16-14-keep-long-listening-sessions-bounded-and-recoverable: backlog
+  epic-16-retrospective: optional

@@ -14,7 +14,7 @@ so that I can listen directly in HifiMule without opening another player.
 
 **Requirements:** Initial FR56/58 audible path, FR71 source quality, FR64/75 safety; P-NFR2–6, P-AR5–6, streaming portion of P-AR9, applicable P-AR10/12 and P-UX-DR11/13/14.
 
-**Dependencies:** Stories 15.1–15.3 are done. Preparation baseline: `b3d30a2e110817995de8decd84ae7333a1558ca0` (Review 15.3). This is a production single-track vertical slice: daemon source resolution, controlled native decode, shared default output, browser Play and basic transport. Output selection/media keys (15.5–6), seek controls (15.7), advancement/gapless/gain (15.8–10), preview, full Playback destination/floating bar, Radio, reporting and adaptive quality remain later stories.
+**Dependencies:** Stories 15.1–15.3 are done. Preparation baseline: `b3d30a2e110817995de8decd84ae7333a1558ca0` (Review 15.3). This is a production single-track vertical slice: daemon source resolution, controlled native decode, shared default output, browser Play and basic transport. Output selection/media keys (15.5–15.6), seek controls (15.7), advancement/gapless/gain (15.8–15.10), preview, full Playback destination/floating bar, Radio, reporting and adaptive quality remain later stories.
 
 ## Acceptance Criteria
 

@@ -1,89 +1,95 @@
-# Desktop Playback — Coverage and Readiness Review
+# Desktop Playback and Radio/Recommendations — Coverage and Readiness
 
-All 29 story proposals have user approval. Review scope is the playback amendment, not reapproval of completed Epics 1–14.
+Updated 2026-09-19 following Alexis's approval of the [course correction](sprint-change-proposal-2026-09-19.md). All 31 stories (15.1–15.17 and 16.1–16.14) have planning approval. Completed 15.1–15.14 retain their status; the other 17 stories are backlog. Existing Epics 1–14 are unchanged.
 
 ## Coverage
 
-Story numbers below are within Epic 15. Each mapping identifies concrete acceptance coverage; later release checks do not substitute for feature implementation.
+All story IDs below are fully qualified. Later release checks do not substitute for feature implementation. Epic 15 releases manual playback, Back and compact browsing; Epic 16 retains Radio and the remaining integrations/reliability work. Shared requirements are completed across both epics.
 
 | Requirement | Stories |
 |---|---|
-| FR55 | 12, 13, 15 |
-| FR56 | 1, 4, 6 |
-| FR57 | 6, 15–20 |
-| FR58 | 4–8, 14 |
-| FR59 | 12, 14, 20 |
-| FR60 | 2, 3, 4, 11, 16, 17 |
-| FR61 | 8–10 |
-| FR62 | 11, 14 |
-| FR63 | 11 |
-| FR64 | 4–6 |
-| FR65 | 15–20 |
-| FR66 | 17, 18 |
-| FR67 | 16, 17 |
-| FR68 | 13, 16 |
-| FR69 | 16, 18 |
-| FR70 | 15, 18 |
-| FR71 | 4, 26 |
-| FR72 | 26, 29 |
-| FR73 | 8, 9, 16 |
-| FR74 | 10, 19 |
-| FR75 | 4, 7, 9, 26–28 |
-| FR76 | 21 |
-| FR77 | 22 |
-| FR78 | 23 |
-| FR79 | 23, 24 |
-| FR80 | 25 |
-| FR81 | 21, 24, 25 |
+| FR8 | Existing browse stories; 15.16 compact navigation; verification owned by 15.17. |
+| FR55 | 15.12, 15.13, 16.1 |
+| FR56 | 15.1, 15.4, 15.6 |
+| FR57 | 15.6, 16.1, 16.2, 16.3, 16.4, 16.5, 16.6 |
+| FR58 | 15.4, 15.5, 15.6, 15.7, 15.8, 15.14, 15.15 |
+| FR59 | 15.12, 15.14, 16.6, 15.15 |
+| FR60 | 15.2, 15.3, 15.4, 15.11, 16.2, 16.3, 15.15 |
+| FR61 | 15.8, 15.9, 15.10 |
+| FR62 | 15.11, 15.14 |
+| FR63 | 15.11 |
+| FR64 | 15.4, 15.5, 15.6 |
+| FR65 | 16.1, 16.2, 16.3, 16.4, 16.5, 16.6 |
+| FR66 | 16.3, 16.4 |
+| FR67 | 16.2, 16.3 |
+| FR68 | 15.13, 16.2 |
+| FR69 | 16.2, 16.4 |
+| FR70 | 16.1, 16.4 |
+| FR71 | 15.4, 16.12 |
+| FR72 | 16.12, 16.14 |
+| FR73 | 15.8, 15.9, 16.2 |
+| FR74 | 15.10, 16.5 |
+| FR75 | 15.4, 15.7, 15.9, 16.12, 16.13, 16.14 |
+| FR76 | 16.7 |
+| FR77 | 16.8 |
+| FR78 | 16.9 |
+| FR79 | 16.9, 16.10 |
+| FR80 | 16.11 |
+| FR81 | 16.7, 16.10, 16.11 |
 
 | Quality / design requirement | Stories |
 |---|---|
-| P-NFR1 | 9, 10, 19, 27–29 |
-| P-NFR2 | 3, 4, 9, 13, 15–19, 21, 23, 24, 26, 28 |
-| P-NFR3 | Platform-specific acceptance in all applicable stories; installed matrix in 29 |
-| P-NFR4 | 1–29, through lifecycle, state, generation and operation-specific criteria |
-| P-NFR5 | 1, 3, 4, 15, 17, 18, 21–25 |
-| P-NFR6 | 4–8, 11–15, 20, 22–25, 29 |
-| P-AR1–2 | 1, 2, 6 |
-| P-AR3–4 | 3 and incremental state extensions in 11–18, 21–25 |
-| P-AR5–7 | 4, 9, 10, 19, 29 |
-| P-AR8 | 15–18 |
-| P-AR9 | 4, 7, 17, 18, 21, 22, 24, 26 |
-| P-AR10 | 3, 6–8, 11, 13, 14, 16, 20 |
-| P-AR11 | 23–25 |
-| P-AR12 | 4, 21, 26, 28 |
-| P-AR13 | Ordered groups: 1–3; 4–7; 8–11; 12–14; 15–20; 21–25; 26–29 |
-| P-AR14 | 5, 6, 9, 27–29 |
-| P-UX-DR1 | 12 |
-| P-UX-DR2 | 14, 20 |
-| P-UX-DR3 | 11, 14 |
-| P-UX-DR4 | 6, 20 |
-| P-UX-DR5 | 13, 16 |
-| P-UX-DR6 | 12, 15 |
-| P-UX-DR7 | 5, 7, 14, 16, 17, 20, 26 |
-| P-UX-DR8 | 22, 24 |
-| P-UX-DR9 | 25 |
-| P-UX-DR10–12 | 12–14, with browse preservation in 4, 8, 11 |
-| P-UX-DR13–14 | Applicable UI/source criteria throughout; integrated check in 29 |
-| P-UX-DR15 | 12, 23–25 |
+| P-NFR1 | 15.9, 15.10, 16.5, 16.13, 16.14, 15.17 |
+| P-NFR2 | 15.3, 15.4, 15.9, 15.13, 16.1, 16.2, 16.3, 16.4, 16.5, 16.7, 16.9, 16.10, 16.12, 16.14, 15.15, 15.17 |
+| P-NFR3 | All applicable stories; installed manual matrix 15.17; expanded installed matrix 16.14. |
+| P-NFR4 | 15.1–15.15, 15.17 and 16.1–16.14, through applicable lifecycle, state, generation and operation criteria. |
+| P-NFR5 | 15.1, 15.3, 15.4, 16.1, 16.3, 16.4, 16.7, 16.8, 16.9, 16.10, 16.11, 15.15 |
+| P-NFR6 | 15.4, 15.5, 15.6, 15.7, 15.8, 15.11, 15.12, 15.13, 15.14, 16.1, 16.6, 16.8, 16.9, 16.10, 16.11, 15.17, 15.15, 15.16, 16.14 |
+| P-AR1–2 | 15.1, 15.2, 15.6 |
+| P-AR3–4 | 15.3, 15.11, 15.12, 15.13, 15.14, 16.1, 16.2, 16.3, 16.4, 16.7, 16.8, 16.9, 16.10, 16.11, 15.15 |
+| P-AR5–7 | 15.4, 15.9, 15.10, 16.5, 15.17 |
+| P-AR8 | 16.1, 16.2, 16.3, 16.4 |
+| P-AR9 | 15.4, 15.7, 16.3, 16.4, 16.7, 16.8, 16.10, 16.12 |
+| P-AR10 | 15.3, 15.6, 15.7, 15.8, 15.11, 15.13, 15.14, 16.2, 16.6, 15.15 |
+| P-AR11 | 16.9, 16.10, 16.11 |
+| P-AR12 | 15.4, 16.7, 16.12, 16.14 |
+| P-AR13 | 15.1–15.14 → 15.15 and 15.16 → 15.17 → 16.1–16.6 → 16.7–16.11 → 16.12–16.14. |
+| P-AR14 | 15.5, 15.6, 15.9, 16.13, 16.14, 15.17 |
+| P-UX-DR1 | 15.12 |
+| P-UX-DR2 | 15.14, 16.6, 15.15 |
+| P-UX-DR3 | 15.11, 15.14 |
+| P-UX-DR4 | 15.6, 16.6 |
+| P-UX-DR5 | 15.13, 16.2 |
+| P-UX-DR6 | 15.12, 16.1 |
+| P-UX-DR7 | 15.5, 15.7, 15.14, 16.2, 16.3, 16.6, 16.12 |
+| P-UX-DR8 | 16.8, 16.10 |
+| P-UX-DR9 | 16.11 |
+| P-UX-DR10–12 | 15.12, 15.13, 15.14, 15.4, 15.8, 15.11, 15.16 |
+| P-UX-DR13–14 | All applicable UI/source stories, including 15.15 and 15.16; integrated checks in 15.17 and 16.14. |
+| P-UX-DR15 | 15.12, 16.9, 16.10, 16.11 |
+
+Story 15.17 additionally verifies the implemented manual portions of FR55–64, FR68, FR71 and FR73–75, plus FR8 compact navigation. It does not complete automatic selection, Radio, remote reporting/feedback/exports, adaptive quality or conditional backoff. Story 16.14 owns installed integration of those later additions using the established packaging process.
 
 ## Structural and dependency checks
 
-- Exactly 29 unique sequential story headings, 15.1–15.29; each contains the required user-story and Given/When/Then format.
-- Explicit dependencies point only backward. Later native seek/Next, Radio entry points and export features are omitted until usable; intermediate stories do not claim their completion.
-- Foundation state is introduced incrementally. No starter generation or upfront schema for all playback features is requested; this is a brownfield extension.
-- One user-approved epic avoids artificial component-level epic boundaries. Existing Epics 1–14 are retained.
-- Story 15.3 has a command-driven production state contract before audio exists; its tests do not depend on a future decoder. Stories 15.15–16 explicitly limit interim behavior until artist progression and entry-point integration arrive.
-- Mid-track quality replacement is conditionally excluded from initial delivery. Stories 26 and 29 require it to remain disabled without separate validation; this is consistent with FR72.
+- Exactly 31 unique headings: 15.1–15.17 and 16.1–16.14, with story intent and acceptance criteria.
+- Stories 15.1–15.14 retain their content and completed identities. New Back is 15.15, compact browse navigation is 15.16, and old packaging 15.29 is 15.17.
+- Old 15.15–15.28 map in order to 16.1–16.14. The proposal preserves the historical mapping.
+- No Epic 15 story depends on Epic 16. Packaging depends on 15.1–15.16. Compact navigation uses existing browsing and 15.14 integration; it has no technical Back dependency.
+- Epic 16 uses the delivered Epic 15 foundation and preceding Epic 16 stories; source/occurrence, provider and safety contracts are retained.
+- Basic controls remain usable without Radio. 16.1–16.2 limit interim behavior until artist progression and final entry points arrive.
+- Mid-track quality replacement remains disabled absent separate validation; 16.12 owns boundary adaptation. The manual release makes no adaptive-quality claim.
 
-## Readiness limits requiring attention before implementation
+## Readiness limits
 
-Coverage is complete at planning level. Unrestricted development readiness is NOT established.
+Planning coverage is complete; unrestricted implementation or release readiness is not established.
 
-1. Stories 15.4, 15.21 and 15.24 explicitly allow provider-specific splitting. Their single-session size cannot be certified until provider capability inspection; the implementing story author must split oversized integrations before execution, preserving these requirements and approval provenance.
-2. Story 15.29 spans a shipping matrix whose exact architectures are not enumerated here. Resolve against release configuration and split execution work by platform if needed. It remains a release gate, not evidence that validation has happened.
-3. Each implementation gate must be closed before coding the affected behavior: ownership/access/shutdown contracts; versioned schemas; runtime packaging; metadata conventions; provider eligibility/reconciliation; measured buffer and performance thresholds. Owner: implementing story author and reviewer, before that story executes.
-4. Basket representation/source constraints in Story 15.25 require inspection. If the existing basket cannot represent an approved mixed-source selection, flag the product gap and resolve it explicitly; do not silently narrow FR80 through unsupported-content handling.
-5. Explicit main-session Return restores previous intent as approved in Story 15.11. Preview-only snapshot treatment and preview restart policy remain contract decisions; they must preserve the main session and paused restoration.
+1. Story 15.15 must define replay occurrence identity, retained-history/forward-cursor behavior, persistence, stopped/completed behavior and native command contracts before coding. Its approved threshold is 3,000 ms, and Preview Back restarts only the audition.
+2. Story 15.16 must settle icon mapping, readable label sizing, usable target sizes, spacing and responsive overflow/wrapping using the existing browse navigation. Record real visual comparisons and keyboard/localization checks.
+3. Story 15.17 must enumerate actual shipping architectures, controlled runtime versions, clean-install/upgrade environments and measured manual-playback workloads. Reconcile outstanding applicable evidence and deferred defects from completed stories without manufacturing passes. It is a release gate, not proof that checks have run.
+4. Stories 15.4, 16.7 and 16.10 permit provider-specific execution splitting where needed. Verify capabilities, reporting eligibility and retry/reconciliation contracts before enabling remote behavior.
+5. Each owning story must close its applicable schemas, resource budgets, runtime, metadata and provider contracts. Story 16.14 retains the expanded installed matrix and sustained-workload gate; older packages cannot certify new features.
+6. Story 16.11 must inspect basket/source constraints and explicitly resolve any gap in representing approved mixed-source snapshots; do not silently narrow FR80.
+7. Explicit Return retains Story 15.11's prior intent. Snapshot/preview recovery decisions in later stories must preserve the main session and paused restoration.
 
-No production tests or playback implementation were performed by this documentation review. Mechanical document checks passed; runtime claims still depend on implementation evidence.
+Mechanical document checks validate identifiers, ordering and ownership. No production tests, implementation, package validation or release publication is claimed by this planning amendment.

@@ -3,14 +3,14 @@ stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step
 inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'product-brief-bmad-2026-01-26.md', 'project-context.md']
 status: 'complete'
 completedAt: '2026-01-27'
-lastAmended: '2026-06-09'
-amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view', 'multi-server-management', 'server-identity-name-and-icon']
+lastAmended: '2026-09-19'
+amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view', 'multi-server-management', 'server-identity-name-and-icon', 'desktop-playback-release-radio-split']
 
 playbackExtension:
   stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories']
   status: 'stories-approved-coverage-reviewed-implementation-gates-open'
-  approvedStories: ['15.1', '15.2', '15.3', '15.4', '15.5', '15.6', '15.7', '15.8', '15.9', '15.10', '15.11', '15.12', '15.13', '15.14', '15.15', '15.16', '15.17', '15.18', '15.19', '15.20', '15.21', '15.22', '15.23', '15.24', '15.25', '15.26', '15.27', '15.28', '15.29']
-  updated: '2026-09-11'
+  approvedStories: ['15.1', '15.2', '15.3', '15.4', '15.5', '15.6', '15.7', '15.8', '15.9', '15.10', '15.11', '15.12', '15.13', '15.14', '15.15', '15.16', '15.17', '16.1', '16.2', '16.3', '16.4', '16.5', '16.6', '16.7', '16.8', '16.9', '16.10', '16.11', '16.12', '16.13', '16.14']
+  updated: '2026-09-19'
   inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'playback-prd-source-extract.md']
 ---
 
@@ -3120,14 +3120,14 @@ Existing epic, tracked in [its approved sprint change proposal](sprint-change-pr
 
 ## Playback Extension — Requirements Inventory
 
-Status: requirements and one consolidated playback epic approved; stories are pending. The completed baseline above remains intact. PRD FR20 and FR33 are amended by the playback lifecycle and always-available destination rules. Existing security, accessibility, device-integrity and sync requirements remain inherited constraints.
+Status: requirements and the Epic 15/16 split approved on 2026-09-19; completed foundation retained, new and moved work remains backlog. The completed baseline above remains intact. PRD FR20 and FR33 are amended by the playback lifecycle and always-available destination rules. Existing security, accessibility, device-integrity and sync requirements remain inherited constraints.
 
 ### Functional Requirements
 
 - **FR55:** Playback is an always-present destination listed first, with independent source/selection settings and a manually editable queue. Select it when no physical device is connected; do not expose storage, folder or file-sync actions for Playback.
 - **FR56:** Music and native media controls remain operational after the main UI closes. Reopening the UI shows the same session and current state without restarting playback.
 - **FR57:** Play something starts a fresh Radio using the first eligible result from the shared sync/playback selection engine under Playback settings. Resume continues the existing queue and position. Both actions are available from the desktop app menu without opening the main window when configured sources are available.
-- **FR58:** Users can control play/pause, stop, next, playback position where supported, and output selection. UI and native controls act on one session. Capability limits and recoverable errors are visible rather than silently ignored.
+- **FR58:** Users can control play/pause, stop, Back (restart the current track or return to the previous track), next, playback position where supported, and output selection. Back restarts after three seconds of main-track playback and selects the previous occurrence at or before three seconds; without a previous occurrence it restarts the current track. During Preview it restarts the audition without altering the preserved main session. UI and supported native Previous/keyboard controls use the same session command, preserving paused intent and output safety. Capability limits and recoverable errors are visible rather than silently ignored.
 - **FR59:** A translucent floating playback bar below the media browser remains visible while idle, browsing or working with a device basket, and offers Play something when idle. The bar does not obscure the final list items. Selecting a different server/device does not stop music or change its source; arriving physical devices become selected and unconfigured devices retain a visible setup action. Show detected-device open failures with actionable feedback.
 - **FR60:** Full application quit preserves queue, position and logical-session exclusions. Relaunch restores paused. Quit during sync stops audio and requests orderly sync cancellation without marking incomplete device writes successful.
 - **FR61:** Album playback follows disc/track order and preserves the intended continuity, including silence recorded in the source. Track boundaries introduce no additional gap when both tracks are prepared and their tested formats are supported. No automatic crossfade or silence removal is implied.
@@ -3175,13 +3175,13 @@ Status: requirements and one consolidated playback epic approved; stories are pe
 - P-AR10: Serialize session commands; queue revisions must not advance merely for progress. Publish authoritative snapshots/events and permit UI position interpolation without a second player state owner.
 - P-AR11: Implement immutable per-server export operations with partial results, durable recovery and ambiguity reconciliation before retrying non-idempotent writes. Resolve physical-target changes before basket mutation.
 - P-AR12: Before affected acceptance, measure resource/streaming thresholds, reporting eligibility and source quality ranking. Initial adaptation switches at boundaries; enable mid-track resume only for validated provider/format pairs.
-- P-AR13: Deliver in dependency order: lifecycle/restoration; player/native outputs; albums/previews; Playback UI/settings; Radio; reporting/exports; adaptation and sustained validation. Cross-platform checks and failure handling accompany every stage.
+- P-AR13: Deliver Epic 15 lifecycle/player/albums/manual UI, Back and compact browse navigation, then packaged manual verification (15.17); follow with Epic 16 Radio, reporting/exports, adaptation and sustained installed validation (16.14). Cross-platform checks and failure handling accompany every stage.
 - P-AR14: Validate real sync coexistence with conditional backoff, sustained memory, sleep/wake, output loss, installed lifecycle and native controls. Distinguish API command delivery from physical key routing and callback counters from audible gaplessness.
 
 ### UX Design Requirements
 
 - P-UX-DR1: List Playback first and retain it with no physical device. Device arrival selects its basket and exposes setup for blank devices, while preserving the listening session; display open/detection failures.
-- P-UX-DR2: Add a translucent floating playback bar under the media browser across views, including idle Play something. Reserve reachable space for final rows; do not intercept their controls or steal focus.
+- P-UX-DR2: Add a translucent floating playback bar under the media browser across views, including idle Play something. Include Back with restart/previous behavior and supported native Previous/keyboard delivery. Reserve reachable space for final rows; do not intercept their controls or steal focus.
 - P-UX-DR3: Provide separately named Play and Preview actions; settle preview button/context-menu placement near existing curation affordances. Show audition state and an explicit return to the preserved session.
 - P-UX-DR4: Expose Play something and Resume in the desktop menu without requiring the main window; distinguish fresh Radio from resumed state and provide actionable missing-setup feedback.
 - P-UX-DR5: Provide an editable Playback queue with occurrence-based reorder/removal, bounded upcoming entries and paged history; append Radio suggestions without resetting user order or selection.
@@ -3192,86 +3192,57 @@ Status: requirements and one consolidated playback epic approved; stories are pe
 - P-UX-DR10: Reuse Shoelace tokens, purple #52348B, amber #EBB334, midnight #1A1A2E, Outfit headings, Inter data and glass overlays; integrate with the established library/basket layout.
 - P-UX-DR11: Preserve virtualized grid/list browsing, no-refetch view toggles, identity-based multi-selection, Ctrl/Cmd/Shift ranges, Escape clearing and accessible sticky selection counts when adding playback actions.
 - P-UX-DR12: Adapt controls and queue to existing narrow (<600px), medium (600–1000px) and wide (>1000px) layouts; retain control labels/targets and avoid overlap with the basket.
-- P-UX-DR13: Provide keyboard operation, visible focus, accessible names and ARIA-live status updates consistent with WCAG 2.1 AA; verify with accessibility tooling and OS-theme visual checks.
+- P-UX-DR13: Provide keyboard operation, including Back and compact icon-and-small-label browse navigation, visible focus, accessible names and ARIA-live status updates consistent with WCAG 2.1 AA; verify with accessibility tooling and OS-theme visual checks.
 - P-UX-DR14: Preserve capability-driven navigation, server names/icons and source badges. Browsing a different server must not reroute playback or its reporting/feedback.
 - P-UX-DR15: Keep existing live server-playlist editing semantics distinct from local Radio and explicit snapshot export. Existing no-device placeholders and device-only hub visibility are superseded only where Playback requires availability.
 
 ### FR Coverage Map
 
-Epic 15 owns all FR55–81, P-NFR1–6, P-AR1–14 and P-UX-DR1–15. The table assigns delivery work within that single epic; story groups are sequencing aids, not separate epics. Individual story mappings will be added during story creation.
+Epics 15 and 16 jointly retain FR55–81, P-NFR1–6, P-AR1–14 and P-UX-DR1–15. Story 15.16 additionally refines FR8 navigation. See [playback-epic-validation.md](playback-epic-validation.md) for fully qualified story mappings. A first release does not imply completion of the entire extension.
 
-| Requirements | Completion owner | Earlier foundation / qualification |
-|---|---|---|
-| FR55, FR59 | Radio group | Album/UI groups supplies the manual Playback destination, independent configuration, floating bar and device feedback; Radio group adds automatic-selection settings and idle Play something. |
-| FR56, FR58, FR64 | Lifecycle/player groups | Complete basic transport, native controls and output safety. |
-| FR60 | Radio group | Lifecycle/player groups supplies safe quit and paused queue/position restoration; Radio group completes logical Radio exclusion restoration. |
-| FR57, FR65–70 | Radio group | Lifecycle/player groups supplies Resume; Album/UI groups supplies manual queue editing. |
-| FR61–63 | Album/UI groups | Complete album continuity and audition return behavior. |
-| FR71–72, FR75 | Reliability group | Lifecycle/player groups provides best available initial source selection, bounded buffering, generation fencing and ordinary sync coexistence; Reliability group completes measured adaptation/backoff. |
-| FR73–74 | Radio group | Album/UI groups supplies album pause/retry and album gain; Radio group completes Radio failure bypass and track gain. |
-| FR76–81 | Curation group | Provider-specific eligibility, feedback and export recovery completed here. |
+| Requirements | Delivery ownership |
+|---|---|
+| FR8 | Existing browsing; 15.16 compact navigation, verified in 15.17. |
+| FR55, FR59 | 15.12–15.14 manual destination/queue/bar; 16.1 selection settings and 16.6 idle Play something. |
+| FR56, FR58, FR64 | Epic 15 lifecycle, native transport, Back (15.15) and output safety. |
+| FR60 | Epic 15 safe Quit and paused restoration; 16.2–16.3 Radio identity/exclusions. |
+| FR57, FR65–70 | Epic 16 Radio; Epic 15 supplies Resume, manual queue and source identity. |
+| FR61–63 | Epic 15 albums and auditions. |
+| FR71–72, FR75 | Epic 15 initial selection, audio bounds, stale-work fencing and ordinary coexistence; 16.12–16.14 adaptation/backoff and sustained validation. |
+| FR73–74 | Epic 15 album retry/gain; 16.2 Radio failure handling and 16.5 track gain. |
+| FR76–81 | 16.7–16.11 reporting, preferences and immutable exports. |
 
 ### Quality, Architecture and UX Coverage
 
-| Requirement | Delivery and acceptance responsibility |
-|---|---|
-| P-NFR1 | Album/UI groups deterministic and physical album continuity; Reliability group sustained real-sync regression. |
-| P-NFR2 | Lifecycle/player groups audio bounds; Album/UI groups paged queue/history; Radio group candidate/lookahead bounds; Reliability group measured sustained budgets. |
-| P-NFR3 | Every story validates its behavior on Windows, macOS and Linux; Lifecycle/player groups establishes installed lifecycle/native checks; Reliability group completes shipping architecture matrix and sustained evidence. |
-| P-NFR4 | Lifecycle/player groups state and generation integrity; Album/UI groups audition/queue recovery; Radio group Radio restoration; Curation group remote-operation recovery. |
-| P-NFR5 | Lifecycle/player groups authenticated source privacy; Radio group configured-server metadata; Curation group credential-safe writes. |
-| P-NFR6 | Every UI-bearing story; Album/UI groups establishes full floating controls and queue accessibility, Reliability group runs integrated regression. |
-| P-AR1–4, P-AR10 | Lifecycle/player groups establishes lifecycle, schemas, identity, persistence and serialization; the album/UI, Radio and curation groups extend schemas/migrations only as their behavior is introduced. |
-| P-AR5–6 | Lifecycle/player groups controlled runtime and bounded audio path; Album/UI groups next-track preparation; Reliability group installed distribution and stress evidence. |
-| P-AR7 | Album/UI groups conversion, padding and album gain; Radio group Radio gain. |
-| P-AR8 | Radio group shared selection and recording deduplication; source/occurrence identity starts in Lifecycle/player groups. |
-| P-AR9 | Lifecycle/player groups streaming/seek; Radio group relationships; Curation group reporting/feedback/export; Reliability group quality alternatives. |
-| P-AR11 | Curation group durable immutable exports and physical-target validation. |
-| P-AR12 | Lifecycle/player groups initial source ranking/bounds; Curation group reporting eligibility; Reliability group adaptation thresholds and resume validation. |
-| P-AR13 | The seven internal story groups preserve the approved implementation order. |
-| P-AR14 | Lifecycle/player groups lifecycle/output baseline; Reliability group sustained coexistence and integrated release evidence. |
-| P-UX-DR1, P-UX-DR3, P-UX-DR10–12 | Album/UI groups destination, preview, existing design system, browse preservation and responsive layout. |
-| P-UX-DR2, P-UX-DR5–6 | Album/UI groups manual bar/queue/settings; Radio group completes idle Play something and Radio settings/replenishment. |
-| P-UX-DR4 | Lifecycle/player groups Resume; Radio group Play something and missing-setup feedback. |
-| P-UX-DR7 | Lifecycle/player groups output/errors; Radio group Radio reasons/exhaustion; Reliability group quality/buffering feedback. |
-| P-UX-DR8–9 | Curation group capability-aware feedback and playlist/basket exports. |
-| P-UX-DR13–14 | All UI-bearing stories preserve accessibility and source identity. |
-| P-UX-DR15 | Album/UI groups nodevice navigation precedence; Curation group explicit snapshot versus live playlist semantics. |
+Every relevant story retains platform, state-integrity, privacy and accessibility checks. Epic 15 establishes daemon ownership, schemas, occurrence/source identities, native runtime, album continuity, manual queue and bar usability. Story 15.15 extends transport; 15.16 refines compact browsing. Story 15.17 verifies the installed manual release, including measured resources and ordinary real-sync coexistence.
+
+Epic 16 extends the same contracts with bounded selection/Radio, recording identity, provider reporting/preferences, immutable exports, quality adaptation and conditional backoff. Story 16.14 owns sustained and installed validation of those additions. P-AR8/P-AR11 and the Radio/export portions of UX requirements remain Epic 16 work. See the detailed coverage table for every P-NFR, P-AR and P-UX owner.
 
 ### Epic List
 
 #### Epic 15: Desktop Playback
 
-Users can listen to their curated libraries directly in HifiMule on Windows, macOS and Linux: play albums with their intended continuity, preview music while curating, start ongoing Radio, and save discoveries to server playlists or a connected device basket. Playback belongs to the local Rust daemon, remains usable with the UI closed, and adapts to available connection quality.
+Deliver daemon-owned manual desktop listening on Windows, macOS and Linux: paused restoration, selected-track/album playback, output safety, continuity/gain, auditions, editable queue, persistent bar with Back, compact browse navigation, and verified installed packages.
 
-**FRs covered:** FR55–81, with the approved playback amendments to FR20 and FR33.
+**Dependencies:** Existing sync/provider product. No dependency on Epic 16.
 
-**Quality and design coverage:** P-NFR1–6, P-AR1–14 and P-UX-DR1–15. Existing sync integrity, security and accessibility constraints continue to apply.
+**Sequence:** completed foundation 15.1–15.14; Back 15.15; compact browse navigation 15.16; manual release packaging 15.17. Story 15.16 has no technical dependency on Back but is scheduled before packaging.
 
-**Dependencies:** The existing sync/provider product. There is no dependency on a later epic.
+#### Epic 16: Radio/Recommendations
 
-**Internal story groups, in implementation order:**
+Deliver automatic selection, bounded Radio, explainable artist transitions, recording deduplication and track loudness, followed by source-server reporting/preferences, immutable snapshots/exports, adaptive quality, conditional sync protection and sustained installed verification.
 
-1. **Daemon lifecycle and session restoration:** Single-instance user-session ownership, safe shutdown, authenticated control, versioned state and paused restoration.
-2. **Streaming, audio output and native controls:** Controlled native runtime, bounded audio path, user-facing basic Play/transport/Resume, shared output and disconnect safety.
-3. **Album continuity and previews:** Ordered albums, prepared gapless boundaries, conversion/padding, album gain and preserved main-session audition/return.
-4. **Playback destination, settings and queue:** Always-available virtual destination, independent local settings, manual queue, floating controls and device-arrival feedback.
-5. **Radio using the shared selection engine:** Play something, bounded replenishment, meaningful artist transitions, cross-server recording identity, logical-session exclusions and Radio gain/failure handling.
-6. **Server feedback and playlist/basket exports:** Capability-aware reporting and genuine preferences, immutable snapshots, per-server saves, Add/Replace basket and recoverable operations.
-7. **Adaptive quality and sustained reliability:** Measured thresholds, conservative quality adaptation, conditional sync backoff and prolonged installed-build validation.
+**Dependencies:** Delivered Epic 15 foundation and existing auto-fill engine. Sequence: Radio 16.1–16.6; reporting/preferences/exports 16.7–16.11; adaptation/protection/validation 16.12–16.14.
 
-Each group will contain small, testable stories rather than one large story. Stories may depend only on completed earlier stories. Introduce schemas and migrations only as required by the behavior being delivered. Supply a usable basic playback path before the full destination and Radio; do not expose dead controls awaiting later stories.
-
-**Implementation gates:** Close lifecycle/command contracts before affected implementation, pin and validate the controlled runtime before dependent audio integration, and establish measurable resource and provider-specific eligibility criteria before accepting that behavior. Windows, macOS and Linux validation, accessible interaction and failure handling accompany each relevant story; final sustained checks do not replace those earlier checks.
+**Implementation gates:** Close each story's applicable schemas, provider semantics, resource budgets and runtime/platform contracts before implementation or acceptance. Later verification never substitutes for earlier checks. No dead controls are exposed for unimplemented features.
 
 ### Grouping Rationale and Approval State
 
-The user approved one Desktop Playback epic with more stories. Playback was renumbered from the provisional 14 to 15 after checking sprint-status.yaml, where Epic 14 already belongs to Sync Throughput Pipeline. The seven groups describe the delivery sequence within that capability; they are not independent epic boundaries. The earlier five-epic playback proposal was consolidated before implementation. Existing Epics 1–14 remain unchanged; Sync Throughput Pipeline is tracked in its sprint change proposal and sprint-status.yaml. Requirement coverage is preserved above; individual stories and acceptance criteria are the next planning step.
-
+Alexis approved the 2026-09-19 course correction after Story 15.14: release manual playback with Back and compact browse navigation, retaining the remaining roadmap in Radio/Recommendations. Existing Epics 1–14 and completed Stories 15.1–15.14 remain intact. The [approved proposal](sprint-change-proposal-2026-09-19.md) records the old-to-new ID map and supersedes the earlier one-epic/29-story grouping. There are now 31 stories across these two epics; approval is planning approval, not runtime certification.
 
 ## Epic 15: Desktop Playback
 
-Deliver daemon-owned listening, faithful albums, previews, Radio and explicit curation across Windows, macOS and Linux. Stories are approved incrementally; remaining requirements retain the coverage assignments above.
+Deliver the manual Desktop Playback release described above. Close through Story 15.17 without requiring Epic 16 features.
 
 ### Story 15.1: Close and reopen the UI without restarting the daemon
 
@@ -4103,7 +4074,124 @@ So that I can manage listening without navigating away from what I am doing.
 **Implementation gate:** Before coding, define responsive bar layout, reserved scroll/focus space, status announcement policy and supported-control overflow behavior using existing UI components. Preserve the approved placement under the browser and the authoritative shared playback state. Keep Radio, quality adaptation and exports in their own stories while retaining explicit completion coverage for their future controls.
 
 
-### Story 15.15: Configure Playback selection and start its first selected track
+### Story 15.15: Restart the current track or return to the previous track
+
+As a HifiMule user,
+I want a Back button in the playing bar and equivalent supported keyboard/media control,
+So that I can restart a track or return to the previous track without rebuilding my queue.
+
+**Requirements:** amended FR58; FR59 transport presentation; FR60 persistence and FR61 ordering constraints; P-NFR3–6; P-AR3–4, P-AR6 and P-AR10; P-UX-DR2 and P-UX-DR12–14.
+
+**Dependencies:** Stories 15.1–15.14. No Radio prerequisite.
+
+**Acceptance criteria:**
+
+1. **Restart after three seconds.** Given a main track with authoritative position greater than 3,000 ms, when Back is accepted, then the current track returns to its beginning. The decision uses daemon position rather than interpolated UI time. Playing remains playing and paused remains paused, subject to existing output/error inhibition.
+2. **Previous near the beginning.** Given a main track at 0–3,000 ms inclusive and an available preceding occurrence in the retained main-session playback order, when Back is accepted, then that preceding track becomes current at its beginning. Preserve its source identity, accepted forward order and deliberate repeated entries. Back followed by forward progression returns through the same sequence without silently dropping or duplicating queued selections.
+3. **Beginning and unavailable-source boundaries.** Given no preceding occurrence, Back restarts the current track where supported, without wrapping to the queue end. With no current track, it is unavailable. If the requested restart/previous source cannot be prepared, preserve recoverable state and expose an error; do not silently choose a different track or output.
+4. **Preview isolation.** Given an active audition, Back restarts that audition and never navigates the preserved main history. The saved main occurrence, queue, position and return intent remain intact. Existing Return and Stop semantics are unchanged.
+5. **Shared UI/native command.** Given an available Back action, clicking its bar button, activating the focused button with Enter/Space, or receiving the OS Previous/media-key command invokes the same daemon operation. Support native Previous/keyboard delivery wherever the platform integration provides it, including with the UI closed. Advertise truthful native availability; document unsupported delivery. Do not introduce an arbitrary global key combination or hijack text-editing, seek-slider or browser-navigation keys.
+6. **Accessible bar integration.** Given any library/Playing/device view and supported layout, Back remains reachable beside transport controls with a localized accessible name, tooltip/help explaining restart versus previous behavior, visible focus and truthful disabled state. Preserve the current two-row layout, timeline, bottom-row reachability and focus during updates.
+7. **Ordering and history integrity.** Given repeated commands or a race with automatic advance, queue edits, seek, preview, source replacement or Quit, the daemon serializes decisions, deduplicates retried command identities and fences obsolete preparation. Stale UI commands cannot rewind a newly selected session. Replaying earlier music must not overwrite already-recorded outcomes; specify replay occurrence identity and forward-cursor behavior before coding.
+8. **Persistence and regression evidence.** Given a successful Back followed by orderly Quit/relaunch, restore the accepted current track, queue and position paused. Verify the 0, 3,000 and 3,001 ms boundaries; first-track fallback; repeated source IDs; manual and album queues; paused state; Preview with/without a main session; unavailable sources; output loss; concurrent commands; and restoration. Record UI/native API and physical keyboard/media-key results separately on shipping platforms.
+
+**Implementation gate:** Inspect the existing history, queue cursor and persistence model; freeze replay identity, forward progression, stopped/completed-state behavior, command preconditions/error codes and per-platform native capability mapping. Restart may reuse seek or reopen from zero when safely supported; unsupported behavior must be explicit. Use existing command admission, generation fences and provider routing. Back is not a skip/dislike or an automatic-selection request. Future 16.7 reporting must account for replay without inferring completed listens merely from cursor movement.
+
+The three-second boundary and audition restart rule were approved in the 2026-09-19 course correction; this backlog story does not claim existing implementation.
+
+### Story 15.16: Compact the library browse-mode bar with icons and smaller labels
+
+As a HifiMule user,
+I want a compact library navigation bar with recognizable icons and smaller text,
+So that I can switch between Tracks, Albums, Recently Added and other browse modes while leaving more room for music.
+
+**Requirements:** FR8; P-NFR6; applicable P-UX-DR10–14; existing provider-capability and browse-state contracts.
+
+**Dependencies:** Existing browse-mode navigation and Story 15.14 library/Playing integration. No dependency on Back or Radio. Packaging 15.17 verifies the completed redesign.
+
+**Scope:** The library browse-mode selector (Tracks, Albums, Recently Added, Artists, Playlists, Genres, Frequently Played, Recently Played and Favorites where supported). This is the navigation bar identified by the user, not the playing transport bar or per-track basket action buttons.
+
+**Acceptance criteria:**
+
+1. **Compact icon-and-label controls.** Given the available library browse modes, when the bar renders, each mode has a consistent recognizable icon and a smaller visible localized text label. Reduce visual bulk and spacing relative to the current bar while keeping labels readable and pointer targets usable. Record before/after measurements at matching viewport, language and available-mode count; merely shrinking text without improving the layout is insufficient.
+2. **Preserved navigation.** Given any supported mode, activating its redesigned control opens the same view and uses existing loading, breadcrumb, selection-reset and cached-view behavior. Retain capability filtering, loading/disabled state and clear current-mode indication. Do not introduce duplicate fetches or change playback, selected source or basket contents as a presentation side effect.
+3. **Responsive layout.** Given narrow, medium and wide library columns, divider changes, long translated labels or 200% text scaling, every available mode remains reachable without clipped controls, overlap or horizontal page overflow. Choose and document wrapping or accessible overflow during story preparation; keep the selected mode identifiable and any overflow keyboard-operable. Preserve the grid/list toggle and its existing mode-specific availability.
+4. **Keyboard and accessible naming.** Given keyboard or assistive-technology navigation, each control has its full localized accessible name, visible focus and programmatically exposed selection state. Icons do not cause duplicate announcements. Enter/Space retain button activation, and metadata/loading updates do not unexpectedly move focus. Any abbreviated visible label has a full hover/focus hint; tooltips are not the sole accessible name.
+5. **Consistent visual treatment.** Given supported themes and enabled/selected/disabled states, the bar uses existing Shoelace tokens and icon conventions with sufficient text/icon contrast. Compact styling does not shrink unrelated application buttons or alter track/album content typography.
+6. **Visual and behavior verification.** Given representative supported-provider mode sets and EN/FR/ES/DE labels, verify the actual rendered layout, mode switching, active state, grid/list toggle, keyboard focus and constrained-width/text-scale behavior. Record checks on supported installed platforms or retain explicit unverified entries for packaging 15.17; DOM-only assertions do not certify rendered compactness.
+
+**Implementation gate:** Confirm the current bar boundaries, icon mapping, label sizing, spacing, target sizes and responsive policy against the existing library layout before coding. Use a focused visual comparison to settle these details; preserve existing navigation semantics rather than creating a new mode model.
+
+### Story 15.17: Ship verified playback builds for Windows, macOS and Linux
+
+As a HifiMule user,
+I want the installed application to provide the tested playback behavior on my supported platform,
+So that listening works without a development environment or manually installed decoder libraries.
+
+**Requirements:** P-NFR3 and integrated P-NFR1–6 regression; P-AR5 and P-AR14; release evidence for implemented portions of FR55–64, FR68, FR71, FR73–75, new Back behavior and FR8 compact browse navigation; applicable P-UX-DR1–15. Deferred Epic 16 features are not claimed complete.
+
+**Dependencies:** Stories 15.1–15.16. Epic 16 is not a prerequisite. Completes packaged-build integration and release verification; earlier stories remain responsible for their own cross-platform checks. Does not itself publish a release or certify untested architectures.
+
+**Acceptance Criteria:**
+
+**Given** the project's explicitly enumerated shipping OS/architecture matrix,
+**When** release artifacts are built,
+**Then** each artifact contains or resolves the controlled playback runtime through the documented distribution mechanism,
+**And** exact decoder/audio dependency versions, licensing obligations and runtime loading paths are recorded. A development-machine library must not silently substitute for the shipped runtime.
+
+**Given** an installed artifact on a clean supported environment,
+**When** the user starts HifiMule and plays supported source formats,
+**Then** streaming, decoding and shared output work without development tools or manually locating native libraries,
+**And** packaging/signing/permission behavior follows the existing platform distribution model without requiring elevated privileges for ordinary playback.
+
+**Given** an existing installation with device and server configuration,
+**When** it is upgraded to the playback build,
+**Then** supported configuration/session migrations preserve existing sync settings and credentials,
+**And** an interrupted or failed migration produces recoverable state instead of erasing device configuration. Unsupported downgrade behavior is documented without claiming automatic rollback safety.
+
+**Given** each installed platform build,
+**When** UI close/reopen, simultaneous launches, native transport, output loss, sleep/wake, paused restoration and safe Quit during sync are exercised,
+**Then** results verify the production daemon lifetime and selected-output behavior,
+**And** native API delivery and physical media-key routing have separate evidence entries.
+
+**Given** configured supported providers and representative library metadata,
+**When** selected-track/album playback, manual queue edits, Preview/Return, bar transport including Back/Next/seek, compact browse navigation, output selection and existing device-sync workflows run,
+**Then** their results match the approved capability-dependent behavior and source routing,
+**And** unsupported provider features remain accurately unavailable rather than appearing successful. Manual idle browsing/Resume remain useful; unimplemented Radio actions are not advertised.
+
+**Given** prepared albums and representative playback-plus-sync workloads,
+**When** release evidence is assembled,
+**Then** deterministic continuity, physical-output checks, bounded-resource, recovery and ordinary real-sync-coexistence measurements for shipped manual playback from compatible builds are linked with versions and environments,
+**And** changed packaged dependencies trigger the affected checks rather than inheriting incompatible probe evidence.
+
+**Given** the UI is used across supported themes, widths, text scaling and keyboard navigation,
+**When** the shipped manual Playback experience is reviewed,
+**Then** the floating bar including Back, compact browse-mode bar, queue, preview and error states retain accessible names, visible focus, sufficient contrast and reachable bottom-row actions,
+**And** background updates do not steal focus or overwhelm assistive technology with time ticks.
+
+**Given** a platform, architecture or hardware interaction has not been tested or has a failing check,
+**When** the release decision is recorded,
+**Then** that entry remains an explicit blocker or accurately scoped unsupported capability,
+**And** ARM64 VM results do not certify x64, API calls do not certify physical keys, and callback counters do not certify physical gaplessness. Existing Linux teardown warnings must be resolved or assessed with reproducible evidence before acceptance.
+
+**Given** the verification matrix is complete,
+**When** the story is reviewed for acceptance,
+**Then** each shipping entry links its artifact, loaded runtime versions, test outcomes and material limitations,
+**And** no failed required check is hidden by a global pass. Actual release publication remains outside this story's validation action.
+
+**Given** completed Stories 15.1–15.14 retain outstanding checks or deferred defects,
+**When** the release evidence is reconciled,
+**Then** inventory applicable full-application/installed checks and recorded issues, including Story 15.12 R16 and Story 15.14 R8/R9, and resolve release blockers or record an explicit scoped disposition with evidence,
+**And** preserve accurate unverified rows and reconcile stale status prose without rewriting historical results as passes.
+
+**Implementation gate:** Before execution, enumerate shipping platforms/architectures and provider capability expectations from the actual release configuration, define clean-install/upgrade environments and evidence ownership, and settle controlled-runtime licensing/signing requirements. Close applicable architecture gates with recorded evidence. Set manual-playback verification workloads and resource budgets before acceptance. This release makes no adaptive-quality or conditional-backoff claim; retain implemented source selection and buffering/retry. Stories 16.12–16.14 own those later features and full Radio soak validation. Mid-track quality switching remains disabled without separate validation.
+
+
+## Epic 16: Radio/Recommendations
+
+Deliver the retained automatic-selection, curation and reliability roadmap after the Epic 15 manual release. Historical story IDs are mapped in the approved course correction.
+
+### Story 16.1: Configure Playback selection and start its first selected track
 
 As a HifiMule user,
 I want independent Playback source and selection settings using HifiMule's existing selection engine,
@@ -4111,7 +4199,7 @@ So that I can start listening from my curated music without choosing the first t
 
 **Requirements:** Source/selection settings portion of FR55; first-result selection foundation for FR57 and FR65; shared-engine portion of P-AR8; local configuration portion of P-AR4; P-NFR2, P-NFR4–6; P-UX-DR6, P-UX-DR13–14.
 
-**Dependencies:** Stories 15.1–15.14 and the existing auto-fill engine. This story provides a working selection-settings action that plays its first eligible result. It does not label this finite behavior as ongoing Radio or expose final Play something yet; bounded replenishment follows in the next story.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and the existing auto-fill engine. This story provides a working selection-settings action that plays its first eligible result. It does not label this finite behavior as ongoing Radio or expose final Play something yet; bounded replenishment follows in the next story.
 
 **Acceptance Criteria:**
 
@@ -4163,7 +4251,7 @@ So that I can start listening from my curated music without choosing the first t
 **Implementation gate:** Before coding, define the pure selection interface, consumer-specific eligibility/context, source identity and settings schema/defaults, deterministic testing inputs, candidate bounds and invalid-setting behavior. Preserve all existing sync selection semantics. Keep continuous replenishment, artist transitions, logical-session exclusions and final Play something menu/bar wiring assigned to subsequent Radio stories.
 
 
-### Story 15.16: Replenish Radio within a bounded upcoming queue
+### Story 16.2: Replenish Radio within a bounded upcoming queue
 
 As a HifiMule user,
 I want my listening queue to replenish as I listen while respecting my edits and skips,
@@ -4171,7 +4259,7 @@ So that music can continue without assembling the whole library into a playlist 
 
 **Requirements:** FR65, FR68–69; logical-session restoration portion of FR60; exhaustion foundation for FR67; Radio error behavior of FR73; P-NFR2 and P-NFR4–5; relevant P-AR3–4, P-AR6, P-AR8 and P-AR10; P-UX-DR5 and P-UX-DR7.
 
-**Dependencies:** Stories 15.1–15.15. Implements the replenishment/session policy behind an explicit settings-view start action. Until artist-transition policy is delivered, automatic selection stays within the initial artist and enters an explained waiting state when that artist is exhausted. Final Play something in the bar/menu follows after artist transitions; this intermediate behavior is not presented as the completed Radio experience.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Story 16.1. Implements the replenishment/session policy behind an explicit settings-view start action. Until artist-transition policy is delivered, automatic selection stays within the initial artist and enters an explained waiting state when that artist is exhausted. Final Play something in the bar/menu follows after artist transitions; this intermediate behavior is not presented as the completed Radio experience.
 
 **Acceptance Criteria:**
 
@@ -4228,7 +4316,7 @@ So that music can continue without assembling the whole library into a playlist 
 **Implementation gate:** Before coding, define lookahead/refill thresholds, source-qualified eligibility/identity, heard semantics, retry bounds, pause/Stop refill behavior and session persistence limits. Reuse the shared selection engine and revision/generation contracts. Artist transitions, repeat cycles, recording-level deduplication and final entry-point wiring remain explicit subsequent work.
 
 
-### Story 15.17: Continue Radio through meaningful artist connections
+### Story 16.3: Continue Radio through meaningful artist connections
 
 As a HifiMule user,
 I want Radio to stay close to the current artist before moving to a clearly related artist,
@@ -4236,7 +4324,7 @@ So that its progression feels understandable within my curated libraries rather 
 
 **Requirements:** FR66–67; continuation of FR65; P-NFR2, P-NFR4–5; relationship portions of P-AR8–9; P-UX-DR7.
 
-**Dependencies:** Stories 15.1–15.16. Completes artist progression and cycle renewal on the bounded replenishment path. Cross-server recording deduplication, Radio gain and final Play something entry points remain subsequent stories.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.2. Completes artist progression and cycle renewal on the bounded replenishment path. Cross-server recording deduplication, Radio gain and final Play something entry points remain subsequent stories.
 
 **Acceptance Criteria:**
 
@@ -4293,7 +4381,7 @@ So that its progression feels understandable within my curated libraries rather 
 **Implementation gate:** Before coding, inventory relationship metadata actually available from supported providers and define accepted evidence types, ranking/tie-breaking, artist identity, original-settings snapshot semantics, cycle exhaustion and retry bounds. Missing provider relationship support must use the approved fresh-center fallback; it is not permission to introduce third-party enrichment or genre-only links.
 
 
-### Story 15.18: Avoid duplicate Radio recordings across configured servers
+### Story 16.4: Avoid duplicate Radio recordings across configured servers
 
 As a HifiMule user,
 I want Radio to recognize confident copies of the same recording across my servers,
@@ -4301,7 +4389,7 @@ So that duplicate library copies do not repeat unnecessarily while distinct perf
 
 **Requirements:** FR70; recording-level eligibility portions of FR66–69; identity foundation for FR78–79; P-NFR2 and P-NFR4–5; P-AR8 and source-routing portion of P-AR9; P-UX-DR14.
 
-**Dependencies:** Stories 15.1–15.17. Extends existing source-qualified candidates and logical Radio state. Does not deduplicate manual queue occurrences or write to server libraries. Feedback and export remain subsequent stories.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.3. Extends existing source-qualified candidates and logical Radio state. Does not deduplicate manual queue occurrences or write to server libraries. Feedback and export remain subsequent stories.
 
 **Acceptance Criteria:**
 
@@ -4358,7 +4446,7 @@ So that duplicate library copies do not repeat unnecessarily while distinct perf
 **Implementation gate:** Before coding, define accepted recording evidence, confidence/conflict rules, source-copy ranking, persisted identity versioning and reconciliation of existing source-qualified heard/exclusion state. Use metadata from configured servers only. Preserve uncertain recordings rather than broadening heuristics to inflate deduplication coverage.
 
 
-### Story 15.19: Match Radio track loudness using available metadata
+### Story 16.5: Match Radio track loudness using available metadata
 
 As a HifiMule user,
 I want Radio to use available track loudness metadata,
@@ -4366,7 +4454,7 @@ So that music from different albums has more consistent listening levels without
 
 **Requirements:** Radio portion of FR74; P-NFR1–2 and P-NFR4; loudness portion of P-AR7.
 
-**Dependencies:** Stories 15.1–15.18. Reuses Story 15.10 metadata normalization and static gain/peak protection. Adds the Radio policy rather than a second audio gain implementation.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.4. Reuses Story 15.10 metadata normalization and static gain/peak protection. Adds the Radio policy rather than a second audio gain implementation.
 
 **Acceptance Criteria:**
 
@@ -4413,7 +4501,7 @@ So that music from different albums has more consistent listening levels without
 **Implementation gate:** Before coding, confirm track metadata conventions and precedence against the album implementation, define Radio/album/standalone-preview policy dispatch and freeze gain per prepared occurrence. Reuse the existing conversion and static peak-protection primitives; do not add user taste memory or dynamic-range processing.
 
 
-### Story 15.20: Start Radio with Play something without opening the main window
+### Story 16.6: Start Radio with Play something without opening the main window
 
 As a HifiMule user,
 I want a Play something action in the desktop menu and idle playback bar,
@@ -4421,7 +4509,7 @@ So that I can start an ongoing Radio from my configured libraries with one actio
 
 **Requirements:** FR57; idle Play something completion of FR59; entry-point integration of FR55 and FR65–70; P-NFR4–6; P-AR10; P-UX-DR2, P-UX-DR4 and P-UX-DR7.
 
-**Dependencies:** Stories 15.1–15.19. Wires existing selection, replenishment, artist progression, deduplication and Radio gain to final user entry points. Does not create a new selection implementation.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.5. Wires existing selection, replenishment, artist progression, deduplication and Radio gain to final user entry points. Does not create a new selection implementation.
 
 **Acceptance Criteria:**
 
@@ -4478,7 +4566,7 @@ So that I can start an ongoing Radio from my configured libraries with one actio
 **Implementation gate:** Before coding, define each platform's menu placement, windowless setup/error presentation and start-command supersession rules. Reuse existing generation, output and replacement contracts. Keep first-track selection deterministic under controlled test inputs and avoid adding a confirmation dialog to the normal configured one-action start path.
 
 
-### Story 15.21: Report listening accurately to the source server
+### Story 16.7: Report listening accurately to the source server
 
 As a HifiMule user,
 I want supported listening activity recorded on the server that supplied the track,
@@ -4486,7 +4574,7 @@ So that its listening history reflects what I heard without HifiMule creating it
 
 **Requirements:** FR76; reporting portion of FR81; P-NFR4–5; reporting portions of P-AR9 and P-AR12; source identity portion of P-UX-DR14.
 
-**Dependencies:** Stories 15.1–15.20. Uses occurrence identities, actual playback progress, preview outcomes and durable session state. Like/Dislike and exports remain separate stories.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.6. Uses occurrence identities, actual playback progress, preview outcomes and durable session state. Like/Dislike and exports remain separate stories.
 
 **Acceptance Criteria:**
 
@@ -4543,7 +4631,7 @@ So that its listening history reflects what I heard without HifiMule creating it
 **Implementation gate:** Before coding, verify each provider's now-playing, completion, automatic play-count, seek/resume and idempotency semantics; define eligibility thresholds and durable operation identity/reconciliation/retention. No universal counting threshold is assumed. Enable only verified reporting behavior; if provider integrations exceed one implementation session, split them into ordered provider-specific stories before execution.
 
 
-### Story 15.22: Save supported Like and Dislike preferences on the source server
+### Story 16.8: Save supported Like and Dislike preferences on the source server
 
 As a HifiMule user,
 I want explicit Like or Dislike actions to update my source server's track preference,
@@ -4551,7 +4639,7 @@ So that the preference is available outside HifiMule rather than becoming a sepa
 
 **Requirements:** FR77; rejected-occurrence foundation for FR78; P-NFR4–6; feedback portion of P-AR9; P-UX-DR8 and P-UX-DR13–14.
 
-**Dependencies:** Stories 15.1–15.21. Uses provider capabilities, occurrence/source identity and existing operation recovery patterns. Playlist/basket snapshots are subsequent stories.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.7. Uses provider capabilities, occurrence/source identity and existing operation recovery patterns. Playlist/basket snapshots are subsequent stories.
 
 **Acceptance Criteria:**
 
@@ -4603,7 +4691,7 @@ So that the preference is available outside HifiMule rather than becoming a sepa
 **Implementation gate:** Before coding, define provider equivalence mappings, read/write capabilities, pending-operation identity and reconciliation, feedback-versus-transport behavior and local rejection semantics including explicit later preference reversal. Use bounded operational persistence only; no local-only durable taste fallback or cross-server preference propagation is introduced.
 
 
-### Story 15.23: Save an immutable local listening snapshot
+### Story 16.9: Save an immutable local listening snapshot
 
 As a HifiMule user,
 I want to save the accepted history and upcoming queue from my listening session locally,
@@ -4611,7 +4699,7 @@ So that I can keep what I discovered without ongoing playback changing the saved
 
 **Requirements:** FR78; local cross-server order portion of FR79; P-NFR2 and P-NFR4–6; snapshot portion of P-AR11; P-UX-DR15.
 
-**Dependencies:** Stories 15.1–15.22. Saves and exposes a read-only local snapshot using existing queue presentation. Server playlist and physical basket export follow in separate stories; this story does not write to either destination.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.8. Saves and exposes a read-only local snapshot using existing queue presentation. Server playlist and physical basket export follow in separate stories; this story does not write to either destination.
 
 **Acceptance Criteria:**
 
@@ -4663,7 +4751,7 @@ So that I can keep what I discovered without ongoing playback changing the saved
 **Implementation gate:** Before coding, define snapshot identity and atomic capture boundary, local naming/listing access, disposition inclusion rules, duplicate-request retention and paged persistence. Resolve incomplete/technically failed occurrence treatment and preview-only sessions explicitly. Preserve the approved accepted-history/current/upcoming formula and keep snapshots distinct from live server playlists or an automatically synchronized queue.
 
 
-### Story 15.24: Save a listening snapshot as playlists on its source servers
+### Story 16.10: Save a listening snapshot as playlists on its source servers
 
 As a HifiMule user,
 I want to save a listening snapshot to playlists on its contributing servers,
@@ -4671,7 +4759,7 @@ So that I can reuse my discoveries in other clients while understanding what was
 
 **Requirements:** FR79; export portion of FR81; P-NFR2 and P-NFR4–6; P-AR11 and playlist-write portion of P-AR9; P-UX-DR8 and P-UX-DR14–15.
 
-**Dependencies:** Stories 15.1–15.23. Uses immutable local snapshots and existing provider playlist capabilities. Physical basket export remains a separate story.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.9. Uses immutable local snapshots and existing provider playlist capabilities. Physical basket export remains a separate story.
 
 **Acceptance Criteria:**
 
@@ -4728,7 +4816,7 @@ So that I can reuse my discoveries in other clients while understanding what was
 **Implementation gate:** Before coding, verify provider create/populate limits, duplicate handling, naming policy, operation identity, batch checkpoints and ambiguity reconciliation. Define user-visible partial-result recovery. Reuse immutable snapshot storage and existing playlist provider methods; split provider enablement before execution if needed to retain single-session story scope.
 
 
-### Story 15.25: Add a listening snapshot to a connected device basket or replace it
+### Story 16.11: Add a listening snapshot to a connected device basket or replace it
 
 As a HifiMule user,
 I want to add my saved listening selection to a connected device basket or replace that basket,
@@ -4736,7 +4824,7 @@ So that I can take the music with me using HifiMule's existing sync workflow.
 
 **Requirements:** FR80; applicable operation integrity portion of FR81; P-NFR4–6; physical-target portion of P-AR11; P-UX-DR9 and P-UX-DR14–15.
 
-**Dependencies:** Stories 15.1–15.24 and existing device-basket behavior. Uses the immutable snapshot from Story 15.23; it does not start sync or write music to the device.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.10 and existing device-basket behavior. Uses the immutable snapshot from Story 16.9; it does not start sync or write music to the device.
 
 **Acceptance Criteria:**
 
@@ -4788,7 +4876,7 @@ So that I can take the music with me using HifiMule's existing sync workflow.
 **Implementation gate:** Before coding, inspect existing basket representation, source locks, duplicates/order semantics and mutation persistence. Define target identity/revalidation and concurrency policy without changing approved device safety guarantees. Resolve unsupported snapshot content explicitly; do not quietly expand this story into cross-server basket redesign or automatic synchronization.
 
 
-### Story 15.26: Adapt playback quality at track boundaries using buffer health
+### Story 16.12: Adapt playback quality at track boundaries using buffer health
 
 As a HifiMule user,
 I want playback to choose the best quality my connection can sustain,
@@ -4796,7 +4884,7 @@ So that I can keep listening with minimal interruption without manually tuning s
 
 **Requirements:** FR71; boundary adaptation and insufficient-bandwidth portions of FR72; P-NFR2 and P-NFR4–6; quality portions of P-AR9 and P-AR12; quality-status portion of P-UX-DR7.
 
-**Dependencies:** Stories 15.1–15.25. Extends initial source ranking and bounded buffering. Mid-track representation replacement remains disabled unless separately validated; seeking support alone does not enable it. Sync backoff and sustained release validation follow separately.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.11. Extends initial source ranking and bounded buffering. Mid-track representation replacement remains disabled unless separately validated; seeking support alone does not enable it. Sync backoff and sustained release validation follow separately.
 
 **Acceptance Criteria:**
 
@@ -4848,7 +4936,7 @@ So that I can keep listening with minimal interruption without manually tuning s
 **Implementation gate:** Before coding, verify provider alternatives and quality ordering; define startup assumptions, estimator scope, observation windows, depletion/recovery thresholds, preparation cutoff and maximum buffer budgets from measurements. Keep authenticated URLs daemon-side. Do not claim codec bitrate alone establishes comparative quality, and do not enable mid-track replacement without a separate provider/format validation decision.
 
 
-### Story 15.27: Protect playback during sync without unnecessary throttling
+### Story 16.13: Protect playback during sync without unnecessary throttling
 
 As a HifiMule user,
 I want music playback and device synchronization to run together,
@@ -4856,7 +4944,7 @@ So that preparing a device does not interrupt listening or slow down unnecessari
 
 **Requirements:** FR75; P-NFR1–4; coexistence portions of P-AR6 and P-AR14.
 
-**Dependencies:** Stories 15.1–15.26 and the existing sync scheduler/cancellation boundaries. Reuses playback buffer measurements. This story adjusts sync demand conditionally; it does not replace adaptive streaming or change device write-integrity rules.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.12 and the existing sync scheduler/cancellation boundaries. Reuses playback buffer measurements. This story adjusts sync demand conditionally; it does not replace adaptive streaming or change device write-integrity rules.
 
 **Acceptance Criteria:**
 
@@ -4903,7 +4991,7 @@ So that preparing a device does not interrupt listening or slow down unnecessari
 **Implementation gate:** Before coding, identify the existing safe scheduler controls and define risk/recovery thresholds, resource attribution, fairness, minimum progress and stale-signal expiry from measured scenarios. Set acceptable throughput impact for healthy coexistence before acceptance. Do not introduce blocking coordination into the audio callback or weaken device integrity to meet a throughput target.
 
 
-### Story 15.28: Keep long listening sessions bounded and recoverable
+### Story 16.14: Keep long listening sessions bounded and recoverable
 
 As a HifiMule user,
 I want long album and Radio sessions to remain responsive and recoverable,
@@ -4911,7 +4999,7 @@ So that leaving music playing through a workday does not progressively consume m
 
 **Requirements:** Sustained evidence for P-NFR1–4; FR60 and FR65–75 regression; resource portions of P-AR12 and P-AR14.
 
-**Dependencies:** Stories 15.1–15.27. Validates integrated runtime behavior and fixes bounded resource/recovery defects found within this scope. Packaged distribution and the complete shipping-platform matrix are covered separately. Larger unrelated defects become explicitly linked blockers rather than silently expanding this story.
+**Dependencies:** The delivered Epic 15 foundation (Stories 15.1–15.17) and Stories 16.1–16.13. Validates integrated runtime behavior and fixes bounded resource/recovery defects found within this scope. Reuse the packaging process established in Story 15.17 and own the expanded installed shipping-platform matrix for Epic 16. Larger unrelated defects become explicitly linked blockers rather than silently expanding this story.
 
 **Acceptance Criteria:**
 
@@ -4955,69 +5043,14 @@ So that leaving music playing through a workday does not progressively consume m
 **Then** results record duration, hardware/VM status, build/runtime versions, resource time series and recovery outcomes against budgets fixed before acceptance,
 **And** a failed budget or untested scenario remains an explicit blocker or limitation rather than being hidden by a short successful run.
 
+**Given** installed builds on every shipping platform/architecture,
+**When** automatic selection, Radio, reporting/feedback, snapshots, playlist/basket exports, adaptation and conditional sync protection are exercised,
+**Then** record capability-dependent source routing, accessibility, failure/recovery and runtime-version evidence for all added workflows,
+**And** changed dependencies or affected workflows receive fresh checks. Story 15.17 evidence does not certify new features; actual publication is separate. Split platform execution tasks during preparation if needed.
+
 **Implementation gate:** Before execution, set soak duration, sampling interval, memory/task/handle budgets, workload sizes, fault schedule, acceptable growth and evidence method using earlier measurements. Investigate reproducible growth or recovery failures, rerun affected scenarios after fixes, and retain raw evidence locations. Do not invent passing thresholds after seeing the results.
-
-
-### Story 15.29: Ship verified playback builds for Windows, macOS and Linux
-
-As a HifiMule user,
-I want the installed application to provide the tested playback behavior on my supported platform,
-So that listening works without a development environment or manually installed decoder libraries.
-
-**Requirements:** P-NFR3 and integrated P-NFR1–6 regression; P-AR5 and P-AR14; release evidence for FR55–81 and applicable P-UX-DR1–15.
-
-**Dependencies:** Stories 15.1–15.28. Completes packaged-build integration and release verification; earlier stories remain responsible for their own cross-platform checks. Does not itself publish a release or certify untested architectures.
-
-**Acceptance Criteria:**
-
-**Given** the project's explicitly enumerated shipping OS/architecture matrix,
-**When** release artifacts are built,
-**Then** each artifact contains or resolves the controlled playback runtime through the documented distribution mechanism,
-**And** exact decoder/audio dependency versions, licensing obligations and runtime loading paths are recorded. A development-machine library must not silently substitute for the shipped runtime.
-
-**Given** an installed artifact on a clean supported environment,
-**When** the user starts HifiMule and plays supported source formats,
-**Then** streaming, decoding and shared output work without development tools or manually locating native libraries,
-**And** packaging/signing/permission behavior follows the existing platform distribution model without requiring elevated privileges for ordinary playback.
-
-**Given** an existing installation with device and server configuration,
-**When** it is upgraded to the playback build,
-**Then** supported configuration/session migrations preserve existing sync settings and credentials,
-**And** an interrupted or failed migration produces recoverable state instead of erasing device configuration. Unsupported downgrade behavior is documented without claiming automatic rollback safety.
-
-**Given** each installed platform build,
-**When** UI close/reopen, simultaneous launches, native transport, output loss, sleep/wake, paused restoration and safe Quit during sync are exercised,
-**Then** results verify the production daemon lifetime and selected-output behavior,
-**And** native API delivery and physical media-key routing have separate evidence entries.
-
-**Given** configured supported providers and representative library metadata,
-**When** the integrated manual album, preview, Radio, feedback, snapshot, playlist and basket workflows run,
-**Then** their results match the approved capability-dependent behavior and source routing,
-**And** unsupported provider features remain accurately unavailable rather than appearing successful.
-
-**Given** prepared albums and representative playback-plus-sync workloads,
-**When** release evidence is assembled,
-**Then** deterministic continuity, physical-output checks, adaptive-quality results and sustained resource measurements from compatible builds are linked with versions and environments,
-**And** changed packaged dependencies trigger the affected checks rather than inheriting incompatible probe evidence.
-
-**Given** the UI is used across supported themes, widths, text scaling and keyboard navigation,
-**When** the complete Playback experience is reviewed,
-**Then** the floating bar, queue, preview, error states and export results retain accessible names, visible focus, sufficient contrast and reachable bottom-row actions,
-**And** background updates do not steal focus or overwhelm assistive technology with time ticks.
-
-**Given** a platform, architecture or hardware interaction has not been tested or has a failing check,
-**When** the release decision is recorded,
-**Then** that entry remains an explicit blocker or accurately scoped unsupported capability,
-**And** ARM64 VM results do not certify x64, API calls do not certify physical keys, and callback counters do not certify physical gaplessness. Existing Linux teardown warnings must be resolved or assessed with reproducible evidence before acceptance.
-
-**Given** the verification matrix is complete,
-**When** the story is reviewed for acceptance,
-**Then** each shipping entry links its artifact, loaded runtime versions, test outcomes and material limitations,
-**And** no failed required check is hidden by a global pass. Actual release publication remains outside this story's validation action.
-
-**Implementation gate:** Before execution, enumerate shipping platforms/architectures and provider capability expectations from the actual release configuration, define clean-install/upgrade environments and evidence ownership, and settle controlled-runtime licensing/signing requirements. Close applicable architecture gates with recorded evidence. Mid-track quality switching remains disabled unless a separate provider/format validation supports it; boundary-only adaptation is the initial supported scope.
 
 
 ## Playback Story Coverage and Readiness
 
-All 29 stories have user approval. See [playback-epic-validation.md](playback-epic-validation.md) for the FR55–81, P-NFR1–6, P-AR1–14 and P-UX-DR1–15 coverage map, dependency checks and implementation readiness limits. Coverage is complete at planning level; unresolved contract gates and provider-specific sizing prevent an unrestricted ready-for-development declaration.
+All 31 stories across 15.1–15.17 and 16.1–16.14 have planning approval under the [2026-09-19 amendment](sprint-change-proposal-2026-09-19.md). See [playback-epic-validation.md](playback-epic-validation.md) for requirement coverage, dependency checks and readiness limits. Stories 15.1–15.14 remain done; new and moved stories remain backlog. Implementation contracts and actual installed evidence must still be completed by their owners.

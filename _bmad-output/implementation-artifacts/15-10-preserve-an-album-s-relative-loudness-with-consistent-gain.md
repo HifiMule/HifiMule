@@ -16,7 +16,7 @@ so that quiet and loud passages retain their intended relationship while usable 
 
 **Dependencies:** Stories 15.1–15.9. Prepared 2026-09-18 against the baseline above. Story 15.9 and sprint tracking are marked done, but its review notes and unchecked tasks still identify missing full Windows/Linux daemon builds, native race checks, successor-source cases and physical continuity captures. Its narrative still says in-progress. These are inherited evidence limitations, not proof of platform acceptance; do not change predecessor status in this story.
 
-**Scope:** One daemon-owned, frozen album adjustment, optional provider metadata normalization, durable album membership/policy, static sample-peak protection and deterministic audio regression. Initial metadata support is the complete OpenSubsonic album ReplayGain pair described below. Jellyfin and embedded-only albums remain playable at unchanged gain when they lack that supported contract. No Radio track normalization (15.19), Preview (15.11), gain settings panel, metadata scanning service, DSP limiter, compression, crossfade, dependency upgrade or sync transcoding change.
+**Scope:** One daemon-owned, frozen album adjustment, optional provider metadata normalization, durable album membership/policy, static sample-peak protection and deterministic audio regression. Initial metadata support is the complete OpenSubsonic album ReplayGain pair described below. Jellyfin and embedded-only albums remain playable at unchanged gain when they lack that supported contract. No Radio track normalization (16.5), Preview (15.11), gain settings panel, metadata scanning service, DSP limiter, compression, crossfade, dependency upgrade or sync transcoding change.
 
 ## Acceptance Criteria
 
@@ -180,7 +180,7 @@ Project context's provider abstraction and managed-zone safety remain foundation
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.10; adjacent 15.9/15.11; queue policy 15.13; Radio gain 15.19]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.10; adjacent 15.9/15.11; queue policy 15.13; Radio gain 16.5]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — Playback Extension FR61/74 and P-NFR1/2/4]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback Audio Pipeline, Provider Integration, Implementation Contracts, Validation Refinements]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md`; `project-context.md`]

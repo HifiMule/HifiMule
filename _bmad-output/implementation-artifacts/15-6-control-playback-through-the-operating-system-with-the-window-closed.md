@@ -15,7 +15,7 @@ so that I can pause and resume music while working without reopening HifiMule.
 
 **Dependencies:** Stories 15.1–15.5 are done. Extend their production lifecycle, serialized session owner, single-track player and selected-output safety. On a truly fresh playback configuration, Story 15.5 now saves the one available concrete OS-default endpoint after complete discovery; it never opens audio or resumes. That bootstrap is not a floating default route. Preparation date: 2026-09-16.
 
-**Scope:** Native Play/Pause/Toggle/Stop, now-playing projection, daemon-owned registration and desktop-menu Resume. Native seek belongs to 15.7, Next to 15.8, full Playback destination to 15.12, floating bar to 15.14, Play something/Radio menu wiring to 15.20, and server listening reports to 15.21. Do not advertise those unfinished transport actions or add a browser player, global keyboard hook, second event loop, cross-application media-priority override or reporting side effect.
+**Scope:** Native Play/Pause/Toggle/Stop, now-playing projection, daemon-owned registration and desktop-menu Resume. Native seek belongs to 15.7, Next to 15.8, full Playback destination to 15.12, floating bar to 15.14, Play something/Radio menu wiring to 16.6, and server listening reports to 16.7. Do not advertise those unfinished transport actions or add a browser player, global keyboard hook, second event loop, cross-application media-priority override or reporting side effect.
 
 ## Acceptance Criteria
 

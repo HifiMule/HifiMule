@@ -249,7 +249,7 @@ Installed evidence must exercise actual shipped binaries on Windows, macOS and L
 - Latest five commits: `e863368` Review 15.1; `23eeae2` Dev 15.1; `09b6a8b` Story 15.1; `ac5217c` Add design for playback; `907e776` cross-platform playback session feasibility proof. Production 15.1 changes take precedence over the earlier experimental supervisor/probe.
 - Review hardened delayed-launch fencing, Windows ACLs, bounded native hydration, stopping health on a separate runtime, blocking-work completion and RPC drain. Preserve those fixes when adding active cancellation.
 - Story 15.1 documents installed ARM64 MSI/deb/DMG checks and user-observed idle tray Quit on all three OSes, followed by 12 review patches. Its updated installed-platform evidence remains pending rerun; do not reuse pre-review installer results as current 15.2 acceptance evidence.
-- Discovery covered Epic 15's approved 29-story sequence, PRD, architecture, UX, project context, prior story/review and current lifecycle/sync/UI paths. This story prepares lifecycle cancellation only; session restoration belongs to 15.3, audible playback to 15.4 and playback-vs-sync QoS to 15.27.
+- Discovery covered Epic 15's then-approved 29-story sequence (historical IDs before the 2026-09-19 split), PRD, architecture, UX, project context, prior story/review and current lifecycle/sync/UI paths. This story prepares lifecycle cancellation only; session restoration belongs to 15.3, audible playback to 15.4 and playback-vs-sync QoS to 15.27.
 
 ### References
 

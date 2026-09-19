@@ -16,7 +16,7 @@ so that I can replay a passage or continue from a chosen position without restar
 
 **Dependencies:** Stories 15.1–15.6 are marked done in the current sprint. Extend their daemon-owned single-track player, provider resolution, selected-output safety, native controls and checkpointed session. Preparation date: 2026-09-18; repository baseline inspected: `21e1800`.
 
-**Scope:** Current-track seeking and elapsed/duration presentation in the existing playback controls, shared native seeking, and truthful committed-position restoration. Preserve the occurrence, source and queue. Queue advancement/Next (15.8), gapless continuity (15.9), previews (15.11), full Playback destination/bar redesign (15.12/15.14), server reports (15.21) and adaptation (15.26) remain separate. Seeking does not authorize a representation switch, a browser player, a new event loop, or sync throttling.
+**Scope:** Current-track seeking and elapsed/duration presentation in the existing playback controls, shared native seeking, and truthful committed-position restoration. Preserve the occurrence, source and queue. Queue advancement/Next (15.8), gapless continuity (15.9), previews (15.11), full Playback destination/bar redesign (15.12/15.14), server reports (16.7) and adaptation (16.12) remain separate. Seeking does not authorize a representation switch, a browser player, a new event loop, or sync throttling.
 
 ## Acceptance Criteria
 
@@ -213,7 +213,7 @@ Checked 2026-09-18 using primary documentation. Keep the pinned runtime; this st
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.7; stories 15.1–15.29 and coverage/dependency map]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.7; stories 15.1–15.14, 15.17 and 16.1–16.14 and coverage/dependency map]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — Desktop Playback amendment, FR58, FR75 and playback NFRs]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Desktop Playback ownership, generation, buffers, providers, position and native control contracts]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — general accessible controls, responsive layout and Shoelace foundation; playback-specific UX comes from the approved epic/architecture]

@@ -10,7 +10,7 @@ classification:
   projectContext: 'Brownfield — sync product extended with playback'
 workflowType: 'prd'
 status: final
-updated: '2026-09-11'
+updated: '2026-09-19'
 playbackUpdate: 'final — ready for staged epic planning; implementation gates remain open'
 ---
 
@@ -246,14 +246,14 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 
 HifiMule becomes the desktop listening companion for the same curated libraries it synchronizes. The primary outcome is an easy answer to “what should I listen to?” through Play something, alongside faithful album listening and auditioning music before choosing it for a playlist or device. Windows, macOS and Linux are in scope from the start.
 
-These requirements extend the existing sync product. They supersede older no-device locking and UI-owned lifetime assumptions for playback only. The implementation stages in the architecture are delivery order, not permission to omit requirements below.
+These requirements extend the existing sync product. They supersede older no-device locking and UI-owned lifetime assumptions for playback only. Delivery is split into Epic 15 (manual Desktop Playback, Back, compact browse navigation and packaging) and Epic 16 (Radio/Recommendations and the remaining playback roadmap). All requirements below remain product commitments; the first release completes only its mapped subset, not Radio, reporting/exports, adaptation or conditional backoff.
 
 ### Listening destinations and controls
 
 - **FR55:** Playback is an always-present destination listed first, with independent source/selection settings and a manually editable queue. Select it when no physical device is connected; do not expose storage, folder or file-sync actions for Playback.
 - **FR56:** Music and native media controls remain operational after the main UI closes. Reopening the UI shows the same session and current state without restarting playback.
 - **FR57:** Play something starts a fresh Radio using the first eligible result from the shared sync/playback selection engine under Playback settings. Resume continues the existing queue and position. Both actions are available from the desktop app menu without opening the main window when configured sources are available.
-- **FR58:** Users can control play/pause, stop, next, playback position where supported, and output selection. UI and native controls act on one session. Capability limits and recoverable errors are visible rather than silently ignored.
+- **FR58:** Users can control play/pause, stop, Back (restart the current track or return to the previous track), next, playback position where supported, and output selection. Back restarts after three seconds of main-track playback and selects the previous occurrence at or before three seconds; without a previous occurrence it restarts the current track. During Preview it restarts the audition without altering the preserved main session. UI and supported native Previous/keyboard controls use the same session command, preserving paused intent and output safety. Capability limits and recoverable errors are visible rather than silently ignored.
 - **FR59:** A translucent floating playback bar below the media browser remains visible while idle, browsing or working with a device basket, and offers Play something when idle. The bar does not obscure the final list items. Selecting a different server/device does not stop music or change its source; arriving physical devices become selected and unconfigured devices retain a visible setup action. Show detected-device open failures with actionable feedback.
 - **FR60:** Full application quit preserves queue, position and logical-session exclusions. Relaunch restores paused. Quit during sync stops audio and requests orderly sync cancellation without marking incomplete device writes successful.
 
@@ -307,7 +307,9 @@ These requirements extend the existing sync product. They supersede older no-dev
 
 ### Success and release evidence
 
-Success is demonstrated when configured Play something starts listening without opening the UI, album/preview behavior retains the agreed order and position, and users can move discoveries into playlists or a device basket without reconstructing the queue. Counter-metrics are playback underruns, unintended output reroutes, duplicate reporting/export effects, memory growth and unnecessary sync-throughput loss. Report actual measurements; do not replace unknown thresholds with invented latency guarantees.
+Epic 15 release success is demonstrated by selected-track/album listening, Preview/Return, manual queue, Back, compact accessible browse navigation, durable paused restoration and installed verification in Story 15.17.
+
+Epic 16 success is demonstrated when configured Play something starts listening without opening the UI, album/preview behavior retains the agreed order and position, and users can move discoveries into playlists or a device basket without reconstructing the queue. Counter-metrics are playback underruns, unintended output reroutes, duplicate reporting/export effects, memory growth and unnecessary sync-throughput loss. Report actual measurements; do not replace unknown thresholds with invented latency guarantees.
 
 The isolated playback experiments establish short-run decoding/output and session-control feasibility on tested ARM64 environments. They do not certify streaming adaptation, packaged x64 behavior, metadata coverage or sustained physical playback under real sync load. The architecture lists the remaining gates.
 

@@ -17,7 +17,7 @@ so that I can shape what I hear next without interrupting the current track.
 
 **Dependencies:** Stories 15.1–15.12. Reuse the daemon session owner, SQLite queue, prepared successor, album gain, preview overlay and Playback destination. Sprint tracking and the 15.12 header say done, but its review completion explicitly retains deferred R16 (physical-basket mutation guards) and says acceptance is incomplete. Carry that known limitation; this story does not resolve or certify it. New queue actions must have no basket side effects. Installed physical-output/platform evidence inherited from earlier stories remains unverified where recorded as such.
 
-**Scope:** Local append, upcoming-only move/remove, authoritative conflicts, durable order, preview-safe editing and bounded history/queue presentation. Stories 15.14–15.29 own the floating bar, selection configuration, Radio replenishment/exclusions/deduplication/normalization, reporting, feedback, exports, adaptation and soak/package certification. Do not introduce those features here.
+**Scope:** Local append, upcoming-only move/remove, authoritative conflicts, durable order, preview-safe editing and bounded history/queue presentation. Stories 15.14, 15.17 and 16.1–16.14 own the floating bar, selection configuration, Radio replenishment/exclusions/deduplication/normalization, reporting, feedback, exports, adaptation and soak/package certification. Do not introduce those features here.
 
 ## Acceptance Criteria
 
@@ -262,7 +262,7 @@ Use Rust/SQL snake_case and JSON/TypeScript camelCase, including enum variant fi
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.13; Playback UX requirements; Stories 15.14–15.29 scope boundaries]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Epic 15, Story 15.13; Playback UX requirements; Stories 15.14, 15.17 and 16.1–16.14 scope boundaries]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — Listening destinations and controls; Radio and selection FR68; History, preferences and curation FR78; Playback quality requirements]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback State and Ownership; Playback UI and Session Control; Playback Implementation Contracts; Playback Project Structure; Playback Validation Refinements]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — §§5.1–5.2 selection/list patterns; §6 responsive/accessibility]

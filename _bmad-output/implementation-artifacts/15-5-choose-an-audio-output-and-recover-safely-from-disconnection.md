@@ -204,7 +204,7 @@ Serial daemon tests avoid the known shared-vault parallel race. Use relevant lif
 
 ### References and technical research
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Playback Requirements Inventory; Epic 15; Stories 15.4–15.7, 15.14, 15.28–15.29]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Playback Requirements Inventory; Epic 15; Stories 15.4–15.7, 15.14, 15.17 and 16.14]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — Listening destinations and controls; Album listening and auditions; Playback quality requirements; UJ-P2]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback State and Ownership; Playback Audio Pipeline; Playback Implementation Contracts; Playback Project Structure; Playback Validation Refinements]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — accessibility/component conventions; `epics.md` P-UX-DR7/13 supplies playback-specific amendments]

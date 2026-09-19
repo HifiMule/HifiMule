@@ -16,7 +16,7 @@ so that I can listen to the complete album without starting every track individu
 
 **Dependencies:** Stories 15.1–15.7 are marked done. Preparation date: 2026-09-18; inspected baseline: `b54751a0bcbb5bc06100b7d1f788e9264baa445b`. Respect those statuses while retaining the installed-seek evidence limitations recorded in 15.7.
 
-**Scope:** Explicit Play album in existing album grid/list surfaces, atomic ordered queue construction, daemon-owned natural advancement, shared UI/native Next, same-occurrence retry, and durable local outcomes. Reuse the working player and selected output. Prepared gapless boundaries (15.9), album gain (15.10), Preview (15.11), Playback destination/queue editor/floating redesign (15.12–14), Radio (15.15–20), reporting (15.21) and snapshots/exports (15.23–25) remain separate. No browser audio, new event loop, dependency upgrade, physical-device requirement, or automatic server scrobbling.
+**Scope:** Explicit Play album in existing album grid/list surfaces, atomic ordered queue construction, daemon-owned natural advancement, shared UI/native Next, same-occurrence retry, and durable local outcomes. Reuse the working player and selected output. Prepared gapless boundaries (15.9), album gain (15.10), Preview (15.11), Playback destination/queue editor/floating redesign (15.12–15.14), Radio (16.1–16.6), reporting (16.7) and snapshots/exports (16.9–16.11) remain separate. No browser audio, new event loop, dependency upgrade, physical-device requirement, or automatic server scrobbling.
 
 ## Acceptance Criteria
 
@@ -221,7 +221,7 @@ Checked 2026-09-18 against primary documentation; retain repository versions and
 
 ### References
 
-- [Source: `_bmad-output/planning-artifacts/epics.md` — Story 15.8; Epic 15 requirements/UX and stories 15.1–15.29]
+- [Source: `_bmad-output/planning-artifacts/epics.md` — Story 15.8; Epic 15 requirements/UX and stories 15.1–15.14, 15.17 and 16.1–16.14]
 - [Source: `_bmad-output/planning-artifacts/prd.md` — Desktop Playback amendment, FR56/58/60/61/73 and playback NFRs]
 - [Source: `_bmad-output/planning-artifacts/architecture.md` — Playback State and Ownership; Audio Pipeline; Implementation Contracts; Validation Refinements; Project Structure; portable server identity]
 - [Source: `_bmad-output/planning-artifacts/ux-design-specification.md` — responsive/accessibility/selection foundation, superseded where playback amendments differ]
