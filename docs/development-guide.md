@@ -79,7 +79,7 @@ Do not invoke raw `cargo build` for the daemon. FFmpeg's dependency build
 scripts run before `hifimule-daemon/build.rs`, so only the wrapper can prepare
 and export the controlled native runtime in time. On Linux it builds and caches
 the pinned runtime. On Windows it downloads, hashes, verifies and builds the
-official signed FFmpeg 9.0.1 source with MSVC, then generates the import
+official signed FFmpeg 9.0.2 source with MSVC, then generates the import
 libraries needed by Cargo. `FFMPEG_DIR` may explicitly select a previously
 verified override.
 

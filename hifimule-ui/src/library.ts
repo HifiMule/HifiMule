@@ -952,6 +952,7 @@ async function bulkAddSelectionToQueue(button: any): Promise<void> {
 // container items missing count/size get ONE batched RPC pair, and responses
 // are mapped by id (response order is not guaranteed to match request order).
 async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ added: number; skipped: number }> {
+    if (!basketStore.hasPhysicalTarget()) return { added: 0, skipped: items.length };
     const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
     const toAdd: BrowseDisplayItem[] = [];
     const needsFetch = new Set<BrowseDisplayItem>();
@@ -1010,11 +1011,12 @@ async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ add
         }
     }
 
-    return { added: toAdd.length, skipped };
+    return { added: toAdd.filter(item => basketStore.has(item.basketId ?? item.id)).length, skipped };
 }
 
 async function bulkAddSelectionToBasket(btn: any): Promise<void> {
     if (btn.loading) return;
+    if (!basketStore.admitPhysicalTargetMutation()) return;
     // Snapshot up front — adds are idempotent via the skip check, so a
     // selection cleared mid-flight cannot double-add.
     const selected = resolveSelectedItems();
@@ -1086,6 +1088,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     toggleBtn.classList.add('basket-toggle-btn');
     toggleBtn.addEventListener('click', async (e: Event) => {
         e.stopPropagation();
+        if (!basketStore.admitPhysicalTargetMutation()) return;
         if (basketStore.has(itemId)) {
             basketStore.remove(itemId);
             return;

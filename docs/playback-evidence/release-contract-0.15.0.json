@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "releaseVersion": "0.15.0",
+  "upgradeBaseline": "0.14.0",
+  "candidatePolicy": {
+    "publish": false,
+    "source": "explicit-ref",
+    "immutableArtifacts": true,
+    "tagRequired": false
+  },
+  "decisionVocabulary": ["pass", "blocker", "unsupported"],
+  "providers": [
+    {
+      "kind": "jellyfin",
+      "versionPolicy": "record exact server version",
+      "capabilities": ["stream", "transcode", "album", "track"]
+    },
+    {
+      "kind": "subsonic",
+      "versionPolicy": "record implementation and exact server version",
+      "capabilities": ["stream", "album", "track"]
+    }
+  ],
+  "rows": [
+    {
+      "id": "windows-x64",
+      "os": "windows",
+      "architecture": "x86_64",
+      "minimumOs": "Windows 10",
+      "currentOs": "Windows 11",
+      "packages": ["msi", "nsis"],
+      "cleanInstallFixture": "fresh local user without build tools or system FFmpeg",
+      "upgradeFixture": "same-host HifiMule 0.14.0 profile with credentials, device manifest, basket and paused session",
+      "outputExpectation": "physical shared-mode output required; virtual output is supplemental",
+      "evidenceOwner": "release-manager"
+    },
+    {
+      "id": "linux-x64",
+      "os": "linux",
+      "architecture": "x86_64",
+      "minimumOs": "Ubuntu 22.04",
+      "currentOs": "current supported Ubuntu desktop",
+      "packages": ["deb", "appimage"],
+      "cleanInstallFixture": "fresh desktop user without build tools or system FFmpeg",
+      "upgradeFixture": "same-host HifiMule 0.14.0 profile with credentials, device manifest, basket and paused session",
+      "outputExpectation": "physical PulseAudio/PipeWire output required; Xvfb is lifecycle-only",
+      "evidenceOwner": "release-manager"
+    },
+    {
+      "id": "macos-x64",
+      "os": "macos",
+      "architecture": "x86_64",
+      "minimumOs": "macOS 10.15",
+      "currentOs": "current supported macOS x64",
+      "packages": ["app", "dmg"],
+      "cleanInstallFixture": "fresh standard user without Homebrew or system FFmpeg",
+      "upgradeFixture": "same-host HifiMule 0.14.0 profile with credentials, device manifest, basket and paused session",
+      "outputExpectation": "physical shared output required; virtual output is supplemental",
+      "evidenceOwner": "release-manager"
+    },
+    {
+      "id": "macos-arm64",
+      "os": "macos",
+      "architecture": "aarch64",
+      "minimumOs": "macOS 11",
+      "currentOs": "current supported macOS ARM64",
+      "packages": ["app", "dmg"],
+      "cleanInstallFixture": "fresh standard user without Homebrew or system FFmpeg",
+      "upgradeFixture": "same-host HifiMule 0.14.0 profile with credentials, device manifest, basket and paused session",
+      "outputExpectation": "physical shared output required; virtual output is supplemental",
+      "evidenceOwner": "release-manager"
+    }
+  ],
+  "boundaries": {
+    "crossArchitectureInference": false,
+    "nativeApiInjectionCertifiesPhysicalKeys": false,
+    "virtualOutputCertifiesAudibleContinuity": false,
+    "crossHostCredentialsCertifyUpgrade": false,
+    "olderDirectUpgradeSupported": false
+  }
+}

@@ -51,3 +51,8 @@ _bmad/
 .codex/
 .opencode/
 .roo/
+
+# python
+__pycache__/
+*.pyc
+*.pyo

@@ -9,12 +9,8 @@ import {
   withoutAudioRuntimeVerification,
 } from "../verify-audio-runtime.mjs";
 
-const exactVersions = {
-  libavcodec: "63.1.101",
-  libavformat: "63.1.101",
-  libavutil: "61.1.101",
-  libswresample: "7.1.101",
-};
+const runtimeManifest = JSON.parse(readFileSync(new URL("../../hifimule-daemon/audio-runtime.json", import.meta.url)));
+const exactVersions = Object.fromEntries(Object.entries(runtimeManifest.abiVersions).map(([name, value]) => [`lib${name}`, value]));
 
 function pkgConfigFixture(overrides = {}, libdir = join(resolve("/controlled/ffmpeg"), "lib")) {
   const versions = { ...exactVersions, ...overrides };
@@ -36,25 +32,23 @@ test("exact verifier accepts every manifest ABI and strips inherited authority",
 });
 
 test("controlled-prefix verifier rejects same-major but non-manifest ABI versions", () => {
+  const unexpected = exactVersions.libavcodec.replace(/\d+$/, (micro) => String(Number(micro) + 1));
   assert.throws(
     () => verifyAudioRuntime({
       prefix: "/controlled/ffmpeg",
-      execFileSync: pkgConfigFixture({ libavcodec: "63.1.102" }),
+      execFileSync: pkgConfigFixture({ libavcodec: unexpected }),
     }),
-    /libavcodec ABI mismatch: expected exact ABI 63\.1\.101, found 63\.1\.102/,
+    new RegExp(`libavcodec ABI mismatch: expected exact ABI ${exactVersions.libavcodec.replaceAll(".", "\\.")}, found ${unexpected.replaceAll(".", "\\.")}`),
   );
 });
 
 test("host verifier accepts the established macOS micro version within the exact ABI major", () => {
   const result = verifyAudioRuntime({
     execFileSync: pkgConfigFixture({
-      libavcodec: "63.1.101",
-      libavformat: "63.1.101",
-      libavutil: "61.1.101",
-      libswresample: "7.1.101",
+      ...exactVersions,
     }),
   });
-  assert.equal(result.versions.libavcodec, "63.1.101");
+  assert.equal(result.versions.libavcodec, exactVersions.libavcodec);
 });
 
 test("host verifier rejects an older version even when the ABI major matches", () => {
@@ -62,7 +56,7 @@ test("host verifier rejects an older version even when the ABI major matches", (
     () => verifyAudioRuntime({
       execFileSync: pkgConfigFixture({ libavcodec: "63.0.99" }),
     }),
-    /expected ABI 63\.1\.101 or newer within major 63, found 63\.0\.99/,
+    new RegExp(`expected ABI ${exactVersions.libavcodec.replaceAll(".", "\\.")} or newer within major 63, found 63\\.0\\.99`),
   );
 });
 

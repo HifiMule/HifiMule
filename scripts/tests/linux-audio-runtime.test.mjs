@@ -39,11 +39,11 @@ test("standalone verifier rejects Ubuntu FFmpeg 8 from the selected prefix", { s
   const prefix = fakePcPrefix({ avcodec: "62.11.100" });
   const bin = mkdtempSync(join(tmpdir(), "hifimule-fake-pkg-config-"));
   const pkgConfig = join(bin, "pkg-config");
-  writeFileSync(pkgConfig, "#!/bin/sh\ncase \"$1:$2\" in\n  --modversion:libavcodec) echo 62.11.100 ;;\n  --modversion:libavformat) echo 63.1.101 ;;\n  --modversion:libavutil) echo 61.1.101 ;;\n  --modversion:libswresample) echo 7.1.101 ;;\n  --variable=libdir:*) printf '%s\\n' \"$HIFIMULE_TEST_LIBDIR\" ;;\n  *) exit 1 ;;\nesac\n");
+  writeFileSync(pkgConfig, `#!/bin/sh\ncase "$1:$2" in\n  --modversion:libavcodec) echo 62.11.100 ;;\n  --modversion:libavformat) echo ${manifest.abiVersions.avformat} ;;\n  --modversion:libavutil) echo ${manifest.abiVersions.avutil} ;;\n  --modversion:libswresample) echo ${manifest.abiVersions.swresample} ;;\n  --variable=libdir:*) printf '%s\\n' "$HIFIMULE_TEST_LIBDIR" ;;\n  *) exit 1 ;;\nesac\n`);
   chmodSync(pkgConfig, 0o755);
   assert.throws(
     () => execFileSync("node", [join(root, "scripts/verify-audio-runtime.mjs"), "--prefix", prefix], { env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, HIFIMULE_TEST_LIBDIR: join(prefix, "lib"), PKG_CONFIG_PATH: join(prefix, "lib/pkgconfig") }, stdio: "pipe" }),
-    (error) => error.stderr?.toString().includes("libavcodec ABI mismatch: expected exact ABI 63.1.101, found 62.11.100") === true,
+    (error) => error.stderr?.toString().includes(`libavcodec ABI mismatch: expected exact ABI ${manifest.abiVersions.avcodec}, found 62.11.100`) === true,
   );
 });
 test("Windows skips Unix pkg-config verification while macOS retains it", () => {

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "releaseEvidenceVersion": 1,
+  "evidenceId": "windows-x64:msi:artifact-unavailable:providers-v1:clean-upgrade",
+  "target": "windows-x64",
+  "packageFormat": "msi",
+  "decision": "blocker",
+  "blocker": {
+    "owner": "release-manager",
+    "rationale": "No immutable Authenticode-signed MSI or Windows x64 clean-install and upgrade environment is available in this workspace.",
+    "requiredAction": "Build the explicit candidate on Windows, verify Authenticode, then run the complete clean-install, upgrade, playback, lifecycle, accessibility, physical-output and resource matrix."
+  }
+}

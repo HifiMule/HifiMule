@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Bundles macOS Homebrew libmtp dependencies beside the Tauri app and rewrites
-// daemon load commands so local `npm run tauri build` matches release CI.
+// Bundles the controlled FFmpeg runtime plus Homebrew libmtp dependencies and
+// rewrites daemon load commands so no developer path reaches a shipping app.
 
 import { execFileSync } from "node:child_process";
 import {
@@ -9,6 +9,8 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +25,13 @@ const homebrewPrefixes = ["/opt/homebrew", "/usr/local"];
 if (process.platform !== "darwin") {
   process.exit(0);
 }
+const audioPrefix = process.env.HIFIMULE_FFMPEG_PREFIX;
+if (!audioPrefix) throw new Error("HIFIMULE_FFMPEG_PREFIX is required for macOS packaging");
+const privatePrefixes = [
+  ...homebrewPrefixes,
+  resolve(audioPrefix),
+  join(projectRoot, "target", "audio-runtime"),
+];
 
 function run(command, args, options = {}) {
   const output = execFileSync(command, args, {
@@ -54,8 +63,8 @@ function dylibDependencies(path) {
     .filter(Boolean);
 }
 
-function isHomebrewPath(path) {
-  return homebrewPrefixes.some((prefix) => path.startsWith(`${prefix}/`));
+function isPrivatePath(path) {
+  return privatePrefixes.some((prefix) => path.startsWith(`${prefix}/`));
 }
 
 function findLibmtpDylib() {
@@ -72,13 +81,16 @@ function findLibmtpDylib() {
 }
 
 function findFfmpegDylibs() {
-  const prefix = run("brew", ["--prefix", "ffmpeg"]);
+  const prefix = resolve(audioPrefix);
   const required = ["libavcodec", "libavformat", "libavutil", "libswresample"];
-  return required.map((stem) => {
+  return required.flatMap((stem) => {
     const match = walkFiles(join(prefix, "lib"))
       .find((path) => basename(path).startsWith(`${stem}.`) && path.endsWith(".dylib") && !lstatSync(path).isSymbolicLink());
     if (!match) throw new Error(`Controlled FFmpeg library ${stem} not found under ${prefix}/lib`);
-    return match;
+    const major = basename(match).split(".")[1];
+    const abiAlias = join(prefix, "lib", `${stem}.${major}.dylib`);
+    if (!existsSync(abiAlias)) throw new Error(`Controlled FFmpeg ABI alias is missing: ${abiAlias}`);
+    return [match, abiAlias];
   });
 }
 
@@ -101,7 +113,7 @@ function copyBrewDylib(source) {
     target,
   ]);
 
-  for (const dep of dylibDependencies(target).filter(isHomebrewPath)) {
+  for (const dep of dylibDependencies(target).filter(isPrivatePath)) {
     if (existsSync(dep)) {
       copyBrewDylib(dep);
     }
@@ -110,8 +122,8 @@ function copyBrewDylib(source) {
   return target;
 }
 
-function rewriteHomebrewDependencies(path, prefix) {
-  for (const dep of dylibDependencies(path).filter(isHomebrewPath)) {
+function rewritePrivateDependencies(path, prefix) {
+  for (const dep of dylibDependencies(path).filter(isPrivatePath)) {
     const depName = basename(dep);
     if (copied.has(depName)) {
       run("install_name_tool", [
@@ -128,7 +140,11 @@ function sign(path) {
   run("codesign", ["--force", "--sign", "-", path], { stdio: "inherit" });
 }
 
+// The directory is a packaging staging area. Reusing it would retain dylibs
+// from a previous FFmpeg/Homebrew closure and silently ship both runtimes.
+rmSync(libDir, { recursive: true, force: true });
 mkdirSync(libDir, { recursive: true });
+writeFileSync(join(libDir, ".gitkeep"), "");
 
 const libmtpDylib = findLibmtpDylib();
 copyBrewDylib(libmtpDylib);
@@ -143,17 +159,17 @@ const sidecars = existsSync(sidecarsDir)
 // Copy every private direct dependency under its recorded basename before
 // rewriting so the packaged load command always has a matching resource.
 for (const sidecar of sidecars) {
-  for (const dependency of dylibDependencies(sidecar).filter(isHomebrewPath)) {
+  for (const dependency of dylibDependencies(sidecar).filter(isPrivatePath)) {
     if (existsSync(dependency)) copyBrewDylib(dependency);
   }
 }
 
 for (const dylib of [...copied.values()]) {
-  rewriteHomebrewDependencies(dylib, "@loader_path");
+  rewritePrivateDependencies(dylib, "@loader_path");
 }
 
 for (const sidecar of sidecars) {
-  rewriteHomebrewDependencies(sidecar, bundledLoadPrefix);
+  rewritePrivateDependencies(sidecar, bundledLoadPrefix);
 }
 
 for (const dylib of [...copied.values()]) {
@@ -165,19 +181,19 @@ for (const sidecar of sidecars) {
 }
 
 for (const sidecar of sidecars) {
-  const homebrewDeps = dylibDependencies(sidecar).filter(isHomebrewPath);
-  if (homebrewDeps.length > 0) {
+  const developerDeps = dylibDependencies(sidecar).filter(isPrivatePath);
+  if (developerDeps.length > 0) {
     throw new Error(
-      `Homebrew dylib path still present in ${sidecar}:\n${homebrewDeps.join("\n")}`,
+      `Developer dylib path still present in ${sidecar}:\n${developerDeps.join("\n")}`,
     );
   }
 }
 
 for (const dylib of [...copied.values()]) {
-  const homebrewDeps = dylibDependencies(dylib).filter(isHomebrewPath);
-  if (homebrewDeps.length > 0) {
+  const developerDeps = dylibDependencies(dylib).filter(isPrivatePath);
+  if (developerDeps.length > 0) {
     throw new Error(
-      `Homebrew dylib path still present in ${dylib}:\n${homebrewDeps.join("\n")}`,
+      `Developer dylib path still present in ${dylib}:\n${developerDeps.join("\n")}`,
     );
   }
 }

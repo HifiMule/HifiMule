@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "releaseEvidenceVersion": 1,
+  "evidenceId": "macos-x64:dmg:artifact-unavailable:providers-v1:clean-upgrade",
+  "target": "macos-x64",
+  "packageFormat": "dmg",
+  "decision": "blocker",
+  "blocker": {
+    "owner": "release-manager",
+    "rationale": "The current host is ARM64 and no immutable x64 Developer ID-signed, notarized DMG or macOS x64 clean-install and upgrade environment is available.",
+    "requiredAction": "Build and notarize the explicit x64 candidate, then run the complete floor/current clean-install, upgrade, playback, lifecycle, accessibility, physical-output and resource matrix."
+  }
+}

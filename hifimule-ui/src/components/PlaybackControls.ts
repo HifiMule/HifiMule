@@ -228,7 +228,7 @@ export class PlaybackControls {
             }
             if (!this.disposed && this.container.isConnected) {
                 if (this.seekIdentity(previous) !== this.seekIdentity(snapshot)) {
-                    this.invalidateInteractions();
+                    this.invalidateInteractions(true);
                 }
                 this.snapshot = snapshot;
                 this.anchorPositionMs = snapshot.positionMs;
@@ -309,12 +309,13 @@ export class PlaybackControls {
         this.renderTimeline();
     }
 
-    private invalidateInteractions(): void {
+    private invalidateInteractions(clearCommandError = false): void {
         ++this.interactionEpoch;
         this.scrubbing = false;
         this.scrubPreviewMs = undefined;
         this.queuedSeek = undefined;
         this.busy = this.seekBusy = this.outputBusy = false;
+        if (clearCommandError) this.commandError = '';
     }
 
     private fresh(): boolean { return playbackStore.connection() === 'fresh'; }
@@ -489,6 +490,7 @@ export class PlaybackControls {
         this.commandError = '';
         this.render(this.snapshot);
         const observed = this.snapshot;
+        let discardQueued = false;
         try {
             const current = await playbackSeek(positionMs, observed);
             if (!this.disposed && epoch === this.interactionEpoch && this.seekIdentity(this.snapshot) === identity) {
@@ -499,11 +501,16 @@ export class PlaybackControls {
                 const code = (error as { data?: { code?: string } })?.data?.code;
                 this.commandError = code ? t(`playback.error.${code}`) : t('playback.command_error');
                 this.scrubPreviewMs = undefined;
-                if (code?.includes('CONFLICT') || code?.includes('MISMATCH')) void playbackStore.refresh().catch(() => {});
+                if (code?.includes('CONFLICT') || code?.includes('MISMATCH')) {
+                    discardQueued = true;
+                    this.queuedSeek = undefined;
+                    try { await playbackStore.refresh(); } catch { /* Preserve the scoped command error. */ }
+                }
             }
         } finally {
             if (this.disposed || epoch !== this.interactionEpoch) return;
             this.seekBusy = false;
+            if (discardQueued) this.queuedSeek = undefined;
             const queued = this.queuedSeek;
             this.queuedSeek = undefined;
             if (!this.disposed && this.fresh() && epoch === this.interactionEpoch && queued && queued.identity === this.seekIdentity(this.snapshot)

@@ -820,6 +820,30 @@ test('repeated scrubs coalesce to the latest target while seek RPC is pending', 
   h.component.destroy();
 });
 
+test('a conflicting seek discards queued work instead of replaying a stale snapshot', async () => {
+  const calls = [];
+  let rejectFirst;
+  const initial = snapshot('paused');
+  initial.playback.durationMs = 10_000;
+  initial.playback.seek = { available: true };
+  const h = harness(initial, async () => {}, { seek: (position, observed) => {
+    calls.push([position, observed.stateSequence]);
+    if (calls.length === 1) return new Promise((_resolve, reject) => { rejectFirst = reject; });
+    return Promise.resolve({ ...initial, stateSequence: String(calls.length + 1) });
+  }});
+  await h.tick();
+  const first = h.component.submitSeek(2_000);
+  await h.component.submitSeek(4_000);
+  rejectFirst({ data: { code: 'PLAYBACK_CONFLICT' } });
+  await first;
+  for (let turn = 0; turn < 24; turn++) await Promise.resolve();
+  assert.deepEqual(calls, [[2_000, '1']]);
+
+  await h.component.submitSeek(6_000);
+  assert.deepEqual(calls, [[2_000, '1'], [6_000, '1']]);
+  h.component.destroy();
+});
+
 test('authoritative clock advances only while fresh and reanchors backward', async () => {
   const active = snapshot('playing');
   active.positionMs = 2_000;
@@ -898,6 +922,31 @@ test('seek rejection renders without a state change and retry clears the error',
   reject = false; await h.component.submitSeek(1000);
   assert.doesNotMatch(text(h.container), /playback.error.INVALID_SEEK/);
   h.component.destroy();
+});
+
+test('command errors survive same-identity refreshes but clear for a new occurrence, session, or generation', async () => {
+  for (const replacement of [
+    { current: { occurrenceId: 'replacement', source: { serverId: 'server', trackId: 'other' } } },
+    { sessionId: 'replacement-session' },
+    { generationId: 'replacement-generation' },
+  ]) {
+    const initial = snapshot('paused');
+    initial.playback.durationMs = 10_000;
+    initial.playback.seek = { available: true };
+    const h = harness(initial, async () => {}, { seek: async () => { throw { data: { code: 'INVALID_SEEK' } }; } });
+    await h.tick();
+    await h.component.submitSeek(11_000);
+    assert.match(text(h.container), /playback.error.INVALID_SEEK/);
+
+    h.setSnapshot({ ...initial, stateSequence: '2' });
+    await h.tick();
+    assert.match(text(h.container), /playback.error.INVALID_SEEK/);
+
+    h.setSnapshot({ ...initial, ...replacement, stateSequence: '3' });
+    await h.tick();
+    assert.doesNotMatch(text(h.container), /playback.error.INVALID_SEEK/);
+    h.component.destroy();
+  }
 });
 
 test('real shared-store heartbeat delivers output discovery completion without a session change', async () => {

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
 const manifest = JSON.parse(readFileSync(resolve(root, 'hifimule-daemon/audio-runtime.json'), 'utf8'));
-if (manifest.ffmpegRelease !== '9.0.1' || !/^[a-f0-9]{64}$/.test(manifest.sourceSha256)) {
+if (manifest.ffmpegRelease !== '9.0.2' || !/^[a-f0-9]{64}$/.test(manifest.sourceSha256)) {
   throw new Error('Audio runtime manifest is incomplete');
 }
 

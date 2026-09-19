@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect and validate sanitized Stories 15.4–15.9 installed-playback evidence."""
+"""Collect and validate sanitized installed-playback and release evidence."""
 
 from __future__ import annotations
 
@@ -18,6 +18,32 @@ import urllib.request
 
 
 REQUIRED_TARGETS = ("windows-x64", "linux-x64", "macos-x64", "macos-arm64")
+REQUIRED_RELEASE_ROWS = (
+    ("windows-x64", "msi"),
+    ("windows-x64", "nsis"),
+    ("linux-x64", "deb"),
+    ("linux-x64", "appimage"),
+    ("macos-x64", "dmg"),
+    ("macos-arm64", "dmg"),
+)
+RELEASE_SCENARIOS = (
+    "provider-format-playback",
+    "track-and-ordered-album",
+    "queue-preview-return-back-next-seek",
+    "output-selection-loss-reconnection",
+    "window-close-reopen",
+    "duplicate-launch",
+    "sleep-wake",
+    "paused-restoration",
+    "native-controls-ui-open-closed",
+    "physical-media-keys",
+    "safe-quit-real-sync",
+    "physical-device-sync",
+    "floating-bar-and-compact-browse",
+    "keyboard-focus-final-rows",
+    "screen-reader-and-live-regions",
+    "themes-widths-divider-and-text-scaling",
+)
 PULSE_MAX_BUFFER_BYTES = 48_000 * 2 * 4 // 10  # 100 ms, stereo float32
 FIXTURES = ("wav", "flac", "alac-m4a", "mp3", "aac-m4a", "opus")
 SCENARIOS = (
@@ -72,6 +98,10 @@ SECRET_KEY = re.compile(r"token|password|authorization|cookie|secret|url|header"
 REMOTE_URL = re.compile(r"https?://", re.I)
 SECRET_VALUE = re.compile(r"(?:bearer\s+|api[_-]?key\s*[=:]|token\s*[=:]|password\s*[=:])", re.I)
 NATIVE_LIBRARY = re.compile(r"(?:lib)?(?:avcodec|avformat|avutil|swresample|pulse)[^/\\]*\.(?:dll|dylib|so(?:\.\d+)*)$", re.I)
+RELEASE_SECRET_KEY = re.compile(
+    r"(?:ownerToken|accessToken|refreshToken|authorization|cookie|password|requestHeaders|"
+    r"authenticatedUrl|serverId|trackId|endpointId|outputId)$", re.I)
+HOME_PATH = re.compile(r"(?:^|[\s'\"])(?:/Users/[^/\s]+|/home/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s]+)", re.I)
 
 
 def now() -> str:
@@ -141,6 +171,199 @@ def sanitize(value, path="record"):
         if SECRET_VALUE.search(value):
             raise ValueError(f"secret-like value is forbidden at {path}")
     return value
+
+
+def release_privacy_errors(value, path="record") -> list[str]:
+    """Reject release evidence that could expose credentials, raw identities, or profiles."""
+    errors = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if RELEASE_SECRET_KEY.search(str(key)):
+                errors.append(f"raw identifier or secret-bearing field is forbidden at {path}.{key}")
+            errors.extend(release_privacy_errors(child, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            errors.extend(release_privacy_errors(child, f"{path}[{index}]"))
+    elif isinstance(value, str):
+        if REMOTE_URL.search(value) or SECRET_VALUE.search(value):
+            errors.append(f"authenticated/remote URL or secret-like value is forbidden at {path}")
+        if HOME_PATH.search(value):
+            errors.append(f"unredacted home/profile path is forbidden at {path}")
+    return errors
+
+
+def validate_release_record(record: dict) -> list[str]:
+    """Validate the additive Story 15.17 schema without weakening schema v1."""
+    if not isinstance(record, dict):
+        return ["release record is not an object"]
+    errors = release_privacy_errors(record)
+    if record.get("schemaVersion") != 2 or record.get("releaseEvidenceVersion") != 1:
+        errors.append("release evidence schema/version is unsupported")
+    row = (record.get("target"), record.get("packageFormat"))
+    if row not in REQUIRED_RELEASE_ROWS:
+        errors.append(f"unsupported release row: {row[0]}/{row[1]}")
+    evidence_id = record.get("evidenceId")
+    if not isinstance(evidence_id, str) or not evidence_id.strip():
+        errors.append("stable evidence identity is missing")
+    decision = record.get("decision")
+    if decision not in {"pass", "blocker", "unsupported"}:
+        errors.append("release decision must be pass, blocker, or unsupported")
+        return errors
+    if decision in {"blocker", "unsupported"}:
+        disposition = record.get("blocker") if decision == "blocker" else record.get("unsupported")
+        if not isinstance(disposition, dict) or any(
+            not isinstance(disposition.get(key), str) or not disposition[key].strip()
+            for key in ("owner", "rationale", "requiredAction")
+        ):
+            errors.append(f"{decision} decision lacks owner, rationale, or required action")
+        return errors
+
+    artifact = record.get("artifact")
+    if not isinstance(artifact, dict):
+        errors.append("artifact identity is missing")
+        artifact = {}
+    artifact_hash = artifact.get("sha256")
+    source_revision = artifact.get("sourceRevision")
+    if not isinstance(artifact.get("fileName"), str) or not artifact["fileName"].strip():
+        errors.append("artifact filename is missing")
+    if not isinstance(artifact_hash, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_hash) is None:
+        errors.append("artifact SHA-256 is missing or invalid")
+    if not isinstance(source_revision, str) or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        errors.append("artifact source revision is missing or invalid")
+    if isinstance(evidence_id, str) and any(str(value) not in evidence_id for value in (*row, artifact_hash)):
+        errors.append("evidence identity does not bind target, package format, and artifact hash")
+    signing = artifact.get("signing", {})
+    if signing.get("status") != "passed" or not signing.get("identity"):
+        errors.append("distribution signing/notarization evidence is not passed")
+    licenses = artifact.get("licenses", {})
+    if licenses.get("noticePresent") is not True or licenses.get("ffmpegSourceOffer") is not True:
+        errors.append("license notice or FFmpeg source offer is missing")
+
+    runtime = record.get("runtime", {})
+    if re.fullmatch(r"[0-9a-f]{64}", str(runtime.get("manifestSha256", ""))) is None:
+        errors.append("runtime manifest identity is missing")
+    versions = runtime.get("loadedVersions", {})
+    if any(not versions.get(name) for name in ("avcodec", "avformat", "avutil", "swresample")):
+        errors.append("loaded runtime versions are incomplete")
+    paths = runtime.get("loadedPaths")
+    if not isinstance(paths, list) or not paths or any(not isinstance(path, str) or not path for path in paths):
+        errors.append("installed runtime load paths are missing")
+
+    providers = record.get("providers")
+    if not isinstance(providers, list) or {item.get("kind") for item in providers if isinstance(item, dict)} != {"jellyfin", "subsonic"}:
+        errors.append("exact Jellyfin and Subsonic provider sets are required")
+    else:
+        for provider in providers:
+            if not provider.get("version") or not isinstance(provider.get("capabilities"), list) or not provider["capabilities"]:
+                errors.append("provider version/capability identity is incomplete")
+            if provider.get("kind") == "subsonic" and not provider.get("implementation"):
+                errors.append("Subsonic implementation identity is missing")
+
+    environment = record.get("environment", {})
+    required_environment = ("osVersion", "architecture", "upgradeFrom")
+    if any(not isinstance(environment.get(key), str) or not environment[key].strip() for key in required_environment):
+        errors.append("install/upgrade environment identity is incomplete")
+    install_key = "cleanLaunch" if row[1] == "appimage" else "cleanInstall"
+    for key in (install_key, "upgrade", "interruptedMigration"):
+        if environment.get(key) != "passed":
+            errors.append(f"environment {key} is not passed")
+    for key in ("noBuildTools", "noSystemFfmpeg"):
+        if environment.get(key) is not True:
+            errors.append(f"environment {key} is not proven")
+    if environment.get("elevationRequired") is not False:
+        errors.append("installed playback required elevation")
+    permissions = record.get("permissions", {})
+    if permissions.get("outcome") != "passed" or not permissions.get("policy"):
+        errors.append("package permissions/origin policy is not passed")
+
+    scenarios = record.get("scenarios", {})
+    for name in RELEASE_SCENARIOS:
+        if scenarios.get(name) != "passed":
+            errors.append(f"release scenario {name} is not passed")
+
+    resources = record.get("resourceWorkload", {})
+    numeric_requirements = {
+        "durationMinutes": (30, None), "warmupMinutes": (5, None),
+        "sampleIntervalSeconds": (None, 5), "rssDeltaP95MiB": (None, 128),
+        "retainedRssGrowthMiB": (None, 16),
+    }
+    if resources.get("outcome") != "passed":
+        errors.append("resource workload is not passed")
+    for key, (minimum, maximum) in numeric_requirements.items():
+        value = resources.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) \
+                or minimum is not None and value < minimum \
+                or maximum is not None and value > maximum:
+            errors.append(f"resource workload {key} is invalid or outside the release bound")
+    if type(resources.get("normalizedCpuP95")) not in (int, float):
+        errors.append("normalized p95 CPU measurement is missing")
+
+    material = record.get("materialEvidence")
+    if not isinstance(material, list) or not material:
+        errors.append("immutable material evidence is missing")
+    else:
+        for item in material:
+            if (not isinstance(item, dict)
+                    or re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))) is None
+                    or not str(item.get("uri", "")).startswith(("ci-artifact://", "release-artifact://"))
+                    or not item.get("retention")):
+                errors.append("material evidence lacks hash, immutable URI, or retention policy")
+    limitations = record.get("limitations")
+    if not isinstance(limitations, list) or any(
+        not isinstance(item, dict) or item.get("approved") is not True
+        or not item.get("owner") or not item.get("rationale") for item in limitations
+    ):
+        errors.append("limitations are malformed or unapproved")
+    return errors
+
+
+def validate_release_manifest(manifest: dict, directory: Path) -> list[str]:
+    errors = []
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+        return ["release manifest schema is unsupported"]
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(manifest.get("releaseVersion", ""))):
+        errors.append("release version is missing or invalid")
+    revision_value = manifest.get("sourceRevision")
+    if re.fullmatch(r"[0-9a-f]{40}", str(revision_value or "")) is None:
+        errors.append("release source revision is missing or invalid")
+    rows = manifest.get("rows")
+    if not isinstance(rows, list):
+        return errors + ["release manifest rows are missing"]
+    found = {}
+    decisions = []
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            errors.append(f"release manifest row {index} is invalid")
+            continue
+        key = (item.get("target"), item.get("packageFormat"))
+        if key in found:
+            errors.append(f"release row {key[0]}/{key[1]} is duplicated")
+            continue
+        found[key] = item
+        record_name = item.get("record")
+        if not isinstance(record_name, str) or Path(record_name).name != record_name:
+            errors.append(f"release row {key[0]}/{key[1]} has an unsafe record path")
+            continue
+        try:
+            record = json.loads((directory / record_name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f"release row {key[0]}/{key[1]} record is missing or invalid: {error}")
+            continue
+        if (record.get("target"), record.get("packageFormat")) != key:
+            errors.append(f"release row {key[0]}/{key[1]} record identity disagrees with manifest")
+        errors.extend(f"release row {key[0]}/{key[1]}: {error}" for error in validate_release_record(record))
+        if record.get("decision") == "pass" and record.get("artifact", {}).get("sourceRevision") != revision_value:
+            errors.append(f"release row {key[0]}/{key[1]} source revision disagrees with manifest")
+        decisions.append(record.get("decision"))
+    for target, package_format in REQUIRED_RELEASE_ROWS:
+        if (target, package_format) not in found:
+            errors.append(f"release row {target}/{package_format} is missing")
+    derived = "pass" if len(decisions) == len(REQUIRED_RELEASE_ROWS) and all(value == "pass" for value in decisions) else "blocker"
+    if manifest.get("aggregateDecision") != derived:
+        errors.append(f"aggregate decision disagrees with required rows: expected {derived}")
+    if derived != "pass":
+        errors.append("aggregate release decision is blocker because one or more required installer rows are not passed")
+    return errors
 
 
 def safe_audio_runtime(runtime: dict) -> dict:
@@ -1085,7 +1308,8 @@ def main(argv=None) -> int:
     collect_parser.add_argument("--desktop-session", required=True,
                                 help="Desktop/session route, for example macOS Aqua, Windows 11 Explorer, GNOME Wayland")
     collect_parser.add_argument("--output", required=True)
-    validate_parser = subparsers.add_parser("validate", help="validate one record or a four-target directory")
+    validate_parser = subparsers.add_parser(
+        "validate", help="validate one legacy record/directory or a v2 release record/manifest")
     validate_parser.add_argument("path")
     args = parser.parse_args(argv)
     if args.command == "collect":
@@ -1095,7 +1319,13 @@ def main(argv=None) -> int:
         errors = validate_matrix(path)
     else:
         try:
-            errors = validate_record(json.loads(path.read_text(encoding="utf-8")))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("schemaVersion") == 2 and isinstance(payload.get("rows"), list):
+                errors = validate_release_manifest(payload, path.parent)
+            elif payload.get("schemaVersion") == 2:
+                errors = validate_release_record(payload)
+            else:
+                errors = validate_record(payload)
         except (OSError, json.JSONDecodeError) as error:
             errors = [f"invalid evidence file: {error}"]
     for error in errors:

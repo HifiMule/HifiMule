@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "releaseEvidenceVersion": 1,
+  "evidenceId": "linux-x64:deb:artifact-unavailable:providers-v1:clean-upgrade",
+  "target": "linux-x64",
+  "packageFormat": "deb",
+  "decision": "blocker",
+  "blocker": {
+    "owner": "release-manager",
+    "rationale": "The current host is macOS ARM64; no immutable deb or Ubuntu 22.04 x64 desktop, PulseAudio and physical-output test environment is available.",
+    "requiredAction": "Build the explicit Ubuntu candidate, inspect its private closure, then run the complete clean-install, upgrade, playback, lifecycle, accessibility, physical-output and resource matrix."
+  }
+}

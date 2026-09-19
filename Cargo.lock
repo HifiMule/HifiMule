@@ -2011,7 +2011,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hifimule-daemon"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "hifimule-i18n"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "serde_json",
  "windows-sys 0.59.0",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "hifimule-lifecycle"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "libc",
  "rand 0.8.5",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "hifimule-ui"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

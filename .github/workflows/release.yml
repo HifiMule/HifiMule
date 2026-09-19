@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: 'Exact commit SHA or immutable ref to build'
+        required: true
+        type: string
+      candidate_version:
+        description: 'Candidate version (must match Cargo and Tauri)'
+        required: true
+        default: '0.15.0'
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -18,22 +29,28 @@ jobs:
       matrix:
         include:
           - platform: macos-15-intel
+            row: macos-x64
             args: --target x86_64-apple-darwin
             rust-targets: x86_64-apple-darwin
           - platform: macos-15
+            row: macos-arm64
             args: --target aarch64-apple-darwin
             rust-targets: aarch64-apple-darwin
           - platform: ubuntu-22.04
+            row: linux-x64
             args: ''
             rust-targets: ''
           - platform: windows-latest
-            args: ''
+            row: windows-x64
+            args: --config src-tauri/tauri.windows-signing.conf.json
             rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.candidate_ref || github.ref }}
 
       - name: Install pnpm
         # action-v4.0.0 (latest reviewed for this hardening pass)
@@ -46,10 +63,22 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust 1.93.0
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: ${{ matrix.rust-targets }}
+
+      - name: Verify candidate identity
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.candidate_version }}
+          EXPECTED_REF: ${{ inputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$EXPECTED_REF^{commit}")"
+          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" = "$EXPECTED_VERSION"
+          node -e 'const c=require("./hifimule-ui/src-tauri/tauri.conf.json"); if(c.version!==process.env.EXPECTED_VERSION) process.exit(1)'
 
       - name: Install Windows FFmpeg source-build tools
         if: matrix.platform == 'windows-latest'
@@ -101,7 +130,7 @@ jobs:
       - name: Install macOS dependencies
         if: startsWith(matrix.platform, 'macos')
         run: |
-          brew install pkg-config libmtp ffmpeg
+          brew install pkg-config libmtp nasm
           LIBMTP_PREFIX="$(brew --prefix libmtp)"
           LIBMTP_PC_DIR="$LIBMTP_PREFIX/lib/pkgconfig"
 
@@ -112,6 +141,45 @@ jobs:
           LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' -print -quit)"
           test -n "$LIBMTP_DYLIB"
           lipo "$LIBMTP_DYLIB" -verify_arch "$(uname -m)"
+
+      - name: Provision controlled macOS audio runtime
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          node scripts/macos-audio-runtime.mjs env "$TARGET_TRIPLE" "$GITHUB_ENV"
+
+      - name: Require Windows Authenticode credentials
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows Authenticode credentials are required' }
+          $CertificatePath = Join-Path $env:RUNNER_TEMP 'hifimule-signing.pfx'
+          [IO.File]::WriteAllBytes($CertificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $Password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $Certificate = Import-PfxCertificate -FilePath $CertificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $Password
+          if (-not $Certificate.Thumbprint) { throw 'Imported certificate has no thumbprint' }
+          $Config = @{ bundle = @{ windows = @{ certificateThumbprint = $Certificate.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path hifimule-ui/src-tauri/tauri.windows-signing.conf.json -Value $Config -Encoding utf8
+
+      - name: Require macOS Developer ID and notarization credentials
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            test -n "${!name:-}" || { echo "$name is required for direct-distribution candidates"; exit 1; }
+          done
 
       - name: Install frontend dependencies
         working-directory: hifimule-ui
@@ -124,13 +192,33 @@ jobs:
         if: startsWith(matrix.platform, 'macos')
         run: node scripts/check-macos-minimum-system-version.mjs
 
-      - name: Build and release
+      - name: Build immutable candidate
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: hifimule-ui
+        env:
+          HIFIMULE_SKIP_SIDECAR_PREP: "1"
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm exec tauri build ${{ matrix.args }}
+
+      - name: Build draft release
+        if: github.event_name == 'push'
         id: build_and_release
         # action-v0.6.2 (latest reviewed for this hardening pass)
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFIMULE_SKIP_SIDECAR_PREP: "1"
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'HifiMule ${{ github.ref_name }}'
@@ -172,7 +260,7 @@ jobs:
           node scripts/linux-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" deb-root
           rm -rf deb-root
 
-      - name: Verify macOS bundle uses bundled libmtp
+      - name: Verify macOS controlled runtime bundle
         if: startsWith(matrix.platform, 'macos')
         run: |
           set -euo pipefail
@@ -185,26 +273,10 @@ jobs:
           test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
           APP_DIR="$(find "${TARGET_DIRS[@]}" -path '*.app' -type d -print -quit)"
           test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
-          test -n "$(find "$APP_DIR/Contents/Resources/bundled-libs" -name 'libmtp*.dylib' -print -quit)" || {
-            echo "Bundled libmtp dylib not found in app resources"
-            exit 1
-          }
-          find "$APP_DIR/Contents/MacOS" -type f -name 'hifimule-daemon*' -print0 | while IFS= read -r -d '' sidecar; do
-            if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local'; then
-              echo "Homebrew dylib path still present in bundled sidecar: $sidecar"
-              otool -L "$sidecar"
-              exit 1
-            fi
-          done
-          find "$APP_DIR/Contents/Resources/bundled-libs" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
-            if otool -L "$dylib" | grep -E '/opt/homebrew|/usr/local'; then
-              echo "Homebrew dylib path still present in bundled dylib: $dylib"
-              otool -L "$dylib"
-              exit 1
-            fi
-          done
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          node scripts/macos-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" "$APP_DIR"
 
-      - name: Verify macOS bundle is validly ad-hoc signed
+      - name: Verify macOS Developer ID and notarization
         if: startsWith(matrix.platform, 'macos')
         run: |
           set -euo pipefail
@@ -217,21 +289,85 @@ jobs:
           test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
           APP_DIR="$(find "${TARGET_DIRS[@]}" -path '*.app' -type d -print -quit)"
           test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
-          # A broken/linker-only signature makes Gatekeeper report the app as
-          # "damaged" once it has been quarantined (i.e. downloaded). Fail the
-          # release before that ever ships.
           codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+          codesign -dv --verbose=4 "$APP_DIR" 2>&1 | grep -q 'Authority=Developer ID Application:'
           codesign -dv --verbose=2 "$APP_DIR" 2>&1 | grep -q 'Sealed Resources' || {
             echo "Bundle signature is missing sealed resources"
             codesign -dv --verbose=2 "$APP_DIR" 2>&1
             exit 1
           }
+          spctl --assess --type execute --verbose=4 "$APP_DIR"
+          DMG="$(find "${TARGET_DIRS[@]}" -path '*/release/bundle/*' -name '*.dmg' -print -quit)"
+          test -n "$DMG" || { echo 'DMG artifact not found'; exit 1; }
+          xcrun stapler validate "$DMG"
 
-  smoke-test:
+      - name: Verify Windows installed audio bundle
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $Msi = Get-ChildItem target,hifimule-ui/src-tauri/target -Filter *.msi -Recurse | Select-Object -First 1
+          if (-not $Msi) { throw 'MSI artifact not found' }
+          $Extracted = Join-Path $env:RUNNER_TEMP 'hifimule-msi'
+          New-Item -ItemType Directory -Force $Extracted | Out-Null
+          $Process = Start-Process msiexec.exe -ArgumentList "/a `"$($Msi.FullName)`" /qn TARGETDIR=`"$Extracted`"" -Wait -PassThru
+          if ($Process.ExitCode -ne 0) { throw "MSI administrative extraction failed: $($Process.ExitCode)" }
+          node scripts/windows-audio-runtime.mjs verify-bundle x86_64-pc-windows-msvc $Extracted
+
+      - name: Verify Windows Authenticode signatures
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $Artifacts = Get-ChildItem target,hifimule-ui/src-tauri/target -Recurse -File | Where-Object { $_.Extension -in '.msi', '.exe' -and $_.FullName -match '[\\/]bundle[\\/]' }
+          if (($Artifacts | Measure-Object).Count -lt 2) { throw 'Both MSI and NSIS artifacts are required' }
+          foreach ($Artifact in $Artifacts) {
+            $Signature = Get-AuthenticodeSignature $Artifact.FullName
+            if ($Signature.Status -ne 'Valid' -or -not $Signature.SignerCertificate) { throw "Invalid Authenticode signature: $($Artifact.FullName) ($($Signature.Status))" }
+          }
+
+      - name: Write immutable candidate checksums
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          CANDIDATE_ROW: ${{ matrix.row }}
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate-metadata
+          find target hifimule-ui/src-tauri/target -path '*/release/bundle/*' -type f -print0 2>/dev/null \
+            | sort -z \
+            | xargs -0 shasum -a 256 > "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.sha256"
+          test -s "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.sha256"
+          git rev-parse HEAD > "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.source-revision"
+
+      - name: Upload immutable candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: hifimule-candidate-${{ inputs.candidate_version }}-${{ matrix.row }}
+          path: |
+            target/**/release/bundle/**/*
+            hifimule-ui/src-tauri/target/**/release/bundle/**/*
+            candidate-metadata/*
+          if-no-files-found: error
+          retention-days: 30
+
+  smoke-release:
+    if: github.event_name == 'push'
     needs: release
     permissions:
       contents: write
     uses: ./.github/workflows/smoke-test.yml
     with:
       release_tag: ${{ github.ref_name }}
+    secrets: inherit
+
+  smoke-candidate:
+    if: github.event_name == 'workflow_dispatch'
+    needs: release
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/smoke-test.yml
+    with:
+      candidate_version: ${{ inputs.candidate_version }}
     secrets: inherit

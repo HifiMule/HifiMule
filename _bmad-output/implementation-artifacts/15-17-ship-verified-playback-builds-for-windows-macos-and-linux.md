@@ -1,6 +1,10 @@
+---
+baseline_commit: bf9f4254940bfbc35c23c25ac3bb3b4e8b8e169f
+---
+
 # Story 15.17: Ship verified playback builds for Windows, macOS and Linux
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -23,33 +27,33 @@ so that listening works without a development environment or manually installed 
 
 ## Tasks / Subtasks
 
-- [ ] Freeze the release contract before changing packages or evidence (AC: 1, 2, 8, 9).
-  - [ ] Record the actual matrix: Windows x64, Linux x64, macOS x64 and macOS ARM64. Do not add Windows/Linux ARM claims. Explicitly configure Windows to produce MSI and NSIS, Linux to produce only deb and AppImage (not Tauri's broader `all`, which also includes RPM), and macOS to produce separate x64/ARM64 app payloads and DMGs.
-  - [ ] Use release candidate `0.15.0` (the first unused minor after shipped `v0.14.0`) consistently across Cargo, Tauri and artifact metadata unless Alexis approves a different version before implementation. Treat `v0.14.0` as the mandatory in-place upgrade baseline on the same host; older direct upgrades are unsupported unless separately tested, and machine-bound credentials are not cross-host migration evidence.
-  - [ ] Define supported OS floors: Windows 10 and 11 x64 desktop; Ubuntu 22.04 x64; macOS 10.15+ x64 and macOS 11+ ARM64. Run install/launch/playback at the declared floor and a current environment, or raise/narrow the advertised floor in configuration and documentation with evidence. A mutable `*-latest`/Server runner is build evidence, not a desktop-floor test.
-  - [ ] Define clean-install and upgrade fixtures, supported provider/version/capability combinations, physical versus virtual output expectations, evidence owner and blocker/disposition vocabulary.
-  - [ ] Add a non-publishing candidate path (`workflow_dispatch` or equivalent) that builds from an explicit commit/ref and version, uploads immutable candidate artifacts, and hands them to smoke/evidence jobs without a pushed `v*` tag. Keep release creation draft-only; do not tag, push or publish as part of this story.
-  - [ ] Reconcile `docs/release-guide.md` with the current four-job workflow; remove the stale three-job/universal-macOS description and accurately document the draft/smoke/manual gates.
-- [ ] Close the controlled-runtime, licensing and bundle-verification gates (AC: 1, 2, 6, 8, 9).
-  - [ ] Decide the FFmpeg release deliberately. The repository pins 9.0.1, while official FFmpeg 9.0.2 was released 2026-09-18. Either retain 9.0.1 with an evidence-backed security/compatibility decision or update the source URL/signature/hash/ABI/receipts/build constant/notices together and rerun every affected package/runtime/playback check. Never accept an incidental package-manager upgrade.
-  - [ ] Reconcile `audio-runtime.json` ABI declarations against the actual source-built and loaded libraries. Remove the non-shipping Linux ARM verification row and replace pending labels only with real evidence.
-  - [ ] Fix `THIRD_PARTY_AUDIO_NOTICES.md`: it currently says CPAL 0.16.0 while code pins the local CPAL 0.18.2 patch. Verify FFmpeg LGPL configuration/source offer, Rust crate notices and packaged notice presence.
-  - [ ] Make macOS use and prove a controlled runtime rather than accepting an arbitrary Homebrew FFmpeg. Preserve per-architecture builds, rewrite private dylib load paths, sign the full closure and verify no Homebrew/developer path remains.
-  - [ ] Add equivalent post-bundle audio-runtime/architecture/load-path checks for Windows and macOS to the existing Linux bundle checks. Fail on missing libraries, wrong architecture/ABI, system paths, incomplete transitive closure or mismatched manifest/receipt.
-  - [ ] Treat distribution trust as a shipping gate: Windows MSI/NSIS require valid Authenticode signing; macOS app/DMG require Developer ID signing and notarization for direct distribution. Missing credentials/signatures/notarization block the row rather than becoming an optional limitation. Linux packages require recorded SHA-256 and an accurate package-origin/install policy.
-  - [ ] Pin CI Rust to workspace MSRV/toolchain 1.93.0 unless a reviewed reproducibility decision changes both together. Preserve Tauri sidecar naming and platform-specific resource placement.
-- [ ] Resolve inherited release-blocking defects, then retain the fixes in the release matrix (AC: 5, 7, 10).
-  - [ ] **15.12 R16:** add one shared physical-target admission API for user mutations (`add`, `remove`, `toggle`, `clear`) and apply it through `library.ts`, `MediaCard.ts`, `TracksBrowseView.ts`, `BasketSidebar.ts` and `state/basket.ts`. Do not block trusted reconciliation paths such as daemon hydration, device cleanup or server-removal cleanup. Preserve browsing, Play and Preview with no physical device and preserve cross-server read-only behavior.
-  - [ ] **15.14 R8:** when a seek conflicts or its observed identity/revision is stale, discard queued seeks and refresh authoritative state before allowing a new user action; never replay queued work from the stale snapshot.
-  - [ ] **15.14 R9:** scope or clear command errors when session/occurrence/generation identity changes while preserving actionable same-identity failures.
-  - [ ] Add controlled store/DOM/promise regressions for all three defects and update `deferred-work.md` only after the fixes and tests exist.
-- [ ] Extend evidence tooling from feature probes to a release-decision schema (AC: 3–10).
-  - [ ] Version `scripts/playback-installed-evidence.py` rather than weakening older evidence rules. Add artifact/signing/license/permission facts, clean-install and upgrade/migration outcomes, daemon lifecycle/safe-Quit scenarios, Preview/queue/Back/compact-browse/UI accessibility, real-sync coexistence and explicit blocker/limitation/disposition fields.
-  - [ ] Use a stable evidence identity containing target OS/architecture + package format + artifact SHA-256 + provider/version/capability set + install/upgrade environment. Require clean-install/upgrade for every end-user installer (MSI, NSIS, deb, each DMG) and clean-launch for AppImage; extracted app/bundle inspection is supplemental and cannot hide a failed installer row.
-  - [ ] Sanitize all output: never persist owner tokens, credentials, request headers, authenticated URLs, raw endpoint identifiers, provider error bodies or home/profile paths.
-  - [ ] Make validation fail for a missing row, failed required scenario, absent artifact/runtime identity, stale/incompatible evidence, unapproved limitation or aggregate/pass disagreement.
-  - [ ] Store the release manifest and target records under the existing `docs/playback-evidence/` convention. Do not fabricate result files; unavailable machines/hardware produce explicit blocker records, not passes.
-  - [ ] Retain physical continuity captures and other material binary evidence in immutable release/CI artifact storage with SHA-256, URI, capture metadata and retention policy. A disappearing machine-local `rawCapturePath` is not auditable evidence.
+- [x] Freeze the release contract before changing packages or evidence (AC: 1, 2, 8, 9).
+  - [x] Record the actual matrix: Windows x64, Linux x64, macOS x64 and macOS ARM64. Do not add Windows/Linux ARM claims. Explicitly configure Windows to produce MSI and NSIS, Linux to produce only deb and AppImage (not Tauri's broader `all`, which also includes RPM), and macOS to produce separate x64/ARM64 app payloads and DMGs.
+  - [x] Use release candidate `0.15.0` (the first unused minor after shipped `v0.14.0`) consistently across Cargo, Tauri and artifact metadata unless Alexis approves a different version before implementation. Treat `v0.14.0` as the mandatory in-place upgrade baseline on the same host; older direct upgrades are unsupported unless separately tested, and machine-bound credentials are not cross-host migration evidence.
+  - [x] Define supported OS floors: Windows 10 and 11 x64 desktop; Ubuntu 22.04 x64; macOS 10.15+ x64 and macOS 11+ ARM64. Run install/launch/playback at the declared floor and a current environment, or raise/narrow the advertised floor in configuration and documentation with evidence. A mutable `*-latest`/Server runner is build evidence, not a desktop-floor test.
+  - [x] Define clean-install and upgrade fixtures, supported provider/version/capability combinations, physical versus virtual output expectations, evidence owner and blocker/disposition vocabulary.
+  - [x] Add a non-publishing candidate path (`workflow_dispatch` or equivalent) that builds from an explicit commit/ref and version, uploads immutable candidate artifacts, and hands them to smoke/evidence jobs without a pushed `v*` tag. Keep release creation draft-only; do not tag, push or publish as part of this story.
+  - [x] Reconcile `docs/release-guide.md` with the current four-job workflow; remove the stale three-job/universal-macOS description and accurately document the draft/smoke/manual gates.
+- [x] Close the controlled-runtime, licensing and bundle-verification gates (AC: 1, 2, 6, 8, 9).
+  - [x] Decide the FFmpeg release deliberately. The repository pins 9.0.1, while official FFmpeg 9.0.2 was released 2026-09-18. Either retain 9.0.1 with an evidence-backed security/compatibility decision or update the source URL/signature/hash/ABI/receipts/build constant/notices together and rerun every affected package/runtime/playback check. Never accept an incidental package-manager upgrade.
+  - [x] Reconcile `audio-runtime.json` ABI declarations against the actual source-built and loaded libraries. Remove the non-shipping Linux ARM verification row and replace pending labels only with real evidence.
+  - [x] Fix `THIRD_PARTY_AUDIO_NOTICES.md`: it currently says CPAL 0.16.0 while code pins the local CPAL 0.18.2 patch. Verify FFmpeg LGPL configuration/source offer, Rust crate notices and packaged notice presence.
+  - [x] Make macOS use and prove a controlled runtime rather than accepting an arbitrary Homebrew FFmpeg. Preserve per-architecture builds, rewrite private dylib load paths, sign the full closure and verify no Homebrew/developer path remains.
+  - [x] Add equivalent post-bundle audio-runtime/architecture/load-path checks for Windows and macOS to the existing Linux bundle checks. Fail on missing libraries, wrong architecture/ABI, system paths, incomplete transitive closure or mismatched manifest/receipt.
+  - [x] Treat distribution trust as a shipping gate: Windows MSI/NSIS require valid Authenticode signing; macOS app/DMG require Developer ID signing and notarization for direct distribution. Missing credentials/signatures/notarization block the row rather than becoming an optional limitation. Linux packages require recorded SHA-256 and an accurate package-origin/install policy.
+  - [x] Pin CI Rust to workspace MSRV/toolchain 1.93.0 unless a reviewed reproducibility decision changes both together. Preserve Tauri sidecar naming and platform-specific resource placement.
+- [x] Resolve inherited release-blocking defects, then retain the fixes in the release matrix (AC: 5, 7, 10).
+  - [x] **15.12 R16:** add one shared physical-target admission API for user mutations (`add`, `remove`, `toggle`, `clear`) and apply it through `library.ts`, `MediaCard.ts`, `TracksBrowseView.ts`, `BasketSidebar.ts` and `state/basket.ts`. Do not block trusted reconciliation paths such as daemon hydration, device cleanup or server-removal cleanup. Preserve browsing, Play and Preview with no physical device and preserve cross-server read-only behavior.
+  - [x] **15.14 R8:** when a seek conflicts or its observed identity/revision is stale, discard queued seeks and refresh authoritative state before allowing a new user action; never replay queued work from the stale snapshot.
+  - [x] **15.14 R9:** scope or clear command errors when session/occurrence/generation identity changes while preserving actionable same-identity failures.
+  - [x] Add controlled store/DOM/promise regressions for all three defects and update `deferred-work.md` only after the fixes and tests exist.
+- [x] Extend evidence tooling from feature probes to a release-decision schema (AC: 3–10).
+  - [x] Version `scripts/playback-installed-evidence.py` rather than weakening older evidence rules. Add artifact/signing/license/permission facts, clean-install and upgrade/migration outcomes, daemon lifecycle/safe-Quit scenarios, Preview/queue/Back/compact-browse/UI accessibility, real-sync coexistence and explicit blocker/limitation/disposition fields.
+  - [x] Use a stable evidence identity containing target OS/architecture + package format + artifact SHA-256 + provider/version/capability set + install/upgrade environment. Require clean-install/upgrade for every end-user installer (MSI, NSIS, deb, each DMG) and clean-launch for AppImage; extracted app/bundle inspection is supplemental and cannot hide a failed installer row.
+  - [x] Sanitize all output: never persist owner tokens, credentials, request headers, authenticated URLs, raw endpoint identifiers, provider error bodies or home/profile paths.
+  - [x] Make validation fail for a missing row, failed required scenario, absent artifact/runtime identity, stale/incompatible evidence, unapproved limitation or aggregate/pass disagreement.
+  - [x] Store the release manifest and target records under the existing `docs/playback-evidence/` convention. Do not fabricate result files; unavailable machines/hardware produce explicit blocker records, not passes.
+  - [x] Retain physical continuity captures and other material binary evidence in immutable release/CI artifact storage with SHA-256, URI, capture metadata and retention policy. A disappearing machine-local `rawCapturePath` is not auditable evidence.
 - [ ] Build and inspect every configured artifact without publishing it (AC: 1, 2, 8, 9).
   - [ ] Verify artifact names, hashes, target architecture, sidecar placement, runtime manifest/notices and private library closure.
   - [ ] Linux: verify both AppImage and deb extraction, ELF architecture/RUNPATH and private FFmpeg/Pulse/libmtp closure.
@@ -73,11 +77,11 @@ so that listening works without a development environment or manually installed 
   - [ ] Cover supported themes, 599/800/1000/1280 px probes plus actual 900×640 minimum-window behavior, divider extremes, 200% OS text scaling/text zoom, EN/FR/ES/DE labels, keyboard operation and screen-reader announcements.
   - [ ] Preserve 15.16 stable browse-mode nodes/listeners/focus, provider order, capability filtering, loading/selected state, Grid/List rules, no-refetch navigation and zero playback/source/basket side effects.
   - [ ] Verify bottom-row focus/actions remain reachable above the two-row playback bar; background time updates do not steal focus or flood live regions.
-- [ ] Reconcile evidence and make the release decision (AC: 6, 8–10).
-  - [ ] Add Story 15.15, 15.16 and 15.17 sections to `docs/playback-installed-test-checklist.md`; retain historical observations and explicit unverified rows.
-  - [ ] Inventory all open playback items in `deferred-work.md`. Resolve release blockers or record an evidence-backed, narrowly scoped unsupported capability with owner; do not silently waive a failed acceptance criterion.
-  - [ ] Produce one per-row decision and one mechanically derived aggregate decision. A required missing/failed row blocks acceptance.
-  - [ ] Record material limitations and future Epic 16 ownership without claiming Radio, reporting/preferences, snapshots/exports, adaptive quality, conditional backoff or full Radio soak.
+- [x] Reconcile evidence and make the release decision (AC: 6, 8–10).
+  - [x] Add Story 15.15, 15.16 and 15.17 sections to `docs/playback-installed-test-checklist.md`; retain historical observations and explicit unverified rows.
+  - [x] Inventory all open playback items in `deferred-work.md`. Resolve release blockers or record an evidence-backed, narrowly scoped unsupported capability with owner; do not silently waive a failed acceptance criterion.
+  - [x] Produce one per-row decision and one mechanically derived aggregate decision. A required missing/failed row blocks acceptance.
+  - [x] Record material limitations and future Epic 16 ownership without claiming Radio, reporting/preferences, snapshots/exports, adaptive quality, conditional backoff or full Radio soak.
 
 ## Dev Notes
 
@@ -186,16 +190,101 @@ Also run platform runtime-script tests, platform package builds, extracted-bundl
 
 ### Agent Model Used
 
-Story preparation: Codex. Implementation agent: record during dev-story.
+Story preparation: Codex. Implementation agent: GPT-5 Codex.
+
+### Implementation Plan
+
+- Freeze a machine-readable four-row release contract and enforce its version, package, workflow and documentation parity with tests.
+- Harden controlled-runtime creation and post-bundle verification before changing functional playback behavior.
+- Resolve inherited UI defects with focused failing regressions, then extend release evidence without weakening historical schemas.
+- Run source, bundle, installed and manual gates in order; retain unavailable real-platform evidence as blockers rather than inferred passes.
 
 ### Debug Log References
+
+- 2026-09-19: RED `release-contract.test.mjs` failed on absent contract, stale 0.14.0 versions, unrestricted Tauri targets, tag-only workflow and stale three-job release guide; GREEN after contract/workflow/config/guide implementation.
+- 2026-09-19: Initial sandboxed Rust workspace run: 881 passed, 162 socket-dependent tests failed with `Operation not permitted`; unchanged elevated rerun: daemon 1043 passed/6 ignored, i18n 7 passed, lifecycle contract 13 passed, UI library 7 passed.
+- 2026-09-19: RED release-runtime contract found FFmpeg 9.0.1, stale CPAL notice, Homebrew FFmpeg on macOS and ad-hoc trust; GREEN after signed-source 9.0.2, controlled macOS provisioning, installed verifiers and mandatory distribution trust.
+- 2026-09-19: RED basket/store and controlled-promise regressions reproduced R16/R8/R9; GREEN after shared physical-target admission, conflict recovery without replay and playback-identity-scoped errors.
+- 2026-09-19: RED release-schema tests accepted incomplete installer identity and could not aggregate per-package rows; GREEN with additive schema v2, strict privacy/resource/scenario checks, six required installer rows and a mechanically blocking aggregate.
+- 2026-09-19: Local macOS ARM64 packaging initially retained stale 9.0.1/Homebrew-era dylibs, missed Tauri's installed sidecar name and preserved staging load paths. Focused regressions now enforce a clean closure, exact ABI files, installed naming and relocation. A rebuilt local app and mounted DMG passed closure/ARM64 checks; ad-hoc trust verification failed as expected and remains a shipping blocker.
+- 2026-09-19: The first controlled-runtime workspace run mixed the host `ffmpeg` CLI with the private 9.0.2 dylibs and failed eight decoder-reference tests before fixture decoding. Linux/macOS now pin `HIFIMULE_TEST_FFMPEG` to the verified prefix like Windows; the supported wrapper rerun passed the full workspace (daemon 1043 passed/6 ignored plus all other crates).
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Story prepared against repository state after `1f1b7fa` (Review 15.16).
 - No release artifact, installed-platform pass or defect fix is claimed by story preparation.
+- Release contract frozen at 0.15.0 with four architecture-specific rows, explicit package targets, OS floors, same-host 0.14.0 upgrade fixtures and certification boundaries.
+- Added explicit-ref non-publishing candidate builds, immutable per-row checksums/artifacts and downstream install smoke handoff; tag builds remain draft-only.
+- Release-contract validation passed with 169 Node tests, 35 Python evidence tests, production UI build and complete Rust workspace tests.
+- Deliberately adopted FFmpeg 9.0.2 from the official signed source (`8c3850…02e`), updated exact 63.1.102/61.1.102/7.1.102 ABI receipts, and removed the non-shipping Linux ARM certification row.
+- Added controlled per-architecture macOS source builds and Windows/macOS installed closure checks; package notices now match patched CPAL 0.18.2 and are required in extracted bundles.
+- Windows Authenticode and macOS Developer ID/notarization are hard release gates; missing credentials or invalid signatures block candidate and tag rows.
+- Closed inherited R16/R8/R9: user basket mutations require a selected physical target while trusted reconciliation bypasses the gate; conflicting seeks refresh without replaying queued stale work; command errors persist only for the same playback identity.
+- Added an additive release-evidence v2 contract without relaxing historical v1 evidence. Six truthful per-installer blocker records currently keep the aggregate at `blocker`; no unavailable platform result is presented as a pass.
+- Built a supplemental local macOS ARM64 app/DMG from controlled FFmpeg 9.0.2. The mounted DMG was ARM64, contained the exact private runtime/notices and had SHA-256 `23cc97…ad0f`; it is uncommitted, ad-hoc/unnotarized evidence only and does not replace the macOS ARM64 blocker record.
+- Pinned the decoder-reference CLI to the controlled runtime on Linux and macOS, preventing host/private-library mixing during wrapped Cargo tests. Final gates: Node 181/181, Python evidence 39/39, production UI build, full wrapped Rust workspace, formatting and diff checks.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-17-ship-verified-playback-builds-for-windows-macos-and-linux.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `.github/workflows/release.yml`
+- `.github/workflows/build.yml`
+- `.github/workflows/smoke-test.yml`
+- `.gitignore`
+- `Cargo.lock`
+- `Cargo.toml`
+- `docs/playback-evidence/release-contract-0.15.0.json`
+- `docs/playback-evidence/release-0.15.0-manifest.json`
+- `docs/playback-evidence/release-0.15.0-windows-x64-msi.json`
+- `docs/playback-evidence/release-0.15.0-windows-x64-nsis.json`
+- `docs/playback-evidence/release-0.15.0-linux-x64-deb.json`
+- `docs/playback-evidence/release-0.15.0-linux-x64-appimage.json`
+- `docs/playback-evidence/release-0.15.0-macos-x64-dmg.json`
+- `docs/playback-evidence/release-0.15.0-macos-arm64-dmg.json`
+- `docs/playback-installed-test-checklist.md`
+- `_bmad-output/implementation-artifacts/deferred-work.md`
+- `docs/release-guide.md`
+- `hifimule-ui/src-tauri/tauri.conf.json`
+- `hifimule-ui/src-tauri/tauri.linux.conf.json`
+- `hifimule-ui/src-tauri/tauri.macos.conf.json`
+- `hifimule-ui/src-tauri/tauri.windows.conf.json`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/components/TracksBrowseView.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/state/basket.ts`
+- `hifimule-daemon/THIRD_PARTY_AUDIO_NOTICES.md`
+- `hifimule-daemon/audio-runtime.json`
+- `docs/development-guide.md`
+- `scripts/build-daemon.mjs`
+- `scripts/bundle-macos-libs.mjs`
+- `scripts/macos-audio-runtime.mjs`
+- `scripts/playback-installed-evidence.py`
+- `scripts/__pycache__/playback-installed-evidence.cpython-314.pyc` (removed)
+- `scripts/__pycache__/playback-session-evidence.cpython-314.pyc` (removed)
+- `scripts/prepare-sidecar.mjs`
+- `scripts/tests/build-daemon.test.mjs`
+- `scripts/tests/basket-admission.test.mjs`
+- `scripts/tests/linux-audio-runtime.test.mjs`
+- `scripts/tests/macos-audio-runtime.test.mjs`
+- `scripts/tests/playback-ui.test.mjs`
+- `scripts/tests/test_playback_installed_evidence.py`
+- `scripts/tests/__pycache__/test_playback_installed_evidence.cpython-314.pyc` (removed)
+- `scripts/tests/__pycache__/test_playback_session_evidence.cpython-314.pyc` (removed)
+- `scripts/tests/release-runtime-contract.test.mjs`
+- `scripts/tests/verify-audio-runtime.test.mjs`
+- `scripts/tests/windows-audio-runtime.test.mjs`
+- `scripts/verify-audio-runtime.mjs`
+- `scripts/windows-audio-runtime.mjs`
+- `scripts/tests/release-contract.test.mjs`
+
+## Change Log
+
+- 2026-09-19: Froze the 0.15.0 four-row release contract and added non-publishing candidate build/smoke handoff with strict package targets.
+- 2026-09-19: Updated the controlled runtime to signed-source FFmpeg 9.0.2, added macOS source provisioning and Windows/macOS installed verification, and enforced release signing/notarization.
+- 2026-09-19: Closed inherited basket-admission and playback seek/error defects R16/R8/R9 with store, source-surface, DOM and controlled-promise regressions.
+- 2026-09-19: Added release-evidence schema v2, immutable-material/privacy validation and a six-installer aggregate that remains blocked on absent signed artifacts and real-platform results.
+- 2026-09-19: Hardened wrapped decoder tests to use the verified FFmpeg CLI on Linux/macOS and recorded the truthful blocked release decision after all locally runnable gates passed.

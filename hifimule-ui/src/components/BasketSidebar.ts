@@ -281,6 +281,7 @@ export class BasketSidebar {
             if ('selectedDevicePath' in state) {
                 this.selectedDevicePath = state.selectedDevicePath;
             }
+            basketStore.setPhysicalTargetAvailable(this.selectedDevicePath !== null);
             const currentDevice = state.currentDevice;
             this.currentDevice = currentDevice ?? null;
             const currentDeviceId = this.getCurrentDeviceId(currentDevice);
@@ -757,6 +758,7 @@ export class BasketSidebar {
                     );
                 this.connectedDevices = newConnectedDevices;
                 this.selectedDevicePath = newSelectedDevicePath;
+                basketStore.setPhysicalTargetAvailable(this.selectedDevicePath !== null);
                 this.pendingDevicePath = newPendingPath;
                 this.pendingDeviceFriendlyName = daemonStateResult?.pendingDeviceFriendlyName ?? undefined;
 
@@ -1100,6 +1102,7 @@ export class BasketSidebar {
         // Bind events
         this.container.querySelectorAll('.remove-item-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
+                if (!basketStore.admitPhysicalTargetMutation()) return;
                 const id = (e.currentTarget as HTMLElement).getAttribute('data-id');
                 if (!id) return;
                 if (isAutoFillSlotId(id)) {
@@ -1924,6 +1927,7 @@ export class BasketSidebar {
     }
 
     private confirmClearAll(): void {
+        if (!basketStore.admitPhysicalTargetMutation()) return;
         const count = basketStore.getItems().length;
         if (count === 0) return;
         const dialog = document.createElement('sl-dialog') as any;
@@ -1936,6 +1940,10 @@ export class BasketSidebar {
         document.body.appendChild(dialog);
         dialog.querySelector('#clear-cancel')?.addEventListener('click', () => dialog.hide());
         dialog.querySelector('#clear-confirm')?.addEventListener('click', () => {
+            if (!basketStore.admitPhysicalTargetMutation()) {
+                dialog.hide();
+                return;
+            }
             basketStore.clear();
             dialog.hide();
         });

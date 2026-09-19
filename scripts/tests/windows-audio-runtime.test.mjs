@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-import { createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
+import { createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyInstalledWindowsBundle, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
 
 test("Windows PATH normalization retains entries from competing case aliases", () => {
   const source = { Path: "C:\\Rust\\bin", PATH: "C:\\Windows", path: "C:\\Rust\\bin", KEEP: "yes" };
@@ -181,8 +181,8 @@ for (const target of ["aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc"]) {
       },
       verifySignature: (archive, signature) => {
         signatures += 1;
-        assert.ok(archive.endsWith("ffmpeg-9.0.1.tar.xz"));
-        assert.ok(signature.endsWith("ffmpeg-9.0.1.tar.xz.asc"));
+        assert.ok(archive.endsWith(`ffmpeg-${manifest.ffmpegRelease}.tar.xz`));
+        assert.ok(signature.endsWith(`ffmpeg-${manifest.ffmpegRelease}.tar.xz.asc`));
       },
       buildSource: (_archive, staging, selectedTarget) => {
         builds += 1;
@@ -218,6 +218,20 @@ test("stages the verified runtime beside Cargo test executables", (t) => {
 
   assert.deepEqual(staged.map((path) => basename(path)).sort(), windowsRuntimeDllNames(verifyWindowsAudioRuntime(prefix, "x86_64-pc-windows-msvc").dlls).sort());
   for (const path of staged) assert.equal(readFileSync(path).toString("hex"), readFileSync(join(prefix, "bin", basename(path))).toString("hex"));
+});
+
+test("installed Windows verifier requires matching private DLLs and packaged notices", (t) => {
+  const bundle = mkdtempSync(join(tmpdir(), "hifimule-windows-bundle-"));
+  t.after(() => rmSync(bundle, { recursive: true, force: true }));
+  const machine = 0x8664;
+  const pe = () => { const bytes = Buffer.alloc(128); bytes.write("MZ"); bytes.writeUInt32LE(64, 0x3c); bytes.write("PE\0\0", 64); bytes.writeUInt16LE(machine, 68); return bytes; };
+  writeFileSync(join(bundle, "hifimule-daemon.exe"), pe());
+  writeFileSync(join(bundle, "audio-runtime.json"), JSON.stringify(manifest));
+  writeFileSync(join(bundle, "THIRD_PARTY_AUDIO_NOTICES.md"), "notices");
+  for (const [library, version] of Object.entries(manifest.abiVersions)) writeFileSync(join(bundle, `${library}-${version.split(".")[0]}.dll`), pe());
+  assert.equal(verifyInstalledWindowsBundle(bundle, "x86_64-pc-windows-msvc").dllCount, 4);
+  rmSync(join(bundle, "avcodec-63.dll"));
+  assert.throws(() => verifyInstalledWindowsBundle(bundle, "x86_64-pc-windows-msvc"), /exactly one avcodec-63.dll/);
 });
 
 test("rejects a downloaded Windows SDK with the wrong hash", () => {

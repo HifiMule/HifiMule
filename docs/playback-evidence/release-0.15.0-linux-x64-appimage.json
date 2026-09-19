@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "releaseEvidenceVersion": 1,
+  "evidenceId": "linux-x64:appimage:artifact-unavailable:providers-v1:clean-upgrade",
+  "target": "linux-x64",
+  "packageFormat": "appimage",
+  "decision": "blocker",
+  "blocker": {
+    "owner": "release-manager",
+    "rationale": "The current host is macOS ARM64; no immutable AppImage or Ubuntu 22.04 x64 desktop, PulseAudio and physical-output test environment is available.",
+    "requiredAction": "Build the explicit Ubuntu candidate, inspect and clean-launch its private closure, then run the complete playback, lifecycle, accessibility, physical-output and resource matrix."
+  }
+}

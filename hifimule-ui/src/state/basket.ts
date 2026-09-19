@@ -1,4 +1,5 @@
 import { rpcCall } from '../rpc';
+import { t } from '../i18n';
 
 // Basket State Management
 // Manages the collection of items selected for synchronization.
@@ -40,6 +41,7 @@ class BasketStore extends EventTarget {
     private _syncingFromDaemon: boolean = false;
     private _dirty: boolean = false;
     private activeServerId: string | null = null;
+    private physicalTargetAvailable = false;
 
     constructor() {
         super();
@@ -74,6 +76,26 @@ class BasketStore extends EventTarget {
 
     public getActiveServerId(): string | null {
         return this.activeServerId;
+    }
+
+    public setPhysicalTargetAvailable(available: boolean): void {
+        if (this.physicalTargetAvailable === available) return;
+        this.physicalTargetAvailable = available;
+        this.notify();
+    }
+
+    public hasPhysicalTarget(): boolean {
+        return this.physicalTargetAvailable;
+    }
+
+    /** Shared admission boundary for user-initiated physical basket mutations.
+     * Trusted reconciliation methods intentionally bypass this gate. */
+    public admitPhysicalTargetMutation(): boolean {
+        if (this.physicalTargetAvailable) return true;
+        window.dispatchEvent(new CustomEvent('toast', {
+            detail: { type: 'error', message: t('basket.no_device_connected') },
+        }));
+        return false;
     }
 
     /** True when an item belongs to a server other than the selected one and must
@@ -302,10 +324,11 @@ class BasketStore extends EventTarget {
         return this.items.has(id);
     }
 
-    public add(item: BasketItem) {
+    public add(item: BasketItem): boolean {
+        if (!this.admitPhysicalTargetMutation()) return false;
         if (!this.activeServerId) {
             window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: 'Connect to a server before adding items' } }));
-            return;
+            return false;
         }
         item.serverId = this.activeServerId;
         this.items.set(item.id, item);
@@ -313,31 +336,38 @@ class BasketStore extends EventTarget {
         this.saveToLocalStorage();
         this.saveBasketToDaemon();
         this.notify();
+        return true;
     }
 
-    public remove(id: string) {
+    public remove(id: string): boolean {
+        if (!this.admitPhysicalTargetMutation()) return false;
         if (this.items.delete(id)) {
             this._dirty = true;
             this.saveToLocalStorage();
             this.saveBasketToDaemon();
             this.notify();
+            return true;
         }
+        return false;
     }
 
-    public toggle(item: BasketItem) {
+    public toggle(item: BasketItem): boolean {
+        if (!this.admitPhysicalTargetMutation()) return false;
         if (this.has(item.id)) {
-            this.remove(item.id);
+            return this.remove(item.id);
         } else {
-            this.add(item);
+            return this.add(item);
         }
     }
 
-    public clear() {
+    public clear(): boolean {
+        if (!this.admitPhysicalTargetMutation()) return false;
         this.items.clear();
         this._dirty = true;
         this.saveToLocalStorage();
         this.saveBasketToDaemon();
         this.notify();
+        return true;
     }
 
     /** Returns only the IDs of manually added items (for exclude list in auto-fill). */

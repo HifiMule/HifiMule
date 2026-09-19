@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "ffmpegRelease": "9.0.1",
-  "sourceUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
-  "signatureUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz.asc",
+  "ffmpegRelease": "9.0.2",
+  "sourceUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+  "signatureUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",
   "signingKeyUrl": "https://ffmpeg.org/ffmpeg-devel.asc",
   "signingKey": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
   "configureFlags": [
@@ -15,7 +15,7 @@
   ],
   "windowsConfigureFlags": ["--disable-x86asm"],
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],
-  "abiVersions": { "avcodec": "63.1.101", "avformat": "63.1.101", "avutil": "61.1.101", "swresample": "7.1.101" },
+  "abiVersions": { "avcodec": "63.1.102", "avformat": "63.1.102", "avutil": "61.1.102", "swresample": "7.1.102" },
   "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.18.2", "libpulse-binding": "2.30.1" },
   "bufferPolicy": {
     "compressedChunkBytes": 65536,
@@ -32,6 +32,6 @@
     "startupFillMilliseconds": 100
   },
   "licenses": ["LGPL-2.1-or-later"],
-  "sourceSha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
-  "verification": { "macosArm64": "local-pending", "macosX64": "user", "linuxArm64": "user", "linuxX64": "user", "windowsX64": "user" }
+  "sourceSha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+  "verification": { "macosArm64": "candidate-required", "macosX64": "candidate-required", "linuxX64": "candidate-required", "windowsX64": "candidate-required" }
 }

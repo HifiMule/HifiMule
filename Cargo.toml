@@ -9,7 +9,7 @@ exclude = ["third_party/cpal", "third_party/souvlaki"]
 resolver = "2"
 
 [workspace.package]
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.93.0"
 

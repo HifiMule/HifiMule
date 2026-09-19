@@ -589,9 +589,10 @@ export class TracksBrowseView {
         toggleBtn.style.fontSize = '1.1rem';
         toggleBtn.dataset.basketToggle = track.id;
         // AC 9: (+) controls render disabled when no device (server) is selected.
-        toggleBtn.disabled = !basketStore.getActiveServerId();
+        toggleBtn.disabled = !basketStore.hasPhysicalTarget();
         toggleBtn.addEventListener('click', (e: Event) => {
             e.stopPropagation();
+            if (!basketStore.admitPhysicalTargetMutation()) return;
             if (basketStore.has(track.id)) {
                 basketStore.remove(track.id);
             } else {
@@ -623,7 +624,7 @@ export class TracksBrowseView {
     // ─── Basket button refresh on store update ─────────────────────────────────
 
     private updateTrackButtons(): void {
-        const noDevice = !basketStore.getActiveServerId();
+        const noDevice = !basketStore.hasPhysicalTarget();
         // The bulk bar lives outside the track panel (inserted above it) —
         // keep its add button's disabled state in sync with the per-row ones.
         const bulkAdd = this.container.querySelector<HTMLElement>('[data-bulk-basket-add]');
@@ -762,7 +763,7 @@ export class TracksBrowseView {
         // The CSS gate is pointer-events only — it doesn't block keyboard
         // Enter on a focusable sl-button. Set the property like the per-row
         // (+) buttons (refreshed by updateTrackButtons on store updates).
-        addBtn.disabled = !basketStore.getActiveServerId();
+        addBtn.disabled = !basketStore.hasPhysicalTarget();
         addBtn.dataset.bulkBasketAdd = '';
         addBtn.textContent = t('library.selection.add_to_basket');
         addBtn.addEventListener('click', () => this.bulkAddToBasket());
@@ -847,7 +848,7 @@ export class TracksBrowseView {
         // server basketStore.add error-toasts per item and adds nothing — bail
         // before the loop so a dead path can't show a false success toast or
         // wipe a selection the user would have to rebuild.
-        if (!basketStore.getActiveServerId()) return;
+        if (!basketStore.admitPhysicalTargetMutation()) return;
         const selected = this.resolveSelectedTracks();
         if (selected.length === 0) return;
         let added = 0;
@@ -856,8 +857,7 @@ export class TracksBrowseView {
             if (basketStore.has(track.id)) {
                 skipped++;
             } else {
-                basketStore.add(this.trackToBasketItem(track));
-                added++;
+                if (basketStore.add(this.trackToBasketItem(track))) added++;
             }
         }
         let msg = t('library.selection.added_toast', { added });

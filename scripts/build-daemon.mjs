@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureLinuxAudioRuntime, linuxBuildEnvironment } from "./linux-audio-runtime.mjs";
+import { ensureMacosAudioRuntime } from "./macos-audio-runtime.mjs";
 import { ensureWindowsAudioRuntime, prependWindowsPath, stageWindowsAudioRuntimeForCargo } from "./windows-audio-runtime.mjs";
 import {
   withAudioRuntimeVerification,
@@ -40,6 +41,7 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     linuxBuildEnvironment: options.linuxBuildEnvironment ?? linuxBuildEnvironment,
     ensureWindowsAudioRuntime: options.ensureWindowsAudioRuntime ?? ensureWindowsAudioRuntime,
     stageWindowsAudioRuntimeForCargo: options.stageWindowsAudioRuntimeForCargo ?? stageWindowsAudioRuntimeForCargo,
+    ensureMacosAudioRuntime: options.ensureMacosAudioRuntime ?? ensureMacosAudioRuntime,
   };
   let env = withoutAudioRuntimeVerification(options.env ?? process.env);
   const target = selectedTarget(cargoArgs, execute, env);
@@ -49,6 +51,7 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     const prefix = dependencies.ensureLinuxAudioRuntime(target);
     env = dependencies.linuxBuildEnvironment(target, env);
     env.HIFIMULE_FFMPEG_PREFIX = prefix;
+    env.HIFIMULE_TEST_FFMPEG = posix.join(prefix, "bin/ffmpeg");
     // ffmpeg-sys-next checks FFMPEG_DIR before pkg-config.
     env.FFMPEG_DIR = prefix;
     env.PKG_CONFIG_PATH = [posix.join(prefix, "lib/pkgconfig"), env.PKG_CONFIG_PATH].filter(Boolean).join(":");
@@ -64,7 +67,13 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     env = prependWindowsPath(env, join(env.FFMPEG_DIR, "bin"));
     env = withAudioRuntimeVerification(env);
   } else if (platform === "darwin") {
-    execute("node", ["scripts/verify-audio-runtime.mjs"], { cwd: root, stdio: "inherit", env });
+    const prefix = dependencies.ensureMacosAudioRuntime(target, { env });
+    env.HIFIMULE_FFMPEG_PREFIX = prefix;
+    env.HIFIMULE_TEST_FFMPEG = posix.join(prefix, "bin/ffmpeg");
+    env.FFMPEG_DIR = prefix;
+    env.PKG_CONFIG_PATH = [posix.join(prefix, "lib/pkgconfig"), env.PKG_CONFIG_PATH].filter(Boolean).join(":");
+    env.DYLD_LIBRARY_PATH = [posix.join(prefix, "lib"), env.DYLD_LIBRARY_PATH].filter(Boolean).join(":");
+    execute("node", ["scripts/verify-audio-runtime.mjs", "--prefix", prefix], { cwd: root, stdio: "inherit", env });
     env = withAudioRuntimeVerification(env);
   } else {
     throw new Error(`Unsupported daemon build platform: ${platform}\n${buildDaemonUsage}`);

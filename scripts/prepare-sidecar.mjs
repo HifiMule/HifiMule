@@ -20,6 +20,7 @@ import {
   requiresHostAudioVerification,
 } from "./linux-audio-runtime.mjs";
 import { ensureWindowsAudioRuntime, prependWindowsPath, stageWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
+import { ensureMacosAudioRuntime } from "./macos-audio-runtime.mjs";
 import {
   withAudioRuntimeVerification,
   withoutAudioRuntimeVerification,
@@ -80,6 +81,17 @@ if (process.platform === "win32") {
   stageWindowsAudioRuntime(audioPrefix, targetTriple);
   buildEnv = withAudioRuntimeVerification(buildEnv);
 }
+if (process.platform === "darwin") {
+  audioPrefix = ensureMacosAudioRuntime(targetTriple);
+  buildEnv.HIFIMULE_FFMPEG_PREFIX = audioPrefix;
+  buildEnv.FFMPEG_DIR = audioPrefix;
+  buildEnv.PKG_CONFIG_PATH = [join(audioPrefix, "lib", "pkgconfig"), process.env.PKG_CONFIG_PATH]
+    .filter(Boolean)
+    .join(":");
+  buildEnv.DYLD_LIBRARY_PATH = [join(audioPrefix, "lib"), process.env.DYLD_LIBRARY_PATH]
+    .filter(Boolean)
+    .join(":");
+}
 if (requiresHostAudioVerification(process.platform)) {
   execFileSync(
     "node",
@@ -132,5 +144,6 @@ if (process.platform === "darwin") {
   execSync("node scripts/bundle-macos-libs.mjs", {
     cwd: projectRoot,
     stdio: "inherit",
+    env: buildEnv,
   });
 }

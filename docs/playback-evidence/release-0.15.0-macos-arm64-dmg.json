@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "releaseEvidenceVersion": 1,
+  "evidenceId": "macos-arm64:dmg:artifact-unavailable:providers-v1:clean-upgrade",
+  "target": "macos-arm64",
+  "packageFormat": "dmg",
+  "decision": "blocker",
+  "blocker": {
+    "owner": "release-manager",
+    "rationale": "No immutable Developer ID-signed and notarized ARM64 DMG, clean profile, 0.14.0 upgrade fixture, representative providers, or physical-output test fixture is available.",
+    "requiredAction": "Supply distribution credentials and fixtures, build and notarize the explicit candidate, then run the complete floor/current clean-install, upgrade, playback, lifecycle, accessibility, physical-output and resource matrix."
+  }
+}

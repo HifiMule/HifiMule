@@ -784,3 +784,65 @@ The story and sprint remain `in-progress`: T1/T4 full-application checks, instal
 OS/theme/screen-reader checks, and the separately recorded pre-existing R8/R9
 issues are not completed by these patches. No earlier installed-platform row is
 promoted, and no daemon/audio behavior is certified by these UI checks.
+
+## Story 15.15 Back evidence carried into the release gate (2026-09-19)
+
+Source verification for Story 15.15 passed the complete controlled workspace,
+including 1,038 daemon tests with 6 intentional diagnostic/hardware ignores,
+152 Node tests, the production UI build, formatting and whitespace checks. Back's
+3,000 ms boundary, predecessor navigation, Preview isolation, persistence-first
+commit, generation fencing and native Previous routing have automated coverage.
+Those results remain source/automation evidence only.
+
+- [ ] Windows x64 installed MSI and NSIS: physical Previous/media key, 0/3000/3001 ms, paused intent, output inhibition and accessible retained Back focus/help.
+- [ ] Linux x64 installed deb and AppImage: the same Back matrix through the real desktop/native route and physical output.
+- [ ] macOS x64 installed DMG: the same Back matrix through Developer ID/notarized production packaging and physical media keys.
+- [ ] macOS ARM64 installed DMG: the same Back matrix through Developer ID/notarized production packaging and physical media keys.
+
+## Story 15.16 compact browse evidence carried into the release gate (2026-09-19)
+
+Story 15.16 passed 159 Node tests, its production TypeScript/Vite build and
+whitespace checks. Production modules were rendered across 24 locale, width and
+text-size combinations, but IPC was mocked and the installed macOS application
+used for comparison was baseline-only. These results do not certify a packaged
+webview, real provider capability changes, OS scaling or a screen reader.
+
+- [ ] Every installer row: EN/FR/ES/DE, 599/800/1000/1280 px probes, actual 900×640 minimum window, divider extremes and 200% OS text scaling.
+- [ ] Every installer row: real provider switching, stable mode nodes/listeners/focus, capability filtering, Grid/List rules and no-refetch navigation.
+- [ ] Every installer row: Playback and Preview active with a physical basket; no playback, source-routing or basket side effect from compact browse controls.
+- [ ] Every installer row: final-row keyboard reachability, visible focus, supported-theme contrast and native screen-reader observations.
+
+## Story 15.17 release evidence and decision (2026-09-19)
+
+Release candidate 0.15.0 now has a machine-readable four-target contract and an
+additive v2 evidence schema. The required end-user installer identities are MSI,
+NSIS, deb, AppImage, macOS x64 DMG and macOS ARM64 DMG. The aggregate is derived
+from all six records; a missing, failed, unsupported or blocker row cannot be
+hidden by another target. App bundles and extracted closures are supplemental,
+not substitutes for installer execution.
+
+Inherited source defects R16, R8 and R9 are resolved in the current working tree:
+user basket mutations share a physical-target admission boundary while trusted
+reconciliation bypasses it; conflicting seeks discard queued work and await an
+authoritative refresh; command errors clear on occurrence/session/generation
+replacement while same-identity failures persist. Controlled store, DOM and
+promise regressions pass. This corrects the stale open wording above without
+promoting any historical installed result.
+
+Current release records are explicit blockers rather than fabricated passes:
+
+| Target/package | Decision | Missing evidence |
+| --- | --- | --- |
+| Windows x64 MSI | blocker | Immutable Authenticode-signed artifact; clean install/0.14.0 upgrade; real playback/lifecycle/UI/resource matrix |
+| Windows x64 NSIS | blocker | Immutable Authenticode-signed artifact; clean install/0.14.0 upgrade; real playback/lifecycle/UI/resource matrix |
+| Linux x64 deb | blocker | Immutable package/private closure; Ubuntu 22.04 desktop/Pulse/physical-output install and upgrade matrix |
+| Linux x64 AppImage | blocker | Immutable package/private closure; Ubuntu 22.04 clean launch and real playback/lifecycle/UI/resource matrix |
+| macOS x64 DMG | blocker | Developer ID-signed/notarized artifact; x64 floor/current clean install/upgrade and physical-output matrix |
+| macOS ARM64 DMG | blocker | Developer ID-signed/notarized artifact; clean profile/0.14.0 fixture/providers/physical-output matrix |
+
+Aggregate decision: **blocker**. Publishing remains outside this story. Replace a
+blocker record only with sanitized evidence tied to the immutable artifact hash,
+exact source revision, provider/version/capabilities and install/upgrade environment.
+Physical continuity and other material captures must use an immutable CI/release
+artifact URI, SHA-256, capture metadata and retention policy; a local path is not
+release evidence.

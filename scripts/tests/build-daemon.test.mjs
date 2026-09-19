@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { runDaemonBuild } from "../build-daemon.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
+import { macosRuntimeReceipt } from "../macos-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -14,19 +15,28 @@ test("daemon CLI preserves a failing Cargo subprocess exit code", (t) => {
   const scratch = mkdtempSync(join(tmpdir(), "hifimule-daemon-exit-"));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const preload = join(scratch, "preload.mjs");
+  const prefix = join(scratch, "ffmpeg");
+  mkdirSync(join(prefix, "lib", "pkgconfig"), { recursive: true });
+  const receipt = macosRuntimeReceipt("aarch64-apple-darwin");
+  writeFileSync(join(prefix, ".hifimule-audio-runtime.json"), JSON.stringify(receipt));
+  for (const [library, version] of Object.entries(receipt.abiVersions)) writeFileSync(join(prefix, "lib", `lib${library}.${version}.dylib`), library);
   writeFileSync(preload, `
     import childProcess from "node:child_process";
     import { syncBuiltinESMExports } from "node:module";
     Object.defineProperty(process, "platform", { value: "darwin" });
-    childProcess.execFileSync = (command) => {
+    const versions = ${JSON.stringify(Object.fromEntries(Object.entries(receipt.abiVersions).map(([key, value]) => [`lib${key}`, value])))};
+    childProcess.execFileSync = (command, args) => {
       if (command === "rustc") return "host: aarch64-apple-darwin\\n";
+      if (command === "pkg-config") return versions[args[1]] + "\\n";
+      if (command === "lipo") return "";
+      if (command === "otool") return args.at(-1) + ":\\n\\t/usr/lib/libSystem.B.dylib\\n";
       if (command === "node") return "";
       if (command === "cargo") throw Object.assign(new Error("fixture Cargo failure"), { status: 101 });
       throw new Error("Unexpected subprocess: " + command);
     };
     syncBuiltinESMExports();
   `);
-  const result = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, join(root, "scripts/build-daemon.mjs"), "test", "-p", "hifimule-daemon"], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, join(root, "scripts/build-daemon.mjs"), "test", "-p", "hifimule-daemon"], { encoding: "utf8", env: { ...process.env, HIFIMULE_FFMPEG_PREFIX: prefix } });
   assert.equal(result.status, 101, result.stderr);
   assert.match(result.stderr, /fixture Cargo failure/);
 });
@@ -54,6 +64,7 @@ test("daemon wrapper provisions Linux and passes controlled native environment t
   const cargo = calls.find((call) => call.command === "cargo");
   assert.deepEqual(cargo.args, ["build", "--release", "-p", "hifimule-daemon"]);
   assert.equal(cargo.options.env.HIFIMULE_FFMPEG_PREFIX, "/controlled/ffmpeg");
+  assert.equal(cargo.options.env.HIFIMULE_TEST_FFMPEG, "/controlled/ffmpeg/bin/ffmpeg");
   assert.equal(cargo.options.env.FFMPEG_DIR, "/controlled/ffmpeg");
   assert.equal(cargo.options.env.PKG_CONFIG_PATH, "/controlled/ffmpeg/lib/pkgconfig:/prior/pc");
   assert.equal(cargo.options.env.LD_LIBRARY_PATH, "/controlled/ffmpeg/lib:/prior/lib");
@@ -132,9 +143,19 @@ test("daemon wrapper provisions the explicit Cargo target instead of the host", 
 
 test("daemon wrapper retains macOS runtime verification", () => {
   const calls = [];
-  runDaemonBuild([], { platform: "darwin", execFileSync: executor("aarch64-apple-darwin", calls) });
-  assert.ok(calls.some((call) => call.command === "node" && call.args[0] === "scripts/verify-audio-runtime.mjs"));
+  runDaemonBuild([], {
+    platform: "darwin",
+    execFileSync: executor("aarch64-apple-darwin", calls),
+    ensureMacosAudioRuntime: (target, options) => {
+      assert.equal(target, "aarch64-apple-darwin");
+      assert.equal(options.env.HIFIMULE_FFMPEG_PREFIX, undefined);
+      return "/controlled/ffmpeg";
+    },
+  });
+  assert.ok(calls.some((call) => call.command === "node" && call.args[0] === "scripts/verify-audio-runtime.mjs" && call.args[2] === "/controlled/ffmpeg"));
   const cargo = calls.find((call) => call.command === "cargo");
+  assert.equal(cargo.options.env.FFMPEG_DIR, "/controlled/ffmpeg");
+  assert.equal(cargo.options.env.HIFIMULE_TEST_FFMPEG, "/controlled/ffmpeg/bin/ffmpeg");
   assert.equal(cargo.options.env[audioRuntimeVerification.environmentVariable], audioRuntimeVerification.value);
 });
 

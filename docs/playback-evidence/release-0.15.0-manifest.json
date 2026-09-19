@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "releaseVersion": "0.15.0",
+  "sourceRevision": "bf9f4254940bfbc35c23c25ac3bb3b4e8b8e169f",
+  "candidateSourceState": "blocked: Story 15.17 changes are uncommitted and no immutable candidate artifact exists",
+  "rows": [
+    { "target": "windows-x64", "packageFormat": "msi", "record": "release-0.15.0-windows-x64-msi.json" },
+    { "target": "windows-x64", "packageFormat": "nsis", "record": "release-0.15.0-windows-x64-nsis.json" },
+    { "target": "linux-x64", "packageFormat": "deb", "record": "release-0.15.0-linux-x64-deb.json" },
+    { "target": "linux-x64", "packageFormat": "appimage", "record": "release-0.15.0-linux-x64-appimage.json" },
+    { "target": "macos-x64", "packageFormat": "dmg", "record": "release-0.15.0-macos-x64-dmg.json" },
+    { "target": "macos-arm64", "packageFormat": "dmg", "record": "release-0.15.0-macos-arm64-dmg.json" }
+  ],
+  "aggregateDecision": "blocker"
+}

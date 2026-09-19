@@ -7,7 +7,11 @@ on:
     inputs:
       release_tag:
         description: 'Release tag to test (e.g. v0.1.0)'
-        required: true
+        required: false
+        type: string
+      candidate_version:
+        description: 'Candidate version uploaded by the calling release workflow'
+        required: false
         type: string
   workflow_dispatch:
     inputs:
@@ -29,10 +33,25 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download MSI artifact
+        if: inputs.release_tag != ''
         shell: pwsh
         run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '*.msi' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download candidate MSI artifact
+        if: inputs.candidate_version != ''
+        uses: actions/download-artifact@v6
+        with:
+          name: hifimule-candidate-${{ inputs.candidate_version }}-windows-x64
+          path: ./candidate
+
+      - name: Stage candidate MSI
+        if: inputs.candidate_version != ''
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ./installers | Out-Null
+          Get-ChildItem ./candidate -Filter *.msi -Recurse | Select-Object -First 1 | Copy-Item -Destination ./installers/
 
       - name: Run smoke test
         working-directory: ./installers
@@ -62,10 +81,22 @@ jobs:
           sudo apt-get install -y xvfb jq libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1
 
       - name: Download .deb artifact
+        if: inputs.release_tag != ''
         shell: pwsh
         run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '*.deb' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download candidate deb artifact
+        if: inputs.candidate_version != ''
+        uses: actions/download-artifact@v6
+        with:
+          name: hifimule-candidate-${{ inputs.candidate_version }}-linux-x64
+          path: ./candidate
+
+      - name: Stage candidate deb
+        if: inputs.candidate_version != ''
+        run: mkdir -p ./installers && find ./candidate -name '*.deb' -type f -print -quit | xargs -I '{}' cp '{}' ./installers/
 
       - name: Run smoke test
         working-directory: ./installers
@@ -88,9 +119,11 @@ jobs:
       matrix:
         include:
           - platform: macos-15-intel
+            row: macos-x64
             pattern: '*x64*.dmg'
             log-suffix: macos-intel
           - platform: macos-15
+            row: macos-arm64
             pattern: '*aarch64*.dmg'
             log-suffix: macos-arm
     runs-on: ${{ matrix.platform }}
@@ -99,10 +132,22 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download DMG artifact
+        if: inputs.release_tag != ''
         shell: pwsh
         run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '${{ matrix.pattern }}' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download candidate DMG artifact
+        if: inputs.candidate_version != ''
+        uses: actions/download-artifact@v6
+        with:
+          name: hifimule-candidate-${{ inputs.candidate_version }}-${{ matrix.row }}
+          path: ./candidate
+
+      - name: Stage candidate DMG
+        if: inputs.candidate_version != ''
+        run: mkdir -p ./installers && find ./candidate -name '*.dmg' -type f -print -quit | xargs -I '{}' cp '{}' ./installers/
 
       - name: Run smoke test
         working-directory: ./installers

@@ -338,11 +338,42 @@ export function windowsRuntimeDllNames(dlls) {
   return dlls.map((dll) => basename(dll));
 }
 
+function walkFiles(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? walkFiles(path) : entry.isFile() ? [path] : [];
+  });
+}
+
+export function verifyInstalledWindowsBundle(bundleRoot, target) {
+  const targetInfo = targets[target];
+  if (!targetInfo) fail(`Unsupported Windows playback target: ${target}`);
+  const files = walkFiles(resolve(bundleRoot));
+  const sidecar = files.find((path) => basename(path).toLowerCase() === "hifimule-daemon.exe");
+  if (!sidecar) fail(`Installed Windows bundle is missing hifimule-daemon.exe under ${bundleRoot}`);
+  if (peMachine(sidecar) !== targetInfo.machine) fail(`Installed Windows daemon architecture does not match ${target}`);
+  for (const required of ["audio-runtime.json", "THIRD_PARTY_AUDIO_NOTICES.md"]) {
+    if (!files.some((path) => basename(path) === required)) fail(`Installed Windows bundle is missing ${required}`);
+  }
+  const dlls = files.filter((path) => path.toLowerCase().endsWith(".dll"));
+  for (const [library, version] of Object.entries(manifest.abiVersions)) {
+    const expected = `${library}-${version.split(".")[0]}.dll`.toLowerCase();
+    const matches = dlls.filter((path) => basename(path).toLowerCase() === expected);
+    if (matches.length !== 1) fail(`Installed Windows bundle must contain exactly one ${expected}`);
+    if (peMachine(matches[0]) !== targetInfo.machine) fail(`Installed Windows DLL architecture does not match ${target}: ${matches[0]}`);
+    if (resolve(matches[0]).toLowerCase().startsWith(resolve(process.env.SystemRoot ?? "C:\\Windows").toLowerCase())) fail(`System DLL cannot satisfy controlled runtime: ${matches[0]}`);
+  }
+  return { sidecar, dllCount: dlls.length };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const [mode, target, output] = process.argv.slice(2);
   if (mode === "receipt") {
     if (!process.env.FFMPEG_DIR) fail("FFMPEG_DIR is not set for receipt generation");
     console.log(writeWindowsAudioRuntimeReceipt(process.env.FFMPEG_DIR, target));
+  } else if (mode === "verify-bundle") {
+    if (!output) fail("The `verify-bundle` command requires an extracted bundle root");
+    console.log(JSON.stringify(verifyInstalledWindowsBundle(output, target)));
   } else if (["ensure", "verify", "env"].includes(mode)) {
     const prefix = ensureWindowsAudioRuntime(target);
     if (mode === "env") {
@@ -352,5 +383,5 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
       appendFileSync(output, `${audioRuntimeVerification.environmentVariable}=${audioRuntimeVerification.value}\n`);
       console.log(prefix);
     } else console.log(JSON.stringify(mode === "verify" ? stageWindowsAudioRuntime(prefix, target) : { prefix }));
-  } else fail("Expected `ensure`, `env`, `verify`, or `receipt` command");
+  } else fail("Expected `ensure`, `env`, `verify`, `verify-bundle`, or `receipt` command");
 }

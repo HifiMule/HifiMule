@@ -181,6 +181,7 @@ export class MediaCard {
             toggleBtn.addEventListener('click', async (e: Event) => {
                 e.stopPropagation();
                 if (!selectionAllowed) return;
+                if (!basketStore.admitPhysicalTargetMutation()) return;
 
                 if (basketStore.has(itemId)) {
                     basketStore.remove(itemId);

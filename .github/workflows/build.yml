@@ -99,7 +99,14 @@ jobs:
 
       - name: Install macOS daemon dependencies
         if: runner.os == 'macOS'
-        run: brew install pkg-config libmtp ffmpeg
+        run: brew install pkg-config libmtp nasm
+
+      - name: Provision controlled macOS audio runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          node scripts/macos-audio-runtime.mjs env "$TARGET_TRIPLE" "$GITHUB_ENV"
 
       - name: Run isolated playback restoration evidence
         env:

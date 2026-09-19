@@ -64,7 +64,7 @@ def native_observation(name, path, ui_state):
 
 def seek_row():
     def observation(operation, prior, requested, landed):
-        return {
+        record = {
             "operationId": operation, "instanceId": "instance-a", "sessionId": "session-a",
             "generationId": "generation-a", "occurrenceId": "occurrence-a",
             "occurrenceIdAfter": "occurrence-a", "queueRevision": "1",
@@ -75,6 +75,7 @@ def seek_row():
             "transportAfter": "active", "outcome": "succeeded",
             "compressedHighWaterBytes": 1024, "pcmHighWaterBytes": 2048,
         }
+        return record
     return {
         "provider": "jellyfin", "serverVersion": "10.10.7", "representation": "original",
         "container": "wav", "codec": "pcm_s16le", "backend": "wasapi", "enabled": True,
@@ -135,7 +136,7 @@ def album_observation(cause):
 def continuity_row():
     return {
         "backend": "wasapi", "architecture": "x86_64",
-        "runtime": "cpal-0.18.2/ffmpeg-9.0.1", "endpointFormat": "48000Hz/stereo/f32",
+        "runtime": "cpal-0.18.2/ffmpeg-9.0.2", "endpointFormat": "48000Hz/stereo/f32",
         "captureMethod": "loopback-capture", "measurementKind": "physical-capture",
         "fixtureSha256": "d" * 64, "captureSha256": "e" * 64,
         "rawCapturePath": "captures/windows-x64/album-boundaries.wav",
@@ -153,6 +154,122 @@ def continuity_row():
 
 
 class InstalledEvidenceTests(unittest.TestCase):
+    def release_record(self, target="windows-x64", package_format="msi"):
+        record = {
+            "schemaVersion": 2,
+            "releaseEvidenceVersion": 1,
+            "evidenceId": f"{target}:{package_format}:{'a' * 64}:providers-v1:clean-upgrade",
+            "target": target,
+            "packageFormat": package_format,
+            "artifact": {
+                "fileName": f"HifiMule.{package_format}", "sha256": "a" * 64,
+                "sourceRevision": "b" * 40,
+                "signing": {"status": "passed", "identity": "distribution identity verified"},
+                "licenses": {"noticePresent": True, "ffmpegSourceOffer": True},
+            },
+            "runtime": {
+                "manifestSha256": "c" * 64,
+                "loadedVersions": {"avcodec": "63.1.102", "avformat": "63.1.102",
+                                   "avutil": "61.1.102", "swresample": "7.1.102"},
+                "loadedPaths": ["%LOCALAPPDATA%/HifiMule/avcodec-63.dll"],
+            },
+            "providers": [
+                {"kind": "jellyfin", "version": "10.10.7", "capabilities": ["stream", "album", "track"]},
+                {"kind": "subsonic", "implementation": "navidrome", "version": "0.58.0",
+                 "capabilities": ["stream", "album", "track"]},
+            ],
+            "environment": {
+                "osVersion": "Windows 11", "architecture": "x86_64",
+                "cleanInstall": "passed", "upgradeFrom": "0.14.0", "upgrade": "passed",
+                "interruptedMigration": "passed", "noBuildTools": True,
+                "noSystemFfmpeg": True, "elevationRequired": False,
+            },
+            "permissions": {"outcome": "passed", "policy": "per-user desktop install"},
+            "scenarios": {name: "passed" for name in evidence.RELEASE_SCENARIOS},
+            "resourceWorkload": {
+                "outcome": "passed", "durationMinutes": 30, "warmupMinutes": 5,
+                "sampleIntervalSeconds": 5, "rssDeltaP95MiB": 64,
+                "retainedRssGrowthMiB": 8, "normalizedCpuP95": 20,
+            },
+            "materialEvidence": [{"kind": "physical-continuity", "sha256": "d" * 64,
+                                  "uri": "ci-artifact://playback/windows/capture.wav",
+                                  "retention": "immutable release archive"}],
+            "limitations": [],
+            "decision": "pass",
+        }
+        if package_format == "appimage":
+            record["environment"]["cleanLaunch"] = record["environment"].pop("cleanInstall")
+        return record
+
+    def test_release_schema_requires_artifact_install_upgrade_lifecycle_ui_and_resources(self):
+        record = self.release_record()
+        self.assertEqual(evidence.validate_release_record(record), [])
+        for mutation in (
+            lambda value: value["artifact"].pop("sha256"),
+            lambda value: value["environment"].update(upgrade="unverified"),
+            lambda value: value["scenarios"].update({"safe-quit-real-sync": "failed"}),
+            lambda value: value["resourceWorkload"].update(durationMinutes=29),
+            lambda value: value["materialEvidence"][0].update(uri="/Users/alexis/capture.wav"),
+        ):
+            changed = self.release_record()
+            mutation(changed)
+            self.assertTrue(evidence.validate_release_record(changed))
+
+    def test_release_schema_accepts_truthful_blocker_but_never_aggregates_it_as_pass(self):
+        blocker = {
+            "schemaVersion": 2, "releaseEvidenceVersion": 1,
+            "evidenceId": "linux-x64:deb:artifact-unavailable:providers-v1:clean-upgrade",
+            "target": "linux-x64", "packageFormat": "deb", "decision": "blocker",
+            "blocker": {"owner": "release-manager", "rationale": "No Ubuntu host was available.",
+                        "requiredAction": "Build, install and execute the release matrix."},
+        }
+        self.assertEqual(evidence.validate_release_record(blocker), [])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "linux-deb.json").write_text(json.dumps(blocker))
+            manifest = {
+                "schemaVersion": 2, "releaseVersion": "0.15.0", "sourceRevision": "b" * 40,
+                "rows": [{"target": "linux-x64", "packageFormat": "deb", "record": "linux-deb.json"}],
+                "aggregateDecision": "pass",
+            }
+            errors = evidence.validate_release_manifest(manifest, root)
+        self.assertTrue(any("aggregate" in error for error in errors))
+
+    def test_release_manifest_requires_every_installer_row_and_matching_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for target, package_format in evidence.REQUIRED_RELEASE_ROWS:
+                record = self.release_record(target, package_format)
+                if target.startswith("linux"):
+                    record["environment"].update(osVersion="Ubuntu 22.04", architecture="x86_64")
+                    record["runtime"]["loadedPaths"] = ["/opt/hifimule/lib/libavcodec.so.63"]
+                elif target == "macos-x64":
+                    record["environment"].update(osVersion="macOS 10.15", architecture="x86_64")
+                    record["runtime"]["loadedPaths"] = ["/Applications/HifiMule.app/Contents/Frameworks/libavcodec.63.dylib"]
+                elif target == "macos-arm64":
+                    record["environment"].update(osVersion="macOS 11", architecture="aarch64")
+                    record["runtime"]["loadedPaths"] = ["/Applications/HifiMule.app/Contents/Frameworks/libavcodec.63.dylib"]
+                name = f"{target}-{package_format}.json"
+                (root / name).write_text(json.dumps(record))
+                rows.append({"target": target, "packageFormat": package_format, "record": name})
+            manifest = {"schemaVersion": 2, "releaseVersion": "0.15.0", "sourceRevision": "b" * 40,
+                        "rows": rows, "aggregateDecision": "pass"}
+            self.assertEqual(evidence.validate_release_manifest(manifest, root), [])
+            manifest["rows"].pop()
+            self.assertTrue(any("missing" in error for error in evidence.validate_release_manifest(manifest, root)))
+
+    def test_release_sanitizer_rejects_raw_identifiers_authenticated_urls_and_home_paths(self):
+        for value in (
+            {"serverId": "private"},
+            {"notes": "https://music.example/stream?token=secret"},
+            {"path": "/home/alexis/.local/share/HifiMule"},
+            {"path": "C:\\Users\\alexis\\AppData\\HifiMule"},
+        ):
+            with self.subTest(value=value):
+                self.assertTrue(evidence.release_privacy_errors(value))
+
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
         descriptor = {"port": 32123, "token": "top-secret", "instanceId": "owner"}
 
@@ -188,7 +305,7 @@ class InstalledEvidenceTests(unittest.TestCase):
 
     def test_runtime_projection_drops_urls_and_unknown_fields(self):
         projected = evidence.safe_audio_runtime({
-            "avcodec": "63.1.101", "sharedEndpoint": "Speakers",
+            "avcodec": "63.1.102", "sharedEndpoint": "Speakers",
             "unexpected": "private", "manifest": {
                 "sourceUrl": "https://ffmpeg.org/source.tar.xz",
                 "sourceSha256": "a" * 64,
@@ -238,8 +355,8 @@ class InstalledEvidenceTests(unittest.TestCase):
             "provider": {"kind": "jellyfin", "version": "10.10.7"},
             "audioRuntime": {
                 "sharedBackend": "wasapi", "cpalVersion": "0.18.2",
-                "avcodec": "63.1.101", "avformat": "63.1.101",
-                "avutil": "61.1.101", "swresample": "7.1.101",
+                "avcodec": "63.1.102", "avformat": "63.1.102",
+                "avutil": "61.1.102", "swresample": "7.1.102",
                 "sharedEndpoint": "Speakers", "compressedHighWaterBytes": 100,
                 "compressedAggregateHighWaterBytes": 200,
                 "pcmHighWaterSamples": 100,
