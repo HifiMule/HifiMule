@@ -5348,7 +5348,11 @@ mod tests {
             .collect();
         let shutdown_session = playback.clone();
         let shutdown = std::thread::spawn(move || shutdown_session.shutdown_checkpoint());
-        std::thread::sleep(Duration::from_millis(10));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !playback.fenced.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "shutdown did not fence playback ingress");
+            std::thread::yield_now();
+        }
         drop(guard);
         assert_eq!(
             executing.recv().unwrap().unwrap_err().code,

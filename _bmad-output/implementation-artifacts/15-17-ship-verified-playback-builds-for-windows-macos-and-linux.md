@@ -209,6 +209,7 @@ Story preparation: Codex. Implementation agent: GPT-5 Codex.
 - 2026-09-19: Local macOS ARM64 packaging initially retained stale 9.0.1/Homebrew-era dylibs, missed Tauri's installed sidecar name and preserved staging load paths. Focused regressions now enforce a clean closure, exact ABI files, installed naming and relocation. A rebuilt local app and mounted DMG passed closure/ARM64 checks; ad-hoc trust verification failed as expected and remains a shipping blocker.
 - 2026-09-19: The first controlled-runtime workspace run mixed the host `ffmpeg` CLI with the private 9.0.2 dylibs and failed eight decoder-reference tests before fixture decoding. Linux/macOS now pin `HIFIMULE_TEST_FFMPEG` to the verified prefix like Windows; the supported wrapper rerun passed the full workspace (daemon 1043 passed/6 ignored plus all other crates).
 - 2026-09-19: Windows-host regression run exposed a path-separator defect in the macOS bundle verifier: it searched only for `/bundled-libs/`, so its own Windows-host fixture found no dylibs. The existing test failed as intended; the verifier now accepts either separator and the full Node suite passes (180 pass, 1 intentional skip). Python release-evidence tests pass (39). The production UI build remains blocked locally because `npm` is absent and `pnpm` cannot perform a safe frozen install without the missing `pnpm-lock.yaml`; the available Rust toolchain is 1.98.1 rather than the required 1.93.0.
+- 2026-09-19: Windows CI exposed a race in `saturated_mailbox_cannot_block_shutdown_or_commit_queued_work_after_snapshot`: the test slept for 10 ms after spawning shutdown without establishing that the shutdown fence was set. Replaced the timing assumption with a bounded wait for `fenced`; the exact CI playback-session command now passes locally (89/89).
 
 ### Completion Notes List
 
@@ -226,6 +227,7 @@ Story preparation: Codex. Implementation agent: GPT-5 Codex.
 - Built a supplemental local macOS ARM64 app/DMG from controlled FFmpeg 9.0.2. The mounted DMG was ARM64, contained the exact private runtime/notices and had SHA-256 `23cc97…ad0f`; it is uncommitted, ad-hoc/unnotarized evidence only and does not replace the macOS ARM64 blocker record.
 - Pinned the decoder-reference CLI to the controlled runtime on Linux and macOS, preventing host/private-library mixing during wrapped Cargo tests. Final gates: Node 181/181, Python evidence 39/39, production UI build, full wrapped Rust workspace, formatting and diff checks.
 - Continued on the available Windows host: hardened the macOS installed-bundle verifier so its release checks are path-separator-neutral. This validates source-level verifier behavior only; required signed installers, target-floor clean installs, physical output/media-key/device checks and the real playback-plus-sync workload remain explicit release blockers.
+- Stabilized the Windows CI mailbox-shutdown regression by synchronizing on the actual shutdown fence instead of scheduler timing.
 
 ### File List
 
@@ -260,6 +262,7 @@ Story preparation: Codex. Implementation agent: GPT-5 Codex.
 - `hifimule-ui/src/state/basket.ts`
 - `hifimule-daemon/THIRD_PARTY_AUDIO_NOTICES.md`
 - `hifimule-daemon/audio-runtime.json`
+- `hifimule-daemon/src/playback/session.rs`
 - `docs/development-guide.md`
 - `scripts/build-daemon.mjs`
 - `scripts/bundle-macos-libs.mjs`
@@ -291,3 +294,4 @@ Story preparation: Codex. Implementation agent: GPT-5 Codex.
 - 2026-09-19: Added release-evidence schema v2, immutable-material/privacy validation and a six-installer aggregate that remains blocked on absent signed artifacts and real-platform results.
 - 2026-09-19: Hardened wrapped decoder tests to use the verified FFmpeg CLI on Linux/macOS and recorded the truthful blocked release decision after all locally runnable gates passed.
 - 2026-09-19: Made the macOS installed-bundle verifier path-separator-neutral so its controlled-runtime closure checks also run correctly from the Windows host.
+- 2026-09-19: Stabilized the mailbox-saturation shutdown regression on Windows by waiting for the shutdown fence rather than sleeping.
