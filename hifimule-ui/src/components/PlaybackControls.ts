@@ -48,6 +48,7 @@ export class PlaybackControls {
     private messageKey = '';
     private messagesVisible = false;
     private readonly messagesToggle = document.createElement('sl-icon-button');
+    private readonly back = this.button('back');
     private readonly primary = this.button('resume');
     private readonly stop = this.button('stop');
     private readonly next = this.button('next');
@@ -169,11 +170,11 @@ export class PlaybackControls {
         this.surfaceToggle.addEventListener('click', () => this.onSurfaceChange(this.surface === 'library' ? 'playback' : 'library'));
         const actions = document.createElement('div');
         actions.className = 'playback-controls__actions';
-        actions.append(...[this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh));
+        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh));
         this.messages.className = 'playback-controls__messages';
         this.messages.append(this.status, this.seekStatus, this.error);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
-        this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
+        this.back.hidden = this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
         void this.refreshServerLabels();
         this.unsubscribePlayback = playbackStore.subscribe(
@@ -274,6 +275,15 @@ export class PlaybackControls {
         this.setIcon(this.primary, action === 'pause' ? 'pause-fill' : 'play-fill', label);
         this.primary.hidden = this.stop.hidden = !snapshot.current;
         this.primary.disabled = this.stop.disabled = this.busy || !this.fresh();
+        this.back.hidden = !snapshot.current;
+        this.back.disabled = this.busy || !this.fresh() || !snapshot.playback.canGoBack;
+        const backHelp = snapshot.playback.canGoBack
+            ? t('playback.back_help')
+            : t(snapshot.playback.backUnavailableReason ?? 'playback.back_unavailable');
+        this.back.dataset.playbackHelp = backHelp;
+        this.back.setAttribute('title', backHelp);
+        this.back.setAttribute('aria-description', backHelp);
+        this.hints.get(this.back)?.setAttribute('content', backHelp);
         this.next.hidden = !snapshot.current;
         this.next.disabled = this.busy || !this.fresh() || !snapshot.playback.canGoNext;
         this.retry.hidden = snapshot.playback.status !== 'error' || !snapshot.playback.error?.retryable;
@@ -353,12 +363,12 @@ export class PlaybackControls {
         }
         this.setText(accessibleLabel as HTMLElement, label);
         button.setAttribute('aria-label', label);
-        this.hints?.get(button)?.setAttribute('content', label);
+        this.hints?.get(button)?.setAttribute('content', button.dataset.playbackHelp ?? label);
     }
 
     private hint(button: HTMLElement, placement = 'top', distance?: number): HTMLElement {
         const hint = document.createElement('sl-tooltip');
-        hint.setAttribute('content', button.getAttribute('aria-label') ?? '');
+        hint.setAttribute('content', button.dataset.playbackHelp ?? button.getAttribute('aria-label') ?? '');
         hint.setAttribute('placement', placement);
         if (distance !== undefined) hint.setAttribute('distance', String(distance));
         hint.setAttribute('hoist', '');
@@ -587,12 +597,13 @@ export class PlaybackControls {
             if (!this.disposed && this.snapshot) this.render(this.snapshot);
         }
     }
-    private button(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession'): HTMLElement & { disabled: boolean } {
+    private button(action: 'back' | 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession'): HTMLElement & { disabled: boolean } {
         const button = document.createElement('sl-button') as any;
         button.size = 'small';
         button.dataset.playbackAction = action;
         const labelKey = action === 'returnToSession' ? 'playback.return_to_session' : `playback.${action}`;
-        this.setIcon(button, { pause: 'pause-fill', resume: 'play-fill', stop: 'stop-fill', next: 'skip-end-fill', retry: 'arrow-clockwise', returnToSession: 'arrow-return-left' }[action], t(labelKey));
+        if (action === 'back') button.dataset.playbackHelp = t('playback.back_help');
+        this.setIcon(button, { back: 'skip-start-fill', pause: 'pause-fill', resume: 'play-fill', stop: 'stop-fill', next: 'skip-end-fill', retry: 'arrow-clockwise', returnToSession: 'arrow-return-left' }[action], t(labelKey));
         button.addEventListener('click', async () => {
             if (button.disabled || this.busy || this.disposed || !this.fresh() || !this.snapshot) return;
             this.busy = true;
@@ -609,7 +620,10 @@ export class PlaybackControls {
                 const code = (error as { data?: { code?: string } })?.data?.code;
                 if (code?.includes('CONFLICT') || code?.includes('MISMATCH')) void playbackStore.refresh().catch(() => {});
                 this.commandError = t(code === 'PERSISTENCE_FAILED'
-                    ? 'playback.command_error.persistence' : 'playback.command_error');
+                    ? 'playback.command_error.persistence'
+                    : code === 'BACK_UNAVAILABLE'
+                        ? this.snapshot?.playback.backUnavailableReason ?? 'playback.error.BACK_UNAVAILABLE'
+                        : 'playback.command_error');
             } finally {
                 if (this.disposed || epoch !== this.interactionEpoch) return;
                 this.busy = false;

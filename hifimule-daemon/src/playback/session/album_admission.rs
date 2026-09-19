@@ -313,6 +313,17 @@ pub(super) fn commit(
     };
     let mut playback = i.playback.clone();
     playback.can_go_next = count > 1;
+    playback.can_go_back =
+        current.is_some() && i.restoration.status != "error" && i.pending_terminal.is_none();
+    playback.back_unavailable_reason = (!playback.can_go_back).then(|| {
+        if current.is_none() {
+            "back.empty".into()
+        } else if i.pending_terminal.is_some() {
+            "back.persistence_pending".into()
+        } else {
+            "back.unavailable".into()
+        }
+    });
     let gain_bits = current.as_ref().map_or(1.0f32.to_bits(), |occurrence| {
         i.session
             .album_context
@@ -352,6 +363,9 @@ pub(super) fn commit(
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
         seek_audio: false,
         seek_epoch: i.control_epoch.load(Ordering::Acquire),
+        back_audio: false,
+        back_epoch: i.control_epoch.load(Ordering::Acquire),
+        back_audible: false,
         gain_bits,
         qualified_suffix: current_suffix,
     };

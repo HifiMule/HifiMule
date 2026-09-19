@@ -350,6 +350,66 @@ async fn shutdown_cancels_native_preparation_and_rejects_later_play() {
     assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
 }
 
+#[test]
+fn admitted_audible_back_reopens_the_retired_gate_before_commit() {
+    let f = Fixture::new();
+    let resumed = f
+        .session
+        .control_with_guard(f.rpc_params(ControlAction::Resume), None)
+        .unwrap();
+    f.session.publish_event_at_epoch(
+        resumed.generation_id.clone(),
+        PlaybackEvent::Active,
+        resumed.resume_epoch,
+    );
+    let active = f.session.snapshot().unwrap();
+    let back = f
+        .session
+        .control_with_guard(f.rpc_params(ControlAction::Back), None)
+        .unwrap();
+    assert!(back.back_audible);
+    let pending = back.playback.pending_back.as_ref().unwrap().clone();
+
+    // Pipeline retirement closes the session gate while installing the
+    // replacement. The successful audible completion must reopen it first.
+    f.session.output_gate().store(false, Ordering::Release);
+    assert!(authorize_prepared_back(
+        &f.session,
+        &back.generation_id,
+        back.back_epoch,
+        &pending.operation_id,
+        true,
+        || {
+            f.session.output_gate().store(true, Ordering::Release);
+            true
+        },
+    ));
+
+    let authorized = f.session.snapshot().unwrap();
+    assert_eq!(authorized.playback.status, PlaybackStatus::Loading);
+    assert_eq!(authorized.playback.pending_back.as_ref(), Some(&pending));
+    f.session.publish_event_at_epoch(
+        back.generation_id,
+        PlaybackEvent::BackCommitted {
+            operation_id: pending.operation_id.clone(),
+        },
+        back.back_epoch,
+    );
+    let committed = f.session.snapshot().unwrap();
+    assert_eq!(committed.playback.status, PlaybackStatus::Active);
+    assert!(committed.playback.pending_back.is_none());
+    assert_eq!(
+        committed
+            .playback
+            .back_outcome
+            .as_ref()
+            .map(|outcome| outcome.operation_id.as_str()),
+        Some(pending.operation_id.as_str())
+    );
+    assert!(f.session.output_gate().load(Ordering::Acquire));
+    assert_eq!(active.current, committed.current);
+}
+
 #[async_trait]
 impl MediaProvider for SlowProvider {
     fn server_type(&self) -> ServerType {
@@ -499,6 +559,59 @@ async fn dispatch_of_admitted_resume_after_pause_does_not_restart_preparation() 
         f.session.snapshot().unwrap().playback.status,
         PlaybackStatus::Paused
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paused_back_prepares_without_opening_the_output_gate() {
+    let f = Fixture::new();
+    let admitted = f
+        .service
+        .rpc_control(f.rpc_params(ControlAction::Back), None)
+        .await
+        .unwrap();
+    assert!(admitted.back_audio);
+    assert!(!admitted.back_audible);
+    notified(&f.provider.entered).await;
+    assert!(!f.session.output_gate().load(Ordering::Acquire));
+
+    f.provider.release.notify_one();
+    notified(&f.provider.finished).await;
+    let failed = status(&f.session, PlaybackStatus::Error).await;
+    assert_eq!(
+        failed.playback.back_outcome.unwrap().error.unwrap().code,
+        "BACK_SOURCE_UNAVAILABLE"
+    );
+    assert!(!f.session.output_gate().load(Ordering::Acquire));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superseded_audible_back_cannot_reopen_the_output_gate_or_publish_success() {
+    let f = Fixture::new();
+    f.session
+        .native_control(NativeControlIntent::Play, None)
+        .unwrap();
+    let admitted = f
+        .service
+        .rpc_control(f.rpc_params(ControlAction::Back), None)
+        .await
+        .unwrap();
+    assert!(admitted.back_audio);
+    assert!(admitted.back_audible);
+    notified(&f.provider.entered).await;
+
+    f.service
+        .rpc_control(f.rpc_params(ControlAction::Pause), None)
+        .await
+        .unwrap();
+    assert!(!f.session.output_gate().load(Ordering::Acquire));
+    f.provider.release.notify_one();
+    notified(&f.provider.finished).await;
+
+    let snapshot = f.session.snapshot().unwrap();
+    assert_eq!(snapshot.playback.status, PlaybackStatus::Paused);
+    assert!(snapshot.playback.pending_back.is_none());
+    assert!(snapshot.playback.back_outcome.is_none());
+    assert!(!f.session.output_gate().load(Ordering::Acquire));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

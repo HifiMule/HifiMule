@@ -19,6 +19,7 @@ struct PendingResume {
     generation_id: String,
     control_epoch: u64,
     seek_operation_id: Option<String>,
+    back_operation_id: Option<String>,
     replies: Vec<tokio::sync::oneshot::Sender<CommandResult>>,
 }
 
@@ -49,8 +50,15 @@ impl CommandFeedback {
                     .pending_seek
                     .as_ref()
                     .map(|seek| seek.operation_id.clone())
+            && pending.back_operation_id
+                == snapshot
+                    .playback
+                    .pending_back
+                    .as_ref()
+                    .map(|back| back.operation_id.clone())
             && (snapshot.playback.status == PlaybackStatus::Loading
-                || snapshot.playback.pending_seek.is_some())
+                || snapshot.playback.pending_seek.is_some()
+                || snapshot.playback.pending_back.is_some())
         {
             // An idempotent Play joins the existing attempt; it must not
             // complete the original menu receipt before preparation finishes.
@@ -76,10 +84,16 @@ impl CommandFeedback {
                 .pending_seek
                 .as_ref()
                 .map(|seek| seek.operation_id.clone()),
+            back_operation_id: snapshot
+                .playback
+                .pending_back
+                .as_ref()
+                .map(|back| back.operation_id.clone()),
             replies: request.reply.into_iter().collect(),
         };
         if snapshot.playback.status == PlaybackStatus::Loading
             || snapshot.playback.pending_seek.is_some()
+            || snapshot.playback.pending_back.is_some()
         {
             self.pending = Some(pending);
         } else {
@@ -105,6 +119,18 @@ impl CommandFeedback {
             {
                 None
             } else if pending.seek_operation_id.is_some() {
+                view.failure_code
+                    .clone()
+                    .map_or(Some(Ok(())), |code| Some(Err(code)))
+            } else if pending.back_operation_id.is_some()
+                && view.pending_back_operation_id == pending.back_operation_id
+            {
+                None
+            } else if pending.back_operation_id.is_some()
+                && view.committed_back_operation_id == pending.back_operation_id
+            {
+                Some(Ok(()))
+            } else if pending.back_operation_id.is_some() {
                 view.failure_code
                     .clone()
                     .map_or(Some(Ok(())), |code| Some(Err(code)))
@@ -139,6 +165,7 @@ pub struct NativeCommandMask {
     pub toggle: bool,
     pub stop: bool,
     pub next: bool,
+    pub previous: bool,
     pub seek: bool,
 }
 
@@ -157,6 +184,8 @@ pub struct NativePlaybackView {
     pub position_ms: u64,
     pub occurrence_id: Option<String>,
     pub pending_seek_operation_id: Option<String>,
+    pub pending_back_operation_id: Option<String>,
+    pub committed_back_operation_id: Option<String>,
     pub seeked_position_ms: Option<u64>,
     pub seeked_operation_id: Option<String>,
     pub commands: NativeCommandMask,
@@ -179,6 +208,8 @@ impl Default for NativePlaybackView {
             position_ms: 0,
             occurrence_id: None,
             pending_seek_operation_id: None,
+            pending_back_operation_id: None,
+            committed_back_operation_id: None,
             seeked_position_ms: None,
             seeked_operation_id: None,
             commands: NativeCommandMask::default(),
@@ -250,21 +281,45 @@ impl NativePlaybackView {
                 .pending_seek
                 .as_ref()
                 .map(|seek| seek.operation_id.clone()),
-            seeked_position_ms: snapshot.playback.seek_outcome.as_ref().and_then(|outcome| {
-                (outcome.status == "succeeded")
-                    .then_some(outcome.actual_position_ms)
-                    .flatten()
-            }),
-            seeked_operation_id: snapshot.playback.seek_outcome.as_ref().and_then(|outcome| {
-                (outcome.status == "succeeded" && outcome.actual_position_ms.is_some())
-                    .then(|| outcome.operation_id.clone())
-            }),
+            pending_back_operation_id: snapshot
+                .playback
+                .pending_back
+                .as_ref()
+                .map(|back| back.operation_id.clone()),
+            committed_back_operation_id: snapshot.playback.back_outcome.as_ref().and_then(
+                |outcome| (outcome.status == "committed").then(|| outcome.operation_id.clone()),
+            ),
+            seeked_position_ms: snapshot
+                .playback
+                .back_outcome
+                .as_ref()
+                .and_then(|outcome| (outcome.status == "committed").then_some(Some(0)))
+                .or_else(|| {
+                    snapshot.playback.seek_outcome.as_ref().and_then(|outcome| {
+                        (outcome.status == "succeeded").then_some(outcome.actual_position_ms)
+                    })
+                })
+                .flatten(),
+            seeked_operation_id: snapshot
+                .playback
+                .back_outcome
+                .as_ref()
+                .and_then(|outcome| {
+                    (outcome.status == "committed").then(|| outcome.operation_id.clone())
+                })
+                .or_else(|| {
+                    snapshot.playback.seek_outcome.as_ref().and_then(|outcome| {
+                        (outcome.status == "succeeded" && outcome.actual_position_ms.is_some())
+                            .then(|| outcome.operation_id.clone())
+                    })
+                }),
             commands: NativeCommandMask {
                 play: resumable && !active,
                 pause: !stopping && current && active,
                 toggle: !stopping && (resumable || active),
                 stop: !stopping && current,
                 next: !stopping && snapshot.playback.can_go_next,
+                previous: !stopping && snapshot.playback.can_go_back,
                 seek: !stopping
                     && current
                     && snapshot.playback.seek.available
@@ -626,7 +681,7 @@ fn capabilities(mask: NativeCommandMask) -> souvlaki::MediaControlCapabilities {
         toggle: mask.toggle,
         stop: mask.stop,
         next: mask.next,
-        previous: false,
+        previous: mask.previous,
         seek: mask.seek,
         raise: false,
         quit: false,
@@ -640,6 +695,7 @@ fn event_to_intent(event: souvlaki::MediaControlEvent) -> Option<NativeControlIn
         souvlaki::MediaControlEvent::Toggle => Some(NativeControlIntent::Toggle),
         souvlaki::MediaControlEvent::Stop => Some(NativeControlIntent::Stop),
         souvlaki::MediaControlEvent::Next => Some(NativeControlIntent::Next),
+        souvlaki::MediaControlEvent::Previous => Some(NativeControlIntent::Previous),
         souvlaki::MediaControlEvent::SetPosition(position) => u64::try_from(position.0.as_millis())
             .ok()
             .map(NativeControlIntent::SeekAbsolute),
@@ -668,6 +724,9 @@ mod tests {
 
     fn snapshot(status: PlaybackStatus, state: TransportState) -> SessionSnapshot {
         SessionSnapshot {
+            back_audio: false,
+            back_epoch: 0,
+            back_audible: false,
             resume_audio: false,
             resume_epoch: 0,
             seek_audio: false,
@@ -717,6 +776,8 @@ mod tests {
             next_cursor: None,
             playback: PlaybackState {
                 status,
+                can_go_back: true,
+                back_unavailable_reason: None,
                 ..Default::default()
             },
             output: OutputState {
@@ -751,6 +812,7 @@ mod tests {
                 toggle: true,
                 stop: true,
                 next: false,
+                previous: true,
                 seek: false,
             }
         );
@@ -766,6 +828,7 @@ mod tests {
                 toggle: true,
                 stop: true,
                 next: false,
+                previous: true,
                 seek: false,
             }
         );
@@ -878,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn next_is_mapped_but_previous_remains_unsupported() {
+    fn next_and_previous_map_to_shared_owner_intents() {
         assert_eq!(
             event_to_intent(souvlaki::MediaControlEvent::Stop),
             Some(NativeControlIntent::Stop)
@@ -887,7 +950,10 @@ mod tests {
             event_to_intent(souvlaki::MediaControlEvent::Next),
             Some(NativeControlIntent::Next)
         );
-        assert_eq!(event_to_intent(souvlaki::MediaControlEvent::Previous), None);
+        assert_eq!(
+            event_to_intent(souvlaki::MediaControlEvent::Previous),
+            Some(NativeControlIntent::Previous)
+        );
     }
 
     #[test]
@@ -1126,6 +1192,10 @@ mod tests {
             souvlaki::MediaControlEvent::Next
         ));
         assert_eq!(rx.try_recv().unwrap().intent, NativeControlIntent::Next);
+        assert!((state.lock().unwrap().callback.as_ref().unwrap())(
+            souvlaki::MediaControlEvent::Previous
+        ));
+        assert_eq!(rx.try_recv().unwrap().intent, NativeControlIntent::Previous);
         let initial_calls = state.lock().unwrap().calls.len();
         // UI open/close has no native registration effect; unchanged owner refreshes do no work.
         for _ in 0..5 {
@@ -1341,6 +1411,31 @@ mod tests {
         failed.status = PlaybackStatus::Error;
         failed.failure_code = Some("RESUME_UNAVAILABLE".into());
         feedback.project(failed);
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn committed_back_receipt_ignores_an_unrelated_persistent_failure() {
+        let mut feedback = CommandFeedback::default();
+        let mut admitted = snapshot(PlaybackStatus::Loading, TransportState::Buffering);
+        admitted.playback.pending_back = Some(super::super::model::PendingBack {
+            operation_id: "back-operation".into(),
+        });
+        let (reply, mut receipt) = tokio::sync::oneshot::channel();
+        feedback.admitted(
+            &admitted,
+            NativeRequest {
+                intent: NativeControlIntent::Previous,
+                reply: Some(reply),
+            },
+        );
+
+        let mut committed = NativePlaybackView::from_snapshot(&admitted, false);
+        committed.pending_back_operation_id = None;
+        committed.committed_back_operation_id = Some("back-operation".into());
+        committed.failure_code = Some("OUTPUT_WARNING".into());
+        feedback.project(committed);
+
         assert_eq!(receipt.try_recv().unwrap(), Ok(()));
     }
 }

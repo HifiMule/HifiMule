@@ -725,6 +725,7 @@ fn non_unity_handoff_and_storage_retry_preserve_frozen_member_policy() {
         },
         duration_ms: 10_000,
         representation: "mp3".into(),
+        predecessor_position_ms: 9_500,
         successor_offset_frames: 1200,
         sample_rate: 48_000,
         seek: SeekCapability::jellyfin_pcm_wav(),
@@ -853,7 +854,7 @@ fn legacy_v3_album_restores_and_allows_new_album_without_resetting_gain_or_queue
                 .unwrap()
                 .query_row("SELECT version FROM playback_schema", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
             // Re-reading does not guess formats or change the frozen policy.
             assert_eq!(
                 db.load_playback_session()

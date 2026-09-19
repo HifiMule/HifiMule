@@ -232,10 +232,12 @@ export interface PlaybackSessionSnapshot {
     nextCursor: string | null;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
     mainCurrent: { occurrenceId: string; ordinal: number; source: { serverId: string; trackId: string }; availability: 'unknown' | 'notConfigured' } | null;
-    playback: { status: PlaybackStatus; canGoNext: boolean; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
+    playback: { status: PlaybackStatus; canGoNext: boolean; canGoBack: boolean; backUnavailableReason?: string | null; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
         seek: { available: boolean; reason?: string | null; mechanism?: string | null; decodedLandingToleranceMs?: number | null };
         pendingSeek?: { operationId: string; requestedPositionMs: number; priorCommittedPositionMs: number } | null;
         seekOutcome?: { operationId: string; requestedPositionMs: number; actualPositionMs?: number | null; status: string; error?: { code: string; retryable: boolean } | null } | null;
+        pendingBack?: { operationId: string } | null;
+        backOutcome?: { operationId: string; status: 'committed' | 'failed'; error?: { code: string; retryable: boolean } | null } | null;
         error?: { code: string; retryable: boolean } | null };
     output: PlaybackOutputState;
 }
@@ -447,7 +449,7 @@ export async function playbackPlayAlbum(serverId: string, albumId: string): Prom
     }
 }
 
-export async function playbackControl(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession', observed?: PlaybackSessionSnapshot): Promise<void> {
+export async function playbackControl(action: 'back' | 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession', observed?: PlaybackSessionSnapshot): Promise<void> {
     const current = observed ?? await playbackGetSession();
     if (!current.current) return;
     await rpcCall('playback.control', {

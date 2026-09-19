@@ -1,6 +1,10 @@
+---
+baseline_commit: 3efa4529c56c94a009d5ed02a64562a97b957c9a
+---
+
 # Story 15.15: Restart the current track or return to the previous track
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -25,29 +29,29 @@ Dependencies: delivered Stories 15.1–15.14. No Epic 16 prerequisite. Story 15.
 
 ## Tasks / Subtasks
 
-- [ ] **1. Add replay-safe durable attempts without changing queue identity** (AC 2, 7, 8).
-  - [ ] Implement the version-5-to-6 playback migration and attempt lifecycle specified below; verify rollback/idempotence and preservation of existing outcomes, album policy and saved Preview.
-  - [ ] Replace destructive outcome reset for replay, including Resume/Retry, and make ordinary terminal handling and prepared-handoff terminal handling attempt-aware.
-  - [ ] Test stable forward order, repeated source IDs, migration, terminal persistence failure/retry and paused restoration.
-- [ ] **2. Add the shared daemon Back command and capability** (AC 1–5, 7).
-  - [ ] Extend `ControlAction`, owner dispatch and `PlaybackState`; retain the existing strict control envelope and add daemon-derived `canGoBack`/`backUnavailableReason`.
-  - [ ] Sample authoritative position, reconcile presented handoffs, validate current identity, select restart/previous and persist the accepted transition before publishing it.
-  - [ ] Reuse qualified seek or bounded provider reopen at zero; fence previous preparation, PCM and prepared successors. Preserve explicit playing/paused intent and all output inhibition.
-  - [ ] Restart Preview in isolation, preserving its open audition identity and saved main state while marking discontinuous heard coverage conservatively; allocate a fresh audition identity after an already-recorded terminal failure.
-  - [ ] Suppress every audio side effect on dedup cache hits; cover admission/failure/race cases.
-- [ ] **3. Enable supported native Previous delivery** (AC 5, 7, 8).
-  - [ ] Extend the daemon native mask and map `MediaControlEvent::Previous` to the shared Back command.
-  - [ ] Publish dynamic macOS/Windows/MPRIS availability through the existing patched Souvlaki adapters. Test headless command routing and metadata/position refresh.
-  - [ ] Record API-level and physical-key results separately, including unsupported or untested environments.
-- [ ] **4. Integrate Back into the retained bar** (AC 5, 6).
-  - [ ] Extend `playbackControl` and snapshot types; reuse the existing control click/refresh path, not UI time or client history.
-  - [ ] Add a stable Shoelace Back button beside the primary transport, using `skip-start-fill`, localized name and explanatory hover/focus help in EN/FR/ES/DE.
-  - [ ] Apply daemon availability, busy/freshness gates and scoped error handling. Preserve focus and clear superseded interaction state/errors when identity changes.
-  - [ ] Verify the two-row bar, full-width timeline, output chooser, Library/Playing switch, guidance overlay and final-content reachability at narrow width/zoom.
-- [ ] **5. Validate end-to-end and record evidence** (AC 1–8).
-  - [ ] Extend real production-module Rust/Node test harnesses with the matrix below; run focused tests, relevant broader regressions and the UI build.
-  - [ ] Verify actual UI keyboard activation and daemon playback behavior; do not treat DOM fixtures or mock native events as physical-key evidence.
-  - [ ] Document commands/results/limitations in the Dev Agent Record. Preserve existing done statuses and explicit release follow-ups.
+- [x] **1. Add replay-safe durable attempts without changing queue identity** (AC 2, 7, 8).
+  - [x] Implement the version-5-to-6 playback migration and attempt lifecycle specified below; verify rollback/idempotence and preservation of existing outcomes, album policy and saved Preview.
+  - [x] Replace destructive outcome reset for replay, including Resume/Retry, and make ordinary terminal handling and prepared-handoff terminal handling attempt-aware.
+  - [x] Test stable forward order, repeated source IDs, migration, terminal persistence failure/retry and paused restoration.
+- [x] **2. Add the shared daemon Back command and capability** (AC 1–5, 7).
+  - [x] Extend `ControlAction`, owner dispatch and `PlaybackState`; retain the existing strict control envelope and add daemon-derived `canGoBack`/`backUnavailableReason`.
+  - [x] Sample authoritative position, reconcile presented handoffs, validate current identity, select restart/previous and persist the accepted transition before publishing it.
+  - [x] Reuse qualified seek or bounded provider reopen at zero; fence previous preparation, PCM and prepared successors. Preserve explicit playing/paused intent and all output inhibition.
+  - [x] Restart Preview in isolation, preserving its open audition identity and saved main state while marking discontinuous heard coverage conservatively; allocate a fresh audition identity after an already-recorded terminal failure.
+  - [x] Suppress every audio side effect on dedup cache hits; cover admission/failure/race cases.
+- [x] **3. Enable supported native Previous delivery** (AC 5, 7, 8).
+  - [x] Extend the daemon native mask and map `MediaControlEvent::Previous` to the shared Back command.
+  - [x] Publish dynamic macOS/Windows/MPRIS availability through the existing patched Souvlaki adapters. Test headless command routing and metadata/position refresh.
+  - [x] Record API-level and physical-key results separately, including unsupported or untested environments.
+- [x] **4. Integrate Back into the retained bar** (AC 5, 6).
+  - [x] Extend `playbackControl` and snapshot types; reuse the existing control click/refresh path, not UI time or client history.
+  - [x] Add a stable Shoelace Back button beside the primary transport, using `skip-start-fill`, localized name and explanatory hover/focus help in EN/FR/ES/DE.
+  - [x] Apply daemon availability, busy/freshness gates and scoped error handling. Preserve focus and clear superseded interaction state/errors when identity changes.
+  - [x] Verify the two-row bar, full-width timeline, output chooser, Library/Playing switch, guidance overlay and final-content reachability at narrow width/zoom.
+- [x] **5. Validate end-to-end and record evidence** (AC 1–8).
+  - [x] Extend real production-module Rust/Node test harnesses with the matrix below; run focused tests, relevant broader regressions and the UI build.
+  - [x] Verify actual UI keyboard activation and daemon playback behavior; do not treat DOM fixtures or mock native events as physical-key evidence.
+  - [x] Document commands/results/limitations in the Dev Agent Record. Preserve existing done statuses and explicit release follow-ups.
 
 ## Dev Notes
 
@@ -185,19 +189,56 @@ Run required platform-target checks for changed native code and the relevant exi
 
 ### Agent Model Used
 
-Creation: Codex. Implementation: pending.
+Creation and implementation: Codex.
 
 ### Debug Log References
 
-Creation analysis: approved planning/architecture/UX context, preceding story and five recent commits; current UI/control/native/session/persistence implementation; official native API documentation. No production implementation or test execution is claimed by story creation.
+Creation analysis: approved planning/architecture/UX context, preceding story and five recent commits; current UI/control/native/session/persistence implementation; official native API documentation.
+
+Implementation plan and execution: introduced schema-v6 attempt evidence first, migrated terminal paths and bounded queue edits, then added serialized Back admission/preparation, native Previous projection, retained UI integration and regression coverage. Full workspace testing exposed and drove fixes for legacy-v3 ledger reconstruction and byte-equivalent album receipt replay.
+
+Validation evidence (2026-09-19):
+
+- `rtk proxy env HIFIMULE_FFMPEG_RUNTIME_VERIFIED=ffmpeg-9-runtime-verified-v2 cargo test --workspace` — passed: daemon 1,038 passed/6 intentional diagnostic or hardware ignores; i18n 7 passed; lifecycle contract 13 passed; UI Rust 7 passed; all remaining workspace/doc suites passed.
+- `rtk proxy env HIFIMULE_FFMPEG_RUNTIME_VERIFIED=ffmpeg-9-runtime-verified-v2 cargo test -p hifimule-daemon playback::` — passed: 317 passed/6 intentional diagnostic or hardware ignores.
+- `rtk node --test scripts/tests/*.test.mjs` — passed: 152/152.
+- `rtk npm --prefix hifimule-ui run build` — passed; retained pre-existing Vite chunk and mixed static/dynamic import warnings.
+- `rtk cargo fmt --all -- --check` and `rtk git diff --check` — passed.
+- `rtk cargo clippy -p hifimule-daemon --all-targets -- -D warnings` — blocked by the existing repository lint backlog (108 errors across unrelated API/device/RPC/sync and older playback code); no Clippy-clean baseline exists for this command.
+- API/automation evidence: daemon threshold, replay, Preview, output inhibition, migration, long-history, native Previous/mask/position and retained DOM activation/focus/help tests passed. Physical media-key delivery, actual Shoelace Enter/Space in an installed app, narrow-width/zoom clipping and shipping-platform checks were not executed in this environment; they remain explicit Story 15.17 installed manual-release checks. The optional zbus backend remains disabled and unclaimed.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Story is ready-for-dev; replay identity, forward cursor, stopped/completed behavior, persistence and native mapping are specified above.
-- Implementation tasks and acceptance evidence remain unchecked.
+- Added a schema-v6 paged playback-attempt ledger with immutable legacy evidence, atomic migration/recovery, fresh replay attempts and attempt-aware terminal/handoff/replacement behavior.
+- Added the shared Back operation with the authoritative 3,000 ms boundary, retained predecessor navigation, first-track restart, Preview isolation, persistence-first commit, dedup and generation/control fencing.
+- Fixed replacement-pipeline retirement so an audible Back reopens the matching generation/epoch gate, while paused, inhibited, failed and superseded Back operations remain silent; Back commits only after worker readiness.
+- Preserved cursor-relative forward order for manual and album queues, including repeated sources, and replaced cap-truncated Move/Remove paths with bounded indexed SQL suitable for rewound histories over 10,000 rows.
+- Enabled truthful native Previous capability/routing and committed zero-position discontinuities through the existing macOS, Windows and MPRIS Souvlaki adapters.
+- Added the stable localized Back control and safe unavailable/error presentation through the shared RPC/store refresh path.
+- Added Rust and production-module Node regression coverage; the complete workspace and UI build pass. Installed physical keyboard/media-key and layout checks remain assigned to Story 15.17 and are not labeled passed here.
+
+## Change Log
+
+- 2026-09-19: Implemented replay-safe Back across daemon persistence/session/preparation, native controls and retained UI; added migration, long-history and end-to-end regression coverage.
+- 2026-09-19: Fixed macOS Back silence by reopening only the admitted replacement pipeline at worker readiness; hardened failure, supersession, native feedback and attempt-position races found during adversarial review.
 
 ### File List
 
-- `_bmad-output/implementation-artifacts/15-15-restart-the-current-track-or-return-to-the-previous-track.md` — created story.
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` — story readiness updated.
+- `_bmad-output/implementation-artifacts/15-15-restart-the-current-track-or-return-to-the-previous-track.md`
+- `_bmad-output/implementation-artifacts/spec-15-15-back-audio-resume-regression.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/audio/handoff.rs`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/commands_tests.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/album_admission.rs`
+- `hifimule-daemon/src/playback/session/album_admission_tests.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/rpc.ts`
+- `scripts/tests/playback-ui.test.mjs`

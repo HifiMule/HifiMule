@@ -95,7 +95,7 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
     stateSequence: sequence, generationId: 'generation', mode: 'main', preview: null, state, positionMs: 0,
     current: { occurrenceId: 'occurrence', source: { serverId: 'server', trackId: 'track' } },
     output: { revision: '1', selected: { outputId: 'headphones', displayName: 'Headphones', detail: 'USB', available: true, isDefault: false }, pending: null, active: null, status: 'available', error },
-    playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], canGoNext: false, metadata: { title: 'Track' },
+    playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], canGoNext: false, canGoBack: true, backUnavailableReason: null, metadata: { title: 'Track' },
       durationMs: null, seek: { available: false, reason: 'playback.seek.unavailable' }, error },
   };
 }
@@ -117,6 +117,29 @@ test('two-row icon controls retain top hints and expose the Library/Playing surf
   h.component.setSurface('playback');
   assert.equal(h.component.surfaceToggle.querySelector('sl-icon').attributes.name, 'collection');
   assert.match(text(h.container), /playback.idle_guidance/);
+  h.component.destroy();
+});
+
+test('Back is a stable accessible control with separate help and shared daemon action', async () => {
+  const actions = [];
+  const initial = snapshot('paused');
+  const h = harness(initial, async action => actions.push(action)); await h.tick();
+  const back = h.container.querySelector('[data-playback-action="back"]');
+  assert.equal(back.querySelector('sl-icon').attributes.name, 'skip-start-fill');
+  assert.equal(back.attributes['aria-label'], 'playback.back');
+  assert.equal(h.component.hints.get(back).attributes.content, 'playback.back_help');
+  back.focus(); await back.click(); await h.tick();
+  assert.deepEqual(actions, ['back']);
+  h.setSnapshot({ ...initial, stateSequence: '2', generationId: 'back-generation', positionMs: 0 }); await h.tick();
+  assert.equal(h.container.querySelector('[data-playback-action="back"]'), back);
+  assert.equal(h.document.activeElement, back);
+  assert.equal(h.component.hints.get(back).attributes.content, 'playback.back_help');
+
+  const blocked = { ...initial, stateSequence: '3', playback: { ...initial.playback, canGoBack: false, backUnavailableReason: 'back.persistence_pending' } };
+  h.setSnapshot(blocked); await h.tick();
+  assert.equal(back.disabled, true);
+  assert.equal(back.attributes.title, 'back.persistence_pending');
+  assert.equal(h.component.hints.get(back).attributes.content, 'back.persistence_pending');
   h.component.destroy();
 });
 
@@ -181,7 +204,7 @@ test('Preview never requests main metadata and late restoration cannot repaint a
 
 test('all new bar labels are translated in every shipped locale', () => {
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
-  for (const locale of ['en','fr','es','de']) for (const key of ['playback.guidance.show','playback.guidance.hide','playback.browse_library','playback.show_playing','playback.playing_title','playback.idle_guidance','playback.unknown_track','playback.refresh','playback.connection.connecting','playback.connection.stale','playback.connection.disconnected']) {
+  for (const locale of ['en','fr','es','de']) for (const key of ['playback.guidance.show','playback.guidance.hide','playback.browse_library','playback.show_playing','playback.playing_title','playback.idle_guidance','playback.unknown_track','playback.refresh','playback.connection.connecting','playback.connection.stale','playback.connection.disconnected','playback.back','playback.back_help','playback.back_unavailable','back.empty','back.persistence_pending','back.unavailable','playback.error.BACK_UNAVAILABLE','playback.error.BACK_SOURCE_UNAVAILABLE']) {
     assert.ok(catalog[locale][key], `${locale}: ${key}`);
   }
 });

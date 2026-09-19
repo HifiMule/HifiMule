@@ -105,6 +105,8 @@ pub(super) fn run_output(
     seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     provider_duration_ms: u64,
     mut seek_commit: Option<(String, u64)>,
+    mut back_commit: Option<String>,
+    back_pending: Arc<AtomicBool>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
     successor_fence: Arc<SuccessorFence>,
@@ -306,6 +308,10 @@ pub(super) fn run_output(
                         metadata: metadata.clone(),
                         duration_ms,
                         representation: representation.clone(),
+                        predecessor_position_ms: match seek_qualified.load(Ordering::Acquire) {
+                            0 => provider_duration_ms,
+                            verified => verified,
+                        },
                         successor_offset_frames: 0,
                         sample_rate: rate,
                         seek: crate::playback::model::SeekCapability::unavailable(
@@ -561,6 +567,18 @@ pub(super) fn run_output(
             output
                 .set_paused(!enabled, &mut report_stall)
                 .map_err(PlaybackPipelineError::output_policy)?;
+            if ready
+                && (!gate.load(Ordering::Acquire) || enabled)
+                && let Some(operation_id) = back_commit.take()
+            {
+                session.publish_pipeline_event(
+                    expected_serial,
+                    generation.clone(),
+                    PlaybackEvent::BackCommitted { operation_id },
+                    event_epoch.load(Ordering::Acquire),
+                );
+                back_pending.store(false, Ordering::Release);
+            }
             if enabled {
                 let len = output.writable_samples().min(scratch.len());
                 if len > 0 {

@@ -1026,6 +1026,7 @@ impl AudioEngine {
                     }
                 }
                 super::model::ControlAction::Stop
+                | super::model::ControlAction::Back
                 | super::model::ControlAction::Next
                 | super::model::ControlAction::Retry
                 | super::model::ControlAction::ReturnToSession => {
@@ -1058,6 +1059,7 @@ impl AudioEngine {
                         pipeline.cancel.store(true, Ordering::Release);
                         return false;
                     }
+                    pipeline.gate.store(true, Ordering::Release);
                     // Only a newly admitted Resume may authorize an installed
                     // pipeline to report preparation failures in a newer epoch.
                     pipeline
@@ -1162,6 +1164,36 @@ impl AudioEngine {
             gain,
             admitted_suffix,
             None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_back_at_epoch_with_gain(
+        &self,
+        description: PlaybackDescription,
+        source: super::model::TrackSource,
+        operation_id: String,
+        generation: String,
+        session: super::PlaybackSession,
+        deadline: std::time::Instant,
+        expected_epoch: u64,
+        gain: f32,
+        admitted_suffix: Option<String>,
+    ) -> Result<(), PlaybackPipelineError> {
+        self.start_at_epoch_kind(
+            description,
+            source,
+            0,
+            generation,
+            session,
+            deadline,
+            expected_epoch,
+            gain,
+            admitted_suffix,
+            None,
+            Some(operation_id),
         )
         .await
     }
@@ -1191,6 +1223,7 @@ impl AudioEngine {
             gain,
             admitted_suffix,
             Some(operation_id),
+            None,
         )
         .await
     }
@@ -1208,6 +1241,7 @@ impl AudioEngine {
         gain: f32,
         admitted_suffix: Option<String>,
         seek_operation_id: Option<String>,
+        back_operation_id: Option<String>,
     ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
         let duration_ms = u64::from(description.song.duration_seconds).saturating_mul(1000);
@@ -1354,6 +1388,9 @@ impl AudioEngine {
         let worker_seek = seek_operation_id
             .clone()
             .map(|operation_id| (operation_id, start_ms));
+        let worker_back = back_operation_id.clone();
+        let back_pending = Arc::new(AtomicBool::new(back_operation_id.is_some()));
+        let worker_back_pending = back_pending.clone();
         // A worker cannot open native output until installation has passed the
         // owner's generation and command-epoch fence under the owner lock.
         let (installed_tx, installed_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -1385,6 +1422,8 @@ impl AudioEngine {
                     seek_mechanism,
                     duration_ms,
                     worker_seek,
+                    worker_back.clone(),
+                    worker_back_pending.clone(),
                     worker_boundary_pending,
                     worker_handoff,
                     worker_successor_fence,
@@ -1403,17 +1442,32 @@ impl AudioEngine {
                             worker_cancel.load(Ordering::Acquire),
                         ) && log_pipeline_failure(&session, &generation, &error) =>
                     {
-                        let event = worker_seek_failure.map_or_else(
-                            || PlaybackEvent::Failed {
-                                code: error.code().into(),
-                                retryable: error.retryable(),
-                            },
-                            |(operation_id, _)| PlaybackEvent::SeekPipelineFailed {
+                        let event = if worker_back_pending.load(Ordering::Acquire)
+                            && let Some(operation_id) = worker_back
+                        {
+                            PlaybackEvent::BackFailed {
                                 operation_id,
-                                code: error.code().into(),
-                                retryable: error.retryable(),
-                            },
-                        );
+                                code: if error.code().starts_with("OUTPUT_") {
+                                    error.code()
+                                } else {
+                                    "BACK_SOURCE_UNAVAILABLE"
+                                }
+                                .into(),
+                                retryable: true,
+                            }
+                        } else {
+                            worker_seek_failure.map_or_else(
+                                || PlaybackEvent::Failed {
+                                    code: error.code().into(),
+                                    retryable: error.retryable(),
+                                },
+                                |(operation_id, _)| PlaybackEvent::SeekPipelineFailed {
+                                    operation_id,
+                                    code: error.code().into(),
+                                    retryable: error.retryable(),
+                                },
+                            )
+                        };
                         session.publish_event_at_epoch(
                             generation,
                             event,
@@ -1578,6 +1632,8 @@ fn run_output(
     seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     provider_duration_ms: u64,
     seek_commit: Option<(String, u64)>,
+    back_commit: Option<String>,
+    back_pending: Arc<AtomicBool>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
     successor_fence: Arc<SuccessorFence>,
@@ -1910,6 +1966,14 @@ fn run_output(
             anyhow::Error::new(error).context("start output stream"),
         ));
     }
+    if let Some(operation_id) = back_commit {
+        session.publish_event_at_epoch(
+            generation.clone(),
+            PlaybackEvent::BackCommitted { operation_id },
+            event_epoch.load(Ordering::Acquire),
+        );
+        back_pending.store(false, Ordering::Release);
+    }
     let snapshot = match session.snapshot() {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -1997,6 +2061,10 @@ fn run_output(
                     metadata: metadata.clone(),
                     duration_ms,
                     representation: representation.clone(),
+                    predecessor_position_ms: match seek_qualified.load(Ordering::Acquire) {
+                        0 => provider_duration_ms,
+                        verified => verified,
+                    },
                     successor_offset_frames: 0,
                     sample_rate: rate,
                     seek: super::model::SeekCapability::unavailable("seek.unqualified"),
@@ -2664,7 +2732,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_pipeline_epoch_advances_only_for_a_current_admitted_resume() {
+    fn installed_pipeline_resume_reopens_gate_only_for_current_generation_and_epoch() {
         use crate::playback::NativeControlIntent;
         let session = queued_session();
         let admitted = session
@@ -2700,10 +2768,15 @@ mod tests {
             .unwrap();
         assert!(!engine.resume_existing(&admitted.generation_id, &session, admitted.resume_epoch));
         assert_eq!(authorized.load(Ordering::Acquire), admitted.resume_epoch);
+        assert!(!session.output_gate().load(Ordering::Acquire));
         let resumed = session
             .native_control(NativeControlIntent::Play, None)
             .unwrap();
+        // Pipeline retirement and replacement share this gate. Reproduce the
+        // retirement close that happens after Back has admitted audible intent.
+        session.output_gate().store(false, Ordering::Release);
         assert!(engine.resume_existing(&resumed.generation_id, &session, resumed.resume_epoch));
+        assert!(session.output_gate().load(Ordering::Acquire));
         assert_eq!(authorized.load(Ordering::Acquire), resumed.resume_epoch);
         assert!(engine.current.lock().unwrap().is_some());
         engine.stop_and_join().unwrap();

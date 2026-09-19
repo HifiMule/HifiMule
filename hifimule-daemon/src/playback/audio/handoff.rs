@@ -145,6 +145,7 @@ mod tests {
                 },
                 duration_ms: 9_000,
                 representation: "wav".into(),
+                predecessor_position_ms: 8_000,
                 successor_offset_frames: 0,
                 sample_rate: 48_000,
                 seek: crate::playback::model::SeekCapability::unavailable("preparing"),

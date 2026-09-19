@@ -76,6 +76,15 @@ pub struct SessionSnapshot {
     /// Owner-captured epoch fencing asynchronous seek preparation.
     #[serde(skip)]
     pub(crate) seek_epoch: u64,
+    /// Private Back preparation disposition, excluded from the wire contract.
+    #[serde(skip)]
+    pub(crate) back_audio: bool,
+    /// Owner-captured epoch fencing asynchronous Back preparation.
+    #[serde(skip)]
+    pub(crate) back_epoch: u64,
+    /// Whether a completed Back preparation may become audible immediately.
+    #[serde(skip)]
+    pub(crate) back_audible: bool,
     /// Frozen occurrence gain, excluded from the public playback wire contract.
     #[serde(skip)]
     pub(crate) gain_bits: u32,
@@ -216,12 +225,16 @@ pub struct PlaybackTrackMetadata {
 pub struct PlaybackState {
     pub status: PlaybackStatus,
     pub can_go_next: bool,
+    pub can_go_back: bool,
+    pub back_unavailable_reason: Option<String>,
     pub metadata: Option<PlaybackTrackMetadata>,
     pub duration_ms: Option<u64>,
     pub representation: Option<String>,
     pub seek: SeekCapability,
     pub pending_seek: Option<PendingSeek>,
     pub seek_outcome: Option<SeekOutcome>,
+    pub pending_back: Option<PendingBack>,
+    pub back_outcome: Option<BackOutcome>,
     pub error: Option<PlaybackFailure>,
 }
 
@@ -230,12 +243,16 @@ impl Default for PlaybackState {
         Self {
             status: PlaybackStatus::Idle,
             can_go_next: false,
+            can_go_back: false,
+            back_unavailable_reason: Some("back.empty".into()),
             metadata: None,
             duration_ms: None,
             representation: None,
             seek: SeekCapability::unavailable("seek.unresolved"),
             pending_seek: None,
             seek_outcome: None,
+            pending_back: None,
+            back_outcome: None,
             error: None,
         }
     }
@@ -288,6 +305,20 @@ pub struct SeekOutcome {
     pub error: Option<PlaybackFailure>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingBack {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackOutcome {
+    pub operation_id: String,
+    pub status: String,
+    pub error: Option<PlaybackFailure>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PlaybackEvent {
     Resolved {
@@ -307,6 +338,7 @@ pub enum PlaybackEvent {
         metadata: PlaybackTrackMetadata,
         duration_ms: u64,
         representation: String,
+        predecessor_position_ms: u64,
         successor_offset_frames: u64,
         sample_rate: u32,
         seek: SeekCapability,
@@ -326,6 +358,14 @@ pub enum PlaybackEvent {
     },
     // The owner distinguishes preparation failure from a later pipeline failure.
     SeekPipelineFailed {
+        operation_id: String,
+        code: String,
+        retryable: bool,
+    },
+    BackCommitted {
+        operation_id: String,
+    },
+    BackFailed {
         operation_id: String,
         code: String,
         retryable: bool,
@@ -451,6 +491,7 @@ pub struct SeekParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ControlAction {
+    Back,
     Pause,
     Resume,
     Stop,
@@ -599,6 +640,19 @@ pub struct AuditionOutcome {
     pub coverage_unknown: bool,
     pub seek_discontinuous: bool,
     pub fully_heard: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackAttempt {
+    pub attempt_seq: u64,
+    pub attempt_id: String,
+    pub session_id: String,
+    pub occurrence_id: String,
+    pub source: TrackSource,
+    pub disposition: Option<String>,
+    pub failure_code: Option<String>,
+    pub terminal_position_ms: Option<u64>,
+    pub legacy: bool,
 }
 
 // Only legacy v3 migration creates this marker. It never qualifies playback:
@@ -802,6 +856,7 @@ mod seek_contract_tests {
             serde_json::to_value(ControlAction::ReturnToSession).unwrap(),
             "returnToSession"
         );
+        assert_eq!(serde_json::to_value(ControlAction::Back).unwrap(), "back");
     }
 
     #[test]
