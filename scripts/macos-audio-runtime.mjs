@@ -150,7 +150,7 @@ export function verifyInstalledMacosBundle(appRoot, target, options = {}) {
   }
   const execute = options.run ?? run;
   execute("lipo", [sidecar, "-verify_arch", info.arch]);
-  const dylibs = files.filter((path) => path.includes("/bundled-libs/") && path.endsWith(".dylib"));
+  const dylibs = files.filter((path) => /[\\/]bundled-libs[\\/]/.test(path) && path.endsWith(".dylib"));
   for (const [library, version] of Object.entries(manifest.abiVersions)) {
     const major = version.split(".")[0];
     const names = dylibs.map((path) => basename(path)).filter((name) => name.startsWith(`lib${library}.`));
