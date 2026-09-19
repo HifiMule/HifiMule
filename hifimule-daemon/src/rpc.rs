@@ -8950,6 +8950,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_server_connect_subsonic_success_updates_state_and_db() {
         let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
         let mut server = mockito::Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")
@@ -9098,6 +9100,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_login_uses_auto_detection_for_subsonic() {
         let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
         let mut server = mockito::Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")
@@ -10000,6 +10004,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_server_connect_replaces_existing_provider() {
         let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
         let mut server = mockito::Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")

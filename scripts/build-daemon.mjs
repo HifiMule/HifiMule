@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureLinuxAudioRuntime, linuxBuildEnvironment } from "./linux-audio-runtime.mjs";
-import { ensureWindowsAudioRuntime, prependWindowsPath } from "./windows-audio-runtime.mjs";
+import { ensureWindowsAudioRuntime, prependWindowsPath, stageWindowsAudioRuntimeForCargo } from "./windows-audio-runtime.mjs";
 import {
   withAudioRuntimeVerification,
   withoutAudioRuntimeVerification,
@@ -39,9 +39,11 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     ensureLinuxAudioRuntime: options.ensureLinuxAudioRuntime ?? ensureLinuxAudioRuntime,
     linuxBuildEnvironment: options.linuxBuildEnvironment ?? linuxBuildEnvironment,
     ensureWindowsAudioRuntime: options.ensureWindowsAudioRuntime ?? ensureWindowsAudioRuntime,
+    stageWindowsAudioRuntimeForCargo: options.stageWindowsAudioRuntimeForCargo ?? stageWindowsAudioRuntimeForCargo,
   };
   let env = withoutAudioRuntimeVerification(options.env ?? process.env);
   const target = selectedTarget(cargoArgs, execute, env);
+  const args = cargoArgs.length ? cargoArgs : ["build", "--release", "-p", "hifimule-daemon"];
 
   if (platform === "linux") {
     const prefix = dependencies.ensureLinuxAudioRuntime(target);
@@ -55,6 +57,10 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     env = withAudioRuntimeVerification(env);
   } else if (platform === "win32") {
     env.FFMPEG_DIR = dependencies.ensureWindowsAudioRuntime(target, { env });
+    const profile = args.includes("--release") ? "release" : "debug";
+    const output = join(root, "target", ...((args.includes("--target") || args.some((arg) => arg.startsWith("--target="))) ? [target] : []), profile);
+    dependencies.stageWindowsAudioRuntimeForCargo(env.FFMPEG_DIR, target, output);
+    env.HIFIMULE_TEST_FFMPEG = join(env.FFMPEG_DIR, "bin", "ffmpeg.exe");
     env = prependWindowsPath(env, join(env.FFMPEG_DIR, "bin"));
     env = withAudioRuntimeVerification(env);
   } else if (platform === "darwin") {
@@ -64,7 +70,6 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     throw new Error(`Unsupported daemon build platform: ${platform}\n${buildDaemonUsage}`);
   }
 
-  const args = cargoArgs.length ? cargoArgs : ["build", "--release", "-p", "hifimule-daemon"];
   execute("cargo", args, { cwd: root, stdio: "inherit", env });
   return { target, args, env };
 }

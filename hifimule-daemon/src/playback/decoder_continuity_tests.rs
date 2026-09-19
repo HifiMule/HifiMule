@@ -186,9 +186,10 @@ fn join_at_boundary(a: &[f32], b: &[f32], channels: u16) -> Vec<f32> {
 fn continuity_six_format_adjacent_tracks_match_independent_drained_references() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../experiments/playback-probe/fixtures");
     for suffix in ["wav", "flac", "m4a", "mp3", "aac.m4a", "opus"] {
+        let declared_frames = [96_017, 72_011, 120_013];
         let mut decoded = Vec::new();
         let mut expected = Vec::new();
-        for (index, frames) in [96_017, 72_011, 120_013].into_iter().enumerate() {
+        for (index, frames) in declared_frames.into_iter().enumerate() {
             let path = root.join(format!("track-{}.{suffix}", index + 1));
             let actual = production(&path, 48_000, 2).unwrap();
             let reference = reference(&path, 48_000, 2);

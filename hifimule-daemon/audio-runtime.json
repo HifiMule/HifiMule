@@ -6,11 +6,12 @@
   "signingKeyUrl": "https://ffmpeg.org/ffmpeg-devel.asc",
   "signingKey": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
   "configureFlags": [
-    "--enable-shared", "--disable-static", "--disable-programs", "--disable-doc",
-    "--disable-network", "--disable-avdevice", "--disable-avfilter", "--disable-swscale",
+    "--enable-shared", "--disable-static", "--enable-ffmpeg", "--disable-doc",
+    "--disable-network", "--disable-avdevice", "--enable-avfilter", "--disable-swscale",
     "--disable-everything", "--enable-avcodec", "--enable-avformat",
-    "--enable-avutil", "--enable-swresample", "--enable-protocol=file",
-    "--enable-demuxer=wav,flac,mov,mp3,aac,ogg,aiff,asf", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be,pcm_s32be,flac,alac,mp3,aac,opus,vorbis,wmav1,wmav2,wmapro,wmalossless"
+    "--enable-avutil", "--enable-swresample", "--enable-protocol=file,pipe",
+    "--enable-demuxer=wav,flac,mov,mp3,aac,ogg,aiff,asf", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be,pcm_s24be,pcm_s32be,flac,alac,mp3,aac,opus,vorbis,wmav1,wmav2,wmapro,wmalossless",
+    "--enable-encoder=pcm_f32le,aac,flac", "--enable-muxer=pcm_f32le,mov,ipod,adts,flac", "--enable-parser=aac", "--enable-bsf=aac_adtstoasc", "--enable-filter=aresample,aformat"
   ],
   "windowsConfigureFlags": ["--disable-x86asm"],
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],

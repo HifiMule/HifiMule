@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
-import { createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, toMsysPath, validateMsys2Toolchain, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
+import { createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
 
 test("Windows PATH normalization retains entries from competing case aliases", () => {
   const source = { Path: "C:\\Rust\\bin", PATH: "C:\\Windows", path: "C:\\Rust\\bin", KEEP: "yes" };
@@ -103,6 +103,7 @@ function fakeRuntime(target = "aarch64-pc-windows-msvc") {
   const machine = target.startsWith("aarch64") ? 0xaa64 : 0x8664;
   mkdirSync(join(prefix, "lib", arch), { recursive: true });
   mkdirSync(join(prefix, "bin"));
+  writeFileSync(join(prefix, "bin", "ffmpeg.exe"), "fixture");
   const receipt = {
     schemaVersion: 1, targetTriple: target, ffmpegRelease: manifest.ffmpegRelease,
     sourceUrl: manifest.sourceUrl, signatureUrl: manifest.signatureUrl, signingKey: manifest.signingKey,
@@ -126,6 +127,7 @@ function populateOfficialRuntime(prefix, target) {
   const machine = target.startsWith("aarch64") ? 0xaa64 : 0x8664;
   mkdirSync(join(prefix, "lib"), { recursive: true });
   mkdirSync(join(prefix, "bin"), { recursive: true });
+  writeFileSync(join(prefix, "bin", "ffmpeg.exe"), "fixture");
   for (const [library, version] of Object.entries(manifest.abiVersions)) {
     const [major, minor, micro] = version.split(".");
     const include = join(prefix, "include", `lib${library}`); mkdirSync(include, { recursive: true });
@@ -205,6 +207,17 @@ for (const target of ["aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc"]) {
 test("FFMPEG_DIR remains a validated explicit override", () => {
   const prefix = fakeRuntime("x86_64-pc-windows-msvc");
   assert.equal(ensureWindowsAudioRuntime("x86_64-pc-windows-msvc", { env: { FFMPEG_DIR: prefix } }), prefix);
+});
+
+test("stages the verified runtime beside Cargo test executables", (t) => {
+  const prefix = fakeRuntime("x86_64-pc-windows-msvc");
+  const output = mkdtempSync(join(tmpdir(), "hifimule-cargo-runtime-"));
+  t.after(() => { rmSync(prefix, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); });
+
+  const staged = stageWindowsAudioRuntimeForCargo(prefix, "x86_64-pc-windows-msvc", output);
+
+  assert.deepEqual(staged.map((path) => basename(path)).sort(), windowsRuntimeDllNames(verifyWindowsAudioRuntime(prefix, "x86_64-pc-windows-msvc").dlls).sort());
+  for (const path of staged) assert.equal(readFileSync(path).toString("hex"), readFileSync(join(prefix, "bin", basename(path))).toString("hex"));
 });
 
 test("rejects a downloaded Windows SDK with the wrong hash", () => {

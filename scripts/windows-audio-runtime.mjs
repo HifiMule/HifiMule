@@ -78,6 +78,7 @@ export function verifyWindowsAudioRuntime(prefix, target) {
 
   const libDir = existsSync(join(prefix, "lib", targetInfo.libdir)) ? join(prefix, "lib", targetInfo.libdir) : join(prefix, "lib");
   const binDir = join(prefix, "bin");
+  if (!existsSync(join(binDir, "ffmpeg.exe"))) fail(`Controlled FFmpeg reference executable is missing: ${join(binDir, "ffmpeg.exe")}`);
   const dlls = [];
   for (const [library, version] of Object.entries(receipt.abiVersions)) {
     const upper = library.toUpperCase();
@@ -320,6 +321,17 @@ export function stageWindowsAudioRuntime(prefix, target) {
   for (const dll of verified.dlls) copyFileSync(dll, join(out, basename(dll)));
   console.log(`Staged controlled Windows FFmpeg DLLs: ${windowsRuntimeDllNames(verified.dlls).join(", ")}`);
   return verified;
+}
+
+export function stageWindowsAudioRuntimeForCargo(prefix, target, output) {
+  const verified = verifyWindowsAudioRuntime(prefix, target);
+  mkdirSync(output, { recursive: true });
+  const staged = verified.dlls.map((dll) => {
+    const destination = join(output, basename(dll));
+    copyFileSync(dll, destination);
+    return destination;
+  });
+  return staged;
 }
 
 export function windowsRuntimeDllNames(dlls) {

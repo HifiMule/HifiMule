@@ -87,10 +87,12 @@ test("daemon wrapper ensures Windows FFmpeg and exports FFMPEG_DIR before Cargo"
     env: {},
     execFileSync: executor("aarch64-pc-windows-msvc", calls),
     ensureWindowsAudioRuntime: (target, options) => { ensured = { target, options }; return "C:\\ffmpeg"; },
+    stageWindowsAudioRuntimeForCargo: () => {},
   });
   assert.equal(ensured.target, "aarch64-pc-windows-msvc");
   const cargoEnv = calls.find((call) => call.command === "cargo").options.env;
   assert.equal(cargoEnv.FFMPEG_DIR, "C:\\ffmpeg");
+  assert.equal(cargoEnv.HIFIMULE_TEST_FFMPEG, join("C:\\ffmpeg", "bin", "ffmpeg.exe"));
   assert.match(cargoEnv.PATH, /^C:\\ffmpeg[/\\]bin(?:;|$)/);
   assert.equal(cargoEnv[audioRuntimeVerification.environmentVariable], audioRuntimeVerification.value);
 });
@@ -102,8 +104,9 @@ test("Windows wrapper preserves Cargo search paths for every environment key cas
     runDaemonBuild(["test", "-p", "hifimule-daemon"], {
       platform: "win32",
       env: original,
-      execFileSync: executor("x86_64-pc-windows-msvc", calls),
-      ensureWindowsAudioRuntime: () => "C:\\ffmpeg",
+    execFileSync: executor("x86_64-pc-windows-msvc", calls),
+    ensureWindowsAudioRuntime: () => "C:\\ffmpeg",
+    stageWindowsAudioRuntimeForCargo: () => {},
     });
     const cargoEnv = calls.find((call) => call.command === "cargo").options.env;
     assert.deepEqual(Object.keys(cargoEnv).filter((name) => name.toUpperCase() === "PATH"), ["PATH"]);
@@ -121,6 +124,7 @@ test("daemon wrapper provisions the explicit Cargo target instead of the host", 
     env: { PATH: "C:\\Windows\\System32" },
     execFileSync: executor("x86_64-pc-windows-msvc", calls),
     ensureWindowsAudioRuntime: (target) => { ensuredTarget = target; return "C:\\ffmpeg-arm64"; },
+    stageWindowsAudioRuntimeForCargo: () => {},
   });
   assert.equal(ensuredTarget, "aarch64-pc-windows-msvc");
   assert.equal(result.target, "aarch64-pc-windows-msvc");
