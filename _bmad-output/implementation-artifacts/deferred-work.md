@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Deferred from: reusable smoke workflow permissions review (2026-09-20)
+
+- **Reusable smoke jobs inherit all release signing secrets** (`.github/workflows/release.yml:363`, `.github/workflows/release.yml:374`) — both smoke callers use `secrets: inherit` even though the reusable smoke workflow only consumes `GITHUB_TOKEN`. Removing inherited Apple and Windows signing credentials would reduce exposure, but secret transport was pre-existing at baseline `7ed4b4ddbfe2db04fb84f164283cefb55bc40ba4` and is outside the approved permission-scope fix.
+
 ## Deferred from: code review of 15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels.md (2026-09-19)
 
 - **Validate runtime browse-mode values returned by the provider** (`hifimule-ui/src/library.ts:486`) — `fetchBrowseModes()` has always trusted the runtime RPC payload as `BrowseMode[]`. An unknown value can become the selected mode, produce an untranslated label/no icon, and reach a `loadModeRoot()` switch with no matching loader. Add runtime filtering or schema validation at the RPC boundary. Deferred as pre-existing at baseline `2a88f9b1b410e14ef8fe22e80fcff8aef1d4a3de`.

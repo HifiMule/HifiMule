@@ -355,7 +355,8 @@ jobs:
     if: github.event_name == 'push'
     needs: release
     permissions:
-      contents: write
+      contents: read
+      actions: read
     uses: ./.github/workflows/smoke-test.yml
     with:
       release_tag: ${{ github.ref_name }}

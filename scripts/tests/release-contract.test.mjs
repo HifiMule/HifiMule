@@ -6,6 +6,26 @@ import test from "node:test";
 const root = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 const json = (path) => JSON.parse(read(path));
+const jobBlock = (workflow, jobName) => {
+  const match = workflow.match(new RegExp(`^  ${jobName}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:|$(?![\\s\\S]))`, "m"));
+  assert.ok(match, `workflow must define the ${jobName} job`);
+  return match[0];
+};
+const permissionMap = (workflow, indent) => {
+  const padding = " ".repeat(indent);
+  const entryPadding = `${padding}  `;
+  const header = `${padding}permissions:\n`;
+  const start = workflow.indexOf(header);
+  assert.notEqual(start, -1, "workflow block must define permissions");
+
+  const permissions = {};
+  for (const line of workflow.slice(start + header.length).split("\n")) {
+    const match = line.match(new RegExp(`^${entryPadding}([a-z-]+): (read|write|none)$`));
+    if (!match) break;
+    permissions[match[1]] = match[2];
+  }
+  return permissions;
+};
 
 test("0.15.0 release contract fixes the four shipping rows and package formats", () => {
   const contract = json("docs/playback-evidence/release-contract-0.15.0.json");
@@ -52,6 +72,18 @@ test("release workflow supports explicit immutable candidates without publishing
   assert.match(workflow, /Upload immutable candidate/);
   assert.match(workflow, /if: github\.event_name == 'push'/);
   assert.match(workflow, /releaseDraft: true/);
+});
+
+test("smoke workflows use a read-only caller and callee permission contract", () => {
+  const releaseWorkflow = read(".github/workflows/release.yml");
+  const smokeWorkflow = read(".github/workflows/smoke-test.yml");
+  const readOnlyPermissions = { contents: "read", actions: "read" };
+
+  assert.deepEqual(permissionMap(smokeWorkflow, 0), readOnlyPermissions);
+  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-release"), 4), readOnlyPermissions);
+  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-candidate"), 4), readOnlyPermissions);
+  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "release"), 4), { contents: "write" });
+  assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 1);
 });
 
 test("release guide states certification boundaries and the four-row workflow", () => {
