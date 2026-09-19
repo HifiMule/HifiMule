@@ -3,7 +3,7 @@ baseline_commit: 2a88f9b1b410e14ef8fe22e80fcff8aef1d4a3de
 ---
 # Story 15.16: Compact the library browse-mode bar with icons and smaller labels
 
-Status: review
+Status: done
 
 ## Story
 

@@ -199,7 +199,7 @@ development_status:
   15-13-edit-the-upcoming-listening-queue: done
   15-14-control-listening-from-a-floating-playback-bar-across-views: done
   15-15-restart-the-current-track-or-return-to-the-previous-track: done
-  15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels: review
+  15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels: done
   15-17-ship-verified-playback-builds-for-windows-macos-and-linux: backlog
   epic-15-retrospective: optional
 
