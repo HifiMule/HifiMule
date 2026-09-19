@@ -719,7 +719,18 @@ function renderViewToggle() {
         }
         container.appendChild(group);
     }
-    group.hidden = state.loading || state.browseMode === 'tracks' || state.availableModes.length === 0;
+    const shouldHide = state.loading || state.browseMode === 'tracks' || state.availableModes.length === 0;
+    if (shouldHide && document.activeElement && group.contains(document.activeElement)) {
+        const fallback = container.querySelector<SlButton>(
+            `sl-button[data-mode="${state.browseMode}"]`,
+        );
+        if (fallback && !fallback.disabled) fallback.focus({ preventScroll: true });
+        else {
+            container.tabIndex = -1;
+            container.focus({ preventScroll: true });
+        }
+    }
+    group.hidden = shouldHide;
     for (const button of group.querySelectorAll<SlButton>('sl-button')) {
         const mode = button.getAttribute('data-view');
         const selected = mode === state.listViewMode;
@@ -2345,6 +2356,7 @@ export async function initLibraryView() {
     console.log('Initializing library view...');
 
     clearNavigationCache();
+    teardownListScrollHandler();
 
     const container = document.getElementById('library-content');
     if (container) {

@@ -1,5 +1,10 @@
 # Deferred Work
 
+## Deferred from: code review of 15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels.md (2026-09-19)
+
+- **Validate runtime browse-mode values returned by the provider** (`hifimule-ui/src/library.ts:486`) — `fetchBrowseModes()` has always trusted the runtime RPC payload as `BrowseMode[]`. An unknown value can become the selected mode, produce an untranslated label/no icon, and reach a `loadModeRoot()` switch with no matching loader. Add runtime filtering or schema validation at the RPC boundary. Deferred as pre-existing at baseline `2a88f9b1b410e14ef8fe22e80fcff8aef1d4a3de`.
+- **Fence concurrent browse-mode loads during the pre-loading yield** (`hifimule-ui/src/library.ts:1398`) — several existing reset loaders yield to the browser before setting `state.loading`, leaving a short window in which another mode activation can start and later results can race. Add a navigation generation/fence or set admission state before yielding. Deferred as pre-existing at baseline `2a88f9b1b410e14ef8fe22e80fcff8aef1d4a3de`.
+
 ## Deferred from: Preview audio-start gate fix review (2026-09-18)
 
 - **Preview admission persistence failure can retire the live transport before commit** (`hifimule-daemon/src/playback/session.rs:2060`) — admission/replacement pauses and retires audio, rotates generation/epoch and mutates the main state before the audition transaction succeeds. A failed write can leave the prior main or preview stopped despite the RPC error. Rework admission around a tentative transaction or explicit prior-transport recovery.

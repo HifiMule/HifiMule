@@ -1,17 +1,43 @@
 // Reproducible browser fixture: production modules + Shoelace, mocked Tauri IPC.
 // Run: rtk node scripts/preview-browse-mode.mjs
 // Open http://localhost:1422/.browse-preview.html. Ctrl-C removes generated files.
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createServer } from '../hifimule-ui/node_modules/vite/dist/node/index.js';
 const baseline = '2a88f9b1b410e14ef8fe22e80fcff8aef1d4a3de';
 const files = [];
-function write(path, text) { writeFileSync(path, text, {flag:'wx'}); files.push(path); }
+function write(path, text) {
+  const fd = openSync(path, 'wx');
+  files.push(path);
+  try { writeFileSync(fd, text); }
+  catch(error) {
+    try { closeSync(fd); }
+    catch(closeError) { console.error(`Failed to close ${path}:`, closeError); }
+    throw error;
+  }
+  closeSync(fd);
+}
+function cleanupGeneratedFiles() {
+  for (const file of files.splice(0).reverse()) {
+    try { unlinkSync(file); }
+    catch(error) { if(error.code!=='ENOENT') console.error(`Failed to remove ${file}:`, error); }
+  }
+}
+let server;
+async function shutdown() {
+  try { await server?.close(); }
+  finally { cleanupGeneratedFiles(); }
+  process.exit();
+}
+process.on('SIGINT',shutdown);
+process.on('SIGTERM',shutdown);
+
 const probe = '\nexport const browseProbe = { state, renderModeBar, switchMode };';
-write('hifimule-ui/src/.browse-current.ts', readFileSync('hifimule-ui/src/library.ts','utf8') + probe);
-write('hifimule-ui/src/.browse-before.ts', execFileSync('rtk',['proxy','git','show',baseline+':hifimule-ui/src/library.ts'],{encoding:'utf8'}) + probe);
-write('hifimule-ui/.browse-before.css', execFileSync('rtk',['proxy','git','show',baseline+':hifimule-ui/src/styles.css'],{encoding:'utf8'}));
-write('hifimule-ui/.browse-preview.html', `<!doctype html><html class="sl-theme-dark"><meta charset="utf-8"><title>15.16 production renderer verification</title>
+try {
+  write('hifimule-ui/src/.browse-current.ts', readFileSync('hifimule-ui/src/library.ts','utf8') + probe);
+  write('hifimule-ui/src/.browse-before.ts', execFileSync('rtk',['proxy','git','show',baseline+':hifimule-ui/src/library.ts'],{encoding:'utf8'}) + probe);
+  write('hifimule-ui/.browse-before.css', execFileSync('rtk',['proxy','git','show',baseline+':hifimule-ui/src/styles.css'],{encoding:'utf8'}));
+  write('hifimule-ui/.browse-preview.html', `<!doctype html><html class="sl-theme-dark"><meta charset="utf-8"><title>15.16 production renderer verification</title>
 <style>.fixture-controls{box-sizing:border-box;height:64px;display:flex;align-items:center;gap:12px;padding:8px;font:12px system-ui;flex-wrap:wrap}.fixture-controls select{color:inherit;background:#151d31}.fixture-controls label{display:flex;gap:4px}.fixture-shell .basket-view{height:100%;min-height:0}.fixture-shell{height:calc(100vh - 64px);width:720px;max-width:100%;resize:horizontal;overflow:auto;min-width:240px}.fixture-status{margin:0;padding:8px;font:12px system-ui;white-space:pre-wrap;overflow:auto}.library-view{height:100%}#playback-controls-container{flex-shrink:0;min-height:64px;padding:8px;background:var(--panel-bg);font-size:12px}</style>
 <div class="fixture-controls"><label>Version<select id="version"><option value="current">Current</option><option value="before">Before</option></select></label><label>Width<select id="width"><option>720</option><option>360</option><option>1000</option></select></label><label>Language<select id="lang"><option>en</option><option>fr</option><option>es</option><option>de</option></select></label><label>Text<select id="scale"><option value="1">100%</option><option value="2">200%</option></select></label><label>Modes<select id="modes"><option>Broad</option><option>Limited</option><option>Empty</option></select></label><button id="refresh">Refresh</button><button id="loading">Loading</button><button id="surface">Library / Playing</button><button id="split">Divider layout</button></div>
 <div class="fixture-shell"><main class="library-view"><header><div class="library-header-row"><div class="library-title-block"><h1>Library</h1><p>Fixture library</p></div></div></header><div id="browse-mode-bar"></div><div id="library-content"></div><div id="playback-destination-container" hidden>Playing (fixture)</div><div id="playback-controls-container">Playback region (fixture — no audio)<pre class="fixture-status" id="metrics"></pre></div></main></div>
@@ -48,8 +74,12 @@ new ResizeObserver(measure).observe(document.querySelector('.fixture-shell'));
 document.querySelector('#browse-mode-bar').addEventListener('click',()=>setTimeout(measure,100));
 await initLibraryView();controls();
 </script></html>`);
-let server;
-async function cleanup(){await server?.close();for(const file of files){try{unlinkSync(file)}catch(error){if(error.code!=='ENOENT')throw error}}process.exit();}
-process.on('SIGINT',cleanup);process.on('SIGTERM',cleanup);
-
-try { server=await createServer({configFile:'hifimule-ui/vite.config.ts',server:{port:1422}});await server.listen();server.printUrls(); } catch(error) { for(const file of files){try{unlinkSync(file)}catch(error){if(error.code!=='ENOENT')throw error}}throw error; }
+  server=await createServer({configFile:'hifimule-ui/vite.config.ts',server:{port:1422}});
+  await server.listen();
+  server.printUrls();
+} catch(error) {
+  try { await server?.close(); }
+  catch(cleanupError) { console.error('Failed to close preview server:', cleanupError); }
+  cleanupGeneratedFiles();
+  throw error;
+}

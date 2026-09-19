@@ -39,6 +39,14 @@ so that I can switch between Tracks, Albums, Recently Added and other browse mod
   - [x] Use focused existing-style Node coverage for changed reconciliation behavior and stable node identity; do not add a test framework.
   - [x] Run the frontend build and relevant UI regressions. Record rendered dimensions, screenshots or reproducible observations, accessibility results and platform limitations.
 
+### Review Findings
+
+- [x] [Review][Patch] Preserve keyboard focus when the Grid/List group becomes hidden [hifimule-ui/src/library.ts:722]
+- [x] [Review][Patch] Tear down list/grid subscriptions before clearing content for empty capabilities [hifimule-ui/src/library.ts:2369]
+- [x] [Review][Patch] Clean up partially generated preview files when setup fails [scripts/preview-browse-mode.mjs:11]
+- [x] [Review][Defer] Validate runtime browse-mode values returned by the provider [hifimule-ui/src/library.ts:486] — deferred, pre-existing: the RPC wrapper has always trusted the typed provider response, and an unknown value could already select a mode with no loader
+- [x] [Review][Defer] Fence concurrent browse-mode loads during the pre-loading yield [hifimule-ui/src/library.ts:1398] — deferred, pre-existing: mode loaders already yielded before setting `state.loading` at the review baseline
+
 ## Dev Notes
 
 ### Scope, dependencies and precedence

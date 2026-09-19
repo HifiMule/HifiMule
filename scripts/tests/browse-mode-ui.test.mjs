@@ -7,6 +7,14 @@ const allModes = ['artists', 'albums', 'playlists', 'tracks', 'genres', 'recentl
 const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url)));
 function harness(locale = 'en') {
   const document = { activeElement: null };
+  const audit = [];
+  let content;
+  let modesResult = [...allModes];
+  let modesError = null;
+  const basketStore = {
+    addEventListener() {},
+    removeEventListener(type, handler) { audit.push(`remove:basket:${handler.name || 'handler'}`); },
+  };
   class Element {
     children = []; attributes = {}; listeners = {}; className = ''; textContent = ''; hidden = false;
     updateComplete = Promise.resolve(); scrolls = 0; dataset = {};
@@ -14,17 +22,18 @@ function harness(locale = 'en') {
     get isConnected() { return this === root || !!this.parentElement?.isConnected; }
     get firstElementChild() { return this.children[0] ?? null; }
     get nextElementSibling() { const a = this.parentElement?.children ?? []; return a[a.indexOf(this)+1] ?? null; }
-    set innerHTML(value) { this.replaceChildren(); }
+    set innerHTML(value) { if (this === content) audit.push('replace:innerHTML'); this.replaceChildren(); }
     get innerHTML() { return ''; }
     setAttribute(k,v) { this.attributes[k] = String(v); }
     getAttribute(k) { return this.attributes[k] ?? null; }
     append(...nodes) { for (const n of nodes) this.appendChild(n); }
     appendChild(n) { this.insertBefore(n, null); return n; }
     insertBefore(n, ref) { n.remove(); n.parentElement = this; const i = ref ? this.children.indexOf(ref) : this.children.length; this.children.splice(i,0,n); }
-    replaceChildren(...nodes) { for (const n of [...this.children]) n.remove(); this.append(...nodes); }
+    replaceChildren(...nodes) { if (this === content) audit.push('replace:children'); for (const n of [...this.children]) n.remove(); this.append(...nodes); }
     remove() { if (this === document.activeElement) document.activeElement = null; if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(n => n !== this); this.parentElement = null; }
     contains(n) { return this === n || this.children.some(c => c.contains(n)); }
     addEventListener(k,f) { (this.listeners[k] ??= []).push(f); }
+    removeEventListener(k,f) { audit.push(`remove:${k}:${f.name || 'handler'}`); this.listeners[k] = (this.listeners[k] ?? []).filter(listener => listener !== f); }
     async click() { for (const f of this.listeners.click ?? []) await f(); }
     focus() { document.activeElement = this; }
     scrollIntoView() { this.scrolls++; }
@@ -32,19 +41,25 @@ function harness(locale = 'en') {
     querySelector(s) { return this.querySelectorAll(s)[0] ?? null; }
   }
   const root = new Element('div');
+  content = new Element('div');
   document.createElement = tag => new Element(tag);
-  document.getElementById = id => id === 'browse-mode-bar' ? root : null;
+  document.getElementById = id => id === 'browse-mode-bar' ? root : id === 'library-content' ? content : null;
   const exports = {};
-  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode };';
+  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView };';
   const source = ts.transpileModule(input, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   vm.runInNewContext(source, { exports, document, console, requestAnimationFrame: f => f(),
-    require: name => name === './i18n' ? {t:key=>catalog[locale][key] ?? key} : {},
+    require: name => name === './i18n' ? {t:key=>catalog[locale][key] ?? key}
+      : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}}
+      : name === './state/basket' ? {basketStore} : {},
     setTimeout, clearTimeout, window: {} });
   const {probe} = exports;
   probe.state.availableModes = [...allModes];
   const render = async () => { probe.renderModeBar(); await Promise.resolve(); await Promise.resolve(); };
   const buttons = () => root.querySelectorAll('sl-button[data-mode]');
-  return { ...probe, render, root, buttons, document, Element };
+  return { ...probe, render, root, content, buttons, document, Element, audit,
+    setModesResult(value) { modesResult = value; },
+    setModesError(value) { modesError = value; },
+  };
 }
 test('capability reconciliation preserves order, supported nodes, focus and single handlers', async () => {
   const h = harness(); await h.render(); const original = h.buttons(); original[1].focus();
@@ -81,9 +96,50 @@ test('view toggle retains identity and focus, hides for loading and Tracks, and 
   const h=harness();await h.render();const group=h.root.querySelector('.view-toggle-group');const list=group.children[1];list.focus();await h.render();
   assert.equal(h.root.querySelector('.view-toggle-group'),group);assert.equal(h.document.activeElement,list);
   await list.click();await h.render();assert.equal(h.state.listViewMode,'list');assert.equal(h.document.activeElement,list);
-  h.state.loading=true;await h.render();assert.equal(group.hidden,true);
+  h.state.loading=true;await h.render();assert.equal(group.hidden,true);assert.equal(h.document.activeElement,h.root);
   h.state.loading=false;h.state.browseMode='tracks';await h.render();assert.equal(group.hidden,true);
   h.state.browseMode='albums';await h.render();assert.equal(group.hidden,false);assert.equal(group.children[1],list);assert.equal(list.button.getAttribute('aria-pressed'),'true');
+});
+
+test('hiding Grid/List moves only its own focus to an enabled mode or the browse bar', async () => {
+  const tracks=harness();await tracks.render();const tracksGroup=tracks.root.querySelector('.view-toggle-group');tracksGroup.children[0].focus();
+  tracks.state.browseMode='tracks';await tracks.render();
+  assert.equal(tracks.document.activeElement,tracks.buttons().find(button=>button.getAttribute('data-mode')==='tracks'));
+
+  const loading=harness();await loading.render();loading.root.querySelector('.view-toggle-group').children[0].focus();loading.state.loading=true;await loading.render();
+  assert.equal(loading.document.activeElement,loading.root);
+
+  const empty=harness();await empty.render();empty.root.querySelector('.view-toggle-group').children[1].focus();empty.state.availableModes=[];await empty.render();
+  assert.equal(empty.document.activeElement,empty.root);
+
+  const external=harness();await external.render();const outside=new external.Element('input');outside.focus();external.state.browseMode='tracks';await external.render();
+  assert.equal(external.document.activeElement,outside);
+});
+
+test('library initialization tears down list and basket listeners before replacing content', async () => {
+  for (const failure of [null, new Error('capability failure')]) {
+    const h=harness();
+    const scroll=function scrollHandler(){};
+    const listBasket=function listBasketHandler(){};
+    const gridBasket=function gridBasketHandler(){};
+    h.content.__listScrollHandler=scroll;
+    h.content.__listBasketHandler=listBasket;
+    h.content.__gridBasketHandler=gridBasket;
+    h.content.addEventListener('scroll',scroll);
+    h.setModesResult([]);
+    h.setModesError(failure);
+    await h.initLibraryView();
+    const firstReplacement=h.audit.findIndex(event=>event.startsWith('replace:'));
+    assert.ok(firstReplacement>=3, h.audit.join(','));
+    assert.deepEqual(h.audit.slice(0,3),[
+      'remove:scroll:scrollHandler',
+      'remove:basket:listBasketHandler',
+      'remove:basket:gridBasketHandler',
+    ]);
+    assert.equal(h.content.__listScrollHandler,undefined);
+    assert.equal(h.content.__listBasketHandler,undefined);
+    assert.equal(h.content.__gridBasketHandler,undefined);
+  }
 });
 test('mode activation uses the existing reset path, and same-mode/loading clicks are no-ops', async () => {
   const h=harness();await h.render();h.state.breadcrumbStack=[{id:'a',name:'A'}];h.state.selectedIds.add('selection');
