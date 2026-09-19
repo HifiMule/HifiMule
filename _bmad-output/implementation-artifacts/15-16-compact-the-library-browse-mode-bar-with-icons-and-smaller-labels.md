@@ -1,6 +1,9 @@
+---
+baseline_commit: 2a88f9b1b410e14ef8fe22e80fcff8aef1d4a3de
+---
 # Story 15.16: Compact the library browse-mode bar with icons and smaller labels
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -19,22 +22,22 @@ so that I can switch between Tracks, Albums, Recently Added and other browse mod
 
 ## Tasks / Subtasks
 
-- [ ] Confirm application baseline and apply the prepared visual specification (AC: 1, 3, 5, 6).
-  - [ ] Capture the current real library bar before editing at matching widths/locales/mode sets; record bar height, rows, button size, gaps and library-content height.
-  - [ ] Use the mapping, dimensions and wrapping policy below; compare against the isolated design companion. Verify actual Shoelace internal button styling and vertical icon/label alignment.
-  - [ ] Exercise narrow/short-window and 200% text cases before finalizing CSS; keep navigation, content and playback controls reachable.
-- [ ] Extend the existing renderer without changing navigation ownership (AC: 1, 2, 4).
-  - [ ] Add an exhaustive typed icon map and full visible labels from `modeLabel()`; retain `data-mode` and `switchMode(mode)`.
-  - [ ] Reconcile rendered keys/order against `state.availableModes`, including source changes; reuse unchanged buttons and avoid duplicate listeners.
-  - [ ] Update selected, disabled and accessible states on creation and refresh. Preserve focus when the mode remains available; use a sensible fallback only when a focused control disappears.
-- [ ] Implement scoped compact/responsive styles and preserve the view toggle (AC: 3–5).
-  - [ ] Wrap modes naturally and move Grid/List together to the next row when needed. Retain Tracks/loading availability rules and shared grid/list state.
-  - [ ] Preserve `[hidden]` handling and retained Library/Playing DOM. Avoid recreating focused toggle controls on unchanged updates.
-  - [ ] Reuse local icons and theme tokens; change translations only if a new accessible group label is necessary, with four-locale parity.
-- [ ] Verify behavior and rendered result, then record evidence (AC: 1–6).
-  - [ ] Exercise supported modes, same-mode/loading activation, capability changes, breadcrumbs, cached views, selection resets and unchanged basket/playback state.
-  - [ ] Use focused existing-style Node coverage for changed reconciliation behavior and stable node identity; do not add a test framework.
-  - [ ] Run the frontend build and relevant UI regressions. Record rendered dimensions, screenshots or reproducible observations, accessibility results and platform limitations.
+- [x] Confirm application baseline and apply the prepared visual specification (AC: 1, 3, 5, 6).
+  - [x] Capture the current real library bar before editing at matching widths/locales/mode sets; record bar height, rows, button size, gaps and library-content height.
+  - [x] Use the mapping, dimensions and wrapping policy below; compare against the isolated design companion. Verify actual Shoelace internal button styling and vertical icon/label alignment.
+  - [x] Exercise narrow/short-window and 200% text cases before finalizing CSS; keep navigation, content and playback controls reachable.
+- [x] Extend the existing renderer without changing navigation ownership (AC: 1, 2, 4).
+  - [x] Add an exhaustive typed icon map and full visible labels from `modeLabel()`; retain `data-mode` and `switchMode(mode)`.
+  - [x] Reconcile rendered keys/order against `state.availableModes`, including source changes; reuse unchanged buttons and avoid duplicate listeners.
+  - [x] Update selected, disabled and accessible states on creation and refresh. Preserve focus when the mode remains available; use a sensible fallback only when a focused control disappears.
+- [x] Implement scoped compact/responsive styles and preserve the view toggle (AC: 3–5).
+  - [x] Wrap modes naturally and move Grid/List together to the next row when needed. Retain Tracks/loading availability rules and shared grid/list state.
+  - [x] Preserve `[hidden]` handling and retained Library/Playing DOM. Avoid recreating focused toggle controls on unchanged updates.
+  - [x] Reuse local icons and theme tokens; change translations only if a new accessible group label is necessary, with four-locale parity.
+- [x] Verify behavior and rendered result, then record evidence (AC: 1–6).
+  - [x] Exercise supported modes, same-mode/loading activation, capability changes, breadcrumbs, cached views, selection resets and unchanged basket/playback state.
+  - [x] Use focused existing-style Node coverage for changed reconciliation behavior and stable node identity; do not add a test framework.
+  - [x] Run the frontend build and relevant UI regressions. Record rendered dimensions, screenshots or reproducible observations, accessibility results and platform limitations.
 
 ## Dev Notes
 
@@ -163,18 +166,41 @@ Story preparation: Codex. Implementation agent: record during dev-story.
 
 ### Debug Log References
 
+- Red phase: four initial reconciliation/accessibility/identity tests failed before implementation; all seven final tests pass.
+- Verification run: `scripts/preview-browse-mode.mjs`; actual module, Shoelace, loader and CSS browser checks with isolated mock IPC.
+
 - Planning/code/previous-story/git analysis and official documentation checked 2026-09-19.
 - Isolated comparison: `15-16-browse-mode-comparison.html`; measurements and limitations above.
 
 ### Completion Notes List
 
+- Implemented by Codex on 2026-09-19. User explicitly chose proposal B before application implementation: quiet controls with cyan underline/fill and reference-inspired local icons. This supersedes the prepared solid-primary presentation and initial icon mapping.
+- Retained keyed mode and Grid/List controls, localized labels, native shadow-button selected/disabled semantics, loading focus, capability fallback, and existing navigation ownership. Empty capabilities and stale detached buttons cannot trigger unsupported navigation.
+- Scoped compact styles retain 30px targets, wrap labels, preserve focus rings and bound scrolling at min(30vh, 20rem); 40vh was reduced after the large-text check.
+- 159 Node tests passed, including seven focused production-module regressions. TypeScript/Vite build and diff whitespace checks passed. Real Shoelace rendering checked across 24 locale/width/text-size combinations; matched EN 720px bar shrank 85→73px and content grew 376→388px.
+- Detailed evidence and reproduction: `15-16-browse-mode-verification.md`. Updated packaged native checks, live playback/device integration, OS text scaling and screen-reader listening remain explicitly unverified for 15.17. The existing installed macOS app was baseline-only; browser verification used production modules with mocked IPC.
+
 - Ultimate context engine analysis completed - comprehensive developer guide created.
-- Ready for development; implementation and application verification tasks remain unchecked.
+- Preparation readiness notes are superseded by the implementation and verification results above.
 - Preparation checklist applied: design policy, code reuse, capability reconciliation, focus/accessibility, localization, short-window safeguard and truthful evidence boundaries included.
 
 ### File List
+
+Implementation and verification files:
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/browse-mode-ui.test.mjs`
+- `scripts/preview-browse-mode.mjs`
+- `_bmad-output/implementation-artifacts/15-16-browse-mode-design-options.html`
+- `_bmad-output/implementation-artifacts/15-16-browse-mode-verification.md`
+- `_bmad-output/implementation-artifacts/15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 Story preparation artifacts:
 - `_bmad-output/implementation-artifacts/15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels.md`
 - `_bmad-output/implementation-artifacts/15-16-browse-mode-comparison.html`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
+## Change Log
+
+- 2026-09-19: Implemented user-selected design B, stable capability reconciliation and accessible selection/loading focus; added Node regressions and reproducible browser evidence. Status set to review; installed release checks explicitly recorded for 15.17.

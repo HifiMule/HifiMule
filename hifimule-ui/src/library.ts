@@ -1,3 +1,4 @@
+import type SlButton from '@shoelace-style/shoelace/dist/components/button/button.js';
 import {
     BrowseMode,
     BrowseArtist,
@@ -440,38 +441,93 @@ function favoriteTracksForAlbum(tree: FavoriteTree, albumId: string): BrowseTrac
 
 // --- UI rendering ---
 
+const browseModeIcons: Record<BrowseMode, string> = {
+    artists: 'mic',
+    albums: 'disc',
+    playlists: 'collection-play',
+    tracks: 'music-note',
+    genres: 'tags',
+    recentlyAdded: 'plus-square',
+    frequentlyPlayed: 'repeat',
+    recentlyPlayed: 'clock-history',
+    favorites: 'heart',
+};
+
+// Shoelace 2 does not forward aria-pressed to its native shadow button.
+// Read the latest host state after rendering so overlapping updates cannot
+// publish an obsolete selection. The native button remains the only tab stop.
+function updateBrowseButton(button: SlButton, selected: boolean, label?: string) {
+    button.setAttribute('aria-pressed', String(selected));
+    void button.updateComplete.then(() => {
+        const native = button.shadowRoot?.querySelector('button');
+        native?.setAttribute('aria-pressed', button.getAttribute('aria-pressed')!);
+        native?.setAttribute('aria-disabled', button.getAttribute('aria-disabled') ?? String(button.disabled));
+        if (label) native?.setAttribute('aria-label', label);
+    });
+}
+
 function renderModeBar() {
     const container = document.getElementById('browse-mode-bar');
     if (!container) return;
-
-    const existingBtns = container.querySelectorAll('sl-button[data-mode]');
-    if (existingBtns.length > 0) {
-        existingBtns.forEach(btn => {
-            const mode = (btn as HTMLElement).getAttribute('data-mode') as BrowseMode;
-            (btn as any).variant = mode === state.browseMode ? 'primary' : 'default';
-            (btn as any).disabled = state.loading;
-        });
-        renderViewToggle();
-        return;
+    const focused = document.activeElement as HTMLElement | null;
+    const previousMode = container.dataset.currentMode;
+    let bar = container.querySelector<HTMLElement>('.browse-mode-bar');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.className = 'browse-mode-bar';
+        container.appendChild(bar);
     }
-
-    container.innerHTML = '';
-    const bar = document.createElement('div');
-    bar.className = 'browse-mode-bar';
-
-    state.availableModes.forEach(mode => {
-        const btn = document.createElement('sl-button') as any;
-        btn.setAttribute('data-mode', mode);
-        btn.variant = mode === state.browseMode ? 'primary' : 'default';
-        btn.size = 'small';
-        btn.textContent = modeLabel(mode);
-        btn.disabled = state.loading;
-        btn.addEventListener('click', () => switchMode(mode));
-        bar.appendChild(btn);
-    });
-
-    container.appendChild(bar);
+    const existing = new Map(Array.from(bar.querySelectorAll<SlButton>('sl-button[data-mode]'))
+        .map(button => [button.getAttribute('data-mode') as BrowseMode, button]));
+    for (const [mode, button] of existing) {
+        if (!state.availableModes.includes(mode)) button.remove();
+    }
+    let next = bar.firstElementChild;
+    for (const mode of state.availableModes) {
+        let button = existing.get(mode);
+        if (!button) {
+            button = document.createElement('sl-button');
+            button.setAttribute('data-mode', mode);
+            button.size = 'small';
+            const icon = document.createElement('sl-icon');
+            icon.name = browseModeIcons[mode];
+            icon.slot = 'prefix';
+            icon.setAttribute('aria-hidden', 'true');
+            const label = document.createElement('span');
+            button.append(icon, label);
+            button.addEventListener('click', () => switchMode(mode));
+        }
+        button.querySelector('span')!.textContent = modeLabel(mode);
+        button.variant = 'default';
+        // Native disabling blurs the focused shadow button. Keep that one
+        // focusable with aria-disabled; switchMode still rejects every loading click.
+        button.disabled = state.loading && focused !== button;
+        button.setAttribute('aria-disabled', String(state.loading));
+        updateBrowseButton(button, mode === state.browseMode);
+        // Do not detach unchanged controls on background updates.
+        if (button !== next) bar.insertBefore(button, next);
+        next = button.nextElementSibling;
+    }
     renderViewToggle();
+    if (focused && focused !== document.activeElement && existing.size > 0
+        && Array.from(existing.values()).includes(focused as SlButton)) {
+        const retained = focused.isConnected && !(focused as SlButton).disabled;
+        const fallback = bar.querySelector<SlButton>(`sl-button[data-mode="${state.browseMode}"]`);
+        if (retained) focused.focus({ preventScroll: true });
+        else if (!focused.isConnected) {
+            if (fallback && !fallback.disabled) fallback.focus({ preventScroll: true });
+            else { container.tabIndex = -1; container.focus({ preventScroll: true }); }
+        }
+    }
+    container.dataset.currentMode = state.browseMode;
+    if (previousMode !== state.browseMode) {
+        requestAnimationFrame(() => {
+            if (!container.hidden && container.dataset.currentMode === state.browseMode) {
+                bar.querySelector<SlButton>(`sl-button[data-mode="${state.browseMode}"]`)
+                    ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+        });
+    }
 }
 
 function createBreadcrumbs(): HTMLElement {
@@ -646,28 +702,32 @@ function removeListSpinner(content: HTMLElement) {
 function renderViewToggle() {
     const container = document.getElementById('browse-mode-bar');
     if (!container) return;
-    const existing = container.querySelector('.view-toggle-group');
-    if (existing) existing.remove();
-    const showToggle = !state.loading && state.browseMode !== 'tracks';
-    if (!showToggle) return;
-    const currentMode = state.listViewMode;
-    const group = document.createElement('div');
-    group.className = 'view-toggle-group';
-    const gridBtn = document.createElement('sl-button') as any;
-    gridBtn.size = 'small';
-    gridBtn.variant = currentMode === 'grid' ? 'primary' : 'default';
-    gridBtn.title = t('library.viewToggle.grid');
-    gridBtn.innerHTML = '<sl-icon name="grid"></sl-icon>';
-    gridBtn.addEventListener('click', () => setViewMode('grid'));
-    const listBtn = document.createElement('sl-button') as any;
-    listBtn.size = 'small';
-    listBtn.variant = currentMode === 'list' ? 'primary' : 'default';
-    listBtn.title = t('library.viewToggle.list');
-    listBtn.innerHTML = '<sl-icon name="list"></sl-icon>';
-    listBtn.addEventListener('click', () => setViewMode('list'));
-    group.appendChild(gridBtn);
-    group.appendChild(listBtn);
-    container.appendChild(group);
+    let group = container.querySelector<HTMLElement>('.view-toggle-group');
+    if (!group) {
+        group = document.createElement('div');
+        group.className = 'view-toggle-group';
+        for (const mode of ['grid', 'list'] as const) {
+            const button = document.createElement('sl-button');
+            button.size = 'small';
+            button.setAttribute('data-view', mode);
+            const icon = document.createElement('sl-icon');
+            icon.name = mode;
+            icon.setAttribute('aria-hidden', 'true');
+            button.appendChild(icon);
+            button.addEventListener('click', () => setViewMode(mode));
+            group.appendChild(button);
+        }
+        container.appendChild(group);
+    }
+    group.hidden = state.loading || state.browseMode === 'tracks' || state.availableModes.length === 0;
+    for (const button of group.querySelectorAll<SlButton>('sl-button')) {
+        const mode = button.getAttribute('data-view');
+        const selected = mode === state.listViewMode;
+        const label = t(`library.viewToggle.${mode}`);
+        button.variant = selected ? 'primary' : 'default';
+        button.title = label;
+        updateBrowseButton(button, selected, label);
+    }
 }
 
 function setViewMode(mode: 'grid' | 'list') {
@@ -1336,7 +1396,7 @@ function renderError(error: Error) {
 // --- Mode switching ---
 
 async function switchMode(mode: BrowseMode) {
-    if (mode === state.browseMode || state.loading) return;
+    if (mode === state.browseMode || state.loading || !state.availableModes.includes(mode)) return;
 
     clearSelection();
     saveScroll();
@@ -2305,5 +2365,6 @@ export async function initLibraryView() {
     }
 
     renderModeBar();
-    await loadModeRoot();
+    if (state.availableModes.length > 0) await loadModeRoot();
+    else container?.replaceChildren();
 }

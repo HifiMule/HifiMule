@@ -89,8 +89,16 @@ body {
 }
 
 #browse-mode-bar {
-  flex-shrink: 0;
-  padding: var(--space-xs) 2rem;
+  flex-shrink: 1;
+  min-block-size: 0;
+  padding: var(--space-2xs) var(--space-md);
+  box-sizing: border-box;
+  min-width: 0;
+  max-block-size: min(30vh, 20rem);
+  overflow-y: auto;
+  scroll-padding: 0.25rem;
+  flex-wrap: wrap;
+  gap: 0.25rem;
   background: rgba(26, 39, 59, 0.96);
   border-bottom: 1px solid var(--surface-border-soft);
   display: flex;
@@ -107,8 +115,66 @@ body {
 
 .browse-mode-bar {
   display: flex;
+  flex: 1 1 18rem;
+  min-width: 0;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.25rem;
+}
+
+#browse-mode-bar .browse-mode-bar sl-button {
+  max-width: 100%;
+  --sl-input-height-small: 1.875rem;
+  --sl-button-font-size-small: 0.6875rem;
+}
+
+#browse-mode-bar .browse-mode-bar sl-button::part(base) {
+  min-height: 1.875rem;
+  height: auto;
+  padding-inline: 6px;
+  align-items: center;
+  font-family: inherit;
+  line-height: 1.3;
+  color: var(--ink);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 3px;
+}
+
+#browse-mode-bar .browse-mode-bar sl-button::part(label) {
+  padding-inline: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#browse-mode-bar .browse-mode-bar sl-button::part(prefix) {
+  margin-inline-end: 4px;
+}
+
+#browse-mode-bar .browse-mode-bar sl-icon {
+  font-size: 0.875rem;
+}
+
+#browse-mode-bar .browse-mode-bar sl-button[aria-disabled="false"]:hover::part(base) {
+  background: var(--surface-fill-hover);
+}
+
+#browse-mode-bar .browse-mode-bar sl-button[aria-pressed="true"]::part(base) {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.09);
+  box-shadow: inset 0 -2px var(--sl-color-primary-600);
+}
+
+#browse-mode-bar .browse-mode-bar sl-button[aria-disabled="true"]::part(base) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#browse-mode-bar .view-toggle-group {
+  flex-shrink: 0;
+}
+
+#browse-mode-bar .view-toggle-group[hidden] {
+  display: none;
 }
 
 #library-content {
@@ -1917,7 +1983,6 @@ h2 {
     padding: 1.75rem 1.5rem 1.2rem;
   }
 
-  #browse-mode-bar,
   #library-content {
     padding-left: 1.5rem;
     padding-right: 1.5rem;
