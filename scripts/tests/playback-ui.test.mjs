@@ -74,7 +74,7 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
         ? { playbackStore: storeExports.playbackStore }
       : name === '../serverIdentity'
         ? { formatServerIdentity: server => ({ label: server.name || 'Jellyfin', icon: server.icon || 'collection-play' }) }
-        : { t: (key, values) => values?.source ? `${key}: ${values.source}` : key },
+        : { t: (key, values) => values?.source ? `${key}: ${values.source}` : values?.status ? `${key}: ${values.status}` : key },
   });
   const container = new Element('section');
   const component = new exports.PlaybackControls(container, outputRpc.surfaceChange ?? outputRpc.browse);
@@ -181,7 +181,7 @@ test('Preview never requests main metadata and late restoration cannot repaint a
 
 test('all new bar labels are translated in every shipped locale', () => {
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
-  for (const locale of ['en','fr','es','de']) for (const key of ['playback.browse_library','playback.show_playing','playback.playing_title','playback.idle_guidance','playback.unknown_track','playback.refresh','playback.connection.connecting','playback.connection.stale','playback.connection.disconnected']) {
+  for (const locale of ['en','fr','es','de']) for (const key of ['playback.guidance.show','playback.guidance.hide','playback.browse_library','playback.show_playing','playback.playing_title','playback.idle_guidance','playback.unknown_track','playback.refresh','playback.connection.connecting','playback.connection.stale','playback.connection.disconnected']) {
     assert.ok(catalog[locale][key], `${locale}: ${key}`);
   }
 });
@@ -890,5 +890,40 @@ test('real shared-store heartbeat delivers output discovery completion without a
   assert.equal(calls, 2);
   assert.match(text(select), /Discovered output/);
   assert.equal(h.document.activeElement, select);
+  h.component.destroy();
+});
+
+
+test('persistent guidance can be dismissed and reopened without polling reopening it or moving focus', async () => {
+  const initial = snapshot('playing');
+  initial.mode = 'preview'; initial.preview = { hasMainSession: true };
+  const h = harness(initial); await h.tick();
+  const toggle = h.component.messagesToggle;
+  assert.match(h.component.messages.className, /is-visible/);
+  toggle.focus(); await toggle.click();
+  assert.equal(h.component.messages.className, 'playback-controls__messages');
+  assert.equal(toggle.attributes['aria-expanded'], 'false');
+  assert.equal(toggle.attributes.label, 'playback.guidance.show');
+  h.setSnapshot({ ...initial, stateSequence: '2', positionMs: 2500 }); await h.tick();
+  assert.equal(h.component.messages.className, 'playback-controls__messages');
+  assert.equal(h.document.activeElement, toggle);
+  await toggle.click(); assert.match(h.component.messages.className, /is-visible/);
+  await toggle.click();
+  h.setSnapshot({ ...initial, stateSequence: '3', playback: { ...initial.playback, status: 'error', error: {code:'OUTPUT_LOST'} } }); await h.tick();
+  assert.match(h.component.messages.className, /is-visible/, 'a new meaningful problem must be exposed');
+  assert.equal(h.document.activeElement, toggle);
+  h.component.destroy();
+});
+
+test('source identity has a keyboard focus target and accessible name independent of its decorative icon', async () => {
+  const h = harness(snapshot('paused')); await h.tick();
+  assert.equal(h.component.sourceLabel.tabIndex, 0);
+  assert.equal(h.component.sourceLabel.attributes.role, 'img');
+  assert.equal(h.component.sourceLabel.attributes['aria-label'], 'playback.source: Salon');
+  assert.equal(h.component.source.attributes['aria-hidden'], 'true');
+  h.component.sourceLabel.focus();
+  h.setSnapshot(snapshot('paused', '2')); await h.tick();
+  assert.equal(h.document.activeElement, h.component.sourceLabel);
+  assert.equal(h.component.sourceHint.children[0], h.component.sourceLabel);
   h.component.destroy();
 });

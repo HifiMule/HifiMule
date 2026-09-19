@@ -1,6 +1,8 @@
 {
   "en": {
     "playback.browse_library": "Browse library",
+    "playback.guidance.show": "Show playback guidance",
+    "playback.guidance.hide": "Hide playback guidance",
     "playback.show_playing": "Show Playing",
     "playback.playing_title": "Playing",
     "playback.idle_guidance": "Browse your library and choose Play or Preview to start listening.",
@@ -533,6 +535,8 @@
   },
   "fr": {
     "playback.browse_library": "Parcourir la bibliothèque",
+    "playback.guidance.show": "Afficher les informations de lecture",
+    "playback.guidance.hide": "Masquer les informations de lecture",
     "playback.show_playing": "Afficher Lecture",
     "playback.playing_title": "Lecture",
     "playback.idle_guidance": "Parcourez la bibliothèque et choisissez Lecture ou Aperçu pour écouter.",
@@ -1045,6 +1049,8 @@
   },
   "es": {
     "playback.browse_library": "Explorar biblioteca",
+    "playback.guidance.show": "Mostrar información de reproducción",
+    "playback.guidance.hide": "Ocultar información de reproducción",
     "playback.show_playing": "Mostrar reproducción",
     "playback.playing_title": "Reproducción",
     "playback.idle_guidance": "Explora tu biblioteca y elige Reproducir o Vista previa para escuchar.",
@@ -1557,6 +1563,8 @@
   },
   "de": {
     "playback.browse_library": "Bibliothek durchsuchen",
+    "playback.guidance.show": "Wiedergabehinweise anzeigen",
+    "playback.guidance.hide": "Wiedergabehinweise ausblenden",
     "playback.show_playing": "Wiedergabe anzeigen",
     "playback.playing_title": "Wiedergabe",
     "playback.idle_guidance": "Durchsuche deine Bibliothek und wähle Wiedergabe oder Vorschau.",

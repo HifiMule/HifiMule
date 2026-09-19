@@ -60,6 +60,10 @@ export class PlaybackDestination {
         void this.loadLabels();
     }
 
+    focus(): void {
+        if (!this.disposed) this.regions.upcoming.heading.focus();
+    }
+
     destroy(): void {
         this.disposed = true; this.unsubscribe?.();
         for (const region of Object.values(this.regions)) this.cancelRetry(region);

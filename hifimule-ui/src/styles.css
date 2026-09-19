@@ -2220,6 +2220,8 @@ h2 {
 .playback-controls__identity { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
 .playback-controls__identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playback-controls__source-hint { display: inline-flex; flex: 0 0 auto; }
+.playback-controls__source-label { display: inline-flex; border-radius: var(--radius); }
+.playback-controls__source-label:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .playback-controls__source { color: var(--accent); font-size: 1rem; }
 .playback-controls__status, .playback-controls__artist { font-size: .8rem; color: var(--ink-dim); }
 .playback-controls__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; }

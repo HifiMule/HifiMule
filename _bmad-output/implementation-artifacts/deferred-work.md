@@ -317,3 +317,8 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: code review of 15-12-access-playback-as-an-always-available-destination.md (2026-09-19)
 
 - R16 [P2] Physical basket guards are incomplete in existing entry points (`hifimule-ui/src/components/TracksBrowseView.ts:580`, `hifimule-ui/src/state/basket.ts:315`). Per-track buttons check server identity rather than a selected physical destination, and CSS pointer-event locks do not prevent keyboard/store mutations. Pre-existing at bf8f16f; remains an unmet Story 15.12 AC2/closed-gate requirement. Add a shared physical-target guard while retaining browsing and Play/Preview.
+
+## Deferred from: code review of 15-14-control-listening-from-a-floating-playback-bar-across-views.md (2026-09-19)
+
+- **R8 — Cancel queued seeks after conflict** (`hifimule-ui/src/components/PlaybackControls.ts:461`). A second scrub queued during the first seek is dispatched after the first rejects with a conflict, before authoritative recovery completes. Confirmed using controlled promises. Baseline `e35b136` already dispatches queued work after rejection; clear queued work and refresh without replay. Deferred as pre-existing, not an acceptance waiver for AC9.
+- **R9 — Scope command errors to playback identity** (`hifimule-ui/src/components/PlaybackControls.ts:284`). Existing `commandError` survives occurrence/session/generation changes and is displayed over unrelated new playback until another command clears it. Baseline retains the same error; clear or scope it when the interaction is superseded. Deferred as pre-existing.

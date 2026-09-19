@@ -39,10 +39,15 @@ export class PlaybackControls {
     private readonly title = document.createElement('strong');
     private readonly status = document.createElement('span');
     private readonly source = document.createElement('sl-icon');
+    private readonly sourceLabel = document.createElement('span');
     private readonly sourceHint = document.createElement('sl-tooltip');
     private readonly error = document.createElement('span');
     private readonly messages = document.createElement('div');
     private statusPopup = true;
+    private messagesOverride?: boolean;
+    private messageKey = '';
+    private messagesVisible = false;
+    private readonly messagesToggle = document.createElement('sl-icon-button');
     private readonly primary = this.button('resume');
     private readonly stop = this.button('stop');
     private readonly next = this.button('next');
@@ -94,9 +99,14 @@ export class PlaybackControls {
         this.source.className = 'playback-controls__source';
         this.source.setAttribute('aria-hidden', 'true');
         this.sourceHint.className = 'playback-controls__source-hint';
+        this.sourceHint.hidden = true;
         this.sourceHint.setAttribute('placement', 'top');
         this.sourceHint.setAttribute('hoist', '');
-        this.sourceHint.append(this.source);
+        this.sourceLabel.tabIndex = 0;
+        this.sourceLabel.className = 'playback-controls__source-label';
+        this.sourceLabel.setAttribute('role', 'img');
+        this.sourceLabel.append(this.source);
+        this.sourceHint.append(this.sourceLabel);
         this.artist.className = 'playback-controls__artist';
         const identity = document.createElement('div');
         identity.className = 'playback-controls__identity';
@@ -149,10 +159,17 @@ export class PlaybackControls {
         this.setSurface('library');
         this.setIcon(this.refresh, 'arrow-clockwise', t('playback.refresh'));
         this.refresh.addEventListener('click', () => void this.refreshPlayback());
+        this.setIcon(this.messagesToggle, 'info-circle', t('playback.guidance.hide'));
+        this.messages.id = 'playback-guidance';
+        this.messagesToggle.setAttribute('aria-controls', this.messages.id);
+        this.messagesToggle.addEventListener('click', () => {
+            this.messagesOverride = !this.messagesVisible;
+            this.updateMessages();
+        });
         this.surfaceToggle.addEventListener('click', () => this.onSurfaceChange(this.surface === 'library' ? 'playback' : 'library'));
         const actions = document.createElement('div');
         actions.className = 'playback-controls__actions';
-        actions.append(...[this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.refresh));
+        actions.append(...[this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle), this.hint(this.refresh));
         this.messages.className = 'playback-controls__messages';
         this.messages.append(this.status, this.seekStatus, this.error);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
@@ -235,6 +252,7 @@ export class PlaybackControls {
         const sourceLabel = sourceIdentity?.label;
         this.source.setAttribute('name', sourceIdentity?.icon ?? 'hdd-network');
         this.sourceHint.setAttribute('content', sourceLabel ?? t('playback.queue.source_unavailable'));
+        this.sourceLabel.setAttribute('aria-label', t('playback.source', { source: sourceLabel ?? t('playback.queue.source_unavailable') }));
         this.sourceHint.hidden = !sourceId;
         const transportStatus = snapshot.output?.error ? t(`playback.error.${snapshot.output.error.code}`) : snapshot.playback.error
             ? t(`playback.error.${snapshot.playback.error.code}`)
@@ -427,8 +445,15 @@ export class PlaybackControls {
     }
 
     private updateMessages(): void {
-        const visible = this.statusPopup || Boolean(this.seekStatus.textContent || this.error.textContent);
-        this.messages.className = `playback-controls__messages${visible ? ' is-visible' : ''}`;
+        const key = JSON.stringify([this.statusPopup, this.status.textContent, this.seekStatus.textContent, this.error.textContent]);
+        if (key !== this.messageKey) {
+            this.messageKey = key;
+            this.messagesOverride = undefined;
+        }
+        this.messagesVisible = this.messagesOverride ?? (this.statusPopup || Boolean(this.seekStatus.textContent || this.error.textContent));
+        this.messages.className = `playback-controls__messages${this.messagesVisible ? ' is-visible' : ''}`;
+        this.messagesToggle.setAttribute('aria-expanded', String(this.messagesVisible));
+        this.setIcon(this.messagesToggle, 'info-circle', t(this.messagesVisible ? 'playback.guidance.hide' : 'playback.guidance.show'));
     }
 
     private formatTime(valueMs: number): string {

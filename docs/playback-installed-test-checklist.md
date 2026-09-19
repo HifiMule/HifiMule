@@ -748,3 +748,33 @@ Remaining required real-application observations (do not treat the fixture as a 
 
 The Story 15.12 R16 physical-basket mutation gap remains open. No installed row
 from earlier stories is promoted by these results.
+
+### Story 15.14 review-patch verification (2026-09-19)
+
+Source: `3b74774` plus review working tree, macOS ARM64, Codex in-app browser.
+All seven current-change patch findings are resolved. The **88 focused UI tests**,
+full repository JavaScript suite, production TypeScript/Vite build and whitespace
+check pass. Existing Vite mixed-import/chunk warnings remain. New deferred-promise
+tests cover outgoing basket-save failure, superseded Playing reads/mutations,
+disposal, explicit retry after selection failure and retained queue-entry focus.
+
+The approved guidance overlay now has a persistent localized show/hide icon in
+the bar. In the real renderer, French disconnected guidance at a 599px fixture
+stage occupied y=350.6–442 over the final row at y=352.8–388.8. Enter and Space on
+“Masquer les informations de lecture” removed the visual obstruction; the bar
+remained 155×209px, focus stayed on the toggle, and “Focus final row” restored
+focus to Library row 50. Repeated unchanged polls did not reopen the guidance.
+It remained possible to reopen it explicitly. At a 900px fixture stage with
+200% fixture text, the same hide/reopen/final-row sequence passed, the bar
+remained 424×310px, and there was no horizontal page overflow. These are fixture
+stage dimensions, not a native-window or browser-zoom certification.
+
+Tab from the final library row reached the source icon wrapper. The accessibility
+tree named it “Source : Home Jellyfin — music collection”, and its hoisted tooltip
+became visible on keyboard focus. The icon remains decorative within that named
+focus target. Source presentation stays hidden until a snapshot supplies a source.
+
+The story and sprint remain `in-progress`: T1/T4 full-application checks, installed
+OS/theme/screen-reader checks, and the separately recorded pre-existing R8/R9
+issues are not completed by these patches. No earlier installed-platform row is
+promoted, and no daemon/audio behavior is certified by these UI checks.

@@ -9,15 +9,17 @@ export class DestinationHub {
     private revision = '-1';
     private refreshRequest = 0;
     private selecting = false;
-    private selectedKind?: Destination['kind'];
+    private selectionRequest = 0;
+    private selectionTail: Promise<void> = Promise.resolve();
     private selectedKey?: string;
     private issueNodes = new Map<string, { element: HTMLDivElement; revision: string }>();
     private buttons = new Map<string, HTMLButtonElement>();
     private readonly list = document.createElement('div');
     private readonly issues = document.createElement('div');
     private readonly announcement = document.createElement('div');
+    private readonly selectionError = document.createElement('p');
 
-    constructor(private readonly container: HTMLElement, private readonly onChange: () => void) {
+    constructor(private readonly container: HTMLElement, private readonly onChange: (selected?: Destination) => void) {
         container.className = 'destination-hub';
         container.setAttribute('aria-label', t('destination.group'));
         this.list.className = 'destination-hub__list';
@@ -27,7 +29,10 @@ export class DestinationHub {
         this.announcement.className = 'sr-only';
         this.announcement.setAttribute('role', 'status');
         this.announcement.setAttribute('aria-live', 'polite');
-        container.replaceChildren(this.list, this.issues, this.announcement);
+        this.selectionError.className = 'destination-hub__issue';
+        this.selectionError.setAttribute('role', 'alert');
+        this.selectionError.hidden = true;
+        container.replaceChildren(this.list, this.issues, this.announcement, this.selectionError);
         void this.refresh();
     }
 
@@ -111,37 +116,79 @@ export class DestinationHub {
             const name = selected.kind === 'playback' ? t('destination.playback') : selected.name;
             this.announcement.textContent = t('destination.arrival_selected', { name });
         }
-        this.selectedKind = selected?.kind;
         this.selectedKey = selected ? this.key(selected) : undefined;
         this.revision = state.destinationRevision;
-        this.container.hidden = mounted.length === 0 && issueIds.size === 0;
-        if (selected && this.key(selected) !== previousSelected) this.onChange();
+        this.container.hidden = mounted.length === 0 && issueIds.size === 0 && this.selectionError.hidden;
+        if (selected && this.key(selected) !== previousSelected) this.onChange(selected);
     }
 
-    private async select(destination: Destination): Promise<void> {
-        if (this.selecting || this.disposed) return;
+    selectPlayback(onSelected: () => void): Promise<void> {
+        return this.select({ kind: 'playback', id: 'playback', selected: false }, onSelected);
+    }
+
+    private select(destination: Destination, onSelected?: () => void): Promise<void> {
+        if (this.disposed) return Promise.resolve();
+        const request = ++this.selectionRequest;
         this.selecting = true;
         ++this.refreshRequest;
         if (this.timer !== undefined) clearTimeout(this.timer);
         this.timer = undefined;
+        // Serialize mutations, but discard superseded work before each await's
+        // result can start another mutation or change the visible surface.
+        const selection = this.selectionTail.then(() => this.performSelection(destination, request, onSelected));
+        this.selectionTail = selection;
+        return selection;
+    }
+
+    private async performSelection(destination: Destination, request: number, onSelected?: () => void): Promise<void> {
+        const current = () => !this.disposed && request === this.selectionRequest;
+        if (!current()) return;
+        this.selectionError.hidden = true;
+        this.selectionError.textContent = '';
         try {
-            if (this.selectedKind === 'device') await basketStore.flushPendingSave();
+            const state = await getDaemonState();
+            if (!current()) return;
+            const selected = state.destinations.find(item => item.selected);
+            await this.applyState(state);
+            if (!current()) return;
+            if (selected?.kind === 'device') await basketStore.flushPendingSave();
+            if (!current()) return;
             if (destination.kind === 'pendingDevice') {
-                const modal = new InitDeviceModal(this.container, this.onChange);
+                const modal = new InitDeviceModal(this.container, () => {
+                    if (current()) void this.refresh();
+                });
                 await modal.open(destination.name, destination.pendingId, this.revision);
                 return;
             }
-            await destinationSelect(destination.kind === 'playback' ? { kind: 'playback' } : { kind: 'device', path: destination.path });
+            if (destination.kind !== 'playback' || selected?.kind !== 'playback') {
+                await destinationSelect(destination.kind === 'playback' ? { kind: 'playback' } : { kind: 'device', path: destination.path });
+            }
+            if (!current()) return;
             if (destination.kind === 'device') {
                 const basket = await import('../rpc').then(({ rpcCall }) => rpcCall('manifest_get_basket')) as any;
+                if (!current()) return;
                 basketStore.hydrateFromDaemon(basket?.basketItems ?? []);
             }
-            this.onChange();
+            const updated = await getDaemonState();
+            if (!current()) return;
+            await this.applyState(updated);
+            if (!current()) return;
+            const confirmed = updated.destinations.find(item => item.selected);
+            if (confirmed && this.key(confirmed) === this.key(destination)) {
+                this.onChange(confirmed);
+                onSelected?.();
+            }
         } catch {
-            this.announcement.textContent = t('destination.selection_failed');
+            if (current()) {
+                this.selectionError.textContent = t('destination.selection_failed');
+                this.selectionError.hidden = false;
+                this.container.hidden = false;
+            }
         } finally {
-            this.selecting = false;
-            await this.refresh();
+            if (current()) {
+                this.selecting = false;
+                await this.refresh();
+            }
         }
     }
 

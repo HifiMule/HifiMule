@@ -263,7 +263,8 @@ test('main wires the bar-owned Library/Playing switch and updates the shared tit
   assert.match(source, /title\.textContent = t\(playing \? 'playback\.playing_title' : 'ui\.library\.title'\)/);
   assert.match(source, /serverHub\.hidden = playing/);
   assert.match(source, /if \(surface === 'library'\) showLibrarySurface\(\)/);
-  assert.match(source, /destinationSelect\(\{ kind: 'playback' \}\)/);
+  assert.match(source, /activeDestinationHub\?\.selectPlayback\(\(\) => showSurface\('playback'\)\)/);
+  assert.match(source, /activePlaybackDestination\?\.focus\(\)/);
 });
 
 test('bar surface labels have complete locale parity', () => {
@@ -876,4 +877,116 @@ test('invalid scoped cursors reset paging and reload immediately even when the r
     assert.equal(h.component.regions.upcoming.retryTimer, undefined);
     h.component.destroy();
   }
+});
+
+
+function destinationSelectionHarness(hooks = {}) {
+  const calls = []; const shown = []; const hydrated = [];
+  let selected = 'device'; let revision = 1;
+  const state = () => ({ destinationRevision: String(revision), destinations: [
+    { kind: 'playback', id: 'playback', selected: selected === 'playback' },
+    { kind: 'device', path: '/a', deviceId: 'a', name: 'A', selected: selected === 'device' },
+  ], deviceDiscoveryIssues: [] });
+  const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
+    '../rpc': {
+      getDaemonState: async () => hooks.read ? hooks.read(state()) : state(),
+      destinationSelect: async selection => {
+        calls.push(selection.kind);
+        await hooks.select?.(selection);
+        selected = selection.kind; revision++;
+      },
+      rpcCall: async () => ({ basketItems: ['saved basket'] }),
+    },
+    '../state/basket': { basketStore: {
+      flushPendingSave: async () => { calls.push('flush'); await hooks.flush?.(); },
+      hydrateFromDaemon: items => hydrated.push(items),
+    } },
+    '../i18n': { t: key => key },
+  });
+  const container = new Element('nav'); container.connectedRoot = true;
+  const hub = new DestinationHub(container, destination => shown.push(destination?.kind));
+  return { hub, container, calls, shown, hydrated, state,
+    open: () => hub.selectPlayback(() => shown.push('Playing')),
+    device: () => container.querySelectorAll('button').find(button => button.dataset.destinationKind === 'device').click(),
+  };
+}
+
+test('bar Playing navigation waits for the outgoing basket save and aborts on failure', async () => {
+  const flush = deferred();
+  const h = destinationSelectionHarness({ flush: () => flush.promise }); await settle();
+  const opening = h.open(); await settle();
+  assert.deepEqual(h.calls, ['flush']); assert.equal(h.shown.includes('Playing'), false);
+  flush.resolve(); await opening;
+  assert.deepEqual(h.calls, ['flush', 'playback']); assert.equal(h.shown.at(-1), 'Playing');
+  h.hub.destroy();
+
+  const failed = destinationSelectionHarness({ flush: async () => { throw Error('disk failure'); } }); await settle();
+  await failed.open();
+  assert.deepEqual(failed.calls, ['flush']); assert.equal(failed.state().destinations[1].selected, true);
+  assert.equal(failed.shown.includes('Playing'), false);
+  assert.equal(failed.hub.selectionError.hidden, false); assert.match(text(failed.container), /destination.selection_failed/);
+  failed.hub.destroy();
+});
+
+test('a device choice supersedes a pending Playing read before any playback mutation', async () => {
+  const read = deferred(); let hold = false;
+  const h = destinationSelectionHarness({ read: state => hold ? (hold = false, read.promise) : state }); await settle();
+  hold = true; const opening = h.open(); await settle();
+  const observed = h.state(); await h.device();
+  read.resolve(observed); await opening; await settle();
+  assert.equal(h.calls.includes('playback'), false);
+  assert.equal(h.shown.includes('Playing'), false);
+  assert.equal(h.state().destinations[1].selected, true);
+  h.hub.destroy();
+});
+
+test('a device choice during the Playing mutation is serialized and prevents late surface focus', async () => {
+  const selection = deferred();
+  const h = destinationSelectionHarness({ select: value => value.kind === 'playback' ? selection.promise : undefined }); await settle();
+  const opening = h.open(); await settle();
+  await h.device(); await settle();
+  assert.deepEqual(h.calls, ['flush', 'playback']);
+  selection.resolve(); await opening; await settle();
+  assert.deepEqual(h.calls, ['flush', 'playback', 'device']);
+  assert.equal(h.shown.includes('Playing'), false); assert.equal(h.shown.at(-1), 'device');
+  assert.equal(h.state().destinations[1].selected, true); assert.equal(h.hydrated.length, 1);
+  h.hub.destroy();
+});
+
+test('Playing read and mutation failures are visible and retry requires another explicit click', async () => {
+  for (const failure of ['read', 'select']) {
+    let failing = false;
+    const h = destinationSelectionHarness({
+      read: state => { if (failing && failure === 'read') throw Error('offline'); return state; },
+      select: () => { if (failing && failure === 'select') throw Error('rejected'); },
+    }); await settle(); failing = true;
+    await h.open();
+    assert.equal(h.hub.selectionError.hidden, false); assert.equal(h.container.hidden, false);
+    assert.equal(h.shown.includes('Playing'), false);
+    const mutations = h.calls.filter(call => call === 'playback').length;
+    failing = false; await h.hub.refresh();
+    assert.equal(h.calls.filter(call => call === 'playback').length, mutations);
+    assert.equal(h.shown.includes('Playing'), false);
+    await h.open(); assert.equal(h.shown.at(-1), 'Playing'); assert.equal(h.hub.selectionError.hidden, true);
+    h.hub.destroy();
+  }
+});
+
+test('destroying the destination selector fences a pending Playing read', async () => {
+  const read = deferred(); let hold = false;
+  const h = destinationSelectionHarness({ read: state => hold ? read.promise : state }); await settle();
+  hold = true; const opening = h.open(); await settle(); h.hub.destroy();
+  read.resolve(h.state()); await opening;
+  assert.deepEqual(h.calls, []); assert.equal(h.shown.includes('Playing'), false);
+});
+
+test('Playing entry focuses the visible upcoming heading even while Retry is hidden', async () => {
+  const h = queueHarness();
+  h.component.focus();
+  assert.equal(document.activeElement, h.component.regions.upcoming.heading);
+  assert.equal(h.component.regions.upcoming.heading.tabIndex, -1);
+  assert.equal(h.component.retry.hidden, true);
+  h.receive(queueSnapshot); await settle();
+  assert.equal(document.activeElement, h.component.regions.upcoming.heading);
+  h.component.destroy();
 });
