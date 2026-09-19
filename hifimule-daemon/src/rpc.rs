@@ -259,30 +259,13 @@ pub async fn run_server(
             if let Some(snapshot) = output_state.playback.take_output_effect() {
                 let playback = output_state.playback.clone();
                 let generation = snapshot.generation_id;
-                if crate::playback::audio::global().has_active_generation(&generation)
-                    && let Some(candidate) =
-                        playback.successor_candidate(&generation, playback.control_epoch())
-                {
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                    let resolved = async {
-                        let provider = crate::server_manager::get_provider_by_server_id(
-                            &output_state.server_manager,
-                            &output_state.db,
-                            &candidate.successor.source.server_id,
-                        )
-                        .await?;
-                        provider
-                            .resolve_playback(&candidate.successor.source.track_id)
-                            .await
-                    };
-                    if let Ok(Ok(description)) =
-                        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolved)
-                            .await
-                    {
-                        let _ = crate::playback::audio::global()
-                            .prepare_successor(candidate, description, generation, deadline)
-                            .await;
-                    }
+                if crate::playback::audio::global().has_active_generation(&generation) {
+                    crate::playback::commands::spawn_successor_preparation(
+                        playback,
+                        output_state.server_manager.clone(),
+                        output_state.db.clone(),
+                        generation,
+                    );
                     continue;
                 }
                 let resume_epoch = snapshot.resume_epoch;
@@ -347,6 +330,13 @@ pub async fn run_server(
                 };
                 if let Err(error) = result {
                     crate::playback::audio::publish_pipeline_failure(&playback, generation, error);
+                } else {
+                    crate::playback::commands::spawn_successor_preparation(
+                        playback,
+                        output_state.server_manager.clone(),
+                        output_state.db.clone(),
+                        generation,
+                    );
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -1025,6 +1015,10 @@ async fn handle_playback_apply_session(
             };
             if let Err(error) = outcome {
                 crate::playback::audio::publish_pipeline_failure(&playback, generation, error);
+            } else {
+                crate::playback::commands::spawn_successor_preparation(
+                    playback, manager, db, generation,
+                );
             }
         });
     }
@@ -12967,11 +12961,27 @@ mod tests {
         assert_eq!(applied["result"]["data"]["queueRevision"], "1");
         let removed_id =
             applied["result"]["data"]["assignedOccurrences"][1]["occurrenceId"].clone();
+        let initial_current_id =
+            applied["result"]["data"]["assignedOccurrences"][0]["occurrenceId"].clone();
         let mut edit_body = apply_body.clone();
         edit_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
         edit_body["params"]["expectedQueueRevision"] = json!("1");
         edit_body["params"]["operation"] =
-            json!({"type":"appendQueue","sources":[{"serverId":"offline","trackId":"three"}]});
+            json!({"type":"appendQueue","sources":[{"serverId":"offline","trackId":"two"}]});
+        for token in [None, Some("wrong-token")] {
+            let request = client
+                .post(format!("http://127.0.0.1:{port}"))
+                .json(&edit_body);
+            let request = if let Some(token) = token {
+                request.bearer_auth(token)
+            } else {
+                request
+            };
+            assert_eq!(
+                request.send().await.unwrap().status(),
+                http::StatusCode::UNAUTHORIZED
+            );
+        }
         let appended: Value = client
             .post(format!("http://127.0.0.1:{port}"))
             .bearer_auth(&descriptor.token)
@@ -12984,6 +12994,32 @@ mod tests {
             .unwrap();
         let selected_id =
             appended["result"]["data"]["assignedOccurrences"][0]["occurrenceId"].clone();
+        assert_eq!(
+            appended["result"]["data"]["queueRevision"], "2",
+            "{appended}"
+        );
+        assert_ne!(
+            selected_id, removed_id,
+            "repeated source must create a distinct occurrence"
+        );
+        let replayed: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&edit_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            replayed["result"]["data"]["assignedOccurrences"],
+            appended["result"]["data"]["assignedOccurrences"]
+        );
+        assert_eq!(
+            replayed["result"]["data"]["queueRevision"], "2",
+            "receipt retry must not append twice"
+        );
         edit_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
         edit_body["params"]["expectedQueueRevision"] = json!("2");
         edit_body["params"]["operation"] = json!({"type":"moveUpcoming","occurrenceId":selected_id.clone(),"beforeOccurrenceId":removed_id.clone()});
@@ -12998,6 +13034,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(moved["result"]["data"]["queueRevision"], "3");
+        let reordered: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&playback_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let reordered_ids: Vec<_> = reordered["result"]["data"]["occurrences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["occurrenceId"].clone())
+            .collect();
+        assert_eq!(
+            reordered_ids,
+            [
+                initial_current_id.clone(),
+                selected_id.clone(),
+                removed_id.clone()
+            ]
+        );
         edit_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
         edit_body["params"]["expectedQueueRevision"] = json!("3");
         edit_body["params"]["operation"] =
@@ -13013,6 +13073,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(removed["result"]["data"]["queueRevision"], "4");
+        let edited_snapshot: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&playback_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let edited = &edited_snapshot["result"]["data"];
+        assert_eq!(edited["mainCurrent"]["occurrenceId"], initial_current_id);
+        assert_eq!(edited["positionMs"], 0);
+        assert_eq!(
+            edited["state"], "paused",
+            "queue edits must not start output"
+        );
+        assert_eq!(edited["occurrences"].as_array().unwrap().len(), 2);
+        assert_eq!(edited["occurrences"][1]["occurrenceId"], selected_id);
+        assert_eq!(
+            edited["occurrences"][1]["source"],
+            json!({"serverId":"offline","trackId":"two"})
+        );
+        let mut remove_current = edit_body.clone();
+        remove_current["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
+        remove_current["params"]["expectedQueueRevision"] = json!("4");
+        remove_current["params"]["operation"] =
+            json!({"type":"removeUpcoming","occurrenceIds":[initial_current_id]});
+        let rejected: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&remove_current)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"]["data"]["code"], "OCCURRENCE_NOT_UPCOMING");
+        assert_eq!(rejected["error"]["data"]["queueRevision"], "4");
         let mut select_body = apply_body.clone();
         select_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
         select_body["params"]["expectedQueueRevision"] = json!("4");

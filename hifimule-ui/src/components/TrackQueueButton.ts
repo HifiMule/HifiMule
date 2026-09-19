@@ -1,6 +1,5 @@
-import { playbackAppendQueue } from '../rpc';
+import { appendTracksToQueueFromLibrary } from '../state/queue';
 import { t } from '../i18n';
-import { showToast } from '../toast';
 
 export function createTrackQueueButton(
     serverId: string | null | undefined,
@@ -19,10 +18,7 @@ export function createTrackQueueButton(
         if (!source || button.disabled) return;
         button.disabled = true;
         try {
-            await playbackAppendQueue([{ ...source }]);
-            showToast(t('playback.queue_add_success', { count: 1 }), 'success');
-        } catch (error) {
-            showToast((error as Error).message, 'danger');
+            await appendTracksToQueueFromLibrary([{ ...source }]);
         } finally {
             button.disabled = false;
         }

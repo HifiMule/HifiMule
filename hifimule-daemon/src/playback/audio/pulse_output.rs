@@ -107,8 +107,8 @@ pub(super) fn run_output(
     mut seek_commit: Option<(String, u64)>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
-    successor_epoch: Arc<AtomicU64>,
-    successor_authorized: Arc<AtomicBool>,
+    successor_fence: Arc<SuccessorFence>,
+    successor_slot_free: Arc<AtomicBool>,
     gain: f32,
     qualified_suffix: Option<String>,
 ) -> Result<(), PlaybackPipelineError> {
@@ -167,7 +167,8 @@ pub(super) fn run_output(
         channels as usize,
         rate as usize * channels as usize / 10,
         gate.clone(),
-    );
+    )
+    .with_successor_fence(successor_fence.clone());
     let mut ledger = PresentationLedger::new();
     let mut scratch = vec![0f32; rate as usize * channels as usize / 100];
     let mut occurrence = session
@@ -199,6 +200,7 @@ pub(super) fn run_output(
         String,
     )> = None;
     let mut successor_preparation = None;
+    let mut installed_successor_epoch = None;
     let mut successor_ready = false;
     let mut boundary_played_frame = None;
     let mut submitted_audio_frames = 0u64;
@@ -254,6 +256,25 @@ pub(super) fn run_output(
             output
                 .pump()
                 .map_err(PlaybackPipelineError::output_policy)?;
+            if installed_successor_epoch.is_some_and(|epoch| epoch != successor_fence.epoch()) {
+                retire_successor_slot(
+                    active_slot,
+                    &mut slot_a_decoder,
+                    &mut successor_decoder,
+                    &pcm,
+                    &successor_pcm,
+                );
+                if active_slot == 0 {
+                    successor_ready = false;
+                } else {
+                    slot_a_ready = false;
+                }
+                successor_identity = None;
+                successor_preparation = None;
+                installed_successor_epoch = None;
+                handoff.clear();
+                successor_slot_free.store(true, Ordering::Release);
+            }
             if successor_identity.is_none()
                 && let Ok(prepared) = successor_rx.try_recv()
             {
@@ -269,16 +290,14 @@ pub(super) fn run_output(
                     gain,
                     qualified_suffix,
                     successor_epoch: prepared_epoch,
-                    successor_epoch_source,
-                    successor_authorized: prepared_authorized,
+                    cancel: successor_cancel,
                 } = prepared;
-                if prepared_epoch != successor_epoch.load(Ordering::Acquire)
-                    || prepared_epoch != successor_epoch_source.load(Ordering::Acquire)
-                {
+                if prepared_epoch != successor_fence.epoch() {
+                    drop(reader);
+                    successor_slot_free.store(true, Ordering::Release);
                     continue;
                 }
-                prepared_authorized.store(true, Ordering::Release);
-                successor_authorized.store(true, Ordering::Release);
+                installed_successor_epoch = Some(prepared_epoch);
                 let qualified = Arc::new(AtomicU64::new(0));
                 let decoder_qualified = qualified.clone();
                 handoff.arm(
@@ -302,9 +321,9 @@ pub(super) fn run_output(
                 } else {
                     successor_pcm.clone()
                 };
-                let decoder_cancel = cancel.clone();
+                let decoder_cancel = successor_cancel.clone();
                 let worker = crate::playback::output::DecoderWorker::spawn_result(
-                    cancel.clone(),
+                    successor_cancel,
                     move || {
                         decode_stream_with_seek_and_gain(
                             reader,
@@ -368,7 +387,10 @@ pub(super) fn run_output(
             }
             .as_ref()
             .is_some_and(|worker| worker.failed());
-            if successor_identity.is_some() && !handoff.submitted() && prepared_failed {
+            if successor_identity.is_some()
+                && prepared_failed
+                && installed_successor_epoch.is_some_and(|epoch| successor_fence.disarm(epoch))
+            {
                 *prepared_ready = false;
                 let worker = if prepared_slot == 0 {
                     slot_a_decoder.take()
@@ -381,13 +403,18 @@ pub(super) fn run_output(
                 while prepared_queue.pop().is_some() {}
                 successor_identity = None;
                 successor_preparation = None;
+                installed_successor_epoch = None;
                 handoff.clear();
+                successor_slot_free.store(true, Ordering::Release);
             }
             if successor_identity.is_some()
                 && !*prepared_ready
                 && (prepared_queue.len() >= rate as usize * channels as usize / 10
                     || prepared_finished && prepared_queue.len() >= channels as usize)
             {
+                if let Some(epoch) = installed_successor_epoch {
+                    successor_fence.authorize(epoch);
+                }
                 *prepared_ready = true;
                 if let Some(preparation) = successor_preparation.take() {
                     preparation.ready();
@@ -397,6 +424,7 @@ pub(super) fn run_output(
                 && prepared_finished
                 && prepared_queue.is_empty()
                 && !*prepared_ready
+                && installed_successor_epoch.is_some_and(|epoch| successor_fence.disarm(epoch))
             {
                 let failed = if prepared_slot == 0 {
                     slot_a_decoder.take()
@@ -408,6 +436,9 @@ pub(super) fn run_output(
                 }
                 successor_identity = None;
                 successor_preparation = None;
+                installed_successor_epoch = None;
+                handoff.clear();
+                successor_slot_free.store(true, Ordering::Release);
             }
             pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
             if !ready {
@@ -492,7 +523,7 @@ pub(super) fn run_output(
                         slot_a_ready,
                         slot_a_finished,
                         &successor_pcm,
-                        successor_ready && successor_authorized.load(Ordering::Acquire),
+                        successor_ready,
                         slot_b_finished,
                         true,
                     );
@@ -543,7 +574,7 @@ pub(super) fn run_output(
                         slot_a_ready,
                         slot_a_finished,
                         &successor_pcm,
-                        successor_ready && successor_authorized.load(Ordering::Acquire),
+                        successor_ready,
                         slot_b_finished,
                         true,
                     );
@@ -635,6 +666,9 @@ pub(super) fn run_output(
                 handoff_published = false;
                 boundary_pending.store(false, Ordering::Release);
                 handoff.clear();
+                installed_successor_epoch = None;
+                successor_fence.adopted();
+                successor_slot_free.store(true, Ordering::Release);
             }
             if let Some(active) = activity.observe(
                 enabled,

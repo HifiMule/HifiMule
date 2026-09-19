@@ -391,7 +391,8 @@ export function isPlaybackQueueConflict(error: unknown): boolean {
     if (!(error instanceof RpcError) || !error.data || typeof error.data !== 'object') return false;
     const data = error.data as Record<string, unknown>;
     if (error.code === 409) {
-        return ['QUEUE_REVISION_CONFLICT', 'QUEUE_CONFLICT', 'OCCURRENCE_NOT_UPCOMING']
+        return ['QUEUE_REVISION_CONFLICT', 'QUEUE_CONFLICT', 'OCCURRENCE_NOT_UPCOMING',
+            'INVALID_CURSOR', 'INSTANCE_MISMATCH', 'SESSION_MISMATCH']
             .includes(String(data.code ?? ''));
     }
     if (error.code === -7 && data.code === 'QUEUE_CONFLICT') {

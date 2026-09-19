@@ -7417,4 +7417,316 @@ mod tests {
         assert_eq!(page.occurrences.len(), 1);
         assert_eq!(page.occurrences[0].occurrence_id, keep_id);
     }
+
+    fn review_queue_seed(
+        count: usize,
+        current_index: usize,
+        album: bool,
+    ) -> (Arc<Database>, PlaybackSession, Vec<Occurrence>) {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        let sources: Vec<_> = (0..count)
+            .map(|index| TrackSource {
+                server_id: "offline".into(),
+                track_id: format!("track-{}", index % 17),
+            })
+            .collect();
+        let rows = make_occurrences(&sources, 0);
+        let mut session = fresh_session();
+        session.current_occurrence_id = Some(rows[current_index].occurrence_id.clone());
+        session.position_ms = 4_200;
+        session.state = TransportState::Paused;
+        if album {
+            session.queue_kind = QueueKind::Album;
+            session.album_context = Some(FrozenAlbumContext {
+                source: AlbumSource {
+                    server_id: "offline".into(),
+                    album_id: "album".into(),
+                },
+                member_count: count as u64,
+                membership_digest: album_membership_digest(sources.iter()),
+                representations: vec!["flac".into(); count],
+                policy: super::super::loudness::AlbumLoudnessPolicy {
+                    version: super::super::loudness::ALBUM_LOUDNESS_POLICY_VERSION,
+                    scalar_bits: 0.75f32.to_bits(),
+                    gain_db_bits: Some(0.0f64.to_bits()),
+                    peak_bits: Some((super::super::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+                    reason: super::super::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+                },
+            });
+            set_current_policy(&mut session, Some(&rows[current_index]));
+        }
+        db.persist_playback_structure(&session, &rows).unwrap();
+        let playback = PlaybackSession::restore(db.clone(), "review-queue-owner".into());
+        assert_eq!(playback.snapshot().unwrap().restoration.status, "ok");
+        (db, playback, rows)
+    }
+
+    #[test]
+    fn review_queue_same_revision_advance_rejects_current_targets_and_anchors() {
+        let (db, playback, rows) = review_queue_seed(4, 0, false);
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let observed = playback.snapshot().unwrap();
+        let rejected = [
+            SessionOperation::RemoveUpcoming {
+                occurrence_ids: vec![rows[1].occurrence_id.clone()],
+            },
+            SessionOperation::MoveUpcoming {
+                occurrence_id: rows[1].occurrence_id.clone(),
+                before_occurrence_id: None,
+            },
+            SessionOperation::MoveUpcoming {
+                occurrence_id: rows[3].occurrence_id.clone(),
+                before_occurrence_id: Some(rows[1].occurrence_id.clone()),
+            },
+        ];
+        let advanced = playback
+            .control_with_guard(transport(&observed, ControlAction::Next), None)
+            .unwrap();
+        assert_eq!(advanced.queue_revision, observed.queue_revision);
+        assert_eq!(
+            advanced.current.as_ref().unwrap().occurrence_id,
+            rows[1].occurrence_id
+        );
+        for operation in rejected {
+            let error = playback.apply(params(&observed, operation)).unwrap_err();
+            assert_eq!(error.code, "OCCURRENCE_NOT_UPCOMING");
+            assert_eq!(
+                error.authoritative.unwrap().state_sequence,
+                advanced.state_sequence
+            );
+            let current = playback.snapshot().unwrap();
+            assert_eq!(current.current, advanced.current);
+            assert_eq!(current.queue_revision, advanced.queue_revision);
+            assert_eq!(current.state_sequence, advanced.state_sequence);
+        }
+        assert_eq!(
+            db.playback_page(&observed.session_id, None, 10).unwrap(),
+            rows
+        );
+        assert_eq!(
+            db.playback_outcome(&rows[0].occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("explicitSkip")
+        );
+    }
+
+    #[test]
+    fn review_queue_album_current_policy_survives_preview_edit_return_and_restart() {
+        let (db, playback, rows) = review_queue_seed(3, 0, true);
+        let cleanup = OwnerThreadCleanup(playback.clone());
+        let main = playback.snapshot().unwrap();
+        assert_eq!(main.gain_bits, 0.75f32.to_bits());
+        assert_eq!(main.qualified_suffix.as_deref(), Some("flac"));
+        let preview = playback
+            .preview_with_guard(preview_params(&main, "audition"), None)
+            .unwrap();
+        playback
+            .apply(params(
+                &preview,
+                SessionOperation::MoveUpcoming {
+                    occurrence_id: rows[2].occurrence_id.clone(),
+                    before_occurrence_id: Some(rows[1].occurrence_id.clone()),
+                },
+            ))
+            .unwrap();
+        let edited = playback.snapshot().unwrap();
+        assert_eq!(edited.mode, PlaybackMode::Preview);
+        assert_eq!(edited.queue_kind, QueueKind::Manual);
+        assert_eq!(edited.current, preview.current);
+        assert_eq!(edited.generation_id, preview.generation_id);
+        assert_eq!(edited.position_ms, preview.position_ms);
+        assert_eq!(edited.preview, preview.preview);
+        let stored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(stored.current_gain_bits, main.gain_bits);
+        assert_eq!(stored.current_qualified_suffix, main.qualified_suffix);
+        let returned = playback
+            .control_with_guard(transport(&edited, ControlAction::ReturnToSession), None)
+            .unwrap();
+        assert_eq!(returned.current, main.current);
+        assert_eq!(returned.position_ms, 4_200);
+        assert_eq!(returned.gain_bits, main.gain_bits);
+        assert_eq!(returned.qualified_suffix, main.qualified_suffix);
+        drop(cleanup);
+        let restored = PlaybackSession::restore(db, "review-queue-relaunch".into());
+        let _restored_cleanup = OwnerThreadCleanup(restored.clone());
+        let snapshot = restored.snapshot().unwrap();
+        assert_eq!(snapshot.state, TransportState::Paused);
+        assert_eq!(snapshot.queue_kind, QueueKind::Manual);
+        assert_eq!(snapshot.current, main.current);
+        assert_eq!(snapshot.gain_bits, main.gain_bits);
+        assert_eq!(snapshot.qualified_suffix, main.qualified_suffix);
+        let next = restored
+            .control_with_guard(transport(&snapshot, ControlAction::Next), None)
+            .unwrap();
+        assert_eq!(next.current.unwrap().occurrence_id, rows[2].occurrence_id);
+        assert_eq!(next.gain_bits, 1.0f32.to_bits());
+        assert_eq!(next.qualified_suffix, None);
+    }
+
+    #[test]
+    fn review_queue_active_capacity_excludes_long_history_and_rejects_whole_batch() {
+        let history_count = 10_050;
+        let (db, playback, rows) = review_queue_seed(history_count + 9_800, history_count, false);
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let observed = playback.snapshot().unwrap();
+        let source = TrackSource {
+            server_id: "offline".into(),
+            track_id: "repeat".into(),
+        };
+        let appended = playback
+            .apply(params(
+                &observed,
+                SessionOperation::AppendQueue {
+                    sources: vec![source.clone(); 200],
+                },
+            ))
+            .unwrap();
+        assert_eq!(appended.assigned_occurrences.len(), 200);
+        let full = playback.snapshot().unwrap();
+        assert_eq!(
+            full.total_occurrence_count,
+            (history_count + MAX_MANUAL_ACTIVE_OCCURRENCES) as u64
+        );
+        assert_eq!(full.current, observed.current);
+        let rejected = playback
+            .apply(params(
+                &full,
+                SessionOperation::AppendQueue {
+                    sources: vec![source.clone(); 2],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(rejected.code, "QUEUE_LIMIT_EXCEEDED");
+        assert_eq!(
+            playback.snapshot().unwrap().queue_revision,
+            full.queue_revision
+        );
+        assert_eq!(
+            db.playback_count(&full.session_id).unwrap(),
+            full.total_occurrence_count
+        );
+        playback
+            .apply(params(
+                &full,
+                SessionOperation::RemoveUpcoming {
+                    occurrence_ids: vec![rows[history_count + 1].occurrence_id.clone()],
+                },
+            ))
+            .unwrap();
+        let room = playback.snapshot().unwrap();
+        assert_eq!(
+            playback
+                .apply(params(
+                    &room,
+                    SessionOperation::AppendQueue {
+                        sources: vec![source.clone(); 2],
+                    }
+                ))
+                .unwrap_err()
+                .code,
+            "QUEUE_LIMIT_EXCEEDED"
+        );
+        playback
+            .apply(params(
+                &room,
+                SessionOperation::AppendQueue {
+                    sources: vec![source],
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            db.playback_range_count(&full.session_id, None, Some(history_count as u64))
+                .unwrap(),
+            history_count as u64
+        );
+    }
+
+    #[test]
+    fn review_queue_failed_structural_edits_roll_back_order_policy_and_allow_retry() {
+        for operation_kind in ["append", "remove", "move"] {
+            let (db, playback, rows) = review_queue_seed(3, 0, true);
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let before = playback.snapshot().unwrap();
+            let stored_before = db.load_playback_session().unwrap().unwrap();
+            let operation = match operation_kind {
+                "append" => SessionOperation::AppendQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "added".into(),
+                    }],
+                },
+                "remove" => SessionOperation::RemoveUpcoming {
+                    occurrence_ids: vec![rows[1].occurrence_id.clone()],
+                },
+                _ => SessionOperation::MoveUpcoming {
+                    occurrence_id: rows[2].occurrence_id.clone(),
+                    before_occurrence_id: Some(rows[1].occurrence_id.clone()),
+                },
+            };
+            let command = params(&before, operation);
+            db.conn.lock().unwrap().execute_batch("CREATE TRIGGER review_fail_queue BEFORE UPDATE OF queue_revision ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected queue failure'); END").unwrap();
+            assert_eq!(
+                playback.apply(command.clone()).unwrap_err().code,
+                "PERSISTENCE_FAILED"
+            );
+            let failed = playback.snapshot().unwrap();
+            assert_eq!(failed.queue_revision, before.queue_revision);
+            assert_eq!(failed.state_sequence, before.state_sequence);
+            assert_eq!(failed.current, before.current);
+            assert_eq!(failed.position_ms, before.position_ms);
+            assert_eq!(failed.queue_kind, QueueKind::Album);
+            assert_eq!(failed.gain_bits, before.gain_bits);
+            assert_eq!(failed.qualified_suffix, before.qualified_suffix);
+            assert_eq!(
+                db.playback_page(&before.session_id, None, 10).unwrap(),
+                rows
+            );
+            let stored_after = db.load_playback_session().unwrap().unwrap();
+            assert_eq!(stored_after.queue_revision, stored_before.queue_revision);
+            assert_eq!(
+                stored_after.current_occurrence_id,
+                stored_before.current_occurrence_id
+            );
+            assert_eq!(stored_after.position_ms, stored_before.position_ms);
+            assert_eq!(stored_after.queue_kind, stored_before.queue_kind);
+            assert_eq!(
+                stored_after.current_gain_bits,
+                stored_before.current_gain_bits
+            );
+            assert_eq!(
+                stored_after.current_qualified_suffix,
+                stored_before.current_qualified_suffix
+            );
+            assert_eq!(
+                serde_json::to_value(stored_after.album_context).unwrap(),
+                serde_json::to_value(stored_before.album_context).unwrap()
+            );
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER review_fail_queue")
+                .unwrap();
+            // A transport retry replays the retained failure; a deliberate new
+            // action after storage recovery receives a fresh command identity.
+            assert_eq!(
+                playback.apply(command.clone()).unwrap_err().code,
+                "PERSISTENCE_FAILED"
+            );
+            let mut command = command;
+            command.command_id = Uuid::new_v4().to_string();
+            playback.apply(command.clone()).unwrap();
+            let accepted = playback.snapshot().unwrap();
+            assert_eq!(accepted.queue_revision, "1");
+            assert_eq!(accepted.queue_kind, QueueKind::Manual);
+            assert_eq!(accepted.gain_bits, before.gain_bits);
+            assert_eq!(accepted.qualified_suffix, before.qualified_suffix);
+            playback.apply(command).unwrap();
+            assert_eq!(
+                playback.snapshot().unwrap().queue_revision,
+                accepted.queue_revision
+            );
+        }
+    }
 }

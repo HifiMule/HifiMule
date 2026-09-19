@@ -7,8 +7,8 @@ import {
     BrowseAlbum,
     BrowseTrack,
     playbackPlayTrack,
-    playbackAppendQueue,
 } from '../rpc';
+import { appendTracksToQueueFromLibrary } from '../state/queue';
 import { MediaCard } from './MediaCard';
 import { createAlbumPlayButton } from './AlbumPlayButton';
 import { basketStore, BasketItem } from '../state/basket';
@@ -880,6 +880,7 @@ export class TracksBrowseView {
     }
 
     private async bulkAddToQueue(button: any): Promise<void> {
+        if (button.loading) return;
         // Freeze portable identities in displayed order before the first await.
         const sources = this.resolveSelectedTracks().map(track => ({
             serverId: track.serverId ?? '',
@@ -888,11 +889,8 @@ export class TracksBrowseView {
         if (sources.length === 0 || sources.length > 200 || sources.some(source => !source.serverId)) return;
         button.loading = true;
         try {
-            await playbackAppendQueue(sources);
-            showToast(t('playback.queue_add_success', { count: sources.length }), 'success');
+            await appendTracksToQueueFromLibrary(sources);
             // Queue actions deliberately retain browser multi-selection.
-        } catch (error) {
-            showToast((error as Error).message, 'danger');
         } finally {
             button.loading = false;
         }

@@ -201,8 +201,8 @@ function queueButtonHarness() {
   }).outputText;
   vm.runInNewContext(source, {
     exports, document,
-    require: name => name === '../rpc'
-      ? { playbackAppendQueue: async sources => calls.push(sources.map(source => ({ ...source }))) }
+    require: name => name === '../state/queue'
+      ? { appendTracksToQueueFromLibrary: async sources => calls.push(sources.map(source => ({ ...source }))) }
       : name === '../toast'
         ? { showToast: (...args) => toasts.push(args) }
         : { t: (_key, values) => `Queue ${values?.title ?? values?.count}` },
@@ -292,6 +292,132 @@ test('track queue action freezes portable identity and has no selection or baske
   assert.equal(unavailable.disabled, true);
   await unavailable.dispatchEvent('click');
   assert.equal(h.calls.length, 1);
+});
+
+// Run the production library entry points, RPC wrappers and shared store together.
+function libraryQueueHarness({ conflict, refreshFails = false, deferAdmission = false } = {}) {
+  const calls = []; const toasts = []; let getCount = 0; let release;
+  const initial = snapshot('paused');
+  const authoritative = { ...initial, queueRevision: '2', stateSequence: '2' };
+  const pendingAdmission = new Promise(resolve => { release = resolve; });
+  const modules = new Map();
+  const document = { activeElement: null };
+  class Element {
+    listeners = new Map(); dataset = {}; disabled = false; loading = false;
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+  }
+  document.createElement = () => new Element();
+  const translations = { t: (key, values) => values?.count ? `${key}:${values.count}` : key };
+  const load = (path, imports, suffix = '') => {
+    const exports = {};
+    const source = ts.transpileModule(readFileSync(new URL(`../../hifimule-ui/src/${path}`, import.meta.url), 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    vm.runInNewContext(source + suffix, {
+      exports, document, console: { log() {} }, crypto: { randomUUID: () => 'explicit-add-command' },
+      setTimeout: () => 1, clearTimeout() {}, require: name => imports[name] ?? {},
+    });
+    modules.set(path, exports); return exports;
+  };
+  const rpc = load('rpc.ts', {
+    './i18n': translations,
+    '@tauri-apps/api/core': { invoke: async (_command, { method, params }) => {
+      calls.push({ method, params });
+      if (method === 'playback.getSession') {
+        if (++getCount === 1) { if (deferAdmission) await pendingAdmission; return { data: initial }; }
+        if (refreshFails) throw { code: -1, message: 'private read failure' };
+        return { data: authoritative };
+      }
+      assert.equal(method, 'playback.applySession', 'queue actions must not call basket, playlist or sync APIs');
+      if (conflict) throw conflict;
+      return { data: { ...authoritative, assignedOccurrences: [] } };
+    } },
+  });
+  const store = load('state/playback.ts', { '../rpc': rpc }).playbackStore;
+  const queue = load('state/queue.ts', {
+    '../rpc': rpc, './playback': { playbackStore: store }, '../i18n': translations,
+    '../toast': { showToast: (...args) => toasts.push(args), ERROR_TOAST_DURATION: 6000 },
+  });
+  const button = load('components/TrackQueueButton.ts', { '../state/queue': queue, '../i18n': translations });
+  const tracks = load('components/TracksBrowseView.ts', { '../state/queue': queue });
+  const library = load('library.ts', { './state/queue': queue },
+    '\nexports.queueTest = { state, bulkAddSelectionToQueue };');
+  const rows = [
+    { id: 'first', serverId: 'server-a', type: 'Audio' },
+    { id: 'second', serverId: 'server-b', type: 'Audio' },
+  ];
+  const selected = new Set(['second', 'first']); // Deliberately opposite displayed order.
+  function mount(surface) {
+    if (surface === 'row') {
+      const element = button.createTrackQueueButton('server-a', 'first', 'First');
+      return { element, run: () => element.listeners.get('click')({ stopPropagation() {} }), selected };
+    }
+    const element = new Element();
+    if (surface === 'tracks') {
+      const view = new tracks.TracksBrowseView({}, false);
+      view.trackState.items = rows; view.selectedTrackIds = selected;
+      return { element, run: () => view.bulkAddToQueue(element), selected: view.selectedTrackIds };
+    }
+    library.queueTest.state.items = rows; library.queueTest.state.selectedIds = selected;
+    return { element, run: () => library.queueTest.bulkAddSelectionToQueue(element), selected };
+  }
+  return { calls, toasts, store, mount, rows, release };
+}
+
+test('all library queue entry points refresh both conflict shapes exactly once without replay or selection changes', async () => {
+  for (const surface of ['row', 'tracks', 'library']) {
+    for (const conflict of [
+      { code: 409, message: 'private conflict', data: { code: 'QUEUE_REVISION_CONFLICT', queueRevision: '2' } },
+      { code: -7, message: 'private conflict', data: { code: 'QUEUE_CONFLICT', authoritative: { queueRevision: '2' } } },
+    ]) {
+      for (const refreshFails of [false, true]) {
+        const h = libraryQueueHarness({ conflict, refreshFails });
+        const action = h.mount(surface); await action.run();
+        assert.deepEqual(h.calls.map(call => call.method), ['playback.getSession', 'playback.applySession', 'playback.getSession']);
+        assert.deepEqual([...action.selected], ['second', 'first']);
+        assert.equal(action.element.loading, false); assert.equal(action.element.disabled, false);
+        assert.equal(h.toasts.length, 1);
+        assert.equal(h.toasts[0][0], refreshFails ? 'playback.queue.conflict_refresh_failed' : 'playback.queue.conflict');
+        assert.equal(h.store.current()?.queueRevision, refreshFails ? undefined : '2');
+      }
+    }
+  }
+});
+
+test('bulk queue actions preserve captured display order during server changes and do not submit twice while pending', async () => {
+  for (const surface of ['tracks', 'library']) {
+    const h = libraryQueueHarness({ deferAdmission: true }); const action = h.mount(surface);
+    const pending = action.run(); await action.run();
+    h.rows[0].serverId = 'different-server'; h.rows.reverse();
+    h.release(); await pending;
+    const edits = h.calls.filter(call => call.method === 'playback.applySession');
+    assert.equal(edits.length, 1);
+    assert.equal(JSON.stringify(edits[0].params.operation.sources), JSON.stringify([
+      { serverId: 'server-a', trackId: 'first' }, { serverId: 'server-b', trackId: 'second' },
+    ]));
+    assert.deepEqual([...action.selected], ['second', 'first']);
+    assert.equal(h.store.current()?.queueRevision, '2');
+    assert.equal(h.toasts[0][0], 'playback.queue_add_success:2');
+  }
+});
+
+test('a committed library append remains successful when its state refresh fails', async () => {
+  const h = libraryQueueHarness({ refreshFails: true }); await h.mount('row').run();
+  assert.equal(h.calls.filter(call => call.method === 'playback.applySession').length, 1);
+  assert.equal(h.toasts[0][0], 'playback.queue.added_refresh_failed:1');
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  for (const language of ['en', 'fr', 'es', 'de']) {
+    assert.ok(catalog[language]['playback.queue.conflict_refresh_failed']);
+    assert.ok(catalog[language]['playback.queue.added_refresh_failed'].includes('{count}'));
+    assert.ok(catalog[language]['playback.queue.limit_exceeded']);
+  }
+});
+
+test('library queue capacity failures remain actionable without exposing raw diagnostics', async () => {
+  const h = libraryQueueHarness({ conflict: { code: 409, message: 'private capacity diagnostic', data: { code: 'QUEUE_LIMIT_EXCEEDED' } } });
+  await h.mount('library').run();
+  assert.deepEqual(h.calls.map(call => call.method), ['playback.getSession', 'playback.applySession']);
+  assert.equal(h.toasts[0][0], 'playback.queue.limit_exceeded');
 });
 
 test('every track surface mounts the tested preview action and the RPC freezes concurrency fields', () => {

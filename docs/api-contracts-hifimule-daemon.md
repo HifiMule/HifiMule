@@ -1236,3 +1236,21 @@ active decoder. Pending network results and callback/Pulse successor consumption
 are fenced by a successor-only epoch; stale prepared PCM cannot cross the next
 boundary after acknowledgment. Current output gate, generation, cursor and active
 samples remain owned by the existing transport pipeline.
+
+The output consumer atomically claims the next boundary before consuming its
+first sample, for either alternating PCM slot and for Pulse scratch-buffer
+rendering. If that claim wins, an edit returns `PLAYBACK_BUSY` until presentation
+is reconciled; rejected admission leaves the claimed boundary intact. If the
+edit wins, an old preparation cannot publish readiness for the new epoch. The
+single preparation coordinator captures its ticket before provider resolution,
+cancels stale network work, and waits for inactive decoder/source retirement
+before replacing that bounded slot. Successor cancellation is independent of
+the current decoder. A storage rollback still advances the revocation epoch, so
+the unchanged authoritative successor is prepared again without restarting
+current audio.
+
+The Playback destination resolves canonical-current metadata separately from
+active transport metadata, including paused restoration and Preview. Each paged
+region fences its own asynchronous reads and retains keyed action focus. Scoped
+cursor/locator conflicts reset to a bounded first page after an authoritative
+refresh; library and Playback mutations refresh without replaying the action.

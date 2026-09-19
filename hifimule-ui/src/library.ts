@@ -22,8 +22,8 @@ import {
     getImageUrl,
     rpcCall,
     playbackPlayTrack,
-    playbackAppendQueue,
 } from './rpc';
+import { appendTracksToQueueFromLibrary } from './state/queue';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { createAlbumPlayButton } from './components/AlbumPlayButton';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
@@ -861,6 +861,7 @@ function resolveSelectedItems(): BrowseDisplayItem[] {
 }
 
 async function bulkAddSelectionToQueue(button: any): Promise<void> {
+    if (button.loading) return;
     // Resolve in displayed data order and freeze portable identities before awaiting.
     const selected = resolveSelectedItems();
     if (selected.length === 0 || selected.length > 200
@@ -868,11 +869,8 @@ async function bulkAddSelectionToQueue(button: any): Promise<void> {
     const sources = selected.map(item => ({ serverId: item.serverId as string, trackId: item.id }));
     button.loading = true;
     try {
-        await playbackAppendQueue(sources);
-        showToast(t('playback.queue_add_success', { count: sources.length }), 'success');
+        await appendTracksToQueueFromLibrary(sources);
         // Preserve the unrelated browser multi-selection after a local queue action.
-    } catch (error) {
-        showToast((error as Error).message, 'danger');
     } finally {
         button.loading = false;
     }

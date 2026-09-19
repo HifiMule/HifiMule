@@ -629,6 +629,30 @@ passed 33 and session-evidence validators passed 2. The UI production build and
 `git diff --check` also passed. These are local automation results, not an
 installed-package or physical-audio certification.
 
+Review-patch verification on 2026-09-19: macOS 27.0 (26A428), arm64,
+`cc7b148` plus the review working tree. Full controlled daemon tests: **1,021
+passed, 6 ignored**; destination/playback production-component tests: **68
+passed**; frontend production build, 33 installed-evidence validators, 2 session
+evidence validators and whitespace checks passed. The original implementation
+counts above are historical, not the review-patch result.
+
+New regressions exercise atomic boundary-versus-edit admission in both PCM-slot
+directions, native-tail and scratch rendering, delayed HTTP cancellation, stale
+provider tickets and inactive-decoder retirement. Owner/storage coverage adds
+same-revision advancement races, the active-capacity ceiling with longer history,
+Preview-to-manual frozen-current gain across return/restart, v4 album/manual
+migration and transaction rollback. Authenticated production-router assertions
+cover repeated source identities, actual move/remove order, receipt replay and
+protected-current rejection. UI tests now use real store notifications and
+connected-focus semantics for deep-page navigation, independent region recovery,
+canonical-current display, refresh failures and invalid locator recovery.
+
+These controlled tests do not execute actual native device submission timing,
+physical audio, screen readers or responsive OS layouts. Linux and Windows
+offline target checks were attempted but failed before daemon compilation with
+E0463 because the selected toolchain could not find the target standard
+libraries. No installed-platform row is promoted by this review.
+
 - [ ] Windows installed: append/move/remove, repeats, edit-versus-boundary race, Preview edit, keyboard and screen-reader focus, long history.
 - [ ] Linux installed: append/move/remove, repeats, Pulse submission race, Preview edit, keyboard and screen-reader focus, long history.
 - [ ] macOS x64 installed: append/move/remove, repeats, callback race, Preview edit, keyboard and screen-reader focus, long history.

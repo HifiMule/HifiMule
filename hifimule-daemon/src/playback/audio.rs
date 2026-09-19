@@ -1,6 +1,7 @@
 mod handoff;
 #[cfg(target_os = "linux")]
 mod pulse_output;
+use super::continuity::SuccessorFence;
 #[cfg(not(target_os = "linux"))]
 use super::decoder::{UNKNOWN_SEEK_LANDING_FRAME, decode_stream_with_seek_and_gain};
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
@@ -311,11 +312,35 @@ struct Pipeline {
     output_epoch: u64,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
-    successor_epoch: Arc<AtomicU64>,
-    successor_authorized: Arc<AtomicBool>,
+    successor_fence: Arc<SuccessorFence>,
+    successor_slot_free: Arc<AtomicBool>,
+    successor_coordinator: AtomicBool,
 }
 
 static NEXT_OUTPUT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) struct SuccessorTicket {
+    pub epoch: u64,
+    pub output_epoch: u64,
+    fence: Arc<SuccessorFence>,
+    parent_cancel: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    slot_free: Arc<AtomicBool>,
+}
+
+impl SuccessorTicket {
+    pub fn is_current(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+            && !self.parent_cancel.load(Ordering::Acquire)
+            && self.fence.epoch() == self.epoch
+    }
+
+    pub async fn cancelled(&self) {
+        while self.is_current() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+}
 
 struct PreparedSuccessor {
     token: super::continuity::HandoffToken,
@@ -329,8 +354,7 @@ struct PreparedSuccessor {
     gain: f32,
     qualified_suffix: Option<String>,
     successor_epoch: u64,
-    successor_epoch_source: Arc<AtomicU64>,
-    successor_authorized: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
 }
 
 struct OutputControl {
@@ -338,6 +362,25 @@ struct OutputControl {
     configured: Mutex<Option<CpalOutputControl>>,
     #[cfg(target_os = "linux")]
     pause_request: Mutex<Option<mpsc::SyncSender<mpsc::SyncSender<bool>>>>,
+}
+
+/// Retirement runs on the output worker, never under the owner lock or in a
+/// callback. Dropping this worker cancels only the inactive decoder and joins
+/// it before releasing its bounded PCM/source slot for replacement.
+fn retire_successor_slot<T>(
+    active_slot: usize,
+    slot_a: &mut Option<super::output::DecoderWorker<T>>,
+    slot_b: &mut Option<super::output::DecoderWorker<T>>,
+    pcm_a: &ArrayQueue<f32>,
+    pcm_b: &ArrayQueue<f32>,
+) {
+    let (worker, pcm) = if active_slot == 0 {
+        (slot_b, pcm_b)
+    } else {
+        (slot_a, pcm_a)
+    };
+    drop(worker.take());
+    while pcm.pop().is_some() {}
 }
 
 #[cfg(target_os = "windows")]
@@ -679,20 +722,42 @@ impl AudioEngine {
 
     pub(crate) fn revoke_successor(&self, generation: &str) -> bool {
         let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pipeline) = current.as_ref().filter(|p| p.generation == generation) {
-            pipeline
-                .successor_authorized
-                .store(false, Ordering::Release);
-            pipeline.successor_epoch.fetch_add(1, Ordering::AcqRel);
-            let submitted =
-                pipeline.boundary_pending.load(Ordering::Acquire) || pipeline.handoff.submitted();
-            if !submitted {
-                pipeline.handoff.clear();
-            }
-            submitted
-        } else {
-            false
+        current
+            .as_ref()
+            .filter(|p| p.generation == generation && p.alive.load(Ordering::Acquire))
+            .is_some_and(|pipeline| !pipeline.successor_fence.revoke())
+    }
+
+    pub(crate) fn start_successor_coordinator(&self, generation: &str) -> Option<u64> {
+        let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        current
+            .as_ref()
+            .filter(|p| p.generation == generation)
+            .filter(|p| !p.successor_coordinator.swap(true, Ordering::AcqRel))
+            .map(|p| p.output_epoch)
+    }
+
+    /// Capture before reading the owner candidate and before any provider await.
+    pub(crate) fn successor_ticket(&self, generation: &str) -> Option<SuccessorTicket> {
+        let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        let pipeline = current.as_ref().filter(|p| {
+            p.generation == generation
+                && p.alive.load(Ordering::Acquire)
+                && !p.cancel.load(Ordering::Acquire)
+        })?;
+        if !pipeline.successor_slot_free.load(Ordering::Acquire)
+            || pipeline.successor_fence.claimed()
+        {
+            return None;
         }
+        Some(SuccessorTicket {
+            epoch: pipeline.successor_fence.epoch(),
+            output_epoch: pipeline.output_epoch,
+            fence: pipeline.successor_fence.clone(),
+            parent_cancel: pipeline.cancel.clone(),
+            alive: pipeline.alive.clone(),
+            slot_free: pipeline.successor_slot_free.clone(),
+        })
     }
 
     pub(crate) fn retain_control_epoch(&self, generation: &str, epoch: u64) {
@@ -716,11 +781,12 @@ impl AudioEngine {
     pub(crate) async fn prepare_successor(
         &self,
         candidate: super::continuity::SuccessorCandidate,
+        ticket: &SuccessorTicket,
         description: PlaybackDescription,
         generation: String,
         deadline: std::time::Instant,
     ) -> Result<(), PlaybackPipelineError> {
-        let (tx, cancel, output_epoch, high_water, successor_epoch_source, successor_authorized) = {
+        let (tx, output_epoch, high_water) = {
             let current = self
                 .current
                 .lock()
@@ -728,7 +794,9 @@ impl AudioEngine {
             let pipeline = current.as_ref().ok_or_else(|| {
                 PlaybackPipelineError::cancelled(anyhow::anyhow!("active output retired"))
             })?;
-            if pipeline.generation != generation
+            if !ticket.is_current()
+                || ticket.output_epoch != pipeline.output_epoch
+                || pipeline.generation != generation
                 || pipeline.cancel.load(Ordering::Acquire)
                 || candidate.control_epoch != pipeline.event_epoch.load(Ordering::Acquire)
             {
@@ -738,14 +806,12 @@ impl AudioEngine {
             }
             (
                 pipeline.successor_tx.clone(),
-                pipeline.cancel.clone(),
                 pipeline.output_epoch,
                 pipeline.successor_compressed_high_water.clone(),
-                pipeline.successor_epoch.clone(),
-                pipeline.successor_authorized.clone(),
             )
         };
-        let successor_epoch = successor_epoch_source.load(Ordering::Acquire);
+        let successor_epoch = ticket.epoch;
+        let cancel = Arc::new(AtomicBool::new(false));
         let duration_ms = u64::from(description.song.duration_seconds).saturating_mul(1000);
         let metadata = PlaybackTrackMetadata {
             source: candidate.successor.source.clone(),
@@ -767,15 +833,13 @@ impl AudioEngine {
         let seek_mechanism = representation
             .seek_mechanism
             .filter(|_| representation.request.range_supported && duration_ms > 0);
-        let response = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            fetch(&representation.request),
-        )
-        .await
-        .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("successor timeout")))??;
-        if cancel.load(Ordering::Acquire)
-            || successor_epoch_source.load(Ordering::Acquire) != successor_epoch
-        {
+        let response = tokio::select! {
+            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&representation.request)) => {
+                result.map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("successor timeout")))??
+            },
+            _ = ticket.cancelled() => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("successor preparation was superseded"))),
+        };
+        if !ticket.is_current() {
             return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
                 "successor preparation was superseded"
             )));
@@ -786,7 +850,7 @@ impl AudioEngine {
             response,
             preparation.clone(),
         );
-        let reader = BoundedHttpReader::from_source(source, cancel, high_water);
+        let reader = BoundedHttpReader::from_source(source, cancel.clone(), high_water);
         let token = super::continuity::HandoffToken {
             instance_id: candidate.instance_id,
             session_id: candidate.session_id,
@@ -797,6 +861,7 @@ impl AudioEngine {
             preparation_generation: candidate.preparation_generation,
             output_epoch,
         };
+        ticket.slot_free.store(false, Ordering::Release);
         tx.try_send(PreparedSuccessor {
             token,
             reader,
@@ -809,10 +874,12 @@ impl AudioEngine {
             gain,
             qualified_suffix,
             successor_epoch,
-            successor_epoch_source,
-            successor_authorized,
+            cancel,
         })
-        .map_err(|_| PlaybackPipelineError::cancelled(anyhow::anyhow!("successor slot busy")))
+        .map_err(|_| {
+            ticket.slot_free.store(true, Ordering::Release);
+            PlaybackPipelineError::cancelled(anyhow::anyhow!("successor slot busy"))
+        })
     }
 
     async fn retire(
@@ -1238,10 +1305,10 @@ impl AudioEngine {
         let boundary_pending = Arc::new(AtomicBool::new(false));
         let worker_boundary_pending = boundary_pending.clone();
         let handoff = Arc::new(HandoffReceipt::new());
-        let successor_epoch = Arc::new(AtomicU64::new(0));
-        let worker_successor_epoch = successor_epoch.clone();
-        let successor_authorized = Arc::new(AtomicBool::new(false));
-        let worker_successor_authorized = successor_authorized.clone();
+        let successor_fence = Arc::new(SuccessorFence::default());
+        let worker_successor_fence = successor_fence.clone();
+        let successor_slot_free = Arc::new(AtomicBool::new(true));
+        let worker_successor_slot_free = successor_slot_free.clone();
         let worker_handoff = handoff.clone();
         let worker_position = position_ms.clone();
         let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
@@ -1320,8 +1387,8 @@ impl AudioEngine {
                     worker_seek,
                     worker_boundary_pending,
                     worker_handoff,
-                    worker_successor_epoch,
-                    worker_successor_authorized,
+                    worker_successor_fence,
+                    worker_successor_slot_free,
                     gain,
                     qualified_suffix,
                 )
@@ -1380,8 +1447,9 @@ impl AudioEngine {
             output_epoch,
             boundary_pending,
             handoff,
-            successor_epoch,
-            successor_authorized,
+            successor_fence,
+            successor_slot_free,
+            successor_coordinator: AtomicBool::new(false),
         });
         let installed = install_session.with_current_generation(&install_generation, || {
             if install_session.control_epoch() != expected_epoch {
@@ -1512,8 +1580,8 @@ fn run_output(
     seek_commit: Option<(String, u64)>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
-    successor_epoch: Arc<AtomicU64>,
-    successor_authorized: Arc<AtomicBool>,
+    successor_fence: Arc<SuccessorFence>,
+    successor_slot_free: Arc<AtomicBool>,
     gain: f32,
     qualified_suffix: Option<String>,
 ) -> Result<(), PlaybackPipelineError> {
@@ -1625,7 +1693,7 @@ fn run_output(
             successor_pcm.clone(),
             successor_ready.clone(),
             successor_finished.clone(),
-            successor_authorized.clone(),
+            successor_fence.clone(),
             boundary_frame.clone(),
             boundary_deadline_ns.clone(),
             submitted_frames.clone(),
@@ -1654,7 +1722,7 @@ fn run_output(
             successor_pcm.clone(),
             successor_ready.clone(),
             successor_finished.clone(),
-            successor_authorized.clone(),
+            successor_fence.clone(),
             boundary_frame.clone(),
             boundary_deadline_ns.clone(),
             submitted_frames.clone(),
@@ -1683,7 +1751,7 @@ fn run_output(
             successor_pcm.clone(),
             successor_ready.clone(),
             successor_finished.clone(),
-            successor_authorized.clone(),
+            successor_fence.clone(),
             boundary_frame.clone(),
             boundary_deadline_ns.clone(),
             submitted_frames.clone(),
@@ -1712,7 +1780,7 @@ fn run_output(
             successor_pcm.clone(),
             successor_ready.clone(),
             successor_finished.clone(),
-            successor_authorized.clone(),
+            successor_fence.clone(),
             boundary_frame.clone(),
             boundary_deadline_ns.clone(),
             submitted_frames.clone(),
@@ -1741,7 +1809,7 @@ fn run_output(
             successor_pcm.clone(),
             successor_ready.clone(),
             successor_finished.clone(),
-            successor_authorized.clone(),
+            successor_fence.clone(),
             boundary_frame.clone(),
             boundary_deadline_ns.clone(),
             submitted_frames.clone(),
@@ -1873,9 +1941,31 @@ fn run_output(
     )> = None;
     let mut handoff_published = false;
     let mut successor_preparation = None;
+    let mut installed_successor_epoch = None;
     let mut slot_a_decoder = Some(decoder);
     while !cancel.load(Ordering::Acquire) {
         let current_slot = active_slot.load(Ordering::Acquire) as usize;
+        if installed_successor_epoch.is_some_and(|epoch| epoch != successor_fence.epoch()) {
+            retire_successor_slot(
+                current_slot,
+                &mut slot_a_decoder,
+                &mut successor_decoder,
+                &pcm,
+                &successor_pcm,
+            );
+            if current_slot == 0 {
+                successor_ready.store(false, Ordering::Release);
+                successor_finished.store(false, Ordering::Release);
+            } else {
+                slot_a_ready.store(false, Ordering::Release);
+                slot_a_finished.store(false, Ordering::Release);
+            }
+            successor_identity = None;
+            successor_preparation = None;
+            installed_successor_epoch = None;
+            handoff.clear();
+            successor_slot_free.store(true, Ordering::Release);
+        }
         if successor_identity.is_none()
             && let Ok(prepared) = successor_rx.try_recv()
         {
@@ -1891,16 +1981,14 @@ fn run_output(
                 gain,
                 qualified_suffix,
                 successor_epoch: prepared_epoch,
-                successor_epoch_source,
-                successor_authorized: prepared_authorized,
+                cancel: successor_cancel,
             } = prepared;
-            if prepared_epoch != successor_epoch.load(Ordering::Acquire)
-                || prepared_epoch != successor_epoch_source.load(Ordering::Acquire)
-            {
+            if prepared_epoch != successor_fence.epoch() {
+                drop(reader);
+                successor_slot_free.store(true, Ordering::Release);
                 continue;
             }
-            prepared_authorized.store(true, Ordering::Release);
-            successor_authorized.store(true, Ordering::Release);
+            installed_successor_epoch = Some(prepared_epoch);
             let qualified = Arc::new(AtomicU64::new(0));
             let decoder_qualified = qualified.clone();
             handoff.arm(
@@ -1922,8 +2010,8 @@ fn run_output(
             } else {
                 successor_pcm.clone()
             };
-            let decoder_cancel = cancel.clone();
-            let worker = super::output::DecoderWorker::spawn_result(cancel.clone(), move || {
+            let decoder_cancel = successor_cancel.clone();
+            let worker = super::output::DecoderWorker::spawn_result(successor_cancel, move || {
                 decode_stream_with_seek_and_gain(
                     reader,
                     Some(&decoder_hint),
@@ -1990,7 +2078,10 @@ fn run_output(
         }
         .as_ref()
         .is_some_and(|worker| worker.failed());
-        if successor_identity.is_some() && !handoff.submitted() && prepared_failed {
+        if successor_identity.is_some()
+            && prepared_failed
+            && installed_successor_epoch.is_some_and(|epoch| successor_fence.disarm(epoch))
+        {
             prepared_ready.store(false, Ordering::Release);
             let failed = if prepared_slot == 0 {
                 slot_a_decoder.take()
@@ -2003,7 +2094,9 @@ fn run_output(
             while prepared_queue.pop().is_some() {}
             successor_identity = None;
             successor_preparation = None;
+            installed_successor_epoch = None;
             handoff.clear();
+            successor_slot_free.store(true, Ordering::Release);
         }
         if successor_identity.is_some()
             && !prepared_ready.load(Ordering::Acquire)
@@ -2011,6 +2104,9 @@ fn run_output(
                 >= rate as usize * channels as usize * STARTUP_FILL_MILLISECONDS / 1000
                 || prepared_finished && prepared_queue.len() >= channels as usize)
         {
+            if let Some(epoch) = installed_successor_epoch {
+                successor_fence.authorize(epoch);
+            }
             prepared_ready.store(true, Ordering::Release);
             if let Some(preparation) = successor_preparation.take() {
                 preparation.ready();
@@ -2020,6 +2116,7 @@ fn run_output(
             && prepared_finished
             && prepared_queue.is_empty()
             && !prepared_ready.load(Ordering::Acquire)
+            && installed_successor_epoch.is_some_and(|epoch| successor_fence.disarm(epoch))
         {
             let failed = if prepared_slot == 0 {
                 slot_a_decoder.take()
@@ -2031,6 +2128,9 @@ fn run_output(
             }
             successor_identity = None;
             successor_preparation = None;
+            installed_successor_epoch = None;
+            handoff.clear();
+            successor_slot_free.store(true, Ordering::Release);
         }
         pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
         if generation_serial.load(Ordering::Acquire) != expected_serial {
@@ -2039,12 +2139,10 @@ fn run_output(
         }
         if output_lost.load(Ordering::Acquire) {
             cancel.store(true, Ordering::Release);
-            if let Some(worker) = slot_a_decoder.take() {
-                let _ = worker.join();
-            }
-            if let Some(worker) = successor_decoder.take() {
-                let _ = worker.join();
-            }
+            // Either slot may now own a successor-specific cancellation token.
+            // Cancel before joining: a full PCM queue cannot drain after loss.
+            drop(slot_a_decoder.take());
+            drop(successor_decoder.take());
             return Err(PlaybackPipelineError::output_lost(anyhow::anyhow!(
                 "output stream callback reported loss"
             )));
@@ -2149,6 +2247,9 @@ fn run_output(
             boundary_deadline_ns.store(u64::MAX, Ordering::Release);
             boundary_pending.store(false, Ordering::Release);
             handoff.clear();
+            installed_successor_epoch = None;
+            successor_fence.adopted();
+            successor_slot_free.store(true, Ordering::Release);
         }
         let current_slot = active_slot.load(Ordering::Acquire) as usize;
         let current_done = if current_slot == 0 {
@@ -2245,7 +2346,7 @@ fn build_stream<T>(
     successor_pcm: Arc<ArrayQueue<f32>>,
     successor_ready: Arc<AtomicBool>,
     successor_finished: Arc<AtomicBool>,
-    successor_authorized: Arc<AtomicBool>,
+    successor_fence: Arc<SuccessorFence>,
     boundary_frame: Arc<AtomicU64>,
     boundary_deadline_ns: Arc<AtomicU64>,
     submitted_frames: Arc<AtomicU64>,
@@ -2262,7 +2363,8 @@ where
         config.channels as usize,
         rate as usize * config.channels as usize * STARTUP_FILL_MILLISECONDS / 1000,
         gate.clone(),
-    );
+    )
+    .with_successor_fence(successor_fence);
     let callback_lost = lost.clone();
     let mut watchdog = super::output::CallbackWatchdog::default();
     let error_gate = gate.clone();
@@ -2288,8 +2390,7 @@ where
                 slot_a_ready.load(Ordering::Acquire),
                 slot_a_finished.load(Ordering::Acquire),
                 &successor_pcm,
-                successor_ready.load(Ordering::Acquire)
-                    && successor_authorized.load(Ordering::Acquire),
+                successor_ready.load(Ordering::Acquire),
                 successor_finished.load(Ordering::Acquire),
                 &_replay,
                 &_submitted_tail,
@@ -2302,8 +2403,7 @@ where
                 slot_a_ready.load(Ordering::Acquire),
                 slot_a_finished.load(Ordering::Acquire),
                 &successor_pcm,
-                successor_ready.load(Ordering::Acquire)
-                    && successor_authorized.load(Ordering::Acquire),
+                successor_ready.load(Ordering::Acquire),
                 successor_finished.load(Ordering::Acquire),
                 enabled,
             );
@@ -2589,8 +2689,9 @@ mod tests {
                 successor_tx: mpsc::sync_channel(1).0,
                 output_epoch: 1,
                 boundary_pending: Arc::new(AtomicBool::new(false)),
-                successor_epoch: Arc::new(AtomicU64::new(0)),
-                successor_authorized: Arc::new(AtomicBool::new(false)),
+                successor_fence: Arc::new(SuccessorFence::default()),
+                successor_slot_free: Arc::new(AtomicBool::new(true)),
+                successor_coordinator: AtomicBool::new(false),
                 handoff: Arc::new(HandoffReceipt::new()),
             })),
         };
@@ -2639,8 +2740,9 @@ mod tests {
                 successor_tx: mpsc::sync_channel(1).0,
                 output_epoch: 1,
                 boundary_pending: Arc::new(AtomicBool::new(true)),
-                successor_epoch: Arc::new(AtomicU64::new(0)),
-                successor_authorized: Arc::new(AtomicBool::new(false)),
+                successor_fence: Arc::new(SuccessorFence::default()),
+                successor_slot_free: Arc::new(AtomicBool::new(true)),
+                successor_coordinator: AtomicBool::new(false),
                 handoff: Arc::new(HandoffReceipt::new()),
             })),
         };
@@ -2732,8 +2834,9 @@ mod tests {
                 successor_tx: mpsc::sync_channel(1).0,
                 output_epoch: 1,
                 boundary_pending: Arc::new(AtomicBool::new(false)),
-                successor_epoch: Arc::new(AtomicU64::new(0)),
-                successor_authorized: Arc::new(AtomicBool::new(false)),
+                successor_fence: Arc::new(SuccessorFence::default()),
+                successor_slot_free: Arc::new(AtomicBool::new(true)),
+                successor_coordinator: AtomicBool::new(false),
                 handoff: Arc::new(HandoffReceipt::new()),
             })),
         });
@@ -2825,8 +2928,9 @@ mod tests {
                 successor_tx: mpsc::sync_channel(1).0,
                 output_epoch: 1,
                 boundary_pending: Arc::new(AtomicBool::new(false)),
-                successor_epoch: Arc::new(AtomicU64::new(0)),
-                successor_authorized: Arc::new(AtomicBool::new(false)),
+                successor_fence: Arc::new(SuccessorFence::default()),
+                successor_slot_free: Arc::new(AtomicBool::new(true)),
+                successor_coordinator: AtomicBool::new(false),
                 handoff: Arc::new(HandoffReceipt::new()),
             })),
         };
@@ -3218,3 +3322,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "audio/queue_edit_tests.rs"]
+mod queue_edit_tests;

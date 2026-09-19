@@ -6,7 +6,11 @@ import ts from '../../hifimule-ui/node_modules/typescript/lib/typescript.js';
 
 class Element {
   children = []; dataset = {}; attributes = {}; listeners = new Map();
-  textContent = ''; hidden = false; disabled = false; isConnected = true; className = '';
+  textContent = ''; hidden = false; disabled = false; className = '';
+  connectedRoot = false;
+  get isConnected() { return this.connectedRoot || !!this.parentElement?.isConnected; }
+  get firstElementChild() { return this.children[0] ?? null; }
+  contains(node) { return this === node || this.children.some(child => child.contains(node)); }
   constructor(tag) { this.tagName = tag; }
   get classList() {
     return {
@@ -21,18 +25,19 @@ class Element {
   setAttribute(key, value) { this.attributes[key] = String(value); }
   getAttribute(key) { return this.attributes[key] ?? null; }
   append(...children) { for (const child of children) { if (child.parentElement) child.remove(); child.parentElement = this; this.children.push(child); } }
-  replaceChildren(...children) { for (const child of this.children) child.parentElement = null; this.children = []; this.append(...children); }
-  remove() { if (!this.parentElement) return; this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
+  replaceChildren(...children) { for (const child of [...this.children]) child.remove(); this.append(...children); }
+  remove() { if (!this.parentElement) return; if (this.contains(document.activeElement)) document.activeElement = null; this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
+  insertBefore(child, before) { child.remove(); child.parentElement = this; const index = before ? this.children.indexOf(before) : this.children.length; this.children.splice(index, 0, child); }
   addEventListener(name, listener) { this.listeners.set(name, listener); }
   removeEventListener() {}
-  focus() { document.activeElement = this; }
+  focus() { if (this.isConnected) document.activeElement = this; }
   async click() { await this.listeners.get('click')?.(); }
   querySelectorAll(selector) {
-    const own = selector === 'button' && this.tagName === 'button' ? [this] : [];
+    const own = selector === '*' || selector === 'button' && this.tagName === 'button' ? [this] : [];
     return own.concat(this.children.flatMap(child => child.querySelectorAll(selector)));
   }
   querySelector(selector) {
-    const all = [this, ...this.children.flatMap(child => [child, ...child.querySelectorAll('*')])];
+    const all = this.querySelectorAll('*');
     const occurrence = selector.match(/data-occurrence-id="([^"]+)"/)?.[1];
     const action = selector.match(/data-queue-action="([^"]+)"/)?.[1];
     return all.find(node => (!occurrence || node.dataset.occurrenceId === occurrence)
@@ -58,7 +63,7 @@ function load(relative, mocks, runtime = {}) {
   }).outputText;
   vm.runInNewContext(source, { exports, document, window: { addEventListener() {}, removeEventListener() {} }, console,
     CSS: { escape: value => String(value) },
-    setTimeout: () => 1, clearTimeout() {}, require: name => mocks[name] ?? {}, ...runtime });
+    setTimeout: () => 1, clearTimeout() {}, require: name => name === '../rpc' ? { isPlaybackQueueConflict: () => false, ...mocks[name] } : mocks[name] ?? {}, ...runtime });
   return exports;
 }
 
@@ -74,7 +79,7 @@ test('destination hub renders Playback first and explicit selection never steals
     '../i18n': { t: key => key }, './InitDeviceModal': { InitDeviceModal: class {} },
     '../state/basket': { basketStore: { flushPendingSave: async () => {} } },
   });
-  const container = new Element('nav');
+  const container = new Element('nav'); container.connectedRoot = true;
   const hub = new DestinationHub(container, () => {});
   await hub.refresh();
   const buttons = container.querySelectorAll('button');
@@ -112,12 +117,12 @@ test('playback destination keeps Preview separate and describes one bounded cano
         { occurrenceId: 'o1', source: { serverId: 'srv', trackId: 't' } },
         { occurrenceId: 'o2', source: { serverId: 'srv', trackId: 't' } },
       ], 'upcoming', null, 3),
-      playbackDescribeOccurrences: async (_observed, ids) => { metadataCalls++; assert.deepEqual(Array.from(ids), ['o1', 'o2']); return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv', trackId: 't' }, title: 'Song', artist: 'Artist', album: null, durationMs: 1, status: 'available' })); },
+      playbackDescribeOccurrences: async (_observed, ids) => { if (ids[0] === 'current') return [{ occurrenceId: 'current', source: { serverId: 'srv' }, title: 'Main', status: 'available' }]; metadataCalls++; assert.deepEqual(Array.from(ids), ['o1', 'o2']); return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv', trackId: 't' }, title: 'Song', artist: 'Artist', album: null, durationMs: 1, status: 'available' })); },
     },
     '../i18n': { t: (key, values) => values?.title ? `${key}:${values.title}` : values?.count != null ? `${key}:${values.count}` : key },
     '../serverIdentity': { formatServerIdentity: server => ({ label: server.name }) },
   });
-  const container = new Element('section');
+  const container = new Element('section'); container.connectedRoot = true;
   container.className = 'content layout-host';
   const destination = new PlaybackDestination(container, () => { browseCalls++; });
   subscriber(snapshot);
@@ -154,7 +159,7 @@ test('disposed playback destination ignores a late rejected page', async () => {
     },
     '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: () => ({ label: '' }) },
   });
-  const container = new Element('section');
+  const container = new Element('section'); container.connectedRoot = true;
   const destination = new PlaybackDestination(container, () => {});
   subscriber(snapshot);
   for (let turn = 0; turn < 4; turn++) await Promise.resolve();
@@ -174,7 +179,7 @@ test('playback destination keeps the library return action in recoverable error 
     '../rpc': { serverList: async () => [], playbackListOccurrences: async () => { throw new Error('stale'); } },
     '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: () => ({ label: '' }) },
   });
-  const container = new Element('section');
+  const container = new Element('section'); container.connectedRoot = true;
   const destination = new PlaybackDestination(container, () => { browseCalls++; });
   subscriber(snapshot);
   for (let turn = 0; turn < 12; turn++) await Promise.resolve();
@@ -250,7 +255,7 @@ test('destination CSS makes hidden siblings authoritative and bounds Playback sc
   assert.match(browseRule[1], /overflow-wrap:\s*anywhere/);
 });
 
-async function settle() { for (let turn = 0; turn < 24; turn++) await Promise.resolve(); }
+async function settle() { await new Promise(resolve => setImmediate(resolve)); }
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function clockHarness() {
   const timers = new Map(); let id = 0;
@@ -274,67 +279,50 @@ function queueHarness(rpc = {}, storeOverride) {
         ? occurrencePage([], 'history')
         : customList ? customList(s, cursor, limit, options)
           : occurrencePage([{ occurrenceId: cursor ?? 'first' }], 'upcoming', cursor ? null : 'second', 101),
-      playbackDescribeOccurrences: customDescribe ?? (async (_s, ids) => { metadataCalls++; return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })); }),
+      playbackDescribeOccurrences: async (observed, ids) => {
+        if (ids.length === 1 && ids[0] === observed.mainCurrent?.occurrenceId) return [{ occurrenceId: ids[0], source: observed.mainCurrent.source, title: 'Canonical current', status: 'available' }];
+        return customDescribe ? customDescribe(observed, ids) : (metadataCalls++, ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })));
+      },
       isPlaybackQueueConflict: () => false, ...rest },
     '../i18n': { t: (key, values) => values?.id ? `${key}:${values.id}` : key },
     '../serverIdentity': { formatServerIdentity: s => ({ label: s.name }) },
   }, clock.runtime);
-  const container = new Element('section'); const component = new PlaybackDestination(container, () => {});
+  const container = new Element('section'); container.connectedRoot = true; const component = new PlaybackDestination(container, () => {});
   return { component, container, clock, receive: s => subscriber(s), metadataCalls: () => metadataCalls,
     current: findClass(container, 'playback-destination__current'),
     button: key => container.querySelectorAll('button').find(b => b.textContent === key) };
 }
 
-test('current occurrence requires live transport and matching loaded metadata', async () => {
+test('canonical current remains visible through paused restoration, Preview and transport status changes', async () => {
   const h = queueHarness();
   h.receive({ ...queueSnapshot, playback: { status: 'paused', metadata: null } }); await settle();
-  const metadataCalls = h.metadataCalls();
-  assert.equal(h.current.textContent, 'playback.queue.no_current',
-    'a restored active pointer without loaded metadata must not display its UUID');
-  let sequence = 2;
-  for (const status of ['idle', 'stopped', 'completed', 'error']) {
-    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: {
-      status, metadata: { title: 'Stale', source: queueSnapshot.mainCurrent.source },
+  assert.match(h.current.textContent, /Canonical current/);
+  const calls = h.metadataCalls();
+  for (const status of ['idle', 'stopped', 'completed', 'error', 'active']) {
+    h.receive({ ...queueSnapshot, stateSequence: '2', mode: 'preview', playback: {
+      status, metadata: { title: 'Audition', source: { serverId: 'other', trackId: 'other' } },
     } });
     await settle();
-    assert.equal(h.current.textContent, 'playback.queue.no_current', `status ${status} must hide current metadata`);
+    assert.match(h.current.textContent, /Canonical current/);
+    assert.doesNotMatch(h.current.textContent, /Audition/);
   }
-  for (const source of [{ serverId: 'other', trackId: 'track' }, { serverId: 'srv', trackId: 'other' }]) {
-    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: {
-      status: 'paused', metadata: { title: 'Wrong source', source },
-    } });
-    await settle();
-    assert.equal(h.current.textContent, 'playback.queue.no_current');
-  }
-  for (const status of ['loading', 'active', 'paused']) {
-    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: { status, metadata: null } });
-    await settle();
-    assert.equal(h.current.textContent, 'playback.queue.no_current');
-    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: {
-      status, metadata: { title: 'Loaded', source: queueSnapshot.mainCurrent.source },
-    } });
-    await settle();
-    assert.match(h.current.textContent, /playback\.queue\.current_occurrence:Loaded/);
-    assert.doesNotMatch(h.current.textContent, /current_occurrence:current/);
-  }
-  h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: { status: 'paused', metadata: null } });
-  await settle();
-  assert.equal(h.current.textContent, 'playback.queue.no_current', 'metadata removal must clear stale current text');
-  assert.equal(h.metadataCalls(), metadataCalls, 'transport-only changes must not reload queue metadata');
+  assert.equal(h.metadataCalls(), calls);
+  h.receive({ ...queueSnapshot, mainCurrent: null }); await settle();
+  assert.equal(h.current.textContent, 'playback.queue.no_current');
   h.component.destroy();
 });
 
 test('queue paging keeps focus and ignores transport-only updates and repeated Next clicks', async () => {
   const second = deferred(); let pageCalls = 0;
   const h = queueHarness({ playbackListOccurrences: async (_s, cursor) => {
-    pageCalls++; return cursor ? second.promise : { occurrences: [{ occurrenceId: 'first' }], nextCursor: 'second', totalOccurrenceCount: 101 };
+    pageCalls++; return cursor ? second.promise : occurrencePage([{ occurrenceId: 'first' }], 'upcoming', 'second', 101);
   } });
   h.receive(queueSnapshot); await settle();
   const next = h.button('playback.queue.next'); next.focus();
   await next.click(); await next.click(); await settle();
   h.receive({ ...queueSnapshot, stateSequence: '2', mode: 'preview', playback: { status: 'active', metadata: { title: 'Audition' } } }); await settle();
   assert.equal(pageCalls, 2);
-  second.resolve({ occurrences: [{ occurrenceId: 'second' }], nextCursor: null, totalOccurrenceCount: 101 }); await settle();
+  second.resolve(occurrencePage([{ occurrenceId: 'second' }])); await settle();
   assert.equal(h.metadataCalls(), 2);
   assert.equal(h.button('playback.queue.next'), next);
   assert.equal(document.activeElement, next);
@@ -346,7 +334,7 @@ test('queue paging keeps focus and ignores transport-only updates and repeated N
 test('obsolete queue page errors cannot replace a newer queue or reset its paging', async () => {
   const old = deferred();
   const h = queueHarness({ playbackListOccurrences: async s => s.queueRevision === '1' ? old.promise :
-    { occurrences: [{ occurrenceId: 'new-queue' }], nextCursor: 'next-new', totalOccurrenceCount: 200 } });
+    occurrencePage([{ occurrenceId: 'new-queue' }], 'upcoming', 'next-new', 200) });
   h.receive(queueSnapshot); await settle();
   h.receive({ ...queueSnapshot, queueRevision: '2', stateSequence: '2' }); await settle();
   old.reject(new Error('old failed page')); await settle();
@@ -363,7 +351,7 @@ test('paused queue recovers with an equal real-store snapshot and bounded retry'
   let calls = 0;
   const h = queueHarness({ playbackListOccurrences: async () => {
     if (++calls === 1) throw new Error('temporary');
-    return { occurrences: [{ occurrenceId: 'recovered' }], nextCursor: null, totalOccurrenceCount: 1 };
+    return occurrencePage([{ occurrenceId: 'recovered' }]);
   } }, store);
   await settle(); assert.equal(calls, 1);
   await h.clock.tick();
@@ -371,7 +359,7 @@ test('paused queue recovers with an equal real-store snapshot and bounded retry'
   assert.match(text(h.container), /recovered/);
   assert.equal(h.button('playback.retry').hidden, true);
   h.component.destroy();
-  assert.equal(h.clock.timers.size, 0);
+  assert.equal(h.component.regions.upcoming.retryTimer, undefined);
 });
 
 test('failed queue retries stop after three automatic attempts and expose manual retry', async () => {
@@ -379,7 +367,7 @@ test('failed queue retries stop after three automatic attempts and expose manual
   const h = queueHarness({ playbackListOccurrences: async () => { calls++; throw new Error('offline'); } });
   h.receive(queueSnapshot); await settle();
   for (let i = 0; i < 5; i++) await h.clock.tick();
-  assert.equal(calls, 4); assert.equal(h.clock.timers.size, 0);
+  assert.equal(calls, 4); assert.equal(h.component.regions.upcoming.retryTimer, undefined);
   assert.equal(h.button('playback.retry').hidden, false);
   h.component.destroy();
 });
@@ -404,7 +392,7 @@ test('destination switches flush outgoing basket and retain one poll timer and s
     '../state/basket': { basketStore: { flushPendingSave: async () => { calls.push('flush'); await flush.promise; } } },
     '../i18n': { t: key => key },
   }, clock.runtime);
-  const container = new Element('nav'); const hub = new DestinationHub(container, () => {}); await settle();
+  const container = new Element('nav'); container.connectedRoot = true; const hub = new DestinationHub(container, () => {}); await settle();
   const issue = container.children[1].children[0];
   await hub.refresh(); assert.equal(container.children[1].children[0], issue);
   assert.equal(clock.timers.size, 1);
@@ -424,7 +412,7 @@ test('basket flush failure prevents destination selection', async () => {
       { kind: 'playback', selected: false }, { kind: 'device', path: '/a', name: 'A', selected: true }], deviceDiscoveryIssues: [] }), destinationSelect: async () => { selections++; } },
     '../state/basket': { basketStore: { flushPendingSave: async () => { throw new Error('disk failure'); } } }, '../i18n': { t: key => key },
   });
-  const container = new Element('nav'); const hub = new DestinationHub(container, () => {}); await settle();
+  const container = new Element('nav'); container.connectedRoot = true; const hub = new DestinationHub(container, () => {}); await settle();
   await container.querySelectorAll('button')[0].click(); await settle();
   assert.equal(selections, 0); assert.match(text(container), /destination.selection_failed/);
   hub.destroy();
@@ -435,7 +423,7 @@ test('hub ignores superseded and disposed state requests', async () => {
   const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
     '../rpc': { getDaemonState: () => { const req = deferred(); requests.push(req); return req.promise; } }, '../i18n': { t: key => key },
   }, clock.runtime);
-  const container = new Element('nav'); const hub = new DestinationHub(container, () => {});
+  const container = new Element('nav'); container.connectedRoot = true; const hub = new DestinationHub(container, () => {});
   const latest = hub.refresh();
   requests[1].resolve({ destinationRevision: '2', destinations: [{ kind: 'playback', selected: true }], deviceDiscoveryIssues: [] }); await latest;
   requests[0].resolve({ destinationRevision: '1', destinations: [], deviceDiscoveryIssues: [] }); await settle();
@@ -478,11 +466,373 @@ test('editable upcoming rows submit occurrence moves without blind conflict repl
     },
     '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: s => ({ label: s.name }) },
   });
-  const container = new Element('section'); const component = new PlaybackDestination(container, () => {});
+  const container = new Element('section'); container.connectedRoot = true; const component = new PlaybackDestination(container, () => {});
   subscriber(snapshot()); await settle();
   const moveDown = container.querySelectorAll('button').filter(button => button.textContent === 'playback.queue.move_down')[0];
   await moveDown.click(); await settle();
   assert.deepEqual(moves, [{ revision: '1', occurrenceId: 'a', beforeOccurrenceId: 'c' }]);
   assert.match(text(container), /playback\.queue\.moved/);
   component.destroy();
+});
+
+function liveQueueHarness(overrides = {}) {
+  const clock = clockHarness();
+  let snapshot = { ...queueSnapshot };
+  const { PlaybackStore } = load('../../hifimule-ui/src/state/playback.ts', { '../rpc': {} }, clock.runtime);
+  const store = new PlaybackStore(async () => snapshot);
+  store.accept(snapshot);
+  const realRpc = load('../../hifimule-ui/src/rpc.ts', { './i18n': { t: key => key } });
+  const describe = async (_observed, ids) => ids.map(id => ({ occurrenceId: id,
+    source: { serverId: 'srv', trackId: id }, title: `Title ${id}`, status: 'available' }));
+  const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
+    '../state/playback': { playbackStore: store },
+    '../rpc': { serverList: async () => [], isPlaybackQueueConflict: error => error.conflict === true || realRpc.isPlaybackQueueConflict(error),
+      playbackDescribeOccurrences: describe,
+      playbackListOccurrences: async (_s, _c, _l, options) => occurrencePage([], options.section), ...overrides },
+    '../i18n': { t: (key, values) => values?.id ? `${key}:${values.id}` : key },
+    '../serverIdentity': { formatServerIdentity: server => ({ label: server.name }) },
+  }, clock.runtime);
+  const container = new Element('section'); container.connectedRoot = true;
+  const component = new PlaybackDestination(container, () => {});
+  const region = name => findClass(container, `playback-destination__region--${name}`);
+  return { component, container, clock, store, describe, region, RpcError: realRpc.RpcError,
+    snapshot: () => snapshot,
+    update(next, notify = false) {
+      snapshot = { ...snapshot, ...next, stateSequence: String(Number(snapshot.stateSequence) + 1) };
+      if (notify) store.accept(snapshot);
+    },
+    action: (id, action) => container.querySelector(`[data-occurrence-id="${id}"][data-queue-action="${action}"]`),
+    button: (section, label) => region(section).querySelectorAll('button').find(button => button.textContent === label),
+  };
+}
+const sourceOccurrence = id => ({ occurrenceId: id, source: { serverId: 'srv', trackId: id } });
+
+test('real refresh broadcasts keep mutation focus pending until the located upcoming metadata arrives', async () => {
+  const located = deferred(); const requests = []; let h;
+  h = liveQueueHarness({
+    playbackListOccurrences: async (snapshot, _cursor, _limit, options) => {
+      requests.push([snapshot.queueRevision, options.section, options.aroundOccurrenceId]);
+      if (options.section === 'history') return occurrencePage([], 'history');
+      return occurrencePage(['a', 'b', 'c'].map(sourceOccurrence));
+    },
+    playbackDescribeOccurrences: async (snapshot, ids) => {
+      if (snapshot.queueRevision === '2' && ids[0] === 'a') return located.promise;
+      return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' }));
+    },
+    playbackMoveUpcoming: async () => h.update({ queueRevision: '2' }),
+  });
+  await settle();
+  const focused = h.action('a', 'moveDown'); focused.focus(); await focused.click(); await settle();
+  assert.equal(document.activeElement, focused, 'history completion must not redirect focus');
+  assert.deepEqual(requests.filter(([revision, section]) => revision === '2' && section === 'upcoming'),
+    [['2', 'upcoming', 'a']], 'subscriber notification must not race a duplicate first-page request');
+  located.resolve(await h.describe(h.snapshot(), ['a', 'b', 'c'])); await settle();
+  assert.equal(document.activeElement, focused);
+  assert.equal(focused.isConnected, true);
+  h.component.destroy();
+});
+
+test('metadata responses are fenced per region after description and echoed anchors are validated', async () => {
+  const oldMetadata = deferred(); let first = true;
+  const h = liveQueueHarness({
+    playbackListOccurrences: async (snapshot, _cursor, _limit, options) => {
+      if (options.section === 'history') return occurrencePage([], 'history');
+      return occurrencePage([sourceOccurrence(snapshot.queueRevision === '1' ? 'old' : 'new')]);
+    },
+    playbackDescribeOccurrences: async (_snapshot, ids) => {
+      if (ids[0] === 'old' && first) { first = false; return oldMetadata.promise; }
+      return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' }));
+    },
+  });
+  await settle();
+  h.update({ queueRevision: '2' }, true); await settle();
+  oldMetadata.resolve([{ occurrenceId: 'old', source: { serverId: 'srv' }, title: 'OBSOLETE', status: 'available' }]); await settle();
+  assert.match(text(h.region('upcoming')), /new/);
+  assert.doesNotMatch(text(h.region('upcoming')), /OBSOLETE/);
+  h.component.destroy();
+
+  const wrong = liveQueueHarness({ playbackListOccurrences: async (_s, _c, _l, options) => ({
+    ...occurrencePage([sourceOccurrence('wrong')], options.section), mainCurrentOccurrenceId: 'other-current',
+  }) });
+  await settle();
+  assert.doesNotMatch(text(wrong.region('upcoming')), /Title wrong/);
+  assert.equal(wrong.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry').hidden, false);
+  wrong.component.destroy();
+});
+
+test('removing the final upcoming occurrence detaches its action and focuses the connected upcoming heading', async () => {
+  let removed = false; let h;
+  h = liveQueueHarness({
+    playbackListOccurrences: async (_s, _c, _l, options) => occurrencePage(
+      options.section === 'upcoming' && !removed ? [sourceOccurrence('only')] : [], options.section),
+    playbackRemoveUpcoming: async () => { removed = true; h.update({ queueRevision: '2' }); },
+  });
+  await settle();
+  const action = h.action('only', 'remove'); action.focus(); await action.click(); await settle();
+  assert.equal(action.isConnected, false);
+  assert.equal(document.activeElement, h.region('upcoming').children[0]);
+  assert.equal(document.activeElement.isConnected, true);
+  h.component.destroy();
+});
+
+test('label and metadata refresh preserve keyed action nodes and their connected focus', async () => {
+  const labels = deferred(); let available = false;
+  const h = liveQueueHarness({
+    serverList: () => labels.promise,
+    playbackListOccurrences: async (_s, _c, _l, options) => occurrencePage(
+      options.section === 'upcoming' ? [sourceOccurrence('a')] : [], options.section),
+    playbackDescribeOccurrences: async (_s, ids) => ids.map(id => ({ occurrenceId: id,
+      source: { serverId: 'srv' }, title: id, status: available ? 'available' : 'sourceUnavailable' })),
+  });
+  await settle();
+  const action = h.action('a', 'remove'); action.focus();
+  labels.resolve([{ serverId: 'srv', name: 'Bedroom' }]); await settle();
+  assert.equal(h.action('a', 'remove'), action); assert.equal(document.activeElement, action);
+  assert.match(text(findClass(h.container, 'playback-destination__current')), /Bedroom/);
+  available = true;
+  await h.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry').click(); await settle();
+  assert.equal(h.action('a', 'remove'), action); assert.equal(document.activeElement, action);
+  assert.equal(action.isConnected, true);
+  h.component.destroy();
+});
+
+test('deep located pages retain direct backward navigation and exact Next/Previous round trips', async () => {
+  const ids = Array.from({ length: 900 }, (_value, index) => `track-${index}`);
+  const requests = []; let h;
+  h = liveQueueHarness({
+    playbackListOccurrences: async (_s, cursor, limit, options) => {
+      if (options.section === 'history') return occurrencePage([], 'history');
+      const start = options.aroundOccurrenceId
+        ? Math.max(0, ids.indexOf(options.aroundOccurrenceId) - Math.floor(limit / 2))
+        : Number(cursor ?? 0);
+      requests.push(start);
+      const end = Math.min(ids.length, start + limit);
+      return { ...occurrencePage(ids.slice(start, end).map(sourceOccurrence), 'upcoming', end < ids.length ? String(end) : null),
+        precedingOccurrenceId: ids[start - 1] ?? null, followingOccurrenceIds: ids.slice(end, end + 2), endOfSection: end === ids.length };
+    },
+    playbackMoveUpcoming: async (_s, id, anchor) => {
+      ids.splice(ids.indexOf(id), 1); ids.splice(anchor ? ids.indexOf(anchor) : ids.length, 0, id);
+      h.update({ queueRevision: '2' });
+    },
+  });
+  await settle();
+  for (let index = 0; index < 5; index++) { await h.button('upcoming', 'playback.queue.next').click(); await settle(); }
+  const moved = h.action('track-550', 'moveDown'); moved.focus(); await moved.click(); await settle();
+  const locatedStart = requests.at(-1);
+  assert.ok(locatedStart > 400);
+  assert.equal(h.button('upcoming', 'playback.queue.previous').getAttribute('aria-disabled'), 'false');
+  assert.equal(document.activeElement, h.action('track-550', 'moveDown'));
+  await h.button('upcoming', 'playback.queue.next').click(); await settle();
+  await h.button('upcoming', 'playback.queue.previous').click(); await settle();
+  assert.equal(requests.at(-1), locatedStart, 'Previous must return to the centered page, not the first page');
+  const count = requests.length;
+  await h.button('upcoming', 'playback.queue.previous').click(); await settle();
+  assert.equal(requests.length, count + 1, 'backward navigation must not walk all intervening pages');
+  assert.ok(requests.at(-1) < locatedStart && requests.at(-1) > 0);
+  assert.ok(h.region('upcoming').querySelectorAll('button').length <= 302);
+  h.component.destroy();
+});
+
+test('history success cannot hide upcoming errors or unavailable metadata and history failures retry independently', async () => {
+  const history = deferred(); let failing = true;
+  const h = liveQueueHarness({ playbackListOccurrences: async (_s, _c, _l, options) => {
+    if (options.section === 'history') return history.promise;
+    if (failing) throw new Error('offline');
+    return occurrencePage([sourceOccurrence('a')]);
+  } });
+  await settle(); history.resolve(occurrencePage([], 'history')); await settle();
+  const retry = h.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry');
+  assert.equal(retry.hidden, false); assert.match(text(h.container), /recoverable_error/);
+  failing = false; await retry.click(); await settle(); assert.equal(retry.hidden, true);
+  h.component.destroy();
+
+  let historyCalls = 0;
+  const independent = liveQueueHarness({ playbackListOccurrences: async (_s, _c, _l, options) => {
+    if (options.section === 'history' && ++historyCalls === 1) throw new Error('history offline');
+    return occurrencePage([], options.section);
+  } });
+  await settle(); await independent.clock.tick();
+  assert.equal(historyCalls, 2);
+  assert.doesNotMatch(text(independent.container), /recoverable_error/);
+  independent.component.destroy();
+});
+
+test('canonical current metadata remains bounded and ignores superseded identity while displaying unavailable fallback', async () => {
+  const oldCurrent = deferred(); const calls = [];
+  const h = liveQueueHarness({ playbackDescribeOccurrences: async (_s, ids) => {
+    calls.push([...ids]);
+    if (ids[0] === 'current') return oldCurrent.promise;
+    return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: null, status: 'sourceUnavailable' }));
+  } });
+  await settle();
+  h.update({ mainCurrent: { occurrenceId: 'new-current', source: { serverId: 'srv', trackId: 'new' } } }, true); await settle();
+  oldCurrent.resolve([{ occurrenceId: 'current', source: { serverId: 'srv' }, title: 'STALE MAIN', status: 'available' }]); await settle();
+  const current = findClass(h.container, 'playback-destination__current');
+  assert.doesNotMatch(current.textContent, /STALE MAIN|no_current|new-current/);
+  assert.match(current.textContent, /sourceUnavailable/);
+  h.update({ mode: 'preview', playback: { metadata: { title: 'Audition' }, status: 'paused' } }, true); await settle();
+  assert.deepEqual(calls, [['current'], ['new-current']]);
+  h.component.destroy();
+});
+
+test('a superseded same-identity description cannot overwrite a newer located page or its error state', async () => {
+  const stale = deferred(); let calls = 0;
+  const h = liveQueueHarness({
+    playbackListOccurrences: async (_s, _c, _l, options) => occurrencePage(
+      options.section === 'upcoming' ? [sourceOccurrence(++calls === 1 ? 'old' : 'located')] : [], options.section),
+    playbackDescribeOccurrences: async (_s, ids) => ids[0] === 'old' ? stale.promise
+      : ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })),
+  });
+  await settle();
+  // Exercise overlapping requests against the production region loader without
+  // changing owner/revision/anchor: identity checks alone cannot reject the old result.
+  await h.component.loadRegion(h.component.regions.upcoming);
+  assert.match(text(h.region('upcoming')), /located/);
+  stale.resolve([{ occurrenceId: 'old', source: { serverId: 'srv' }, title: 'STALE PAGE', status: 'sourceUnavailable' }]);
+  await settle();
+  assert.match(text(h.region('upcoming')), /located/);
+  assert.doesNotMatch(text(h.region('upcoming')), /STALE PAGE/);
+  assert.equal(h.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry').hidden, true);
+  h.component.destroy();
+});
+
+test('scoped read conflicts refresh immediately without replay and contain refresh failure', async () => {
+  let calls = 0; let h;
+  h = liveQueueHarness({ playbackListOccurrences: async (_s, _c, _l, options) => {
+    if (options.section === 'history') return occurrencePage([], 'history');
+    if (++calls === 1) {
+      await Promise.resolve();
+      h.update({ queueRevision: '2' });
+      throw Object.assign(new Error('stale anchor'), { conflict: true });
+    }
+    return occurrencePage([sourceOccurrence('authoritative')]);
+  } });
+  await settle();
+  assert.match(text(h.region('upcoming')), /authoritative/);
+  assert.equal(calls, 2);
+  assert.equal(h.component.regions.upcoming.retryTimer, undefined);
+  h.component.destroy();
+
+  let fail = false;
+  const broken = liveQueueHarness({ playbackListOccurrences: async (_s, _c, _l, options) => {
+    if (fail && options.section === 'upcoming') throw Object.assign(new Error('conflict'), { conflict: true });
+    return occurrencePage([], options.section);
+  } });
+  await settle();
+  fail = true; broken.store.refresh = async () => { throw new Error('offline'); };
+  await broken.component.loadRegion(broken.component.regions.upcoming); await settle();
+  assert.match(text(broken.container), /conflict_refresh_failed/);
+  assert.equal(broken.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry').hidden, false);
+  broken.component.destroy();
+});
+
+test('queue mutation remains busy through authoritative metadata loading and ignores repeated actions', async () => {
+  const admitted = deferred(); const described = deferred(); let mutations = 0; let h;
+  h = liveQueueHarness({
+    playbackListOccurrences: async (_s, _c, _l, options) => occurrencePage(
+      options.section === 'upcoming' ? ['a', 'b', 'c'].map(sourceOccurrence) : [], options.section),
+    playbackDescribeOccurrences: async (snapshot, ids) => {
+      if (snapshot.queueRevision === '2' && ids.includes('a')) return described.promise;
+      return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' }));
+    },
+    playbackMoveUpcoming: async () => {
+      ++mutations; await admitted.promise; h.update({ queueRevision: '2' });
+    },
+    playbackRemoveUpcoming: async () => { assert.fail('a second action cannot enter while the first is pending'); },
+  });
+  await settle();
+  const action = h.action('a', 'moveDown'); action.focus(); await action.click(); await settle();
+  const body = findClass(h.container, 'playback-destination__body');
+  assert.equal(body.getAttribute('aria-busy'), 'true');
+  await action.click(); await h.action('b', 'remove').click(); await settle();
+  assert.equal(mutations, 1);
+  admitted.resolve(); await settle();
+  assert.equal(body.getAttribute('aria-busy'), 'true', 'committed edit is still reconciling its page');
+  await action.click(); await h.action('b', 'remove').click(); await settle();
+  assert.equal(mutations, 1);
+  described.resolve(await h.describe(h.snapshot(), ['a', 'b', 'c'])); await settle();
+  assert.equal(body.getAttribute('aria-busy'), 'false');
+  assert.equal(document.activeElement, action);
+  assert.equal(action.isConnected, true);
+  h.component.destroy();
+});
+
+test('mutation refresh failures release busy state, expose Retry and never replay the edit', async () => {
+  for (const conflict of [false, true]) {
+    let mutations = 0;
+    const h = liveQueueHarness({
+      playbackListOccurrences: async (_s, _c, _l, options) => occurrencePage(
+        options.section === 'upcoming' ? ['a', 'b'].map(sourceOccurrence) : [], options.section),
+      playbackMoveUpcoming: async () => {
+        ++mutations;
+        if (conflict) throw Object.assign(new Error('private conflict detail'), { conflict: true });
+      },
+    });
+    await settle();
+    h.store.refresh = async () => { throw new Error('private refresh failure'); };
+    const action = h.action('a', 'moveDown'); action.focus(); await action.click(); await settle();
+    assert.equal(mutations, 1);
+    assert.equal(findClass(h.container, 'playback-destination__body').getAttribute('aria-busy'), 'false');
+    assert.equal(h.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry').hidden, false);
+    assert.equal(findClass(h.container, 'playback-destination__mutation-status').textContent,
+      conflict ? 'playback.queue.conflict_refresh_failed' : 'playback.queue.moved');
+    assert.equal(document.activeElement, action);
+    assert.equal(action.isConnected, true);
+    await h.container.querySelectorAll('button').find(button => button.textContent === 'playback.retry').click(); await settle();
+    assert.equal(mutations, 1, 'Retry reloads state and cannot repeat an accepted or rejected mutation');
+    h.component.destroy();
+  }
+});
+
+test('accepted removal recovers once when its focus survivor advances before the refresh returns', async () => {
+  let edits = 0; const located = []; let h;
+  h = liveQueueHarness({
+    playbackListOccurrences: async (snapshot, cursor, _limit, options) => {
+      if (options.section === 'upcoming') {
+        located.push([snapshot.queueRevision, cursor, options.aroundOccurrenceId]);
+        if (options.aroundOccurrenceId === 'b')
+          throw new h.RpcError('Locator is no longer upcoming', 409, { code: 'INVALID_CURSOR' }, null);
+      }
+      return { ...occurrencePage(options.section === 'upcoming'
+        ? (snapshot.queueRevision === '1' ? ['a', 'b', 'c'] : ['c']).map(sourceOccurrence) : [], options.section),
+        mainCurrentOccurrenceId: snapshot.mainCurrent.occurrenceId };
+    },
+    playbackRemoveUpcoming: async () => {
+      ++edits;
+      h.update({ queueRevision: '2', mainCurrent: sourceOccurrence('b') });
+    },
+  });
+  await settle();
+  const action = h.action('a', 'remove'); action.focus(); await action.click(); await settle();
+  assert.equal(edits, 1);
+  assert.deepEqual(located, [['1', null, null], ['2', null, 'b'], ['2', null, null]]);
+  assert.match(text(h.region('upcoming')), /Title c/);
+  assert.equal(document.activeElement, h.region('upcoming').children[0]);
+  assert.equal(document.activeElement.isConnected, true);
+  assert.equal(h.component.regions.upcoming.location.aroundOccurrenceId, null);
+  assert.equal(h.component.regions.upcoming.retryTimer, undefined);
+  assert.equal(findClass(h.container, 'playback-destination__body').getAttribute('aria-busy'), 'false');
+  h.component.destroy();
+});
+
+test('invalid scoped cursors reset paging and reload immediately even when the refreshed snapshot is equal', async () => {
+  for (const code of ['INVALID_CURSOR', 'INSTANCE_MISMATCH', 'SESSION_MISMATCH']) {
+    const cursors = []; let h;
+    h = liveQueueHarness({ playbackListOccurrences: async (_snapshot, cursor, _limit, options) => {
+      if (options.section === 'history') return occurrencePage([], 'history');
+      cursors.push(cursor);
+      if (cursor) throw new h.RpcError('Invalid scoped page', 409, { code }, null);
+      return occurrencePage([sourceOccurrence('a')], 'upcoming', cursors.length === 1 ? 'obsolete' : null);
+    } });
+    await settle();
+    let refreshes = 0; const refresh = h.store.refresh.bind(h.store);
+    h.store.refresh = async () => { ++refreshes; return refresh(); };
+    await h.button('upcoming', 'playback.queue.next').click(); await settle();
+    assert.deepEqual(cursors, [null, 'obsolete', null], code);
+    assert.equal(refreshes, 1);
+    assert.equal(h.component.regions.upcoming.previous.length, 0);
+    assert.equal(h.button('upcoming', 'playback.queue.previous').getAttribute('aria-disabled'), 'true');
+    assert.equal(h.component.regions.upcoming.retryTimer, undefined);
+    h.component.destroy();
+  }
 });

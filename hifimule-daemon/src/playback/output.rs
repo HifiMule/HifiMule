@@ -206,6 +206,7 @@ pub struct BoundaryPcmConsumer {
     buffering: bool,
     successor: bool,
     gate: Option<Arc<AtomicBool>>,
+    successor_fence: Option<Arc<super::continuity::SuccessorFence>>,
 }
 
 impl BoundaryPcmConsumer {
@@ -216,6 +217,7 @@ impl BoundaryPcmConsumer {
             buffering: true,
             successor: false,
             gate: None,
+            successor_fence: None,
         }
     }
     pub fn with_gate(channels: usize, refill: usize, gate: Arc<AtomicBool>) -> Self {
@@ -223,6 +225,14 @@ impl BoundaryPcmConsumer {
             gate: Some(gate),
             ..Self::new(channels, refill)
         }
+    }
+
+    pub(crate) fn with_successor_fence(
+        mut self,
+        fence: Arc<super::continuity::SuccessorFence>,
+    ) -> Self {
+        self.successor_fence = Some(fence);
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -262,6 +272,10 @@ impl BoundaryPcmConsumer {
                 && current.len() < self.channels
                 && other_ready
                 && other.len() >= self.channels
+                && self
+                    .successor_fence
+                    .as_ref()
+                    .is_none_or(|fence| fence.claim())
             {
                 self.successor = !self.successor;
                 self.buffering = false;
@@ -358,6 +372,10 @@ impl BoundaryPcmConsumer {
                 && current.len() < self.channels
                 && other_ready
                 && other.len() >= self.channels
+                && self
+                    .successor_fence
+                    .as_ref()
+                    .is_none_or(|fence| fence.claim())
             {
                 self.successor = !self.successor;
                 self.buffering = false;
@@ -1007,3 +1025,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "output_queue_tests.rs"]
+mod queue_edit_tests;

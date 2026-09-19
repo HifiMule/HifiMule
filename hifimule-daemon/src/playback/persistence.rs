@@ -1359,6 +1359,341 @@ mod tests {
     }
 
     #[test]
+    fn v4_album_migration_freezes_current_policy_and_rolls_back_on_failure() {
+        let db = Database::memory().unwrap();
+        let first = occurrence("ignored", 0, "repeated");
+        let current = occurrence("ignored", 1, "repeated");
+        let context = super::super::model::FrozenAlbumContext {
+            source: super::super::model::AlbumSource {
+                server_id: "portable-server".into(),
+                album_id: "album".into(),
+            },
+            member_count: 2,
+            membership_digest: super::super::model::album_membership_digest([
+                &first.source,
+                &current.source,
+            ]),
+            representations: vec!["mp3".into(), "flac".into()],
+            policy: super::super::loudness::AlbumLoudnessPolicy {
+                version: super::super::loudness::ALBUM_LOUDNESS_POLICY_VERSION,
+                scalar_bits: 0.75f32.to_bits(),
+                gain_db_bits: Some(0.0f64.to_bits()),
+                peak_bits: Some((super::super::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+                reason: super::super::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+            },
+        };
+        let committed = session(7, Some(current.occurrence_id.clone()), 4_200);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE playback_schema (singleton_id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+                 INSERT INTO playback_schema VALUES(1,4);
+                 CREATE TABLE playback_sessions (singleton_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL, checkpoint_sequence INTEGER NOT NULL, transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL, album_context_json TEXT);
+                 CREATE TABLE playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, outcome TEXT, failure_code TEXT, PRIMARY KEY(session_id, ordinal));",
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO playback_sessions VALUES(1,?1,7,3,'playing',?2,4200,?3)",
+                params![
+                    committed.session_id,
+                    current.occurrence_id,
+                    serde_json::to_string(&context).unwrap()
+                ],
+            )
+            .unwrap();
+            for row in [&first, &current] {
+                conn.execute(
+                    "INSERT INTO playback_occurrences VALUES(?1,?2,?3,?4,?5,?6,NULL)",
+                    params![
+                        committed.session_id,
+                        row.occurrence_id,
+                        row.ordinal as i64,
+                        row.source.server_id,
+                        row.source.track_id,
+                        if row.ordinal == 0 {
+                            Some("naturalCompletion")
+                        } else {
+                            None
+                        }
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        assert!(db.init_playback_with_injected_failure().is_err());
+        {
+            let conn = db.conn.lock().unwrap();
+            let version: i64 = conn
+                .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 4);
+            let columns = conn
+                .prepare("PRAGMA table_info(playback_sessions)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                !columns
+                    .iter()
+                    .any(|name| name == "queue_kind" || name == "current_gain_bits")
+            );
+        }
+        let migrated = db.load_playback_session().unwrap().unwrap();
+        db.validate_playback_session(&migrated).unwrap();
+        assert_eq!(migrated.queue_kind, super::super::model::QueueKind::Album);
+        assert_eq!(migrated.current_gain_bits, 0.75f32.to_bits());
+        assert_eq!(migrated.current_qualified_suffix.as_deref(), Some("flac"));
+        assert_eq!(migrated.album_context.as_ref(), Some(&context));
+        assert_eq!(migrated.current_occurrence_id, Some(current.occurrence_id));
+        assert_eq!(migrated.queue_revision, 7);
+        assert_eq!(migrated.checkpoint_sequence, 3);
+        assert_eq!(migrated.position_ms, 4_200);
+        assert_eq!(
+            db.playback_outcome(&first.occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        let again = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(again.current_gain_bits, migrated.current_gain_bits);
+        assert_eq!(
+            again.current_qualified_suffix,
+            migrated.current_qualified_suffix
+        );
+    }
+
+    #[test]
+    fn v4_manual_migration_uses_unity_for_existing_and_empty_current() {
+        for has_current in [false, true] {
+            let db = Database::memory().unwrap();
+            let current = occurrence("ignored", 0, "manual-current");
+            let current_id = has_current.then(|| current.occurrence_id.clone());
+            let committed = session(6, current_id.clone(), if has_current { 1_234 } else { 0 });
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE playback_schema (singleton_id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+                     INSERT INTO playback_schema VALUES(1,4);
+                     CREATE TABLE playback_sessions (singleton_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL, checkpoint_sequence INTEGER NOT NULL, transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL, album_context_json TEXT);
+                     CREATE TABLE playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, outcome TEXT, failure_code TEXT, PRIMARY KEY(session_id, ordinal));",
+                ).unwrap();
+                conn.execute(
+                    "INSERT INTO playback_sessions VALUES(1,?1,6,2,?2,?3,?4,NULL)",
+                    params![
+                        committed.session_id,
+                        state_name(committed.state),
+                        current_id,
+                        committed.position_ms as i64
+                    ],
+                )
+                .unwrap();
+                if has_current {
+                    conn.execute(
+                        "INSERT INTO playback_occurrences VALUES(?1,?2,0,?3,?4,NULL,NULL)",
+                        params![
+                            committed.session_id,
+                            current.occurrence_id,
+                            current.source.server_id,
+                            current.source.track_id
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            // Load twice to check that the migration is stable once the version is updated.
+            for _ in 0..2 {
+                let migrated = db.load_playback_session().unwrap().unwrap();
+                db.validate_playback_session(&migrated).unwrap();
+                assert_eq!(migrated.queue_kind, super::super::model::QueueKind::Manual);
+                assert_eq!(migrated.current_gain_bits, 1.0f32.to_bits());
+                assert_eq!(migrated.current_qualified_suffix, None);
+                assert_eq!(migrated.album_context, None);
+                assert_eq!(migrated.current_occurrence_id, current_id);
+                assert_eq!(migrated.position_ms, committed.position_ms);
+                assert_eq!(migrated.state, committed.state);
+                assert_eq!(migrated.queue_revision, 6);
+                assert_eq!(migrated.checkpoint_sequence, 2);
+                assert_eq!(
+                    db.playback_count(&committed.session_id).unwrap(),
+                    u64::from(has_current)
+                );
+            }
+            let version: i64 = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, PERSISTENCE_VERSION);
+        }
+    }
+
+    #[test]
+    fn queue_edit_abort_restores_deleted_rows_ordinals_revision_and_current_policy() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let rows: Vec<_> = (0..5)
+            .map(|ordinal| occurrence("ignored", ordinal, "repeated"))
+            .collect();
+        let mut committed = session(4, Some(rows[1].occurrence_id.clone()), 1_234);
+        committed.current_gain_bits = 0.75f32.to_bits();
+        committed.current_qualified_suffix = Some("flac".into());
+        db.persist_playback_structure(&committed, &rows).unwrap();
+        db.conn.lock().unwrap().execute(
+            "UPDATE playback_occurrences SET outcome='naturalCompletion' WHERE occurrence_id=?1",
+            [&rows[0].occurrence_id],
+        ).unwrap();
+        let mut edited = committed.clone();
+        edited.queue_revision += 1;
+        let ordered = [rows[4].clone(), rows[2].clone()];
+        let removed = [rows[3].occurrence_id.clone()];
+        // Fail after DELETE and all ordinal rewrites, at the final session update.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER abort_queue_edit BEFORE UPDATE ON playback_sessions
+             BEGIN SELECT RAISE(ABORT, 'injected queue edit failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            db.edit_playback_upcoming(&edited, &ordered, &removed)
+                .is_err()
+        );
+        let unchanged = db.playback_page(&committed.session_id, None, 200).unwrap();
+        assert_eq!(
+            unchanged
+                .iter()
+                .map(|row| (&row.occurrence_id, row.ordinal, &row.source))
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| (&row.occurrence_id, row.ordinal, &row.source))
+                .collect::<Vec<_>>()
+        );
+        let restored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(restored.queue_revision, committed.queue_revision);
+        assert_eq!(
+            restored.current_occurrence_id,
+            committed.current_occurrence_id
+        );
+        assert_eq!(restored.position_ms, committed.position_ms);
+        assert_eq!(restored.current_gain_bits, committed.current_gain_bits);
+        assert_eq!(
+            restored.current_qualified_suffix,
+            committed.current_qualified_suffix
+        );
+        assert_eq!(
+            db.playback_outcome(&rows[0].occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER abort_queue_edit")
+            .unwrap();
+        db.edit_playback_upcoming(&edited, &ordered, &removed)
+            .unwrap();
+        let after = db.playback_page(&committed.session_id, None, 200).unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .map(|row| &row.occurrence_id)
+                .collect::<Vec<_>>(),
+            [
+                &rows[0].occurrence_id,
+                &rows[1].occurrence_id,
+                &rows[4].occurrence_id,
+                &rows[2].occurrence_id
+            ]
+        );
+        assert_eq!(
+            after.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(
+            db.load_playback_session().unwrap().unwrap().queue_revision,
+            5
+        );
+    }
+
+    #[test]
+    fn empty_main_preview_append_abort_rolls_back_queue_and_saved_baseline_together() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let committed = session(0, None, 0);
+        db.persist_playback_structure(&committed, &[]).unwrap();
+        let audition = PersistedAudition {
+            audition_id: Uuid::new_v4().to_string(),
+            parent_session_id: committed.session_id.clone(),
+            source: TrackSource {
+                server_id: "portable-server".into(),
+                track_id: "audition".into(),
+            },
+            position_ms: 2_345,
+            state: TransportState::Playing,
+            saved_main_occurrence_id: None,
+            saved_main_position_ms: 0,
+            saved_main_intent: TransportState::Idle,
+            resume_inhibited: false,
+            contiguous_heard_ms: 1_200,
+            coverage_unknown: false,
+            seek_discontinuous: true,
+        };
+        db.persist_audition_admission(&committed, &audition)
+            .unwrap();
+        let first = occurrence("ignored", 0, "main");
+        let mut appended = committed.clone();
+        appended.queue_revision = 1;
+        appended.current_occurrence_id = Some(first.occurrence_id.clone());
+        appended.state = TransportState::Paused;
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER abort_preview_baseline BEFORE UPDATE ON playback_audition
+             BEGIN SELECT RAISE(ABORT, 'injected preview baseline failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            db.append_playback_occurrences_with_audition_baseline(
+                &appended,
+                std::slice::from_ref(&first)
+            )
+            .is_err()
+        );
+        let restored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(restored.queue_revision, 0);
+        assert_eq!(restored.current_occurrence_id, None);
+        assert_eq!(restored.state, TransportState::Idle);
+        assert_eq!(db.playback_count(&committed.session_id).unwrap(), 0);
+        assert_eq!(db.load_playback_audition().unwrap(), Some(audition.clone()));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER abort_preview_baseline")
+            .unwrap();
+        db.append_playback_occurrences_with_audition_baseline(&appended, &[first])
+            .unwrap();
+        let expected = PersistedAudition {
+            saved_main_occurrence_id: appended.current_occurrence_id.clone(),
+            saved_main_intent: TransportState::Paused,
+            ..audition
+        };
+        assert_eq!(db.load_playback_audition().unwrap(), Some(expected));
+        assert_eq!(db.playback_count(&committed.session_id).unwrap(), 1);
+        let restored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(
+            restored.current_occurrence_id,
+            appended.current_occurrence_id
+        );
+        assert_eq!(restored.queue_revision, 1);
+        assert_eq!(restored.state, TransportState::Paused);
+    }
+
+    #[test]
     fn album_context_migrates_and_round_trips_atomically() {
         let db = Database::memory().unwrap();
         db.init_playback().unwrap();

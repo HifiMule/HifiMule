@@ -221,30 +221,7 @@ impl PlaybackCommandService {
                 return;
             }
 
-            let Some(candidate) = playback.successor_candidate(&generation, resume_epoch) else {
-                return;
-            };
-            let successor_description = async {
-                let provider = crate::server_manager::get_provider_by_server_id(
-                    &manager,
-                    &db,
-                    &candidate.successor.source.server_id,
-                )
-                .await?;
-                provider
-                    .resolve_playback(&candidate.successor.source.track_id)
-                    .await
-            };
-            if let Ok(Ok(description)) = tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
-                successor_description,
-            )
-            .await
-            {
-                let _ = super::audio::global()
-                    .prepare_successor(candidate, description, generation, deadline)
-                    .await;
-            }
+            spawn_successor_preparation(playback, manager, db, generation);
         });
     }
 
@@ -311,6 +288,9 @@ impl PlaybackCommandService {
                 Some(Err(_)) => Some(super::audio::PlaybackPipelineError::seek_timeout()),
                 None => return,
             };
+            if failure.is_none() {
+                spawn_successor_preparation(playback.clone(), manager, db, generation.clone());
+            }
             if let Some(error) = failure
                 && super::audio::log_pipeline_failure(&playback, &generation, &error)
             {
@@ -326,6 +306,67 @@ impl PlaybackCommandService {
             }
         });
     }
+}
+
+/// One sequential preparer per installed output pipeline. Capture the fence
+/// before the owner candidate, cancel pending provider/HTTP work on revocation,
+/// and do not allocate another source until the worker releases its old slot.
+pub(crate) fn spawn_successor_preparation(
+    playback: PlaybackSession,
+    manager: Arc<tokio::sync::RwLock<ServerManager>>,
+    db: Arc<Database>,
+    generation: String,
+) {
+    let Some(output_epoch) = super::audio::global().start_successor_coordinator(&generation) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut attempted = None;
+        while super::audio::global().has_active_generation(&generation) {
+            if let Some(ticket) = super::audio::global().successor_ticket(&generation) {
+                if ticket.output_epoch != output_epoch {
+                    break;
+                }
+                let control_epoch = playback.control_epoch();
+                let key = (ticket.epoch, control_epoch);
+                if attempted != Some(key) {
+                    if let Some(candidate) =
+                        playback.successor_candidate(&generation, control_epoch)
+                    {
+                        attempted = Some(key);
+                        let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
+                        let resolve = async {
+                            let provider = crate::server_manager::get_provider_by_server_id(
+                                &manager,
+                                &db,
+                                &candidate.successor.source.server_id,
+                            )
+                            .await?;
+                            provider
+                                .resolve_playback(&candidate.successor.source.track_id)
+                                .await
+                        };
+                        let resolved = tokio::select! {
+                            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
+                            _ = ticket.cancelled() => None,
+                        };
+                        if let Some(Ok(Ok(description))) = resolved {
+                            let _ = super::audio::global()
+                                .prepare_successor(
+                                    candidate,
+                                    &ticket,
+                                    description,
+                                    generation.clone(),
+                                    deadline,
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    });
 }
 
 fn task_failed() -> super::session::PlaybackError {
