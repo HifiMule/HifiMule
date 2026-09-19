@@ -182,7 +182,7 @@ development_status:
   14-3-per-server-producer-fairness-and-priority-buckets: done  # review complete: 6 patches applied; 627 daemon tests pass
 
   # Epic 15 — Desktop Playback (17 stories; approved 2026-09-19 course correction)
-  # Stories 15.1–15.15 prepared; dedicated story files and contract gates for 15.16–15.17 are pending.
+  # Stories 15.1–15.16 prepared; dedicated story file and contract gates for 15.17 are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
   15-2-quit-safely-while-a-device-sync-is-running: done
@@ -199,7 +199,7 @@ development_status:
   15-13-edit-the-upcoming-listening-queue: done
   15-14-control-listening-from-a-floating-playback-bar-across-views: done
   15-15-restart-the-current-track-or-return-to-the-previous-track: done
-  15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels: backlog
+  15-16-compact-the-library-browse-mode-bar-with-icons-and-smaller-labels: ready-for-dev
   15-17-ship-verified-playback-builds-for-windows-macos-and-linux: backlog
   epic-15-retrospective: optional
 
