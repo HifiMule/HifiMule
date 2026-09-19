@@ -1719,20 +1719,15 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
     assert!(manager.get_current_device().await.is_some());
     assert!(manager.get_current_device_path().await.is_some());
 
-    // Now handle an unrecognized device at a DIFFERENT path — recognized device must remain
+    // A genuinely later pending arrival becomes the navigation destination without
+    // erasing the recognized device from the physical inventory.
     let dir2 = tempdir().unwrap();
     manager
         .handle_device_unrecognized(dir2.path().to_path_buf(), msc(dir2.path()), None)
         .await;
 
-    assert!(
-        manager.get_current_device().await.is_some(),
-        "Recognized device must remain selected when an unrecognized device arrives"
-    );
-    assert!(
-        manager.get_current_device_path().await.is_some(),
-        "selected_device_path must remain set"
-    );
+    assert!(manager.get_current_device().await.is_none());
+    assert!(manager.get_current_device_path().await.is_none());
     assert!(
         manager.get_unrecognized_device_path().await.is_some(),
         "unrecognized_device_path must be set"
@@ -1763,7 +1758,10 @@ async fn pending_mtp_device_is_not_replaced_by_a_removable_candidate() {
         .handle_device_unrecognized(reader.path().to_path_buf(), msc(reader.path()), None)
         .await;
 
-    assert_eq!(manager.get_unrecognized_device_path().await, Some(mtp_path));
+    let pending = manager.get_pending_devices_snapshot().await;
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|entry| entry.path == mtp_path));
+    assert!(pending.iter().any(|entry| entry.path == reader.path()));
 }
 
 #[tokio::test]
@@ -1785,6 +1783,170 @@ async fn pending_mtp_device_replaces_an_earlier_removable_candidate() {
         .await;
 
     assert_eq!(manager.get_unrecognized_device_path().await, Some(mtp_path));
+}
+
+// ===== Story 15.12 destination contract =====
+
+#[tokio::test]
+async fn playback_is_the_first_and_default_destination() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let snapshot = manager.get_destination_snapshot().await;
+    assert_eq!(snapshot.revision, 0);
+    assert_eq!(snapshot.destinations.len(), 1);
+    assert!(matches!(
+        snapshot.destinations[0],
+        Destination::Playback { selected: true, .. }
+    ));
+    assert!(manager.get_current_device_path().await.is_none());
+}
+
+#[tokio::test]
+async fn plural_pending_devices_are_distinct_and_target_safe() {
+    let first = tempdir().unwrap();
+    let second = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager
+        .handle_device_unrecognized(
+            first.path().to_path_buf(),
+            msc(first.path()),
+            Some("First".into()),
+        )
+        .await;
+    manager
+        .handle_device_unrecognized(
+            second.path().to_path_buf(),
+            msc(second.path()),
+            Some("Second".into()),
+        )
+        .await;
+
+    let pending = manager.get_pending_devices_snapshot().await;
+    assert_eq!(pending.len(), 2);
+    assert_ne!(pending[0].pending_id, pending[1].pending_id);
+    assert_eq!(pending[0].friendly_name.as_deref(), Some("First"));
+    assert_eq!(pending[1].friendly_name.as_deref(), Some("Second"));
+}
+
+#[tokio::test]
+async fn pending_initialization_rejects_a_stale_dialog_without_redirecting() {
+    let first = tempdir().unwrap();
+    let later = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager
+        .handle_device_unrecognized(
+            first.path().to_path_buf(),
+            msc(first.path()),
+            Some("First".into()),
+        )
+        .await;
+    let observed = manager.get_destination_snapshot().await;
+    let first_id = manager.get_pending_devices_snapshot().await[0]
+        .pending_id
+        .clone();
+    manager
+        .handle_device_unrecognized(
+            later.path().to_path_buf(),
+            msc(later.path()),
+            Some("Later".into()),
+        )
+        .await;
+    let result = manager
+        .initialize_pending_device(
+            &first_id,
+            observed.revision,
+            "",
+            None,
+            None,
+            "First".into(),
+            None,
+        )
+        .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("revision is stale")
+    );
+    assert!(!first.path().join(".hifimule.json").exists());
+    assert!(!later.path().join(".hifimule.json").exists());
+}
+
+#[tokio::test]
+async fn discovery_failures_are_sanitized_deduplicated_and_cleared_per_device() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let failed = PathBuf::from("/media/failed");
+    manager
+        .report_discovery_failure(
+            failed.clone(),
+            "raw backend secret",
+            Some("Player".repeat(50)),
+        )
+        .await;
+    let first = manager.get_discovery_issues().await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].code, "DEVICE_READ_FAILED");
+    assert!(first[0].display_name.as_ref().unwrap().len() <= 120);
+    manager
+        .report_discovery_failure(
+            failed.clone(),
+            "raw backend secret",
+            first[0].display_name.clone(),
+        )
+        .await;
+    assert_eq!(manager.get_discovery_issues().await.len(), 1);
+    manager.handle_device_removed(&failed).await;
+    assert!(manager.get_discovery_issues().await.is_empty());
+}
+
+#[tokio::test]
+async fn selected_device_removal_falls_back_to_playback_not_another_device() {
+    let first = tempdir().unwrap();
+    let second = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager
+        .handle_device_detected(
+            first.path().to_path_buf(),
+            make_manifest("a", "A"),
+            msc(first.path()),
+        )
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(
+            second.path().to_path_buf(),
+            make_manifest("b", "B"),
+            msc(second.path()),
+        )
+        .await
+        .unwrap();
+    assert!(manager.select_device(first.path().to_path_buf()).await);
+    manager
+        .handle_device_removed(&first.path().to_path_buf())
+        .await;
+    assert!(manager.get_current_device_path().await.is_none());
+    let snapshot = manager.get_destination_snapshot().await;
+    assert!(matches!(
+        snapshot.destinations[0],
+        Destination::Playback { selected: true, .. }
+    ));
+}
+
+#[tokio::test]
+async fn older_arrival_cannot_override_a_later_explicit_playback_choice() {
+    let dir = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let observed = manager.begin_destination_mutation();
+    manager.select_playback().await;
+    manager
+        .handle_device_detected_at(
+            observed,
+            dir.path().to_path_buf(),
+            make_manifest("slow", "Slow"),
+            msc(dir.path()),
+        )
+        .await
+        .unwrap();
+    assert!(manager.get_current_device_path().await.is_none());
 }
 
 #[cfg(target_os = "windows")]
@@ -2141,18 +2303,18 @@ async fn test_handle_device_detected_two_sequential_devices() {
         "Both devices must be in connected_devices"
     );
 
-    // First device should be auto-selected (second doesn't override)
+    // The genuinely later arrival is selected by the destination mutation order.
     let selected = manager.get_current_device_path().await;
     assert_eq!(
         selected,
-        Some(path1.clone()),
-        "First device must remain selected"
+        Some(path2.clone()),
+        "Later device must be selected"
     );
 
     // get_current_device returns the manifest for the selected path
     let current = manager.get_current_device().await;
     assert!(current.is_some());
-    assert_eq!(current.unwrap().device_id, "device-1");
+    assert_eq!(current.unwrap().device_id, "device-2");
 }
 
 #[tokio::test]
@@ -2220,17 +2382,17 @@ async fn test_handle_device_removed_non_selected_selection_unchanged() {
         .await
         .unwrap();
 
-    // Selected is path1 — remove path2 (non-selected)
-    manager.handle_device_removed(&path2).await;
+    // Selected is path2 — remove path1 (non-selected)
+    manager.handle_device_removed(&path1).await;
 
     let devices = manager.get_connected_devices().await;
     assert_eq!(devices.len(), 1, "Only one device should remain");
 
-    // path1 must still be selected
+    // path2 must still be selected
     let selected = manager.get_current_device_path().await;
     assert_eq!(
         selected,
-        Some(path1.clone()),
+        Some(path2.clone()),
         "Selection must remain unchanged"
     );
 }
@@ -2451,6 +2613,7 @@ async fn test_mtp_probe_missing_manifest_emits_unrecognized_and_marks_known() {
 
     let inserted = emit_mtp_probe_event(
         &tx,
+        1,
         PathBuf::from("mtp://missing-manifest"),
         "missing-manifest",
         dummy_mtp_device_info("missing-manifest"),
@@ -2484,6 +2647,7 @@ async fn test_mtp_probe_read_failure_does_not_mark_known() {
 
     let inserted = emit_mtp_probe_event(
         &tx,
+        1,
         PathBuf::from("mtp://retry-me"),
         "retry-me",
         dummy_mtp_device_info("retry-me"),
@@ -2496,14 +2660,17 @@ async fn test_mtp_probe_read_failure_does_not_mark_known() {
         !inserted,
         "manifest read failure must leave device retryable"
     );
-    assert!(
-        rx.try_recv().is_err(),
-        "no event should be emitted on read failure"
-    );
+    assert!(matches!(
+        rx.recv().await.unwrap(),
+        DeviceEvent::DiscoveryFailed {
+            code: "DEVICE_READ_FAILED",
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
-async fn test_mtp_probe_parse_failure_emits_unrecognized_and_marks_known() {
+async fn test_mtp_probe_parse_failure_emits_retryable_issue() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join(".hifimule.json"), b"not-json").unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -2511,6 +2678,7 @@ async fn test_mtp_probe_parse_failure_emits_unrecognized_and_marks_known() {
 
     let inserted = emit_mtp_probe_event(
         &tx,
+        1,
         PathBuf::from("mtp://unrecognized"),
         "unrecognized",
         dummy_mtp_device_info("unrecognized"),
@@ -2519,15 +2687,15 @@ async fn test_mtp_probe_parse_failure_emits_unrecognized_and_marks_known() {
     )
     .await;
 
-    assert!(
-        inserted,
-        "parse failure emits Unrecognized and can be marked known"
-    );
+    assert!(!inserted, "parse failure remains retryable");
     match rx.recv().await.unwrap() {
-        DeviceEvent::Unrecognized { friendly_name, .. } => {
-            assert_eq!(friendly_name.as_deref(), Some("Unrecognized Device"));
+        DeviceEvent::DiscoveryFailed {
+            display_name, code, ..
+        } => {
+            assert_eq!(display_name.as_deref(), Some("Unrecognized Device"));
+            assert_eq!(code, "DEVICE_READ_FAILED");
         }
-        _ => panic!("expected unrecognized event"),
+        _ => panic!("expected discovery failure event"),
     }
 }
 

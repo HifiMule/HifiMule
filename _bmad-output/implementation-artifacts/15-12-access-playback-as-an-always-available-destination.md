@@ -4,7 +4,7 @@ baseline_commit: bf8f16fb4b7ae05ce4d05b8bb962d26f881a3a86
 
 # Story 15.12: Access Playback as an always-available destination
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -31,33 +31,33 @@ so that I can listen and curate my local listening queue without attaching a syn
 
 ## Tasks / Subtasks
 
-- [ ] Establish the typed destination and device-event contract (AC: 1–2, 4–5, 8).
-  - [ ] Add a discriminated destination projection such as `Playback | Device { path } | PendingDevice { path }`; keep the daemon's physical sync target separate and reject magic/synthetic Playback paths.
-  - [ ] Add strict, additive destination selection/state fields to `get_daemon_state` (or a focused authenticated RPC), retaining legacy physical fields for existing consumers during migration.
-  - [ ] Route discovery intent, user selection and removal through one monotonic daemon mutation clock plus a single state lock; fence slow probes whose observation token predates a later choice. Define selected-removal→Playback fallback and announcement identity; replace nondeterministic remaining-device selection.
-  - [ ] Replace the singleton pending-device slot with a bounded-by-present-hardware collection ordered by observation token, while retaining same-device MTP-over-MSC deduplication/priority and independent Setup actions.
-  - [ ] Give every pending entry an opaque `pendingId`; require `device_initialize` to carry `pendingId` plus the observed destination revision and atomically validate/remove that exact entry. Never initialize whichever pending device happens to be globally current.
-  - [ ] Carry bounded sanitized device-open/read failures (`code`, safe display identity, retryable/recovery hint) from MSC/MTP discovery to UI state. Track failed-but-present devices, deduplicate announcements, retry with bounded backoff, and clear only the matching issue on success/removal. Never expose raw backend diagnostics, credentials or authenticated URLs.
-  - [ ] Pin every admitted sync/scrobble operation to its captured device path/ID/IO. Selecting another destination or removing an unrelated device cannot retarget/fail it; removing its actual target still fails/cancels it under existing integrity rules.
-- [ ] Build the always-present destination navigation and physical isolation (AC: 1–2, 4–5, 8).
-  - [ ] Extract a focused DestinationHub/state boundary rather than further coupling navigation to the large BasketSidebar. Render Playback first even with zero devices and pending/unconfigured devices explicitly.
-  - [ ] Selecting Playback shows the Playback destination; selecting a managed device flushes pending basket saves, calls the physical selection RPC and rehydrates that device exactly as today. Pending Setup remains accessible.
-  - [ ] Narrow `device-locked` and all enablement checks to physical basket/sync actions. Preserve browsing, Play, Preview and transport regardless of device presence.
-  - [ ] Announce programmatic arrival selection without calling `.focus()` or rebuilding the persistent main layout/transport controls.
-- [ ] Present the daemon-owned queue and delivered Playback settings read-only (AC: 3, 5–7).
-  - [ ] Add a single shared `state/playback.ts` snapshot/poll store with instance/session/state-sequence ordering; adapt PlaybackControls to subscribe while preserving stable control nodes, focus, interpolation, output and Preview semantics.
-  - [ ] Type `occurrences`, `totalOccurrenceCount` and `nextCursor` in `rpc.ts`; add the existing `playback.listOccurrences` wrapper with decimal-string revisions and bounded pages (default 100, maximum 200).
-  - [ ] Add the bounded occurrence-display contract below, resolving each page by portable source, preserving occurrence order/duplicates and returning partial per-row availability rather than opaque IDs or browser-side provider calls.
-  - [ ] Add a focused PlaybackDestination/PlaybackQueue component that replaces one bounded page at a time, labels active Preview separately, discards stale pages and restarts from a fresh snapshot on session/revision/cursor conflict. Long-history virtualization/editing remains Story 15.13.
-  - [ ] Show existing output configuration/status only. Render a manual-Play/Preview empty state and localized recoverable errors; omit all future queue, Radio and source-selection controls.
-- [ ] Apply current responsive design and localization (AC: 1–4, 7–8).
-  - [ ] Reuse current `DESIGN.md` and implemented CSS tokens: Inter, Void/Panel/Surface, Signal Cyan only for active/actionable state, Amber only for actionable warnings, no decorative glass/card shadow. The current design system supersedes the older purple/Outfit/glass examples in the 2026-01 UX artifact.
-  - [ ] Use native buttons or a correct WAI-ARIA tabs/composite pattern with selected state and arrow/Enter/Space behavior; retain outline-based `:focus-visible` for Windows high contrast.
-  - [ ] Add EN/FR/ES/DE catalog parity for destination, local-context, read-only queue, empty/config/failure/recovery and arrival-announcement text.
-- [ ] Verify behavior and document the contract (AC: 1–8).
-  - [ ] Add Rust device/RPC tests for ordering, fallback, pending Setup, structured failures and physical-only selection; prove session identity is unchanged across destination events.
-  - [ ] Add behavior-first DOM tests using production TypeScript components for selection, focus, announcements, physical lock boundaries, Preview separation, paging/conflict recovery and zero playback mutation calls.
-  - [ ] Run controlled daemon/UI suites and cross-platform installed checks where available; update API/evidence docs and leave unavailable hardware/OS rows open.
+- [x] Establish the typed destination and device-event contract (AC: 1–2, 4–5, 8).
+  - [x] Add a discriminated destination projection such as `Playback | Device { path } | PendingDevice { path }`; keep the daemon's physical sync target separate and reject magic/synthetic Playback paths.
+  - [x] Add strict, additive destination selection/state fields to `get_daemon_state` (or a focused authenticated RPC), retaining legacy physical fields for existing consumers during migration.
+  - [x] Route discovery intent, user selection and removal through one monotonic daemon mutation clock plus a single state lock; fence slow probes whose observation token predates a later choice. Define selected-removal→Playback fallback and announcement identity; replace nondeterministic remaining-device selection.
+  - [x] Replace the singleton pending-device slot with a bounded-by-present-hardware collection ordered by observation token, while retaining same-device MTP-over-MSC deduplication/priority and independent Setup actions.
+  - [x] Give every pending entry an opaque `pendingId`; require `device_initialize` to carry `pendingId` plus the observed destination revision and atomically validate/remove that exact entry. Never initialize whichever pending device happens to be globally current.
+  - [x] Carry bounded sanitized device-open/read failures (`code`, safe display identity, retryable/recovery hint) from MSC/MTP discovery to UI state. Track failed-but-present devices, deduplicate announcements, retry with bounded backoff, and clear only the matching issue on success/removal. Never expose raw backend diagnostics, credentials or authenticated URLs.
+  - [x] Pin every admitted sync/scrobble operation to its captured device path/ID/IO. Selecting another destination or removing an unrelated device cannot retarget/fail it; removing its actual target still fails/cancels it under existing integrity rules.
+- [x] Build the always-present destination navigation and physical isolation (AC: 1–2, 4–5, 8).
+  - [x] Extract a focused DestinationHub/state boundary rather than further coupling navigation to the large BasketSidebar. Render Playback first even with zero devices and pending/unconfigured devices explicitly.
+  - [x] Selecting Playback shows the Playback destination; selecting a managed device flushes pending basket saves, calls the physical selection RPC and rehydrates that device exactly as today. Pending Setup remains accessible.
+  - [x] Narrow `device-locked` and all enablement checks to physical basket/sync actions. Preserve browsing, Play, Preview and transport regardless of device presence.
+  - [x] Announce programmatic arrival selection without calling `.focus()` or rebuilding the persistent main layout/transport controls.
+- [x] Present the daemon-owned queue and delivered Playback settings read-only (AC: 3, 5–7).
+  - [x] Add a single shared `state/playback.ts` snapshot/poll store with instance/session/state-sequence ordering; adapt PlaybackControls to subscribe while preserving stable control nodes, focus, interpolation, output and Preview semantics.
+  - [x] Type `occurrences`, `totalOccurrenceCount` and `nextCursor` in `rpc.ts`; add the existing `playback.listOccurrences` wrapper with decimal-string revisions and bounded pages (default 100, maximum 200).
+  - [x] Add the bounded occurrence-display contract below, resolving each page by portable source, preserving occurrence order/duplicates and returning partial per-row availability rather than opaque IDs or browser-side provider calls.
+  - [x] Add a focused PlaybackDestination/PlaybackQueue component that replaces one bounded page at a time, labels active Preview separately, discards stale pages and restarts from a fresh snapshot on session/revision/cursor conflict. Long-history virtualization/editing remains Story 15.13.
+  - [x] Show existing output configuration/status only. Render a manual-Play/Preview empty state and localized recoverable errors; omit all future queue, Radio and source-selection controls.
+- [x] Apply current responsive design and localization (AC: 1–4, 7–8).
+  - [x] Reuse current `DESIGN.md` and implemented CSS tokens: Inter, Void/Panel/Surface, Signal Cyan only for active/actionable state, Amber only for actionable warnings, no decorative glass/card shadow. The current design system supersedes the older purple/Outfit/glass examples in the 2026-01 UX artifact.
+  - [x] Use native buttons or a correct WAI-ARIA tabs/composite pattern with selected state and arrow/Enter/Space behavior; retain outline-based `:focus-visible` for Windows high contrast.
+  - [x] Add EN/FR/ES/DE catalog parity for destination, local-context, read-only queue, empty/config/failure/recovery and arrival-announcement text.
+- [x] Verify behavior and document the contract (AC: 1–8).
+  - [x] Add Rust device/RPC tests for ordering, fallback, pending Setup, structured failures and physical-only selection; prove session identity is unchanged across destination events.
+  - [x] Add behavior-first DOM tests using production TypeScript components for selection, focus, announcements, physical lock boundaries, Preview separation, paging/conflict recovery and zero playback mutation calls.
+  - [x] Run controlled daemon/UI suites and cross-platform installed checks where available; update API/evidence docs and leave unavailable hardware/OS rows open.
 
 ## Dev Notes
 
@@ -215,11 +215,45 @@ GPT-5
 
 ### Debug Log References
 
+- Implemented typed destination state and RPC contracts, mutation-clock race fencing, plural pending setup, discovery retry/issues and operation target pinning.
+- Added shared UI playback state, persistent destination navigation and bounded read-only queue metadata/paging.
+- Verification: daemon `991 passed, 6 ignored`; UI behavior `33 passed`; installed-evidence validator `33 passed`; production UI build and `git diff --check` passed.
+- Full daemon tests require local mock socket access; the restricted first run failed at socket creation, and the controlled rerun passed without code changes.
+
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
+- Playback is always projected first and selected as the deterministic no-device/removal fallback without entering physical-device APIs.
+- Device discovery now uses observation-time ordering, exact pending identities/revisions, sanitized retryable issues and device-bound sync/scrobble targets.
+- PlaybackControls and PlaybackDestination share one ordered poll store; the destination renders one canonical queue page with deduplicated bounded metadata lookup and separate Preview status.
+- Added responsive, localized, keyboard/focus-safe destination UI and preserved physical-only basket/sync restrictions.
+- Updated daemon API and installed-test evidence documentation; unavailable Windows/Linux/macOS installed-device rows remain explicitly unchecked.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-12-access-playback-as-an-always-available-destination.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/api.rs`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/components/DestinationHub.ts`
+- `hifimule-ui/src/components/InitDeviceModal.ts`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/state/playback.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/destination-ui.test.mjs`
+- `scripts/tests/playback-ui.test.mjs`
+
+## Change Log
+
+- 2026-09-19: Implemented Story 15.12 typed destinations, deterministic device lifecycle, always-available Playback queue UI, shared playback presentation state, accessibility/localization, tests and contract documentation.

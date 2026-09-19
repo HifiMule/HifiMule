@@ -460,6 +460,35 @@ pub struct OccurrencePage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DescribeOccurrencesParams {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub expected_queue_revision: String,
+    pub occurrence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OccurrenceDisplay {
+    pub occurrence_id: String,
+    pub source: TrackSource,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub status: OccurrenceDisplayStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OccurrenceDisplayStatus {
+    Available,
+    SourceUnavailable,
+    TrackUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResult {
     #[serde(skip)]

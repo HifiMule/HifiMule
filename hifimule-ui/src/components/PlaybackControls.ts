@@ -1,10 +1,11 @@
 import { playbackControl, playbackGetSession, playbackListOutputs, playbackSeek, playbackSelectOutput, serverList, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
 import { formatServerIdentity } from '../serverIdentity';
+import { playbackStore } from '../state/playback';
 
 export class PlaybackControls {
     private disposed = false;
-    private timer: ReturnType<typeof setTimeout> | undefined;
+    private unsubscribePlayback?: () => void;
     private repaintTimer: ReturnType<typeof setInterval> | undefined;
     private snapshot: PlaybackSessionSnapshot | undefined;
     private busy = false;
@@ -110,23 +111,25 @@ export class PlaybackControls {
         this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
         void this.refreshServerLabels();
-        void this.poll();
+        this.unsubscribePlayback = playbackStore.subscribe((snapshot, previous) => this.receiveSnapshot(snapshot, previous));
         this.scheduleRepaint();
     }
     destroy(): void {
         this.disposed = true;
-        if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
+        this.unsubscribePlayback?.();
+        this.unsubscribePlayback = undefined;
         if (this.repaintTimer !== undefined) globalThis.clearInterval(this.repaintTimer);
         window.removeEventListener('pagehide', this.onPageHide);
     }
-    private async poll(): Promise<void> {
-        if (this.disposed || !this.container.isConnected) { this.destroy(); return; }
-        try {
-            const snapshot = await playbackGetSession();
-            const previous = this.snapshot;
-            if (!this.disposed && (!previous || snapshot.instanceId !== previous.instanceId
-                || snapshot.sessionId !== previous.sessionId
-                || BigInt(snapshot.stateSequence) > BigInt(previous.stateSequence))) {
+    private receiveSnapshot(snapshot: PlaybackSessionSnapshot, previous?: PlaybackSessionSnapshot): void {
+            if (!this.container.isConnected) { this.destroy(); return; }
+            const current = this.snapshot;
+            if (current && snapshot.instanceId === current.instanceId && snapshot.sessionId === current.sessionId
+                && BigInt(snapshot.stateSequence) <= BigInt(current.stateSequence)) {
+                void this.refreshOutputs(false);
+                return;
+            }
+            if (!this.disposed && this.container.isConnected) {
                 if (this.seekIdentity(previous) !== this.seekIdentity(snapshot)) {
                     this.scrubbing = false;
                     this.scrubPreviewMs = undefined;
@@ -144,13 +147,6 @@ export class PlaybackControls {
                     void this.refreshOutputs();
                 }
             }
-        } catch { this.anchorAt = 0; /* daemon lifecycle UI owns connection errors */ }
-        if (!this.disposed) {
-            // listOutputs returns the owned worker's cached inventory. Pick up
-            // its completed refresh through the existing polling lifecycle.
-            if (this.snapshot) void this.refreshOutputs(false);
-            this.timer = globalThis.setTimeout(() => void this.poll(), 500);
-        }
     }
     private render(snapshot: PlaybackSessionSnapshot): void {
         this.title.textContent = snapshot.playback.metadata?.title ?? t('playback.nothing_selected');

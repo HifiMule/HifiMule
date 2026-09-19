@@ -460,6 +460,8 @@ pub struct SyncFileError {
 #[serde(rename_all = "camelCase")]
 pub struct SyncOperation {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     pub status: SyncStatus,
     pub started_at: String,
     pub current_file: Option<String>,
@@ -984,6 +986,7 @@ impl SyncOperationManager {
 
         let operation = SyncOperation {
             id: operation_id.clone(),
+            device_id: None,
             status: SyncStatus::Running,
             started_at: timestamp,
             current_file: None,
@@ -1010,6 +1013,19 @@ impl SyncOperationManager {
                 self.shutdown_committed.load(Ordering::Acquire),
             )),
         );
+        operation
+    }
+
+    pub async fn create_operation_for_device(
+        &self,
+        operation_id: String,
+        files_total: usize,
+        device_id: String,
+    ) -> SyncOperation {
+        let mut operation = self.create_operation(operation_id, files_total).await;
+        operation.device_id = Some(device_id);
+        self.update_operation(&operation.id.clone(), operation.clone())
+            .await;
         operation
     }
 

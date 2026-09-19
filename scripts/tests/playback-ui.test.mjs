@@ -58,6 +58,22 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
           playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
           playbackSeek: outputRpc.seek ?? (async () => snapshot),
         }
+      : name === '../state/playback'
+        ? { playbackStore: {
+            subscribe(callback) {
+              let active = true;
+              let previous;
+              const poll = async () => {
+                if (!active) return;
+                calls++;
+                callback(snapshot, previous);
+                previous = snapshot;
+                if (active) timers.set(++timerId, poll);
+              };
+              Promise.resolve().then(poll);
+              return () => { active = false; };
+            },
+          } }
       : name === '../serverIdentity'
         ? { formatServerIdentity: server => ({ label: server.name || 'Jellyfin' }) }
         : { t: (key, values) => values?.source ? `${key}: ${values.source}` : key },

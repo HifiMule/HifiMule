@@ -501,6 +501,7 @@ async fn handler(
         }
         "device.list" => handle_device_list(&state).await,
         "device.select" => handle_device_select(&state, payload.params).await,
+        "destination.select" => handle_destination_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
         "daemon.health" => {
             Ok(daemon_health_result(&state.sync_operation_manager, &state.playback).await)
@@ -509,6 +510,9 @@ async fn handler(
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
         "playback.listOccurrences" => {
             handle_playback_list_occurrences(&state, payload.params).await
+        }
+        "playback.describeOccurrences" => {
+            handle_playback_describe_occurrences(&state, payload.params).await
         }
         "playback.applySession" => {
             handle_playback_apply_session(&state, payload.params, mutation_guard.take()).await
@@ -627,6 +631,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "device_profiles.list"
             | "device.set_transcoding_profile"
             | "device.select"
+            | "destination.select"
             | "playlist.create"
             | "playback.applySession"
             | "playback.playAlbum"
@@ -773,6 +778,126 @@ async fn handle_playback_list_occurrences(
         .map_err(playback_task_error)?
         .map(|data| serde_json::json!({"data":data}))
         .map_err(playback_error)
+}
+
+const OCCURRENCE_DISPLAY_PROVIDER_CONCURRENCY: usize = 8;
+
+async fn handle_playback_describe_occurrences(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    use crate::playback::model::{
+        DescribeOccurrencesParams, OccurrenceDisplay, OccurrenceDisplayStatus,
+    };
+    let p = serde_json::from_value::<DescribeOccurrencesParams>(params.unwrap_or(Value::Null))
+        .map_err(|_| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.describeOccurrences parameters".into(),
+            data: Some(serde_json::json!({"code":"INVALID_OCCURRENCES"})),
+        })?;
+    if p.schema_version != crate::playback::model::SCHEMA_VERSION
+        || p.occurrence_ids.is_empty()
+        || p.occurrence_ids.len() > crate::playback::model::MAX_PAGE_SIZE
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Occurrence display request is outside page bounds".into(),
+            data: Some(serde_json::json!({"code":"INVALID_OCCURRENCES"})),
+        });
+    }
+    let playback = state.playback.clone();
+    let snapshot = tokio::task::spawn_blocking(move || playback.snapshot())
+        .await
+        .map_err(playback_task_error)?
+        .map_err(playback_error)?;
+    if snapshot.session_id != p.session_id || snapshot.queue_revision != p.expected_queue_revision {
+        return Err(JsonRpcError {
+            code: ERR_CROSS_SERVER_CONFLICT,
+            message: "Playback session or queue revision changed".into(),
+            data: Some(serde_json::json!({"code":"QUEUE_CONFLICT", "authoritative": snapshot})),
+        });
+    }
+
+    let mut occurrences = Vec::with_capacity(p.occurrence_ids.len());
+    for occurrence_id in &p.occurrence_ids {
+        let occurrence = state
+            .db
+            .playback_occurrence(&p.session_id, occurrence_id)
+            .map_err(|_| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: "Could not read playback queue".into(),
+                data: None,
+            })?
+            .ok_or(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Occurrence does not belong to this queue".into(),
+                data: Some(serde_json::json!({"code":"INVALID_OCCURRENCES"})),
+            })?;
+        occurrences.push(occurrence);
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(
+        OCCURRENCE_DISPLAY_PROVIDER_CONCURRENCY,
+    ));
+    let mut unique = HashMap::new();
+    for occurrence in &occurrences {
+        unique
+            .entry((
+                occurrence.source.server_id.clone(),
+                occurrence.source.track_id.clone(),
+            ))
+            .or_insert_with(|| occurrence.source.clone());
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for ((server_id, track_id), source) in unique {
+        let permit = Arc::clone(&semaphore);
+        let manager = Arc::clone(&state.server_manager);
+        let db = Arc::clone(&state.db);
+        tasks.spawn(async move {
+            let _permit = permit.acquire_owned().await.ok();
+            let resolved =
+                match crate::server_manager::get_provider_by_server_id(&manager, &db, &server_id)
+                    .await
+                {
+                    Ok(provider) => match provider.get_song(&track_id).await {
+                        Ok(song) => (Some(song), OccurrenceDisplayStatus::Available),
+                        Err(_) => (None, OccurrenceDisplayStatus::TrackUnavailable),
+                    },
+                    Err(_) => (None, OccurrenceDisplayStatus::SourceUnavailable),
+                };
+            ((server_id, track_id), source, resolved)
+        });
+    }
+    let mut descriptions = HashMap::new();
+    while let Some(Ok((key, source, (song, status)))) = tasks.join_next().await {
+        descriptions.insert(key, (source, song, status));
+    }
+    let rows: Vec<_> = occurrences
+        .into_iter()
+        .map(|occurrence| {
+            let key = (
+                occurrence.source.server_id.clone(),
+                occurrence.source.track_id.clone(),
+            );
+            let (source, song, status) = descriptions.get(&key).cloned().unwrap_or((
+                occurrence.source.clone(),
+                None,
+                OccurrenceDisplayStatus::SourceUnavailable,
+            ));
+            OccurrenceDisplay {
+                occurrence_id: occurrence.occurrence_id,
+                source,
+                title: song.as_ref().map(|song| song.title.clone()),
+                artist: song.as_ref().and_then(|song| song.artist_name.clone()),
+                album: song.as_ref().and_then(|song| song.album_title.clone()),
+                duration_ms: song
+                    .as_ref()
+                    .map(|song| u64::from(song.duration_seconds) * 1000),
+                status,
+            }
+        })
+        .collect();
+    Ok(serde_json::json!({"data": {"occurrences": rows}}))
 }
 
 async fn handle_playback_list_outputs(
@@ -2758,14 +2883,17 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let dirty = device.as_ref().map(|d| d.dirty).unwrap_or(false);
 
     // Include pending device path and friendly name for unrecognized devices awaiting initialization
-    let pending_device_snapshot = state
-        .device_manager
-        .get_unrecognized_device_snapshot()
-        .await;
-    let pending_device_path = pending_device_snapshot
-        .as_ref()
+    let pending_device_snapshots = state.device_manager.get_pending_devices_snapshot().await;
+    let pending_device_path = pending_device_snapshots
+        .last()
         .map(|s| s.path.to_string_lossy().to_string());
-    let pending_device_friendly_name = pending_device_snapshot.and_then(|s| s.friendly_name);
+    let pending_device_friendly_name = pending_device_snapshots
+        .last()
+        .and_then(|s| s.friendly_name.clone());
+    let pending_devices: Vec<_> = pending_device_snapshots.iter().map(|pending| serde_json::json!({
+        "pendingId": pending.pending_id,
+        "name": pending.friendly_name.clone().unwrap_or_else(|| "Unconfigured device".to_string()),
+    })).collect();
 
     let auto_sync_on_connect = device
         .as_ref()
@@ -2840,6 +2968,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
 
     let (connected_devices_snapshot, selected_path_buf) =
         state.device_manager.get_multi_device_snapshot().await;
+    let destination_snapshot = state.device_manager.get_destination_snapshot().await;
+    let device_discovery_issues = state.device_manager.get_discovery_issues().await;
     let selected_device_path = selected_path_buf.map(|p| p.to_string_lossy().to_string());
     let connected_devices_json: Vec<_> = connected_devices_snapshot
         .iter()
@@ -2880,12 +3010,16 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
         "pendingDeviceFriendlyName": pending_device_friendly_name,
+        "pendingDevices": pending_devices,
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
         "activeOperationId": active_operation_id,
         "syncPipelineActive": state.sync_operation_manager.is_pipeline_active(),
         "connectedDevices": connected_devices_json,
         "selectedDevicePath": selected_device_path,
+        "destinationRevision": destination_snapshot.revision.to_string(),
+        "destinations": destination_snapshot.destinations,
+        "deviceDiscoveryIssues": device_discovery_issues,
         "supportsPlaylistWrite": supports_playlist_write,
     }))
 }
@@ -6067,7 +6201,11 @@ async fn handle_sync_execute(
     let total_files = delta.adds.len() + delta.deletes.len();
     state
         .sync_operation_manager
-        .create_operation(operation_id.clone(), total_files)
+        .create_operation_for_device(
+            operation_id.clone(),
+            total_files,
+            manifest.device_id.clone(),
+        )
         .await;
 
     // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
@@ -6996,6 +7134,40 @@ async fn handle_device_initialize(
         message: "Missing params".to_string(),
         data: None,
     })?;
+    let allowed = [
+        "pendingId",
+        "observedDestinationRevision",
+        "folderPath",
+        "playlistFolderPath",
+        "profileId",
+        "transcodingProfileId",
+        "name",
+        "icon",
+    ];
+    if params
+        .as_object()
+        .is_none_or(|object| object.keys().any(|key| !allowed.contains(&key.as_str())))
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid device_initialize parameters".to_string(),
+            data: None,
+        });
+    }
+
+    let pending_id = params["pendingId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing pendingId".to_string(),
+        data: None,
+    })?;
+    let observed_destination_revision = params["observedDestinationRevision"]
+        .as_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing or invalid observedDestinationRevision".to_string(),
+            data: None,
+        })?;
 
     let folder_path = params["folderPath"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
@@ -7060,31 +7232,31 @@ async fn handle_device_initialize(
         }
     }
 
-    let device_io = state
-        .device_manager
-        .get_unrecognized_device_io()
-        .await
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "No unrecognized device pending initialization".to_string(),
-            data: None,
-        })?;
-
     let manifest = state
         .device_manager
-        .initialize_device(
+        .initialize_pending_device(
+            pending_id,
+            observed_destination_revision,
             folder_path,
             playlist_folder_path.as_deref(),
             transcoding_profile_id.clone(),
             device_name,
             device_icon,
-            device_io,
         )
         .await
-        .map_err(|e| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: format!("Failed to initialize device: {}", e),
-            data: None,
+        .map_err(|e| {
+            let message = e.to_string();
+            let target_error = message.contains("Pending destination")
+                || message.contains("No unrecognized device");
+            JsonRpcError {
+                code: if target_error {
+                    ERR_INVALID_PARAMS
+                } else {
+                    ERR_STORAGE_ERROR
+                },
+                message: format!("Failed to initialize device: {}", message),
+                data: None,
+            }
         })?;
 
     state
@@ -7720,6 +7892,57 @@ async fn handle_device_select(
     Ok(serde_json::json!({ "status": "success", "data": { "ok": true } }))
 }
 
+async fn handle_destination_select(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    #[derive(Deserialize)]
+    #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+    enum Selection {
+        Playback,
+        Device { path: String },
+        PendingDevice { pending_id: String },
+    }
+    let selection =
+        serde_json::from_value::<Selection>(params.unwrap_or(Value::Null)).map_err(|_| {
+            JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Invalid destination selection".to_string(),
+                data: None,
+            }
+        })?;
+    match selection {
+        Selection::Playback => state.device_manager.select_playback().await,
+        Selection::Device { path } => {
+            if !state
+                .device_manager
+                .select_device(std::path::PathBuf::from(path))
+                .await
+            {
+                return Err(JsonRpcError {
+                    code: 404,
+                    message: "Device not connected".to_string(),
+                    data: None,
+                });
+            }
+        }
+        Selection::PendingDevice { pending_id } => {
+            if !state
+                .device_manager
+                .select_pending_device(&pending_id)
+                .await
+            {
+                return Err(JsonRpcError {
+                    code: 404,
+                    message: "Pending device not connected".to_string(),
+                    data: None,
+                });
+            }
+        }
+    }
+    Ok(serde_json::json!({ "status": "success", "data": { "ok": true } }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8065,6 +8288,39 @@ mod tests {
         .unwrap();
         assert_eq!(page["data"]["occurrences"].as_array().unwrap().len(), 1);
         assert!(page["data"]["nextCursor"].is_string());
+
+        let occurrence_ids: Vec<_> = applied["data"]["assignedOccurrences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["occurrenceId"].clone())
+            .collect();
+        let described = handle_playback_describe_occurrences(
+            &state,
+            Some(json!({
+                "schemaVersion": 1,
+                "sessionId": refreshed["data"]["sessionId"],
+                "expectedQueueRevision": refreshed["data"]["queueRevision"],
+                "occurrenceIds": occurrence_ids,
+            })),
+        )
+        .await
+        .unwrap();
+        let described_rows = described["data"]["occurrences"].as_array().unwrap();
+        assert_eq!(
+            described_rows.len(),
+            2,
+            "deliberate duplicate sources retain both occurrences"
+        );
+        assert_ne!(
+            described_rows[0]["occurrenceId"],
+            described_rows[1]["occurrenceId"]
+        );
+        assert!(
+            described_rows
+                .iter()
+                .all(|row| row["status"] == "sourceUnavailable")
+        );
 
         let conflict = handle_playback_apply_session(
             &state,
@@ -11907,7 +12163,7 @@ mod tests {
         };
 
         // No unrecognized device registered → ERR_INVALID_PARAMS (caught before reaching storage)
-        let params = json!({ "folderPath": "", "profileId": "user-1", "name": "My Device" });
+        let params = json!({ "pendingId": "missing", "observedDestinationRevision": "0", "folderPath": "", "profileId": "user-1", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params)).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().code, ERR_INVALID_PARAMS);
@@ -11947,7 +12203,11 @@ mod tests {
         };
 
         // Initialize with empty folderPath (device root)
-        let params = json!({ "folderPath": "", "profileId": "user-abc", "name": "My Device" });
+        let destinations = device_manager.get_destination_snapshot().await;
+        let pending_id = device_manager.get_pending_devices_snapshot().await[0]
+            .pending_id
+            .clone();
+        let params = json!({ "pendingId": pending_id, "observedDestinationRevision": destinations.revision.to_string(), "folderPath": "", "profileId": "user-abc", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params))
             .await
             .unwrap();
@@ -12016,7 +12276,11 @@ mod tests {
         };
 
         // Initialize with a subfolder
-        let params = json!({ "folderPath": "Music", "profileId": "user-xyz", "name": "My Device" });
+        let destinations = device_manager.get_destination_snapshot().await;
+        let pending_id = device_manager.get_pending_devices_snapshot().await[0]
+            .pending_id
+            .clone();
+        let params = json!({ "pendingId": pending_id, "observedDestinationRevision": destinations.revision.to_string(), "folderPath": "Music", "profileId": "user-xyz", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params))
             .await
             .unwrap();

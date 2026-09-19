@@ -512,17 +512,75 @@ pub struct ConnectedDevice {
     pub manifest: DeviceManifest,
     pub device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     pub device_class: DeviceClass,
+    observation_token: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Destination {
+    Playback {
+        id: String,
+        selected: bool,
+    },
+    Device {
+        path: String,
+        device_id: String,
+        name: String,
+        icon: Option<String>,
+        selected: bool,
+    },
+    PendingDevice {
+        pending_id: String,
+        name: String,
+        selected: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationSnapshot {
+    pub revision: u64,
+    pub destinations: Vec<Destination>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDiscoveryIssue {
+    pub discovery_id: String,
+    pub code: String,
+    pub display_name: Option<String>,
+    pub retryable: bool,
+    pub revision: String,
+}
+
+struct StoredDiscoveryIssue {
+    path: PathBuf,
+    wire: DeviceDiscoveryIssue,
 }
 
 pub struct UnrecognizedDeviceState {
+    pub pending_id: String,
     pub path: PathBuf,
     pub io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     pub friendly_name: Option<String>,
+    pub observation_token: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectedDestination {
+    Playback,
+    Device(PathBuf),
+    Pending(String),
 }
 
 struct DeviceManagerState {
     connected_devices: std::collections::HashMap<PathBuf, ConnectedDevice>,
     selected_device_path: Option<PathBuf>,
+    selected_destination: SelectedDestination,
+    pending_devices: std::collections::BTreeMap<String, UnrecognizedDeviceState>,
+    destination_revision: u64,
+    latest_selection_token: u64,
+    discovery_issues: std::collections::BTreeMap<String, StoredDiscoveryIssue>,
 }
 
 /// Scans the specified managed paths recursively for leftover `.tmp`
@@ -555,16 +613,31 @@ pub async fn cleanup_tmp_files(
 #[derive(Debug, Clone)]
 pub enum DeviceEvent {
     Detected {
+        observation_token: u64,
         path: PathBuf,
         manifest: DeviceManifest,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     },
     Removed(PathBuf),
     Unrecognized {
+        observation_token: u64,
         path: PathBuf,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
         friendly_name: Option<String>,
     },
+    DiscoveryFailed {
+        path: PathBuf,
+        code: &'static str,
+        display_name: Option<String>,
+    },
+}
+
+static DESTINATION_MUTATION_CLOCK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn next_destination_mutation() -> u64 {
+    use std::sync::atomic::Ordering;
+    DESTINATION_MUTATION_CLOCK.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 pub struct DeviceProber;
@@ -587,8 +660,6 @@ pub struct DeviceManager {
     mtp_manifest_cache_path: std::sync::Arc<dyn Fn(&str) -> Result<PathBuf> + Send + Sync>,
     /// Connected-device map and selection are guarded together to avoid torn reads and lock inversion.
     state: std::sync::Arc<tokio::sync::RwLock<DeviceManagerState>>,
-    /// Pending initialization state is stored as one coherent snapshot.
-    unrecognized_device: std::sync::Arc<tokio::sync::RwLock<Option<UnrecognizedDeviceState>>>,
     /// Serializes authoritative manifest commits per portable device identity without
     /// holding the global connected-device lock over device or filesystem I/O.
     manifest_commit_locks:
@@ -596,6 +667,10 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
+    pub fn begin_destination_mutation(&self) -> u64 {
+        next_destination_mutation()
+    }
+
     pub fn new(db: std::sync::Arc<crate::db::Database>) -> Self {
         Self {
             db,
@@ -603,8 +678,12 @@ impl DeviceManager {
             state: std::sync::Arc::new(tokio::sync::RwLock::new(DeviceManagerState {
                 connected_devices: std::collections::HashMap::new(),
                 selected_device_path: None,
+                selected_destination: SelectedDestination::Playback,
+                pending_devices: std::collections::BTreeMap::new(),
+                destination_revision: 0,
+                latest_selection_token: 0,
+                discovery_issues: std::collections::BTreeMap::new(),
             })),
-            unrecognized_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             manifest_commit_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -620,14 +699,30 @@ impl DeviceManager {
             state: std::sync::Arc::new(tokio::sync::RwLock::new(DeviceManagerState {
                 connected_devices: std::collections::HashMap::new(),
                 selected_device_path: None,
+                selected_destination: SelectedDestination::Playback,
+                pending_devices: std::collections::BTreeMap::new(),
+                destination_revision: 0,
+                latest_selection_token: 0,
+                discovery_issues: std::collections::BTreeMap::new(),
             })),
-            unrecognized_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             manifest_commit_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     pub async fn handle_device_detected(
         &self,
+        path: PathBuf,
+        manifest: DeviceManifest,
+        device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    ) -> Result<crate::DaemonState> {
+        let observation_token = self.begin_destination_mutation();
+        self.handle_device_detected_at(observation_token, path, manifest, device_io)
+            .await
+    }
+
+    pub async fn handle_device_detected_at(
+        &self,
+        observation_token: u64,
         path: PathBuf,
         manifest: DeviceManifest,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
@@ -689,16 +784,21 @@ impl DeviceManager {
                 manifest: dirty_manifest.clone(),
                 device_io: std::sync::Arc::clone(&device_io),
                 device_class: device_class.clone(),
+                observation_token,
             };
             {
                 let mut state = self.state.write().await;
                 state.connected_devices.insert(path.clone(), connected);
-                if state.selected_device_path.is_none() {
+                state
+                    .pending_devices
+                    .retain(|_, pending| pending.path != path);
+                state.discovery_issues.retain(|_, issue| issue.path != path);
+                if observation_token > state.latest_selection_token {
                     state.selected_device_path = Some(path.clone());
+                    state.selected_destination = SelectedDestination::Device(path.clone());
+                    state.latest_selection_token = observation_token;
                 }
-            }
-            {
-                *self.unrecognized_device.write().await = None;
+                state.destination_revision += 1;
             }
             let name = dirty_manifest
                 .name
@@ -734,18 +834,21 @@ impl DeviceManager {
             manifest: manifest.clone(),
             device_io,
             device_class,
+            observation_token,
         };
         {
             let mut state = self.state.write().await;
             state.connected_devices.insert(path.clone(), connected);
-            if state.selected_device_path.is_none() {
-                // Auto-select first/only device
+            state
+                .pending_devices
+                .retain(|_, pending| pending.path != path);
+            state.discovery_issues.retain(|_, issue| issue.path != path);
+            if observation_token > state.latest_selection_token {
                 state.selected_device_path = Some(path.clone());
+                state.selected_destination = SelectedDestination::Device(path.clone());
+                state.latest_selection_token = observation_token;
             }
-            // If another device is already selected, don't change selection
-        }
-        {
-            *self.unrecognized_device.write().await = None;
+            state.destination_revision += 1;
         }
 
         let name = manifest
@@ -784,6 +887,18 @@ impl DeviceManager {
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
         friendly_name: Option<String>,
     ) -> crate::DaemonState {
+        let observation_token = self.begin_destination_mutation();
+        self.handle_device_unrecognized_at(observation_token, path, device_io, friendly_name)
+            .await
+    }
+
+    pub async fn handle_device_unrecognized_at(
+        &self,
+        observation_token: u64,
+        path: PathBuf,
+        device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+        friendly_name: Option<String>,
+    ) -> crate::DaemonState {
         let path_str = path.to_string_lossy().to_string();
         // Unrecognized devices have no manifest — ensure they are not in connected_devices.
         // Do NOT change selected_device_path since other recognized devices may still be connected.
@@ -793,45 +908,118 @@ impl DeviceManager {
         {
             let mut state = self.state.write().await;
             state.connected_devices.remove(&path);
-            let mut unrecognized = self.unrecognized_device.write().await;
-            let new_is_mtp = device_class_from_path(&path) == DeviceClass::Mtp;
-            let existing_is_mtp = unrecognized
-                .as_ref()
-                .is_some_and(|state| device_class_from_path(&state.path) == DeviceClass::Mtp);
-            if existing_is_mtp && !new_is_mtp {
-                daemon_log!(
-                    "[Device] Keeping pending MTP device {:?}; ignoring lower-priority removable candidate {:?}",
-                    unrecognized.as_ref().map(|state| &state.path),
-                    path
-                );
-                return crate::DaemonState::DeviceFound(path_str);
+            state
+                .pending_devices
+                .retain(|_, pending| pending.path != path);
+            state.discovery_issues.retain(|_, issue| issue.path != path);
+            let pending_id = uuid::Uuid::new_v4().to_string();
+            state.pending_devices.insert(
+                pending_id.clone(),
+                UnrecognizedDeviceState {
+                    pending_id: pending_id.clone(),
+                    path: path.clone(),
+                    io: device_io,
+                    friendly_name,
+                    observation_token,
+                },
+            );
+            if observation_token > state.latest_selection_token {
+                state.selected_device_path = None;
+                state.selected_destination = SelectedDestination::Pending(pending_id);
+                state.latest_selection_token = observation_token;
             }
-            if unrecognized.is_some() {
-                daemon_log!(
-                    "[Device] Replacing pending unrecognized device {:?} with {:?}",
-                    unrecognized.as_ref().map(|state| &state.path),
-                    path
-                );
-            }
-            *unrecognized = Some(UnrecognizedDeviceState {
-                path,
-                io: device_io,
-                friendly_name,
-            });
+            state.destination_revision += 1;
         }
         crate::DaemonState::DeviceFound(path_str)
     }
 
     pub async fn get_unrecognized_device_snapshot(&self) -> Option<UnrecognizedDeviceState> {
-        self.unrecognized_device
+        let state = self.state.read().await;
+        let pending = match &state.selected_destination {
+            SelectedDestination::Pending(id) => state.pending_devices.get(id),
+            _ => state
+                .pending_devices
+                .values()
+                .max_by_key(|pending| pending.observation_token),
+        }?;
+        Some(UnrecognizedDeviceState {
+            pending_id: pending.pending_id.clone(),
+            path: pending.path.clone(),
+            io: std::sync::Arc::clone(&pending.io),
+            friendly_name: pending.friendly_name.clone(),
+            observation_token: pending.observation_token,
+        })
+    }
+
+    pub async fn get_pending_devices_snapshot(&self) -> Vec<UnrecognizedDeviceState> {
+        let state = self.state.read().await;
+        let mut pending: Vec<_> = state
+            .pending_devices
+            .values()
+            .map(|entry| UnrecognizedDeviceState {
+                pending_id: entry.pending_id.clone(),
+                path: entry.path.clone(),
+                io: std::sync::Arc::clone(&entry.io),
+                friendly_name: entry.friendly_name.clone(),
+                observation_token: entry.observation_token,
+            })
+            .collect();
+        pending.sort_by_key(|entry| entry.observation_token);
+        pending
+    }
+
+    pub async fn report_discovery_failure(
+        &self,
+        path: PathBuf,
+        code: &str,
+        display_name: Option<String>,
+    ) {
+        let display_name = display_name.map(|name| name.chars().take(120).collect::<String>());
+        let mut state = self.state.write().await;
+        let existing = state
+            .discovery_issues
+            .iter()
+            .find_map(|(id, issue)| (issue.path == path).then(|| (id.clone(), issue.wire.clone())));
+        if existing
+            .as_ref()
+            .is_some_and(|(_, issue)| issue.code == code && issue.display_name == display_name)
+        {
+            return;
+        }
+        if let Some((id, _)) = existing {
+            state.discovery_issues.remove(&id);
+        }
+        state.destination_revision += 1;
+        let revision = state.destination_revision.to_string();
+        let discovery_id = uuid::Uuid::new_v4().to_string();
+        state.discovery_issues.insert(
+            discovery_id.clone(),
+            StoredDiscoveryIssue {
+                path,
+                wire: DeviceDiscoveryIssue {
+                    discovery_id,
+                    code: if code == "DEVICE_OPEN_FAILED" {
+                        "DEVICE_OPEN_FAILED"
+                    } else {
+                        "DEVICE_READ_FAILED"
+                    }
+                    .to_string(),
+                    display_name,
+                    retryable: true,
+                    revision,
+                },
+            },
+        );
+    }
+
+    pub async fn get_discovery_issues(&self) -> Vec<DeviceDiscoveryIssue> {
+        self.state
             .read()
             .await
-            .as_ref()
-            .map(|state| UnrecognizedDeviceState {
-                path: state.path.clone(),
-                io: std::sync::Arc::clone(&state.io),
-                friendly_name: state.friendly_name.clone(),
-            })
+            .discovery_issues
+            .values()
+            .map(|issue| issue.wire.clone())
+            .collect()
     }
 
     #[cfg(test)]
@@ -850,24 +1038,29 @@ impl DeviceManager {
     }
 
     pub async fn handle_device_removed(&self, removed_path: &PathBuf) {
-        {
-            let mut state = self.state.write().await;
-            state.connected_devices.remove(removed_path);
-            if state.selected_device_path.as_ref() == Some(removed_path) {
-                state.selected_device_path = state.connected_devices.keys().next().cloned();
-            }
+        let token = self.begin_destination_mutation();
+        let mut state = self.state.write().await;
+        state.connected_devices.remove(removed_path);
+        state
+            .discovery_issues
+            .retain(|_, issue| &issue.path != removed_path);
+        let removed_pending: Vec<String> = state
+            .pending_devices
+            .iter()
+            .filter(|(_, pending)| &pending.path == removed_path)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &removed_pending {
+            state.pending_devices.remove(id);
         }
-        {
-            let mut unrecognized = self.unrecognized_device.write().await;
-            // Only clear if the removed path matches; an unrelated managed device disconnecting
-            // must not erase a pending initialization for a different unrecognized device.
-            if unrecognized
-                .as_ref()
-                .is_some_and(|state| &state.path == removed_path)
-            {
-                *unrecognized = None;
-            }
+        let selected_removed = state.selected_device_path.as_ref() == Some(removed_path)
+            || matches!(&state.selected_destination, SelectedDestination::Pending(id) if removed_pending.contains(id));
+        if selected_removed {
+            state.selected_device_path = None;
+            state.selected_destination = SelectedDestination::Playback;
+            state.latest_selection_token = token;
         }
+        state.destination_revision += 1;
     }
 
     pub async fn get_current_device(&self) -> Option<DeviceManifest> {
@@ -891,6 +1084,15 @@ impl DeviceManager {
 
     pub async fn get_current_device_path(&self) -> Option<PathBuf> {
         self.state.read().await.selected_device_path.clone()
+    }
+
+    pub async fn get_device_id_for_path(&self, path: &Path) -> Option<String> {
+        self.state
+            .read()
+            .await
+            .connected_devices
+            .get(path)
+            .map(|device| device.manifest.device_id.clone())
     }
 
     /// Capture the selected sync destination under one state read.
@@ -968,13 +1170,68 @@ impl DeviceManager {
         (device_list, state.selected_device_path.clone())
     }
 
+    pub async fn get_destination_snapshot(&self) -> DestinationSnapshot {
+        let state = self.state.read().await;
+        let mut destinations = vec![Destination::Playback {
+            id: "playback".to_string(),
+            selected: matches!(state.selected_destination, SelectedDestination::Playback),
+        }];
+        let mut devices: Vec<_> = state.connected_devices.iter().collect();
+        devices.sort_by_key(|(_, device)| device.observation_token);
+        destinations.extend(devices.into_iter().map(|(path, device)| Destination::Device {
+            path: path.to_string_lossy().to_string(),
+            device_id: device.manifest.device_id.clone(),
+            name: device.manifest.name.clone().filter(|name| !name.is_empty())
+                .unwrap_or_else(|| device.manifest.device_id.clone()),
+            icon: device.manifest.icon.clone(),
+            selected: matches!(&state.selected_destination, SelectedDestination::Device(selected) if selected == path),
+        }));
+        let mut pending: Vec<_> = state.pending_devices.values().collect();
+        pending.sort_by_key(|entry| entry.observation_token);
+        destinations.extend(pending.into_iter().map(|entry| Destination::PendingDevice {
+            pending_id: entry.pending_id.clone(),
+            name: entry.friendly_name.clone().unwrap_or_else(|| "Unconfigured device".to_string()),
+            selected: matches!(&state.selected_destination, SelectedDestination::Pending(selected) if selected == &entry.pending_id),
+        }));
+        DestinationSnapshot {
+            revision: state.destination_revision,
+            destinations,
+        }
+    }
+
+    pub async fn select_playback(&self) {
+        let token = self.begin_destination_mutation();
+        let mut state = self.state.write().await;
+        state.selected_device_path = None;
+        state.selected_destination = SelectedDestination::Playback;
+        state.latest_selection_token = token;
+        state.destination_revision += 1;
+    }
+
+    pub async fn select_pending_device(&self, pending_id: &str) -> bool {
+        let token = self.begin_destination_mutation();
+        let mut state = self.state.write().await;
+        if !state.pending_devices.contains_key(pending_id) {
+            return false;
+        }
+        state.selected_device_path = None;
+        state.selected_destination = SelectedDestination::Pending(pending_id.to_string());
+        state.latest_selection_token = token;
+        state.destination_revision += 1;
+        true
+    }
+
     /// Sets the selected device path. Returns false if path is not in connected_devices.
     pub async fn select_device(&self, path: PathBuf) -> bool {
+        let token = self.begin_destination_mutation();
         let mut state = self.state.write().await;
         if !state.connected_devices.contains_key(&path) {
             return false;
         }
-        state.selected_device_path = Some(path);
+        state.selected_device_path = Some(path.clone());
+        state.selected_destination = SelectedDestination::Device(path);
+        state.latest_selection_token = token;
+        state.destination_revision += 1;
         true
     }
 
@@ -1133,6 +1390,33 @@ impl DeviceManager {
         icon: Option<String>,
         _device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<DeviceManifest> {
+        let pending = self
+            .get_unrecognized_device_snapshot()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
+        let revision = self.state.read().await.destination_revision;
+        self.initialize_pending_device(
+            &pending.pending_id,
+            revision,
+            folder_path,
+            playlist_folder_path,
+            transcoding_profile_id,
+            name,
+            icon,
+        )
+        .await
+    }
+
+    pub async fn initialize_pending_device(
+        &self,
+        pending_id: &str,
+        observed_destination_revision: u64,
+        folder_path: &str,
+        playlist_folder_path: Option<&str>,
+        transcoding_profile_id: Option<String>,
+        name: String,
+        icon: Option<String>,
+    ) -> Result<DeviceManifest> {
         // Validate folder_path: no traversal, no absolute paths; multi-level paths (e.g.
         // "Music/HifiMule") are allowed — both MscBackend (create_dir_all) and MtpBackend
         // (auto-creates parent objects) handle them transparently.
@@ -1150,10 +1434,25 @@ impl DeviceManager {
             }
         }
 
-        let pending = self
-            .get_unrecognized_device_snapshot()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
+        let pending = {
+            let state = self.state.read().await;
+            if state.destination_revision != observed_destination_revision {
+                return Err(anyhow::anyhow!("Pending destination revision is stale"));
+            }
+            let pending = state
+                .pending_devices
+                .get(pending_id)
+                .ok_or_else(|| anyhow::anyhow!("Pending destination is no longer available"))?;
+            UnrecognizedDeviceState {
+                pending_id: pending.pending_id.clone(),
+                path: pending.path.clone(),
+                io: std::sync::Arc::clone(&pending.io),
+                friendly_name: pending.friendly_name.clone(),
+                observation_token: pending.observation_token,
+            }
+        };
+        let pending_id = pending.pending_id.clone();
+        let observation_token = pending.observation_token;
         let device_root = pending.path;
         let device_io = pending.io;
         let device_class = device_class_from_path(&device_root);
@@ -1312,23 +1611,16 @@ impl DeviceManager {
                     manifest: manifest.clone(),
                     device_class,
                     device_io,
+                    observation_token,
                 },
             );
-            // Only auto-select if no device is currently selected; don't steal selection
-            // from a device the user has already chosen in a multi-device session.
-            if state.selected_device_path.is_none() {
+            state.pending_devices.remove(&pending_id);
+            if matches!(&state.selected_destination, SelectedDestination::Pending(id) if id == &pending_id)
+            {
                 state.selected_device_path = Some(device_root.clone());
+                state.selected_destination = SelectedDestination::Device(device_root.clone());
             }
-        }
-        {
-            // Only clear the pending slot if it still holds this device's path.
-            // A concurrent remove + new unrecognized probe may have replaced it with a
-            // different device between the snapshot and here; clearing unconditionally
-            // would silently lose that device's pending state.
-            let mut unrecognized = self.unrecognized_device.write().await;
-            if unrecognized.as_ref().is_some_and(|s| s.path == device_root) {
-                *unrecognized = None;
-            }
+            state.destination_revision += 1;
         }
 
         Ok(manifest)
@@ -2023,6 +2315,8 @@ fn has_msc_drive_for_device(_friendly_name: &str, _wpd_device_id: &str) -> bool 
 pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     println!("[Device] Observer thread started");
     let mut known_mounts = std::collections::HashSet::new();
+    let mut retry_state: std::collections::HashMap<PathBuf, (u32, std::time::Instant)> =
+        std::collections::HashMap::new();
 
     loop {
         let current_mounts = get_mounts();
@@ -2032,6 +2326,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
         known_mounts.retain(|mount| {
             if !current_mounts.contains(mount) {
                 let _ = tx.try_send(DeviceEvent::Removed(mount.clone()));
+                retry_state.remove(mount);
                 false
             } else {
                 true
@@ -2041,13 +2336,24 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
         // Detect new mounts
         for mount in &current_mounts {
             if !known_mounts.contains(mount) {
+                if retry_state
+                    .get(mount)
+                    .is_some_and(|(_, next)| std::time::Instant::now() < *next)
+                {
+                    continue;
+                }
                 known_mounts.insert(mount.clone());
+                // Stamp the observation before any potentially slow probe so a late
+                // completion cannot override a newer explicit destination choice.
+                let observation_token = next_destination_mutation();
                 match DeviceProber::probe(mount).await {
                     Ok(Some(manifest)) => {
+                        retry_state.remove(mount);
                         let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
                             std::sync::Arc::new(crate::device_io::MscBackend::new(mount.clone()));
                         let _ = tx
                             .send(DeviceEvent::Detected {
+                                observation_token,
                                 path: mount.clone(),
                                 manifest,
                                 device_io,
@@ -2055,6 +2361,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                             .await;
                     }
                     Ok(None) => {
+                        retry_state.remove(mount);
                         if is_removable_drive(mount) {
                             // Detection layer creates the IO backend so the type (MSC/MTP)
                             // is determined here once, not re-derived downstream.
@@ -2064,6 +2371,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                 ));
                             let _ = tx
                                 .send(DeviceEvent::Unrecognized {
+                                    observation_token,
                                     path: mount.clone(),
                                     device_io,
                                     friendly_name: None,
@@ -2071,7 +2379,35 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                 .await;
                         }
                     }
-                    Err(_) => {} // Probe failed (e.g., permission error) — ignore
+                    Err(_) => {
+                        known_mounts.remove(mount);
+                        let attempt = retry_state
+                            .get(mount)
+                            .map_or(1, |(attempt, _)| attempt.saturating_add(1));
+                        let seconds = match attempt {
+                            1 => 2,
+                            2 => 4,
+                            3 => 8,
+                            4 => 16,
+                            _ => 30,
+                        };
+                        retry_state.insert(
+                            mount.clone(),
+                            (
+                                attempt,
+                                std::time::Instant::now() + Duration::from_secs(seconds),
+                            ),
+                        );
+                        let _ = tx
+                            .send(DeviceEvent::DiscoveryFailed {
+                                path: mount.clone(),
+                                code: "DEVICE_READ_FAILED",
+                                display_name: mount
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().chars().take(120).collect()),
+                            })
+                            .await;
+                    }
                 }
             }
         }
@@ -2122,6 +2458,9 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
     poll_interval: Duration,
 ) {
     let mut known_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut failed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut retry_state: std::collections::HashMap<String, (u32, std::time::Instant)> =
+        std::collections::HashMap::new();
     let mut liveness_tick: u32 = 0;
 
     loop {
@@ -2149,6 +2488,12 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
 
         for dev in &devices {
             if !known_ids.contains(&dev.device_id) {
+                if retry_state
+                    .get(&dev.device_id)
+                    .is_some_and(|(_, next)| std::time::Instant::now() < *next)
+                {
+                    continue;
+                }
                 // Prefer MSC over MTP: if the device is also mounted as a drive
                 // letter, skip it here and let run_observer handle it.
                 if has_msc_drive_for_device(&dev.friendly_name, &dev.device_id) {
@@ -2159,6 +2504,9 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
                 let dev_for_probe = dev.clone();
                 let dev_id = dev.device_id.clone();
                 let friendly_name = dev.friendly_name.clone();
+                // Capture ordering before opening or reading the device. MTP can block
+                // long enough for the user to make a newer selection meanwhile.
+                let observation_token = next_destination_mutation();
 
                 let backend =
                     tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone, None))
@@ -2171,6 +2519,7 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
                             std::sync::Arc::new(backend);
                         if emit_mtp_probe_event(
                             &tx,
+                            observation_token,
                             synthetic_path,
                             &dev_id,
                             dev_for_probe,
@@ -2180,10 +2529,56 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
                         .await
                         {
                             known_ids.insert(dev_id.clone());
+                            failed_ids.remove(&dev_id);
+                            retry_state.remove(&dev_id);
+                        } else {
+                            let attempt = retry_state
+                                .get(&dev_id)
+                                .map_or(1, |(attempt, _)| attempt.saturating_add(1));
+                            let seconds = match attempt {
+                                1 => 2,
+                                2 => 4,
+                                3 => 8,
+                                4 => 16,
+                                _ => 30,
+                            };
+                            retry_state.insert(
+                                dev_id.clone(),
+                                (
+                                    attempt,
+                                    std::time::Instant::now() + Duration::from_secs(seconds),
+                                ),
+                            );
+                            failed_ids.insert(dev_id.clone());
                         }
                     }
                     Err(e) => {
                         daemon_log!("[MTP] Failed to open device {}: {}", dev_id, e);
+                        let attempt = retry_state
+                            .get(&dev_id)
+                            .map_or(1, |(attempt, _)| attempt.saturating_add(1));
+                        let seconds = match attempt {
+                            1 => 2,
+                            2 => 4,
+                            3 => 8,
+                            4 => 16,
+                            _ => 30,
+                        };
+                        retry_state.insert(
+                            dev_id.clone(),
+                            (
+                                attempt,
+                                std::time::Instant::now() + Duration::from_secs(seconds),
+                            ),
+                        );
+                        failed_ids.insert(dev_id.clone());
+                        let _ = tx
+                            .send(DeviceEvent::DiscoveryFailed {
+                                path: synthetic_path,
+                                code: "DEVICE_OPEN_FAILED",
+                                display_name: Some(friendly_name.chars().take(120).collect()),
+                            })
+                            .await;
                     }
                 }
             }
@@ -2191,6 +2586,7 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
 
         let disconnected: Vec<String> = known_ids
             .iter()
+            .chain(failed_ids.iter())
             .filter(|id| !devices.iter().any(|d| &d.device_id == *id))
             .cloned()
             .collect();
@@ -2198,6 +2594,8 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
             let synthetic_path = PathBuf::from(format!("mtp://{}", id));
             let _ = tx.send(DeviceEvent::Removed(synthetic_path)).await;
             known_ids.remove(id);
+            failed_ids.remove(id);
+            retry_state.remove(id);
         }
 
         // Liveness probe for known devices (~every 16 s). Handles the case where Android
@@ -2251,14 +2649,12 @@ fn is_missing_manifest_error(error: &anyhow::Error) -> bool {
         return true;
     }
 
-    // A zombie manifest (object exists in MTP listings but is unreadable due to a
-    // failed partial send) should also be treated as missing so the device appears
-    // as unrecognized and can be re-initialized rather than being suppressed forever.
-    message.contains("libmtp read_file failed")
+    false
 }
 
 async fn emit_mtp_probe_event(
     tx: &tokio::sync::mpsc::Sender<DeviceEvent>,
+    observation_token: u64,
     synthetic_path: PathBuf,
     dev_id: &str,
     dev_info: mtp::MtpDeviceInfo,
@@ -2294,6 +2690,7 @@ async fn emit_mtp_probe_event(
             };
         return tx
             .send(DeviceEvent::Detected {
+                observation_token,
                 path: synthetic_path,
                 manifest,
                 device_io: final_io,
@@ -2332,6 +2729,7 @@ async fn emit_mtp_probe_event(
                         backend_arc
                     };
                 tx.send(DeviceEvent::Detected {
+                    observation_token,
                     path: synthetic_path,
                     manifest,
                     device_io: final_io,
@@ -2341,19 +2739,20 @@ async fn emit_mtp_probe_event(
             }
             Err(e) => {
                 daemon_log!(
-                    "[MTP] Manifest parse error during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; treating device as unrecognized",
+                    "[MTP] Manifest parse error during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; publishing sanitized read failure",
                     dev_id,
                     friendly_name,
                     synthetic_path.display(),
                     e
                 );
-                tx.send(DeviceEvent::Unrecognized {
-                    path: synthetic_path,
-                    device_io: backend_arc,
-                    friendly_name: Some(friendly_name),
-                })
-                .await
-                .is_ok()
+                let _ = tx
+                    .send(DeviceEvent::DiscoveryFailed {
+                        path: synthetic_path,
+                        code: "DEVICE_READ_FAILED",
+                        display_name: Some(friendly_name),
+                    })
+                    .await;
+                false
             }
         },
         Err(e) => {
@@ -2366,6 +2765,7 @@ async fn emit_mtp_probe_event(
                     e
                 );
                 tx.send(DeviceEvent::Unrecognized {
+                    observation_token,
                     path: synthetic_path,
                     device_io: backend_arc,
                     friendly_name: Some(friendly_name),
@@ -2380,6 +2780,13 @@ async fn emit_mtp_probe_event(
                     synthetic_path.display(),
                     e
                 );
+                let _ = tx
+                    .send(DeviceEvent::DiscoveryFailed {
+                        path: synthetic_path,
+                        code: "DEVICE_READ_FAILED",
+                        display_name: Some(friendly_name),
+                    })
+                    .await;
                 false
             }
         }

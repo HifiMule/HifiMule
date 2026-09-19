@@ -362,7 +362,7 @@ pub fn start_daemon_core(
                         Some(guard)
                     };
                     match event {
-                        device::DeviceEvent::Detected { path, manifest, device_io } => {
+                        device::DeviceEvent::Detected { observation_token, path, manifest, device_io } => {
                             daemon_log!("Device detected at {:?}: {:?}", path, manifest);
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
@@ -370,7 +370,8 @@ pub fn start_daemon_core(
                             let has_synced_items = !manifest.synced_items.is_empty();
                             let manifest_device_id = manifest.device_id.clone();
                             let scrobble_manifest = Arc::new(manifest.clone());
-                            match device_manager.handle_device_detected(path.clone(), manifest, device_io).await {
+                            let scrobble_device_io = Arc::clone(&device_io);
+                            match device_manager.handle_device_detected_at(observation_token, path.clone(), manifest, device_io).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
                                 }
@@ -384,38 +385,31 @@ pub fn start_daemon_core(
                             if let Ok((url, token, Some(user_id))) =
                                 api::CredentialManager::get_credentials()
                             {
-                                match device_manager.get_device_io().await {
-                                    Some(scrobble_device_io) => {
-                                        let db_scrobble = Arc::clone(&db);
-                                        let client_scrobble = Arc::clone(&jellyfin_client);
-                                        let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
-                                        let scrobble_device_id = manifest_device_id.clone();
-                                        let scrobble_manifest = Arc::clone(&scrobble_manifest);
-                                        let scrobble_admission = som_events.try_admit_mutation();
-                                        tokio::spawn(async move {
-                                            let Some(_scrobble_admission) = scrobble_admission else {
-                                                return;
-                                            };
-                                            let result = scrobbler::process_device_scrobbles(
-                                                scrobble_device_io,
-                                                scrobble_device_id,
-                                                Some(scrobble_manifest),
-                                                db_scrobble,
-                                                client_scrobble,
-                                                &url,
-                                                &token,
-                                                &user_id,
-                                            )
-                                            .await;
-                                            daemon_log!("[Scrobbler] Result: {:?}", result);
-                                            let mut guard = scrobbler_result_clone.write().await;
-                                            *guard = Some(result);
-                                        });
-                                    }
-                                    None => {
-                                        daemon_log!("[Scrobbler] Skipped — device IO unavailable (device may have disconnected)");
-                                    }
-                                }
+                                let db_scrobble = Arc::clone(&db);
+                                let client_scrobble = Arc::clone(&jellyfin_client);
+                                let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
+                                let scrobble_device_id = manifest_device_id.clone();
+                                let scrobble_manifest = Arc::clone(&scrobble_manifest);
+                                let scrobble_admission = som_events.try_admit_mutation();
+                                tokio::spawn(async move {
+                                    let Some(_scrobble_admission) = scrobble_admission else {
+                                        return;
+                                    };
+                                    let result = scrobbler::process_device_scrobbles(
+                                        scrobble_device_io,
+                                        scrobble_device_id,
+                                        Some(scrobble_manifest),
+                                        db_scrobble,
+                                        client_scrobble,
+                                        &url,
+                                        &token,
+                                        &user_id,
+                                    )
+                                    .await;
+                                    daemon_log!("[Scrobbler] Result: {:?}", result);
+                                    let mut guard = scrobbler_result_clone.write().await;
+                                    *guard = Some(result);
+                                });
                             }
 
                             // Auto-sync trigger: the connected manifest is the source of truth.
@@ -446,19 +440,35 @@ pub fn start_daemon_core(
                                 daemon_log!("[AutoSync] Skipped: auto-sync enabled but no basket items configured");
                             }
                         }
-                        device::DeviceEvent::Unrecognized { path, device_io, friendly_name } => {
+                        device::DeviceEvent::Unrecognized { observation_token, path, device_io, friendly_name } => {
                             println!("Unrecognized device at {:?}", path);
-                            let new_state = device_manager.handle_device_unrecognized(path, device_io, friendly_name).await;
+                            let new_state = device_manager.handle_device_unrecognized_at(observation_token, path, device_io, friendly_name).await;
                             let _ = state_tx_clone.send(new_state);
+                        }
+                        device::DeviceEvent::DiscoveryFailed { path, code, display_name } => {
+                            device_manager.report_discovery_failure(path, code, display_name).await;
+                            let _ = state_tx_clone.send(DaemonState::Idle);
                         }
                         device::DeviceEvent::Removed(path) => {
                             daemon_log!("Device removed at {:?}", path);
-                            // If a sync is running, mark it as failed before clearing device state
-                            if som_events.has_active_operation().await {
+                            let removed_device_id = device_manager.get_device_id_for_path(&path).await;
+                            let targets_removed_device = |device_id: Option<&str>| {
+                                removed_device_id
+                                    .as_deref()
+                                    .is_some_and(|removed| device_id == Some(removed))
+                            };
+                            let matching_running = som_events.get_all_operations().await.into_iter().any(|op| {
+                                op.status == sync::SyncStatus::Running
+                                    && targets_removed_device(op.device_id.as_deref())
+                            });
+                            // Only work admitted against the removed target is failed. An unrelated
+                            // destination arrival/removal cannot retarget or cancel active work.
+                            if matching_running {
                                 daemon_log!("[AutoSync] Device removed during active sync — marking failed");
                                 let ops_snapshot = som_events.get_all_operations().await;
                                 for mut op in ops_snapshot {
-                                    if op.status == sync::SyncStatus::Running {
+                                    if op.status == sync::SyncStatus::Running
+                                        && targets_removed_device(op.device_id.as_deref()) {
                                         op.status = sync::SyncStatus::Failed;
                                         op.errors.push(sync::SyncFileError {
                                             jellyfin_id: String::new(),
@@ -1501,7 +1511,11 @@ async fn run_auto_sync_via_provider(
 
     let operation_id = uuid::Uuid::new_v4().to_string();
     sync_op_manager
-        .create_operation(operation_id.clone(), total_files)
+        .create_operation_for_device(
+            operation_id.clone(),
+            total_files,
+            manifest.device_id.clone(),
+        )
         .await;
 
     let pending_ids: Vec<String> = delta

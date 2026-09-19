@@ -1163,3 +1163,33 @@ and Quit invalidate preparation; failure keeps the last committed cursor and
 requires an explicit retry. Compressed storage remains capped at 8 MiB including
 network and scratch allowances, PCM at 1 MiB/500 ms, and the existing 60-second
 total preparation deadline is not restarted by a seek stage.
+
+## Typed destinations and queue presentation (Story 15.12)
+
+`get_daemon_state` additively exposes decimal-string `destinationRevision`, an
+ordered `destinations` array, plural `pendingDevices`, and bounded
+`deviceDiscoveryIssues`. `destinations[0]` is always
+`{kind:"playback",id:"playback"}`. Managed and pending physical destinations
+carry real path/device identity or an opaque `pendingId`; Playback never enters
+`connectedDevices`, manifests, storage or sync enumeration. The compatibility
+`selectedDevicePath` is null unless a managed physical destination is selected.
+
+Authenticated `destination.select` accepts only `{kind:"playback"}` or
+`{kind:"device",path}`. `device.select` remains physical-only. Discovery,
+explicit selection and removal use one daemon mutation order. A stale probe may
+populate inventory but cannot override a later choice; selected removal returns
+to Playback. `device_initialize` requires the exact `pendingId` and observed
+decimal-string destination revision and rejects stale/replaced dialogs.
+
+Discovery issues contain only an opaque ID, stable code (`DEVICE_OPEN_FAILED` or
+`DEVICE_READ_FAILED`), bounded safe display name, retryability and revision.
+Open/read retries use 2, 4, 8, 16 and capped 30-second backoff. A failure never
+changes selection or exposes backend diagnostics.
+
+`playback.describeOccurrences` accepts strict schema-v1 session/revision identity
+and 1–200 occurrence IDs from one visible page. It validates membership, resolves
+portable sources with a global concurrency ceiling of eight, deduplicates source
+lookups, and returns rows in requested occurrence order without collapsing
+duplicates. Each row is `available`, `sourceUnavailable` or `trackUnavailable`;
+one unavailable source does not fail the page. Queue/session conflicts require a
+fresh `playback.getSession` snapshot and restarted paging.

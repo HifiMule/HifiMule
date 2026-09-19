@@ -589,3 +589,23 @@ macOS ARM64 daemon built successfully. These are digital and owner-state tests;
 actual native worker recreation, physical captures, Windows/Linux runtime runs
 and macOS x64 runs remain open. Existing platform rows are not upgraded by these
 local results.
+
+## Story 15.12 destination evidence
+
+Automated daemon and production-component DOM coverage exercises the no-device
+Playback default, ordered managed/pending arrivals, stale-probe fencing,
+selected-removal fallback, target-safe pending setup, structured discovery
+failures, shared playback snapshot ownership, Preview/main separation, bounded
+queue metadata pages and physical-action locking. These are mock/local runtime
+checks, not installed hardware evidence.
+
+The following installed rows remain open and must record OS, architecture,
+commit, physical device/interface and observed focus/announcement behavior:
+
+- [ ] Windows: no-device launch; managed/blank/overlapping arrival; removal; open failure; reconnect; active main and Preview.
+- [ ] Linux: no-device launch; managed/blank/overlapping arrival; removal; open failure; reconnect; active main and Preview.
+- [ ] macOS x64: no-device launch; managed/blank/overlapping arrival; removal; open failure; reconnect; active main and Preview.
+- [ ] macOS ARM64: no-device launch; managed/blank/overlapping arrival; removal; open failure; reconnect; active main and Preview.
+
+No row above is promoted by source inspection, DOM mocks, daemon unit tests or
+the pre-existing Story 15.11 digital audio evidence.

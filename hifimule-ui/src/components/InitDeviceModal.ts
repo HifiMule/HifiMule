@@ -16,13 +16,24 @@ export class InitDeviceModal {
     private dialog: HTMLElement | null = null;
     private onComplete: (() => void) | null = null;
     private _defaultName: string | undefined = undefined;
+    private pendingId: string | undefined;
+    private observedDestinationRevision: string | undefined;
 
     constructor(_container: HTMLElement, onComplete?: () => void) {
         this.onComplete = onComplete || null;
     }
 
-    async open(defaultName?: string) {
+    async open(defaultName?: string, pendingId?: string, observedDestinationRevision?: string) {
         this._defaultName = defaultName;
+        this.pendingId = pendingId;
+        this.observedDestinationRevision = observedDestinationRevision;
+        if (!this.pendingId || !this.observedDestinationRevision) {
+            const state = await rpcCall('get_daemon_state');
+            const selected = state?.destinations?.find((destination: any) => destination.kind === 'pendingDevice' && destination.selected)
+                ?? state?.destinations?.find((destination: any) => destination.kind === 'pendingDevice');
+            this.pendingId = selected?.pendingId;
+            this.observedDestinationRevision = state?.destinationRevision;
+        }
         this.renderDialog();
         await this.showDialog();
         await this.loadCredentials();
@@ -314,6 +325,8 @@ export class InitDeviceModal {
 
         try {
             await rpcCall('device_initialize', {
+                pendingId: this.pendingId,
+                observedDestinationRevision: this.observedDestinationRevision,
                 folderPath,
                 playlistFolderPath,
                 profileId: userId,

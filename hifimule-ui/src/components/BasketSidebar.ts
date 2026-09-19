@@ -190,7 +190,6 @@ export class BasketSidebar {
     // Multi-device hub state
     private connectedDevices: ConnectedDeviceSummary[] = [];
     private selectedDevicePath: string | null = null;
-    private deviceSwitchInFlight: boolean = false;
     private pendingDevicePath: string | null = null;
     private pendingDeviceFriendlyName: string | undefined = undefined;
     private currentDevice: any = null;
@@ -527,27 +526,6 @@ export class BasketSidebar {
     }
 
     private bindDeviceHubEvents(): void {
-        this.container.querySelectorAll('.device-hub-card').forEach(card => {
-            card.addEventListener('click', async (event) => {
-                if ((event.target as HTMLElement | null)?.closest('.device-settings-btn')) return;
-                if (this.deviceSwitchInFlight) return;
-                const path = (card as HTMLElement).dataset.path;
-                if (!path) return;
-                if (path === this.selectedDevicePath) return;
-                this.deviceSwitchInFlight = true;
-                try {
-                    await basketStore.flushPendingSave();
-                    await rpcCall('device.select', { path });
-                    const basketResult = await rpcCall('manifest_get_basket') as any;
-                    basketStore.hydrateFromDaemon(basketResult?.basketItems ?? []);
-                    this.refreshAndRender();
-                } catch (err) {
-                    console.error('[DeviceHub] Failed to switch device:', err);
-                } finally {
-                    this.deviceSwitchInFlight = false;
-                }
-            });
-        });
         this.container.querySelectorAll('.device-settings-btn').forEach(btn => {
             btn.addEventListener('click', (event) => {
                 event.stopPropagation();
@@ -799,24 +777,12 @@ export class BasketSidebar {
 
 
     private renderDeviceHub(): string {
-        if (this.connectedDevices.length === 0) return '';
+        const selected = this.selectedDeviceSummary();
+        if (!selected || selected.path !== this.selectedDevicePath) return '';
         return `
-            <div class="device-hub-panel">
-                <div class="device-hub-cards">
-                    ${this.connectedDevices.map(d => `
-                        <div class="device-hub-card ${d.path === this.selectedDevicePath ? 'active' : ''}"
-                             data-path="${this.escapeHtml(d.path)}"
-                             role="button" tabindex="0"
-                             aria-pressed="${d.path === this.selectedDevicePath ? 'true' : 'false'}">
-                            <sl-icon name="${this.escapeHtml(d.icon || 'usb-drive')}"
-                                     class="device-hub-icon"></sl-icon>
-                            <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
-                            ${d.path === this.selectedDevicePath ? `
-                                <sl-icon-button name="gear" label="${t('basket.device.settings')}" class="device-settings-btn"></sl-icon-button>
-                            ` : ''}
-                        </div>
-                    `).join('')}
-                </div>
+            <div class="device-settings-shortcut">
+                <span>${this.escapeHtml(selected.name || selected.deviceId)}</span>
+                <sl-icon-button name="gear" label="${t('basket.device.settings')}" class="device-settings-btn"></sl-icon-button>
             </div>
         `;
     }

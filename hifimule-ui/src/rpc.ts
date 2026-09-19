@@ -227,6 +227,9 @@ export interface PlaybackSessionSnapshot {
     preview: { auditionId: string; hasMainSession: boolean; savedMainOccurrenceId: string | null;
         savedMainPositionMs: number; savedMainIntent: string; resumeInhibited: boolean } | null;
     state: string; positionMs: number;
+    totalOccurrenceCount: number;
+    occurrences: PlaybackOccurrence[];
+    nextCursor: string | null;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
     playback: { status: PlaybackStatus; canGoNext: boolean; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
         seek: { available: boolean; reason?: string | null; mechanism?: string | null; decodedLandingToleranceMs?: number | null };
@@ -234,6 +237,49 @@ export interface PlaybackSessionSnapshot {
         seekOutcome?: { operationId: string; requestedPositionMs: number; actualPositionMs?: number | null; status: string; error?: { code: string; retryable: boolean } | null } | null;
         error?: { code: string; retryable: boolean } | null };
     output: PlaybackOutputState;
+}
+
+export interface PlaybackOccurrence {
+    occurrenceId: string;
+    ordinal: number;
+    source: { serverId: string; trackId: string };
+    availability: 'unknown' | 'notConfigured';
+}
+export interface PlaybackOccurrencePage {
+    occurrences: PlaybackOccurrence[];
+    nextCursor: string | null;
+    totalOccurrenceCount: number;
+}
+export interface OccurrenceDisplay {
+    occurrenceId: string;
+    source: { serverId: string; trackId: string };
+    title: string | null;
+    artist: string | null;
+    album: string | null;
+    durationMs: number | null;
+    status: 'available' | 'sourceUnavailable' | 'trackUnavailable';
+}
+
+export type Destination =
+    | { kind: 'playback'; id: 'playback'; selected: boolean }
+    | { kind: 'device'; path: string; deviceId: string; name: string; icon?: string | null; selected: boolean }
+    | { kind: 'pendingDevice'; pendingId: string; name: string; selected: boolean };
+export interface DeviceDiscoveryIssue {
+    discoveryId: string; code: 'DEVICE_OPEN_FAILED' | 'DEVICE_READ_FAILED';
+    displayName?: string | null; retryable: boolean; revision: string;
+}
+export interface DaemonDestinationState {
+    destinationRevision: string;
+    destinations: Destination[];
+    deviceDiscoveryIssues: DeviceDiscoveryIssue[];
+}
+
+export async function getDaemonState(): Promise<DaemonDestinationState & Record<string, unknown>> {
+    return await rpcCall('get_daemon_state');
+}
+
+export async function destinationSelect(selection: { kind: 'playback' } | { kind: 'device'; path: string } | { kind: 'pendingDevice'; pendingId: string }): Promise<void> {
+    await rpcCall('destination.select', selection);
 }
 
 export async function playbackListOutputs(): Promise<{ instanceId: string; outputRevision: string; outputs: PlaybackOutput[]; output: PlaybackOutputState; error?: { code: string; retryable: boolean } | null }> {
@@ -251,6 +297,29 @@ export async function playbackSelectOutput(outputId: string, observed: PlaybackS
 export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
     const result = await rpcCall('playback.getSession', { schemaVersion: 1 });
     return result.data;
+}
+
+export async function playbackListOccurrences(
+    observed: Pick<PlaybackSessionSnapshot, 'sessionId' | 'queueRevision'>,
+    cursor: string | null = null,
+    limit = 100,
+): Promise<PlaybackOccurrencePage> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new RangeError('limit must be between 1 and 200');
+    return (await rpcCall('playback.listOccurrences', {
+        schemaVersion: 1, sessionId: observed.sessionId,
+        expectedQueueRevision: observed.queueRevision, cursor, limit,
+    })).data;
+}
+
+export async function playbackDescribeOccurrences(
+    observed: Pick<PlaybackSessionSnapshot, 'sessionId' | 'queueRevision'>,
+    occurrenceIds: string[],
+): Promise<OccurrenceDisplay[]> {
+    if (occurrenceIds.length < 1 || occurrenceIds.length > 200) throw new RangeError('one bounded occurrence page is required');
+    return (await rpcCall('playback.describeOccurrences', {
+        schemaVersion: 1, sessionId: observed.sessionId,
+        expectedQueueRevision: observed.queueRevision, occurrenceIds,
+    })).data.occurrences;
 }
 
 export async function playbackPlayTrack(serverId: string, trackId: string): Promise<void> {
