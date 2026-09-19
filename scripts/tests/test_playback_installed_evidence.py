@@ -215,6 +215,28 @@ class InstalledEvidenceTests(unittest.TestCase):
             mutation(changed)
             self.assertTrue(evidence.validate_release_record(changed))
 
+    def test_release_schema_accepts_explicit_unsigned_artifact_without_identity(self):
+        record = self.release_record()
+        record["artifact"]["signing"] = {"status": "not-configured"}
+        self.assertEqual(evidence.validate_release_record(record), [])
+
+    def test_release_schema_rejects_inconsistent_or_unknown_signing_states(self):
+        cases = (
+            {"status": "passed"},
+            {"status": "not-configured", "identity": "distribution identity verified"},
+            {"status": "not-configured", "notarized": True},
+            {"status": "unsigned"},
+            {},
+            None,
+            "not-configured",
+            [],
+        )
+        for signing in cases:
+            with self.subTest(signing=signing):
+                record = self.release_record()
+                record["artifact"]["signing"] = signing
+                self.assertTrue(evidence.validate_release_record(record))
+
     def test_release_schema_accepts_truthful_blocker_but_never_aggregates_it_as_pass(self):
         blocker = {
             "schemaVersion": 2, "releaseEvidenceVersion": 1,

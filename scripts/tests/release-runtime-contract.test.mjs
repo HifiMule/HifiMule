@@ -40,14 +40,29 @@ test("macOS builds provision controlled source and every platform verifies insta
   assert.match(read("scripts/build-daemon.mjs"), /ensureMacosAudioRuntime/);
 });
 
-test("shipping workflow requires platform trust rather than ad-hoc signing", () => {
+test("shipping workflow makes platform signing optional but strict when configured", () => {
   const config = JSON.parse(read("hifimule-ui/src-tauri/tauri.conf.json"));
   assert.equal(config.bundle.macOS.signingIdentity, null);
   assert.equal(config.bundle.macOS.hardenedRuntime, true);
   const release = read(".github/workflows/release.yml");
-  assert.match(release, /Require Windows Authenticode credentials/);
+  assert.match(release, /Configure optional Windows Authenticode signing/);
+  assert.match(release, /Windows Authenticode credentials are not configured; building unsigned MSI and NSIS artifacts/);
+  assert.match(release, /Authenticode verification will be skipped/);
+  assert.match(release, /Windows Authenticode credentials are partially configured/);
+  assert.match(release, /Set-Content[^\n]+tauri\.windows-signing\.conf\.json[^\n]+-Value '\{\}'/);
+  assert.match(release, /steps\.windows_signing\.outputs\.enabled == 'true'/);
   assert.match(release, /Verify Windows Authenticode signatures/);
-  assert.match(release, /Require macOS Developer ID and notarization credentials/);
+  assert.match(release, /Configure optional macOS Developer ID signing and notarization/);
+  assert.match(release, /Apple signing and notarization credentials are not configured; building unsigned app and DMG artifacts/);
+  assert.match(release, /Developer ID and notarization verification will be skipped/);
+  assert.match(release, /Apple signing and notarization credentials are partially configured; missing:/);
+  assert.match(release, /steps\.macos_signing\.outputs\.enabled == 'true'/);
   assert.match(release, /Verify macOS Developer ID and notarization/);
+  assert.match(release, /'enabled=false' >> \$env:GITHUB_OUTPUT/);
+  assert.match(release, /'enabled=true' >> \$env:GITHUB_OUTPUT/);
+  assert.match(release, /echo 'enabled=false' >> "\$GITHUB_OUTPUT"/);
+  assert.match(release, /echo 'enabled=true' >> "\$GITHUB_OUTPUT"/);
+  assert.match(release, /value="\$\{!name:-\}"/);
+  assert.match(release, /value\/\/\[\[:space:\]\]\//);
   assert.doesNotMatch(release, /validly ad-hoc signed/);
 });

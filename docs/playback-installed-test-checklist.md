@@ -10,6 +10,16 @@ Use a clean installed package for each row: Windows x64, Linux x64, macOS x64,
 and macOS ARM64. Do not count a source-tree run or VM-only ARM64 run as installed
 hardware evidence.
 
+Platform signing is optional for the active release process. When every credential
+for a platform is absent, record `artifact.signing.status` as `not-configured`,
+omit the signing identity, and test the unsigned installer or DMG including the
+SmartScreen or Gatekeeper warning/override experience. When signing is configured,
+record `passed` plus the verified distribution identity and retain strict
+Authenticode or Developer ID/notarization verification. A partial credential set
+is invalid and must fail before packaging. This current policy supersedes the
+historical mandatory-signing blockers recorded below; those records remain
+unchanged as evidence of their original decision.
+
 ## Reported smoke evidence
 
 On 2026-09-13, user testing confirmed audible AAC, ALAC, FLAC, M4A, Opus, WAV,

@@ -149,14 +149,25 @@ jobs:
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/macos-audio-runtime.mjs env "$TARGET_TRIPLE" "$GITHUB_ENV"
 
-      - name: Require Windows Authenticode credentials
+      - name: Configure optional Windows Authenticode signing
         if: matrix.platform == 'windows-latest'
+        id: windows_signing
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows Authenticode credentials are required' }
+          $CredentialValues = @($env:WINDOWS_CERTIFICATE_BASE64, $env:WINDOWS_CERTIFICATE_PASSWORD)
+          $ConfiguredCount = @($CredentialValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+          if ($ConfiguredCount -eq 0) {
+            Set-Content -Path hifimule-ui/src-tauri/tauri.windows-signing.conf.json -Value '{}' -Encoding utf8
+            'enabled=false' >> $env:GITHUB_OUTPUT
+            Write-Host 'Windows Authenticode credentials are not configured; building unsigned MSI and NSIS artifacts. Authenticode verification will be skipped.'
+            exit 0
+          }
+          if ($ConfiguredCount -ne $CredentialValues.Count) {
+            throw 'Windows Authenticode credentials are partially configured; both WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD are required when signing is enabled'
+          }
           $CertificatePath = Join-Path $env:RUNNER_TEMP 'hifimule-signing.pfx'
           [IO.File]::WriteAllBytes($CertificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
           $Password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
@@ -164,9 +175,11 @@ jobs:
           if (-not $Certificate.Thumbprint) { throw 'Imported certificate has no thumbprint' }
           $Config = @{ bundle = @{ windows = @{ certificateThumbprint = $Certificate.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' } } } | ConvertTo-Json -Depth 5
           Set-Content -Path hifimule-ui/src-tauri/tauri.windows-signing.conf.json -Value $Config -Encoding utf8
+          'enabled=true' >> $env:GITHUB_OUTPUT
 
-      - name: Require macOS Developer ID and notarization credentials
+      - name: Configure optional macOS Developer ID signing and notarization
         if: startsWith(matrix.platform, 'macos')
+        id: macos_signing
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -177,9 +190,26 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            test -n "${!name:-}" || { echo "$name is required for direct-distribution candidates"; exit 1; }
+          names=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID)
+          configured=0
+          missing=()
+          for name in "${names[@]}"; do
+            value="${!name:-}"
+            if [[ -n "${value//[[:space:]]/}" ]]; then
+              configured=$((configured + 1))
+            else
+              missing+=("$name")
+            fi
           done
+          if [[ "$configured" -eq 0 ]]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'Apple signing and notarization credentials are not configured; building unsigned app and DMG artifacts. Developer ID and notarization verification will be skipped.'
+          elif [[ "$configured" -ne "${#names[@]}" ]]; then
+            echo "Apple signing and notarization credentials are partially configured; missing: ${missing[*]}" >&2
+            exit 1
+          else
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install frontend dependencies
         working-directory: hifimule-ui
@@ -277,7 +307,7 @@ jobs:
           node scripts/macos-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" "$APP_DIR"
 
       - name: Verify macOS Developer ID and notarization
-        if: startsWith(matrix.platform, 'macos')
+        if: startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'true'
         run: |
           set -euo pipefail
           TARGET_DIRS=()
@@ -314,7 +344,7 @@ jobs:
           node scripts/windows-audio-runtime.mjs verify-bundle x86_64-pc-windows-msvc $Extracted
 
       - name: Verify Windows Authenticode signatures
-        if: matrix.platform == 'windows-latest'
+        if: matrix.platform == 'windows-latest' && steps.windows_signing.outputs.enabled == 'true'
         shell: pwsh
         run: |
           $Artifacts = Get-ChildItem target,hifimule-ui/src-tauri/target -Recurse -File | Where-Object { $_.Extension -in '.msi', '.exe' -and $_.FullName -match '[\\/]bundle[\\/]' }

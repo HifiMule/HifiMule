@@ -233,8 +233,21 @@ def validate_release_record(record: dict) -> list[str]:
     if isinstance(evidence_id, str) and any(str(value) not in evidence_id for value in (*row, artifact_hash)):
         errors.append("evidence identity does not bind target, package format, and artifact hash")
     signing = artifact.get("signing", {})
-    if signing.get("status") != "passed" or not signing.get("identity"):
-        errors.append("distribution signing/notarization evidence is not passed")
+    if not isinstance(signing, dict):
+        errors.append("distribution signing/notarization evidence must be an object")
+        signing = {}
+    signing_status = signing.get("status")
+    signing_identity = signing.get("identity")
+    if signing_status == "passed":
+        if not isinstance(signing_identity, str) or not signing_identity.strip():
+            errors.append("passed distribution signing/notarization evidence requires an identity")
+    elif signing_status == "not-configured":
+        if signing_identity not in (None, ""):
+            errors.append("unsigned distribution evidence must not claim a signing identity")
+        if set(signing) - {"status", "identity"}:
+            errors.append("unsigned distribution evidence must not claim signing or trust details")
+    else:
+        errors.append("distribution signing/notarization status must be passed or not-configured")
     licenses = artifact.get("licenses", {})
     if licenses.get("noticePresent") is not True or licenses.get("ffmpegSourceOffer") is not True:
         errors.append("license notice or FFmpeg source offer is missing")

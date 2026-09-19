@@ -23,11 +23,11 @@ The required same-host upgrade baseline is `0.14.0`. Older direct upgrades are u
 - [ ] `Cargo.toml`, `Cargo.lock` and `hifimule-ui/src-tauri/tauri.conf.json` agree on `0.15.0`.
 - [ ] The controlled audio-runtime manifest, source receipt and notices are present.
 - [ ] The complete automated suite and platform bundle verifiers pass.
-- [ ] Authenticode credentials are available for MSI and NSIS.
-- [ ] Developer ID signing and notarization credentials are available for both macOS rows.
+- [ ] If Windows signing is enabled, both Authenticode certificate secrets are available for MSI and NSIS.
+- [ ] If macOS signing is enabled, all Developer ID signing and notarization secrets are available for both macOS rows.
 - [ ] Clean-install, `0.14.0` upgrade, provider, physical-output, accessibility and real-sync fixtures have named owners.
 
-Missing signing, notarization, target hardware, provider fixtures or required results are blockers. They are not optional limitations.
+Signing is optional. With no platform signing secrets, the workflow produces unsigned Windows or macOS artifacts and skips only the corresponding trust verification. A partial credential set is a configuration error and fails before packaging. Unsigned Windows builds can trigger SmartScreen warnings, and unsigned macOS builds can trigger Gatekeeper warnings or require an explicit user override. Missing target hardware, provider fixtures or other required results remain blockers.
 
 ## 3. Build a non-publishing candidate
 
@@ -48,7 +48,7 @@ Before a release decision, each package row must link:
 
 - artifact filename, SHA-256, exact source revision and lockfile/runtime identity;
 - OS/architecture and clean-install or same-host upgrade environment;
-- loaded native versions and paths, signing/notarization and packaged-license results;
+- loaded native versions and paths, explicit signed or `not-configured` distribution status, and packaged-license results;
 - supported Jellyfin and OpenSubsonic/Subsonic playback outcomes;
 - lifecycle, physical output, physical media keys, accessibility, migration, real-sync coexistence and bounded-resource outcomes;
 - every limitation/blocker, owner, rationale and final row decision.
@@ -70,6 +70,6 @@ The called smoke workflow installs the release packages. Review its logs as life
 
 ## 6. Publish or reject
 
-The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes and the Windows signatures plus macOS Developer ID signatures/notarization validate. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.
+The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes. A signed row must include a verified signing identity and pass the Windows Authenticode or macOS Developer ID/notarization checks; an unsigned row must record signing status `not-configured` without an identity and must not be described as trusted by SmartScreen or Gatekeeper. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.
 
 Downgrade is not automatically rollback-safe. Preserve a backup before migration testing and document the exact supported recovery procedure without claiming erased device state as success.
