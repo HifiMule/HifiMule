@@ -180,6 +180,36 @@ function previewButtonHarness() {
   return { ...exports, calls, toasts, document, Element };
 }
 
+function queueButtonHarness() {
+  const calls = []; const toasts = [];
+  const document = { activeElement: null };
+  class Element {
+    listeners = new Map(); disabled = false; name = ''; label = ''; children = []; dataset = {};
+    appendChild(child) { child.parent = this; this.children.push(child); return child; }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    focus() { document.activeElement = this; }
+    async dispatchEvent(name) {
+      const event = { stopped: false, stopPropagation() { this.stopped = true; } };
+      for (let node = this; node && !event.stopped; node = node.parent) await node.listeners.get(name)?.(event);
+      return event;
+    }
+  }
+  document.createElement = () => new Element();
+  const exports = {};
+  const source = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/TrackQueueButton.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(source, {
+    exports, document,
+    require: name => name === '../rpc'
+      ? { playbackAppendQueue: async sources => calls.push(sources.map(source => ({ ...source }))) }
+      : name === '../toast'
+        ? { showToast: (...args) => toasts.push(args) }
+        : { t: (_key, values) => `Queue ${values?.title ?? values?.count}` },
+  });
+  return { ...exports, calls, toasts, document, Element };
+}
+
 test('mounted album row leaves nested keyboard activation to its play button', async () => {
   const h = albumButtonHarness();
   const row = h.mountRow({ id: 'album', serverId: 'portable-server', name: 'Album' });
@@ -244,6 +274,26 @@ test('track preview action invokes its frozen source without changing selection 
   assert.equal(h.calls.length, 1);
 });
 
+test('track queue action freezes portable identity and has no selection or basket side effect', async () => {
+  const h = queueButtonHarness();
+  const parent = new h.Element(); let selections = 0;
+  parent.addEventListener('click', () => { selections++; });
+  const button = parent.appendChild(h.createTrackQueueButton('portable-server', 'track-a', 'Track A'));
+  button.focus();
+  assert.equal((await button.dispatchEvent('mousedown')).stopped, true);
+  assert.equal((await button.dispatchEvent('click')).stopped, true);
+  assert.equal(JSON.stringify(h.calls), JSON.stringify([[{ serverId: 'portable-server', trackId: 'track-a' }]]));
+  assert.equal(selections, 0);
+  assert.equal(h.document.activeElement, button);
+  assert.equal(button.label, 'Queue Track A');
+  assert.equal(button.disabled, false);
+
+  const unavailable = h.createTrackQueueButton(null, 'track-b', 'Track B');
+  assert.equal(unavailable.disabled, true);
+  await unavailable.dispatchEvent('click');
+  assert.equal(h.calls.length, 1);
+});
+
 test('every track surface mounts the tested preview action and the RPC freezes concurrency fields', () => {
   for (const relative of [
     '../../hifimule-ui/src/components/MediaCard.ts',
@@ -252,6 +302,7 @@ test('every track surface mounts the tested preview action and the RPC freezes c
   ]) {
     const source = readFileSync(new URL(relative, import.meta.url), 'utf8');
     assert.match(source, /createTrackPreviewButton/);
+    assert.match(source, /createTrackQueueButton/);
   }
   const rpc = readFileSync(new URL('../../hifimule-ui/src/rpc.ts', import.meta.url), 'utf8');
   assert.match(rpc, /expectedQueueRevision: current\.queueRevision/);

@@ -6,7 +6,7 @@ use crate::db::Database;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 4;
+pub const PERSISTENCE_VERSION: i64 = 5;
 
 impl Database {
     pub fn has_portable_server(&self, server_id: &str) -> Result<bool> {
@@ -46,7 +46,7 @@ impl Database {
             return Err(anyhow!("UNSUPPORTED_PLAYBACK_VERSION"));
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_schema (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), version INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0), album_context_json TEXT);
+            CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0), album_context_json TEXT, queue_kind TEXT NOT NULL DEFAULT 'manual' CHECK(queue_kind IN ('album','manual')), current_gain_bits INTEGER NOT NULL DEFAULT 1065353216 CHECK(current_gain_bits>=0 AND current_gain_bits<=4294967295), current_qualified_suffix TEXT);
             CREATE TABLE IF NOT EXISTS playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL CHECK(ordinal>=0), server_id TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(session_id, ordinal));
             CREATE TABLE IF NOT EXISTS playback_audition (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, position_ms INTEGER NOT NULL CHECK(position_ms>=0), transport_state TEXT NOT NULL, saved_main_occurrence_id TEXT, saved_main_position_ms INTEGER NOT NULL CHECK(saved_main_position_ms>=0), saved_main_intent TEXT NOT NULL, resume_inhibited INTEGER NOT NULL CHECK(resume_inhibited IN (0,1)), contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)));
             CREATE TABLE IF NOT EXISTS playback_audition_outcomes (outcome_id INTEGER PRIMARY KEY AUTOINCREMENT, audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT NOT NULL CHECK(disposition IN ('naturalCompletion','stopped','returned','replaced','superseded','technicalFailure','interrupted')), terminal_position_ms INTEGER NOT NULL CHECK(terminal_position_ms>=0), duration_ms INTEGER CHECK(duration_ms>=0), failure_code TEXT, contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)), fully_heard INTEGER NOT NULL CHECK(fully_heard IN (0,1)));
@@ -92,8 +92,51 @@ impl Database {
                 [],
             )?;
         }
+        let has_queue_kind = {
+            let mut statement = tx.prepare("PRAGMA table_info(playback_sessions)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|name| name == "queue_kind")
+        };
+        if !has_queue_kind {
+            tx.execute(
+                "ALTER TABLE playback_sessions ADD COLUMN queue_kind TEXT NOT NULL DEFAULT 'manual' CHECK(queue_kind IN ('album','manual'))",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE playback_sessions SET queue_kind=CASE WHEN album_context_json IS NULL THEN 'manual' ELSE 'album' END",
+                [],
+            )?;
+        }
+        let has_current_policy = {
+            let mut statement = tx.prepare("PRAGMA table_info(playback_sessions)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|name| name == "current_gain_bits")
+        };
+        if !has_current_policy {
+            tx.execute(
+                "ALTER TABLE playback_sessions ADD COLUMN current_gain_bits INTEGER NOT NULL DEFAULT 1065353216 CHECK(current_gain_bits>=0 AND current_gain_bits<=4294967295)",
+                [],
+            )?;
+            tx.execute(
+                "ALTER TABLE playback_sessions ADD COLUMN current_qualified_suffix TEXT",
+                [],
+            )?;
+        }
         if version == Some(3) {
             migrate_v3_album_context(&tx)?;
+            tx.execute(
+                "UPDATE playback_sessions SET queue_kind=CASE WHEN album_context_json IS NULL THEN 'manual' ELSE 'album' END",
+                [],
+            )?;
+        }
+        if version != Some(PERSISTENCE_VERSION) {
+            migrate_current_policy(&tx)?;
         }
         if fail_before_version_commit {
             return Err(anyhow!("injected playback migration failure"));
@@ -118,12 +161,14 @@ impl Database {
     pub fn load_playback_session(&self) -> Result<Option<PersistedSession>> {
         self.init_playback()?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json FROM playback_sessions WHERE singleton_id=1", [], |r| {
+        let loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix FROM playback_sessions WHERE singleton_id=1", [], |r| {
             let state: String = r.get(3)?;
             let state = match state.as_str() { "idle"=>TransportState::Idle, "paused"=>TransportState::Paused, "buffering"=>TransportState::Buffering, "playing"=>TransportState::Playing, "stopping"=>TransportState::Stopping, _=>return Err(rusqlite::Error::InvalidQuery) };
             let context_json: Option<String> = r.get(6)?;
             let album_context = context_json.map(|json| serde_json::from_str(&json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))).transpose()?;
-            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)?, album_context })
+            let queue_kind = match r.get::<_, String>(7)?.as_str() { "album" => super::model::QueueKind::Album, "manual" => super::model::QueueKind::Manual, _ => return Err(rusqlite::Error::InvalidQuery) };
+            let current_gain_bits = u32::try_from(r.get::<_, i64>(8)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)?, queue_kind, current_gain_bits, current_qualified_suffix:r.get(9)?, album_context })
         }).optional()?;
         if loaded.is_none() {
             let occurrence_count: i64 =
@@ -144,6 +189,12 @@ impl Database {
             || session.position_ms > 9_007_199_254_740_991
             || session.queue_revision > i64::MAX as u64
             || session.checkpoint_sequence > i64::MAX as u64
+            || !f32::from_bits(session.current_gain_bits).is_finite()
+            || f32::from_bits(session.current_gain_bits) <= 0.0
+            || session
+                .current_qualified_suffix
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 128)
         {
             return Err(anyhow!("INVALID_SESSION"));
         }
@@ -152,6 +203,9 @@ impl Database {
             .as_ref()
             .is_some_and(|context| context.validate().is_err())
         {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        if session.queue_kind == super::model::QueueKind::Album && session.album_context.is_none() {
             return Err(anyhow!("INVALID_SESSION"));
         }
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -175,6 +229,7 @@ impl Database {
         }
         let mut after = -1i64;
         let mut found = false;
+        let mut expected_album_current_policy = None;
         let mut scanned = 0i64;
         let mut album_membership = super::model::album_membership_hasher();
         loop {
@@ -193,17 +248,26 @@ impl Database {
                 {
                     return Err(anyhow!("INVALID_SESSION"));
                 }
-                found |= Some(&row.occurrence_id) == session.current_occurrence_id.as_ref();
-                if session.album_context.as_ref().is_some_and(|context| {
-                    row.ordinal < context.member_count
-                        && row.source.server_id != context.source.server_id
-                }) {
+                let is_current = Some(&row.occurrence_id) == session.current_occurrence_id.as_ref();
+                found |= is_current;
+                if is_current && session.queue_kind == super::model::QueueKind::Album {
+                    expected_album_current_policy = session.album_context.as_ref().map(|context| {
+                        (context.scalar_for(&row).to_bits(), context.suffix_for(&row))
+                    });
+                }
+                if session.queue_kind == super::model::QueueKind::Album
+                    && session.album_context.as_ref().is_some_and(|context| {
+                        row.ordinal < context.member_count
+                            && row.source.server_id != context.source.server_id
+                    })
+                {
                     return Err(anyhow!("INVALID_SESSION"));
                 }
-                if session
-                    .album_context
-                    .as_ref()
-                    .is_some_and(|context| row.ordinal < context.member_count)
+                if session.queue_kind == super::model::QueueKind::Album
+                    && session
+                        .album_context
+                        .as_ref()
+                        .is_some_and(|context| row.ordinal < context.member_count)
                 {
                     super::model::hash_album_member(&mut album_membership, &row.source);
                 }
@@ -215,16 +279,28 @@ impl Database {
         // by the keyset predicate; no whole-history collection is retained.
         if scanned != count
             || (count > 0 && !found)
-            || session
-                .album_context
-                .as_ref()
-                .is_some_and(|context| context.member_count > count as u64)
+            || (session.queue_kind == super::model::QueueKind::Album
+                && session
+                    .album_context
+                    .as_ref()
+                    .is_some_and(|context| context.member_count > count as u64))
         {
             return Err(anyhow!("INVALID_SESSION"));
         }
-        if session.album_context.as_ref().is_some_and(|context| {
-            album_membership.finalize().to_hex().as_str() != context.membership_digest
-        }) {
+        if session.queue_kind == super::model::QueueKind::Album
+            && session.album_context.as_ref().is_some_and(|context| {
+                album_membership.finalize().to_hex().as_str() != context.membership_digest
+            })
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        if session.queue_kind == super::model::QueueKind::Album
+            && expected_album_current_policy.as_ref()
+                != Some(&(
+                    session.current_gain_bits,
+                    session.current_qualified_suffix.clone(),
+                ))
+        {
             return Err(anyhow!("INVALID_SESSION"));
         }
         tx.commit()?;
@@ -268,6 +344,73 @@ impl Database {
         )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    pub fn playback_range_count(
+        &self,
+        session_id: &str,
+        lower_exclusive: Option<u64>,
+        upper_exclusive: Option<u64>,
+    ) -> Result<u64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let lower = lower_exclusive
+            .map(i64::try_from)
+            .transpose()?
+            .unwrap_or(-1);
+        let upper = upper_exclusive
+            .map(i64::try_from)
+            .transpose()?
+            .unwrap_or(i64::MAX);
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 AND ordinal<?3",
+            params![session_id, lower, upper],
+            |row| row.get::<_, i64>(0),
+        )? as u64)
+    }
+
+    pub fn playback_range_page(
+        &self,
+        session_id: &str,
+        lower_exclusive: Option<u64>,
+        upper_exclusive: Option<u64>,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Occurrence>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let lower = lower_exclusive
+            .map(i64::try_from)
+            .transpose()?
+            .unwrap_or(-1);
+        let after = after
+            .map(i64::try_from)
+            .transpose()?
+            .unwrap_or(lower)
+            .max(lower);
+        let upper = upper_exclusive
+            .map(i64::try_from)
+            .transpose()?
+            .unwrap_or(i64::MAX);
+        let mut stmt = conn.prepare("SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 AND ordinal<?3 ORDER BY ordinal LIMIT ?4")?;
+        stmt.query_map(
+            params![session_id, after, upper, limit as i64],
+            occurrence_from_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
+
+    pub fn playback_predecessor_in_range(
+        &self,
+        session_id: &str,
+        ordinal: u64,
+        lower_exclusive: Option<u64>,
+    ) -> Result<Option<Occurrence>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal<?2 AND ordinal>?3 ORDER BY ordinal DESC LIMIT 1",
+            params![session_id, i64::try_from(ordinal)?, lower_exclusive.map(i64::try_from).transpose()?.unwrap_or(-1)],
+            occurrence_from_row,
+        ).optional().map_err(Into::into)
     }
 
     pub fn playback_occurrence(
@@ -336,7 +479,7 @@ impl Database {
             return Err(anyhow!("active audition changed"));
         }
         let album_context_json = album_context_json(session)?;
-        tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json) VALUES(1,?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json])?;
+        tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json,queue_kind=excluded.queue_kind,current_gain_bits=excluded.current_gain_bits,current_qualified_suffix=excluded.current_qualified_suffix", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json,queue_kind_name(session.queue_kind),i64::from(session.current_gain_bits),session.current_qualified_suffix])?;
         tx.execute(
             "DELETE FROM playback_occurrences WHERE session_id=?1",
             [&session.session_id],
@@ -355,7 +498,7 @@ impl Database {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
         let album_context_json = album_context_json(session)?;
-        tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json) VALUES(1,?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json])?;
+        tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json,queue_kind=excluded.queue_kind,current_gain_bits=excluded.current_gain_bits,current_qualified_suffix=excluded.current_qualified_suffix", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json,queue_kind_name(session.queue_kind),i64::from(session.current_gain_bits),session.current_qualified_suffix])?;
         tx.execute(
             "DELETE FROM playback_occurrences WHERE session_id=?1",
             [&session.session_id],
@@ -397,6 +540,116 @@ impl Database {
         let tx = conn.transaction()?;
         update_session(&tx, session)?;
         insert_occurrences(&tx, &session.session_id, occurrences)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn append_playback_occurrences_with_audition_baseline(
+        &self,
+        session: &PersistedSession,
+        occurrences: &[Occurrence],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        update_session(&tx, session)?;
+        insert_occurrences(&tx, &session.session_id, occurrences)?;
+        let changed = tx.execute(
+            "UPDATE playback_audition SET saved_main_occurrence_id=?1,saved_main_position_ms=0,saved_main_intent='paused' WHERE singleton_id=1 AND parent_session_id=?2 AND saved_main_occurrence_id IS NULL",
+            params![session.current_occurrence_id, session.session_id],
+        )?;
+        if changed != 1 {
+            return Err(anyhow!("active audition baseline changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn edit_playback_upcoming(
+        &self,
+        session: &PersistedSession,
+        ordered_upcoming: &[Occurrence],
+        removed_occurrence_ids: &[String],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let (stored_revision, stored_current): (i64, Option<String>) = tx.query_row(
+            "SELECT queue_revision,current_occurrence_id FROM playback_sessions WHERE singleton_id=1 AND session_id=?1",
+            [&session.session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let prior_revision = session
+            .queue_revision
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("queue revision underflow"))?;
+        if stored_revision != i64::try_from(prior_revision)?
+            || stored_current != session.current_occurrence_id
+        {
+            return Err(anyhow!("authoritative queue changed"));
+        }
+        let current_id = stored_current.ok_or_else(|| anyhow!("current occurrence is required"))?;
+        let current_ordinal: i64 = tx.query_row(
+            "SELECT ordinal FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+            params![session.session_id, current_id],
+            |row| row.get(0),
+        )?;
+        let existing: Vec<String> = {
+            let mut statement = tx.prepare(
+                "SELECT occurrence_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal",
+            )?;
+            statement
+                .query_map(params![session.session_id, current_ordinal], |row| {
+                    row.get(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut expected = existing.clone();
+        expected.retain(|id| !removed_occurrence_ids.contains(id));
+        let proposed: Vec<&str> = ordered_upcoming
+            .iter()
+            .map(|row| row.occurrence_id.as_str())
+            .collect();
+        if expected.len() != proposed.len()
+            || expected.iter().any(|id| !proposed.contains(&id.as_str()))
+        {
+            return Err(anyhow!("edited queue membership changed"));
+        }
+        for occurrence_id in removed_occurrence_ids {
+            let changed = tx.execute(
+                "DELETE FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2 AND ordinal>?3",
+                params![session.session_id, occurrence_id, current_ordinal],
+            )?;
+            if changed != 1 {
+                return Err(anyhow!("removed occurrence is no longer upcoming"));
+            }
+        }
+        if !ordered_upcoming.is_empty() {
+            let max_ordinal: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(ordinal),0) FROM playback_occurrences WHERE session_id=?1",
+                [&session.session_id],
+                |row| row.get(0),
+            )?;
+            let offset = max_ordinal
+                .checked_add(i64::try_from(ordered_upcoming.len())?)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| anyhow!("playback ordinal overflow"))?;
+            tx.execute(
+                "UPDATE playback_occurrences SET ordinal=ordinal+?1 WHERE session_id=?2 AND ordinal>?3",
+                params![offset, session.session_id, current_ordinal],
+            )?;
+            for (index, occurrence) in ordered_upcoming.iter().enumerate() {
+                let ordinal = current_ordinal
+                    .checked_add(i64::try_from(index)? + 1)
+                    .ok_or_else(|| anyhow!("playback ordinal overflow"))?;
+                let changed = tx.execute(
+                    "UPDATE playback_occurrences SET ordinal=?1 WHERE session_id=?2 AND occurrence_id=?3",
+                    params![ordinal, session.session_id, occurrence.occurrence_id],
+                )?;
+                if changed != 1 {
+                    return Err(anyhow!("moved occurrence is absent"));
+                }
+            }
+        }
+        update_session(&tx, session)?;
         tx.commit()?;
         Ok(())
     }
@@ -445,6 +698,28 @@ impl Database {
         )?;
         if changed != 1 {
             return Err(anyhow!("terminal playback outcome was already consumed"));
+        }
+        update_session(&tx, session)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Move the durable cursor away from an occurrence whose terminal outcome
+    /// was already committed. This is used when a successor is appended after
+    /// the previous final current completed; the original outcome is immutable.
+    pub fn persist_playback_departure(
+        &self,
+        session: &PersistedSession,
+        departed_occurrence_id: &str,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE playback_occurrences SET outcome=outcome WHERE session_id=?1 AND occurrence_id=?2 AND outcome IS NOT NULL",
+            params![session.session_id, departed_occurrence_id],
+        )?;
+        if changed != 1 {
+            return Err(anyhow!("terminal playback outcome is absent"));
         }
         update_session(&tx, session)?;
         tx.commit()?;
@@ -942,6 +1217,47 @@ fn migrate_v3_album_context(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+fn migrate_current_policy(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let row: Option<(String, Option<String>, Option<String>, String)> = tx
+        .query_row(
+            "SELECT session_id,current_occurrence_id,album_context_json,queue_kind FROM playback_sessions WHERE singleton_id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((session_id, current_id, context_json, queue_kind)) = row else {
+        return Ok(());
+    };
+    let policy = if queue_kind == "album" {
+        current_id
+            .zip(context_json)
+            .map(|(current_id, json)| -> Result<(u32, Option<String>)> {
+                let context: super::model::FrozenAlbumContext = serde_json::from_str(&json)?;
+                context.validate().map_err(|error| anyhow!(error))?;
+                let current = tx.query_row(
+                    "SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+                    params![session_id, current_id],
+                    occurrence_from_row,
+                )?;
+                Ok((
+                    context.scalar_for(&current).to_bits(),
+                    context.suffix_for(&current),
+                ))
+            })
+            .transpose()?
+    } else if queue_kind == "manual" {
+        None
+    } else {
+        return Err(anyhow!("INVALID_SESSION"));
+    };
+    let (gain_bits, suffix) = policy.unwrap_or((1.0f32.to_bits(), None));
+    tx.execute(
+        "UPDATE playback_sessions SET current_gain_bits=?1,current_qualified_suffix=?2 WHERE singleton_id=1",
+        params![i64::from(gain_bits), suffix],
+    )?;
+    Ok(())
+}
+
 fn nonnegative(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
@@ -950,8 +1266,8 @@ fn nonnegative(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
 fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
     let album_context_json = album_context_json(session)?;
     let changed = tx.execute(
-        "UPDATE playback_sessions SET session_id=?1,queue_revision=?2,checkpoint_sequence=?3,transport_state=?4,current_occurrence_id=?5,position_ms=?6,album_context_json=?7 WHERE singleton_id=1",
-        params![session.session_id, session.queue_revision as i64, session.checkpoint_sequence as i64, state_name(session.state), session.current_occurrence_id, session.position_ms as i64, album_context_json],
+        "UPDATE playback_sessions SET session_id=?1,queue_revision=?2,checkpoint_sequence=?3,transport_state=?4,current_occurrence_id=?5,position_ms=?6,album_context_json=?7,queue_kind=?8,current_gain_bits=?9,current_qualified_suffix=?10 WHERE singleton_id=1",
+        params![session.session_id, session.queue_revision as i64, session.checkpoint_sequence as i64, state_name(session.state), session.current_occurrence_id, session.position_ms as i64, album_context_json, queue_kind_name(session.queue_kind), i64::from(session.current_gain_bits), session.current_qualified_suffix],
     )?;
     if changed != 1 {
         return Err(anyhow!("playback session is absent"));
@@ -998,6 +1314,13 @@ fn state_name(state: TransportState) -> &'static str {
     }
 }
 
+fn queue_kind_name(kind: super::model::QueueKind) -> &'static str {
+    match kind {
+        super::model::QueueKind::Album => "album",
+        super::model::QueueKind::Manual => "manual",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,6 +1338,9 @@ mod tests {
             },
             current_occurrence_id: current,
             position_ms,
+            queue_kind: super::super::model::QueueKind::Manual,
+            current_gain_bits: 1.0f32.to_bits(),
+            current_qualified_suffix: None,
             album_context: None,
         }
     }
@@ -1041,6 +1367,7 @@ mod tests {
         let membership_digest =
             super::super::model::album_membership_digest([&first.source, &second.source]);
         let mut committed = session(1, Some(first.occurrence_id.clone()), 0);
+        committed.queue_kind = super::super::model::QueueKind::Album;
         committed.album_context = Some(super::super::model::FrozenAlbumContext {
             source: super::super::model::AlbumSource {
                 server_id: "portable-server".into(),
@@ -1057,6 +1384,8 @@ mod tests {
                 reason: super::super::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
             },
         });
+        committed.current_gain_bits = 0.75f32.to_bits();
+        committed.current_qualified_suffix = Some("flac".into());
         db.persist_playback_structure(&committed, &[first.clone(), second.clone()])
             .unwrap();
 

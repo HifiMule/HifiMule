@@ -5,7 +5,7 @@ prepared: 2026-09-19
 
 # Story 15.13: Edit the upcoming listening queue
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -73,31 +73,31 @@ so that I can shape what I hear next without interrupting the current track.
 
 ## Tasks / Subtasks
 
-- [ ] Extend the existing queue contract and read model (AC: 1–3, 5, 8).
-  - [ ] Add strict occurrence-based remove/move operations to `playback.applySession`, typed frontend wrappers, limits, stable error codes and authoritative conflict data.
-  - [ ] Add canonical main-current and album/manual queue policy projection independently of active Preview; support bounded upcoming/history reads and cursor validation.
-  - [ ] Document the closed implementation decisions below in the daemon API contract; retain command deduplication and decimal-string revisions.
-- [ ] Implement atomic queue editing and migration in the serialized owner (AC: 1–3, 5–7, 9).
-  - [ ] Validate target/anchor eligibility against the latest main current, preserve repeated source occurrences and enforce current-plus-upcoming capacity.
-  - [ ] Persist edited order, revision, album/manual transition and frozen current gain atomically; preserve historical outcomes and current identity/position.
-  - [ ] Keep empty-main append paused; make preview edits preserve audition and handle the empty-main baseline explicitly.
-  - [ ] Exercise rollback, migration, receipt retry, shutdown admission and paused restoration.
-- [ ] Make successor invalidation safe before audio emission (AC: 2, 4–7).
-  - [ ] Introduce or extend a successor-only preparation fence; revoke pending/ready/staged successor material without stopping the current stream.
-  - [ ] Serialize boundary authorization with edit admission; reconcile already presented boundaries before deciding whether a target is upcoming.
-  - [ ] Preserve existing buffer bounds, output-loss behavior, unsupported-boundary fallback and callback constraints.
-- [ ] Add library queue actions using existing track selection (AC: 1, 3, 8).
-  - [ ] Provide per-track Add to queue in grid/list and Tracks surfaces plus selected-track bulk Add in existing selection bars.
-  - [ ] Capture ordered portable sources before awaits; keep queue actions independent of basket and playlist-write capability.
-  - [ ] Retain browser selection and expose pending/success/conflict/limit errors through localized accessible status; narrow the existing PREVIEW_ACTIVE copy that currently tells users to return before editing the main queue.
-- [ ] Make the Playback destination editable and bounded (AC: 2–3, 5, 7–8).
-  - [ ] Show current, upcoming and paged history with occurrence identity, metadata and source labels; keep Preview separate.
-  - [ ] Provide keyboard-operable Move up/Move down/Remove, including page-boundary movement; preserve focus after accepted edits and conflicts.
-  - [ ] Retain the shared poll store, request fencing, metadata cache, stable paging controls, Retry and Browse library navigation.
-- [ ] Validate behavior and document evidence (AC: 1–10).
-  - [ ] Add owner/persistence/audio race tests and production-component UI tests described below.
-  - [ ] Update API contracts and installed-test checklist; run focused checks, shared regressions and available platform checks.
-  - [ ] Record actual OS/architecture/commit results and leave unavailable hardware/platform evidence explicitly pending.
+- [x] Extend the existing queue contract and read model (AC: 1–3, 5, 8).
+  - [x] Add strict occurrence-based remove/move operations to `playback.applySession`, typed frontend wrappers, limits, stable error codes and authoritative conflict data.
+  - [x] Add canonical main-current and album/manual queue policy projection independently of active Preview; support bounded upcoming/history reads and cursor validation.
+  - [x] Document the closed implementation decisions below in the daemon API contract; retain command deduplication and decimal-string revisions.
+- [x] Implement atomic queue editing and migration in the serialized owner (AC: 1–3, 5–7, 9).
+  - [x] Validate target/anchor eligibility against the latest main current, preserve repeated source occurrences and enforce current-plus-upcoming capacity.
+  - [x] Persist edited order, revision, album/manual transition and frozen current gain atomically; preserve historical outcomes and current identity/position.
+  - [x] Keep empty-main append paused; make preview edits preserve audition and handle the empty-main baseline explicitly.
+  - [x] Exercise rollback, migration, receipt retry, shutdown admission and paused restoration.
+- [x] Make successor invalidation safe before audio emission (AC: 2, 4–7).
+  - [x] Introduce or extend a successor-only preparation fence; revoke pending/ready/staged successor material without stopping the current stream.
+  - [x] Serialize boundary authorization with edit admission; reconcile already presented boundaries before deciding whether a target is upcoming.
+  - [x] Preserve existing buffer bounds, output-loss behavior, unsupported-boundary fallback and callback constraints.
+- [x] Add library queue actions using existing track selection (AC: 1, 3, 8).
+  - [x] Provide per-track Add to queue in grid/list and Tracks surfaces plus selected-track bulk Add in existing selection bars.
+  - [x] Capture ordered portable sources before awaits; keep queue actions independent of basket and playlist-write capability.
+  - [x] Retain browser selection and expose pending/success/conflict/limit errors through localized accessible status; narrow the existing PREVIEW_ACTIVE copy that currently tells users to return before editing the main queue.
+- [x] Make the Playback destination editable and bounded (AC: 2–3, 5, 7–8).
+  - [x] Show current, upcoming and paged history with occurrence identity, metadata and source labels; keep Preview separate.
+  - [x] Provide keyboard-operable Move up/Move down/Remove, including page-boundary movement; preserve focus after accepted edits and conflicts.
+  - [x] Retain the shared poll store, request fencing, metadata cache, stable paging controls, Retry and Browse library navigation.
+- [x] Validate behavior and document evidence (AC: 1–10).
+  - [x] Add owner/persistence/audio race tests and production-component UI tests described below.
+  - [x] Update API contracts and installed-test checklist; run focused checks, shared regressions and available platform checks.
+  - [x] Record actual OS/architecture/commit results and leave unavailable hardware/platform evidence explicitly pending.
 
 ## Dev Notes
 
@@ -236,18 +236,53 @@ Use Rust/SQL snake_case and JSON/TypeScript camelCase, including enum variant fi
 
 GPT-6 (story preparation).
 
+GPT-5 (Codex implementation).
+
 ### Debug Log References
 
 - Prepared against `36add0b4801503d8abdaf124bb0c015ea859e0e7` using planning, backend and UI research; no implementation changes or runtime acceptance claims.
 - Validated against the create-story checklist; applied backend/UI review corrections. Confirmed all ten epic acceptance criteria are preserved verbatim, story/sprint status agree, template placeholders are absent and whitespace checks pass.
+- Implemented and verified against repository HEAD `a9e4a4e2868ffcf5a559834e90731fbfd61b0559` plus the Story 15.13 working tree on macOS 27.0 (26A428), arm64.
+- Controlled full daemon: 1,006 passed, 6 ignored; focused Playback: 285 passed, 6 ignored; authenticated RPC: 120 passed.
+- Production destination/playback UI: 51 passed; installed-evidence validators: 33 passed; session-evidence validators: 2 passed; frontend production build and whitespace checks passed.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Closed selection ordering, operation schemas, queue limits, revision behavior, album/manual gain and preview-edit decisions.
 - Retained the predecessor's deferred physical-basket guard and unavailable installed-platform evidence as known limitations.
+- Added occurrence-based append/remove/move with atomic revisioned persistence, strict active-capacity limits, deduplicated command receipts and cursor-only departure after final completion.
+- Added schema-v5 queue kind and explicit current gain/representation policy migration so manual edits preserve the audible current while all future manual occurrences use unity.
+- Added Preview-safe edits, scoped current/upcoming/history reads, successor-only authorization fencing, bounded editable Playback UI and independent per-track/bulk library queue actions.
+- Suppressed persisted current-occurrence UUIDs unless transport is live and matching track metadata is actually loaded, including restored paused sessions with no selected title.
+- Kept Windows, Linux, macOS x64 and installed macOS ARM64 audio/accessibility certification explicitly pending; local mock/unit evidence does not promote those rows.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-13-edit-the-upcoming-listening-queue.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/album_admission.rs`
+- `hifimule-daemon/src/playback/session/album_admission_tests.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/components/TrackQueueButton.ts`
+- `hifimule-ui/src/components/TracksBrowseView.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/destination-ui.test.mjs`
+- `scripts/tests/playback-ui.test.mjs`
+
+### Change Log
+
+- 2026-09-19: Implemented Story 15.13 manual listening queue editing, persistence migration, successor fencing, bounded editable UI, localized library actions, tests and evidence documentation.

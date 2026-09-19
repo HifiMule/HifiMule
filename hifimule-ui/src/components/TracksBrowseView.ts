@@ -7,6 +7,7 @@ import {
     BrowseAlbum,
     BrowseTrack,
     playbackPlayTrack,
+    playbackAppendQueue,
 } from '../rpc';
 import { MediaCard } from './MediaCard';
 import { createAlbumPlayButton } from './AlbumPlayButton';
@@ -14,6 +15,7 @@ import { basketStore, BasketItem } from '../state/basket';
 import { showToast } from '../toast';
 import { t } from '../i18n';
 import { createTrackPreviewButton } from './TrackPreviewButton';
+import { createTrackQueueButton } from './TrackQueueButton';
 
 const ARTIST_LIMIT = 200;
 const ALBUM_LIMIT = 50;
@@ -576,6 +578,10 @@ export class TracksBrowseView {
         previewBtn.style.fontSize = '1.1rem';
         row.appendChild(previewBtn);
 
+        const queueBtn = createTrackQueueButton(track.serverId, track.id, track.title) as any;
+        queueBtn.style.fontSize = '1.1rem';
+        row.appendChild(queueBtn);
+
         const isInBasket = basketStore.has(track.id);
         const toggleBtn = document.createElement('sl-icon-button') as any;
         toggleBtn.name = isInBasket ? 'dash-circle-fill' : 'plus-circle-fill';
@@ -762,6 +768,17 @@ export class TracksBrowseView {
         addBtn.addEventListener('click', () => this.bulkAddToBasket());
         bar.appendChild(addBtn);
 
+        const queueBtn = document.createElement('sl-button') as any;
+        queueBtn.size = 'small';
+        queueBtn.dataset.bulkQueueAdd = '';
+        const selected = this.resolveSelectedTracks();
+        queueBtn.disabled = selected.length > 200 || selected.some(track => !track.serverId);
+        queueBtn.textContent = selected.length > 200
+            ? t('playback.queue_limit_selection', { count: selected.length })
+            : t('playback.add_selection_to_queue');
+        queueBtn.addEventListener('click', () => void this.bulkAddToQueue(queueBtn));
+        bar.appendChild(queueBtn);
+
         if (this.supportsPlaylistWrite) {
             const plBtn = document.createElement('sl-button') as any;
             plBtn.size = 'small';
@@ -791,6 +808,14 @@ export class TracksBrowseView {
         if (existing) {
             const count = existing.querySelector('.bulk-action-bar__count');
             if (count) count.textContent = t('library.selection.count', { count: this.selectedTrackIds.size });
+            const queue = existing.querySelector<HTMLElement>('[data-bulk-queue-add]') as any;
+            if (queue) {
+                const selected = this.resolveSelectedTracks();
+                queue.disabled = selected.length > 200 || selected.some(track => !track.serverId);
+                queue.textContent = selected.length > 200
+                    ? t('playback.queue_limit_selection', { count: selected.length })
+                    : t('playback.add_selection_to_queue');
+            }
             return;
         }
         const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
@@ -852,6 +877,25 @@ export class TracksBrowseView {
             t('library.selection.new_playlist_name'),
             () => this.clearSelection()
         );
+    }
+
+    private async bulkAddToQueue(button: any): Promise<void> {
+        // Freeze portable identities in displayed order before the first await.
+        const sources = this.resolveSelectedTracks().map(track => ({
+            serverId: track.serverId ?? '',
+            trackId: track.id,
+        }));
+        if (sources.length === 0 || sources.length > 200 || sources.some(source => !source.serverId)) return;
+        button.loading = true;
+        try {
+            await playbackAppendQueue(sources);
+            showToast(t('playback.queue_add_success', { count: sources.length }), 'success');
+            // Queue actions deliberately retain browser multi-selection.
+        } catch (error) {
+            showToast((error as Error).message, 'danger');
+        } finally {
+            button.loading = false;
+        }
     }
 
     // ─── Selection handlers ───────────────────────────────────────────────────

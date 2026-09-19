@@ -609,3 +609,28 @@ commit, physical device/interface and observed focus/announcement behavior:
 
 No row above is promoted by source inspection, DOM mocks, daemon unit tests or
 the pre-existing Story 15.11 digital audio evidence.
+
+## Story 15.13 manual queue evidence (2026-09-19)
+
+Local macOS ARM64 owner/persistence and production-component DOM tests cover
+ordered/repeated append identities, occurrence-only remove/move, no-op stability,
+authoritative conflicts, scoped bounded paging, restart-paused restoration,
+keyboard-native action buttons, deep-page locator requests and browser-selection
+preservation. The controlled FFmpeg build wrapper verifies the local daemon ABI;
+these checks do not certify installed audio or physical output.
+
+Recorded local mock/unit evidence: macOS 27.0 (26A428), arm64, repository HEAD
+`a9e4a4e2868ffcf5a559834e90731fbfd61b0559` plus the uncommitted Story 15.13
+working tree, 2026-09-19T09:36:57Z. The controlled full daemon run passed
+1,006 tests with 6 diagnostic/hardware fixtures intentionally ignored; focused
+Playback passed 285 with 6 ignored; authenticated RPC passed 120; production
+destination/playback component tests passed 50; installed-evidence validators
+passed 33 and session-evidence validators passed 2. The UI production build and
+`git diff --check` also passed. These are local automation results, not an
+installed-package or physical-audio certification.
+
+- [ ] Windows installed: append/move/remove, repeats, edit-versus-boundary race, Preview edit, keyboard and screen-reader focus, long history.
+- [ ] Linux installed: append/move/remove, repeats, Pulse submission race, Preview edit, keyboard and screen-reader focus, long history.
+- [ ] macOS x64 installed: append/move/remove, repeats, callback race, Preview edit, keyboard and screen-reader focus, long history.
+- [ ] macOS ARM64 installed: append/move/remove, repeats, callback race, Preview edit, keyboard and screen-reader focus, long history.
+- [ ] Physical-basket mutation guard R16 inherited from Story 15.12 remains unresolved; Story 15.13 queue actions introduce no basket path and do not certify that deferred acceptance item.

@@ -7,6 +7,7 @@ import { t } from '../i18n';
 import { showToast } from '../toast';
 import { createAlbumPlayButton } from './AlbumPlayButton';
 import { createTrackPreviewButton } from './TrackPreviewButton';
+import { createTrackQueueButton } from './TrackQueueButton';
 
 export interface JellyfinItem {
     Id: string;
@@ -126,6 +127,9 @@ export class MediaCard {
             card.querySelector('.card-content')?.appendChild(play);
             card.querySelector('.card-content')?.appendChild(
                 createTrackPreviewButton(audio.serverId, audio.id, itemName),
+            );
+            card.querySelector('.card-content')?.appendChild(
+                createTrackQueueButton(audio.serverId, audio.id, itemName),
             );
         }
 

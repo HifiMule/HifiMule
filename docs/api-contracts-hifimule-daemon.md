@@ -1193,3 +1193,46 @@ lookups, and returns rows in requested occurrence order without collapsing
 duplicates. Each row is `available`, `sourceUnavailable` or `trackUnavailable`;
 one unavailable source does not fail the page. Queue/session conflicts require a
 fresh `playback.getSession` snapshot and restarted paging.
+
+## Manual listening queue edits (schema v1, Story 15.13)
+
+`playback.applySession` retains its authenticated mutation envelope and adds
+`appendQueue {sources}`, `removeUpcoming {occurrenceIds}` and
+`moveUpcoming {occurrenceId,beforeOccurrenceId}`. Sources are ordered portable
+`{serverId,trackId}` identities; every append creates a fresh occurrence, including
+repeated recordings. Remove is an atomic batch of 1–200 distinct occurrence UUIDs.
+Move removes one upcoming occurrence and inserts it immediately before another
+upcoming occurrence, or at the end when the anchor is null. Self, adjacent and
+already-last moves are successful no-ops. Exact command receipt replay remains
+idempotent and changed-payload command reuse remains invalid.
+
+Upcoming is strictly after the canonical main current, including during Preview.
+Current/history/missing targets and anchors return `OCCURRENCE_NOT_UPCOMING` with
+authoritative session metadata. Structural edits require the observed decimal
+queue revision; progress does not advance it. Accepted non-noop edits increment
+the revision once, preserve current identity/position/history, persist atomically,
+and set `queueKind` to `manual`. Manual active capacity is 10,000 occurrences
+(current plus upcoming); insert/remove batches are capped at 200. Empty append is
+a no-op and empty remove is invalid. Queue edits never call provider playlist,
+basket, manifest, sync or physical-device mutations.
+
+Snapshots expose `mainCurrent` independently from Preview's active `current` and
+`queueKind: "album" | "manual"`. An accepted manual edit freezes the current
+album member's admitted gain/representation while future manual occurrences use
+unity gain. A new album Play restores album policy. Persistence schema v5 derives
+legacy queue kind from the validated v4 album context and restores accepted edits
+paused after relaunch.
+
+`playback.listOccurrences` remains backward compatible with `section: "all"` and
+adds bounded `upcoming` and `history` sections. Scoped requests bind session,
+queue revision and `expectedMainOccurrenceId`; responses echo `section`,
+`sectionCount`, `mainCurrentOccurrenceId`, bounded edge neighbors and
+`endOfSection`. `aroundOccurrenceId` is mutually exclusive with a cursor and
+returns a bounded page containing the target. Cursors bind the same scoped
+identity and are invalid after a queue edit or main-current advance.
+
+Accepted edits revoke prepared-successor authorization without cancelling the
+active decoder. Pending network results and callback/Pulse successor consumption
+are fenced by a successor-only epoch; stale prepared PCM cannot cross the next
+boundary after acknowledgment. Current output gate, generation, cursor and active
+samples remain owned by the existing transport pipeline.

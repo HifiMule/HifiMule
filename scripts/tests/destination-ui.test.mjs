@@ -31,9 +31,25 @@ class Element {
     const own = selector === 'button' && this.tagName === 'button' ? [this] : [];
     return own.concat(this.children.flatMap(child => child.querySelectorAll(selector)));
   }
+  querySelector(selector) {
+    const all = [this, ...this.children.flatMap(child => [child, ...child.querySelectorAll('*')])];
+    const occurrence = selector.match(/data-occurrence-id="([^"]+)"/)?.[1];
+    const action = selector.match(/data-queue-action="([^"]+)"/)?.[1];
+    return all.find(node => (!occurrence || node.dataset.occurrenceId === occurrence)
+      && (!action || node.dataset.queueAction === action)) ?? null;
+  }
 }
 const document = { activeElement: null, createElement: tag => new Element(tag) };
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
+function findClass(element, className) {
+  if (element.classList.contains(className)) return element;
+  for (const child of element.children) { const found = findClass(child, className); if (found) return found; }
+  return null;
+}
+function occurrencePage(occurrences, section = 'upcoming', nextCursor = null, count = occurrences.length) {
+  return { occurrences, nextCursor, totalOccurrenceCount: count, section, sectionCount: occurrences.length,
+    mainCurrentOccurrenceId: 'current', precedingOccurrenceId: null, followingOccurrenceIds: [], endOfSection: !nextCursor };
+}
 
 function load(relative, mocks, runtime = {}) {
   const exports = {};
@@ -41,6 +57,7 @@ function load(relative, mocks, runtime = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(source, { exports, document, window: { addEventListener() {}, removeEventListener() {} }, console,
+    CSS: { escape: value => String(value) },
     setTimeout: () => 1, clearTimeout() {}, require: name => mocks[name] ?? {}, ...runtime });
   return exports;
 }
@@ -85,15 +102,16 @@ test('playback store accepts only a new owner or strictly newer decimal sequence
 test('playback destination keeps Preview separate and describes one bounded canonical page', async () => {
   let subscriber; let metadataCalls = 0; let browseCalls = 0;
   const snapshot = { instanceId: 'i', sessionId: 's', queueRevision: '7', stateSequence: '1', mode: 'preview',
+    mainCurrent: { occurrenceId: 'current' },
     preview: { auditionId: 'a' }, playback: { metadata: { title: 'Audition' } } };
   const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
     '../state/playback': { playbackStore: { subscribe(callback) { subscriber = callback; return () => {}; }, refresh: async () => snapshot } },
     '../rpc': {
       serverList: async () => [{ serverId: 'srv', name: 'Living room' }],
-      playbackListOccurrences: async () => ({ occurrences: [
+      playbackListOccurrences: async (_observed, _cursor, _limit, options) => options.section === 'history' ? occurrencePage([], 'history') : occurrencePage([
         { occurrenceId: 'o1', source: { serverId: 'srv', trackId: 't' } },
         { occurrenceId: 'o2', source: { serverId: 'srv', trackId: 't' } },
-      ], nextCursor: null, totalOccurrenceCount: 2 }),
+      ], 'upcoming', null, 3),
       playbackDescribeOccurrences: async (_observed, ids) => { metadataCalls++; assert.deepEqual(Array.from(ids), ['o1', 'o2']); return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv', trackId: 't' }, title: 'Song', artist: 'Artist', album: null, durationMs: 1, status: 'available' })); },
     },
     '../i18n': { t: (key, values) => values?.title ? `${key}:${values.title}` : values?.count != null ? `${key}:${values.count}` : key },
@@ -239,20 +257,72 @@ function clockHarness() {
   return { timers, runtime: { setTimeout: callback => { timers.set(++id, callback); return id; }, clearTimeout: id => timers.delete(id) },
     async tick() { const entry = timers.entries().next().value; if (entry) { timers.delete(entry[0]); entry[1](); } await settle(); } };
 }
-const queueSnapshot = { instanceId: 'i', sessionId: 's', queueRevision: '1', stateSequence: '1', mode: 'main', playback: { metadata: null } };
+const queueSnapshot = { instanceId: 'i', sessionId: 's', queueRevision: '1', stateSequence: '1', mode: 'main',
+  mainCurrent: { occurrenceId: 'current', source: { serverId: 'srv', trackId: 'track' } },
+  playback: { status: 'active', metadata: null } };
 function queueHarness(rpc = {}, storeOverride) {
   const clock = clockHarness(); let subscriber; let metadataCalls = 0;
   const store = storeOverride ?? { subscribe(cb) { subscriber = cb; return () => {}; }, refresh: async () => queueSnapshot };
+  const customList = rpc.playbackListOccurrences;
+  const customDescribe = rpc.playbackDescribeOccurrences;
+  const customServerList = rpc.serverList;
+  const rest = { ...rpc }; delete rest.playbackListOccurrences; delete rest.playbackDescribeOccurrences; delete rest.serverList;
   const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
     '../state/playback': { playbackStore: store },
-    '../rpc': { serverList: async () => [], playbackListOccurrences: async (_s, cursor) => ({ occurrences: [{ occurrenceId: cursor ?? 'first' }], nextCursor: cursor ? null : 'second', totalOccurrenceCount: 101 }),
-      playbackDescribeOccurrences: async (_s, ids) => { metadataCalls++; return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })); }, ...rpc },
-    '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: s => ({ label: s.name }) },
+    '../rpc': { serverList: customServerList ?? (async () => []),
+      playbackListOccurrences: async (s, cursor, limit, options) => options?.section === 'history'
+        ? occurrencePage([], 'history')
+        : customList ? customList(s, cursor, limit, options)
+          : occurrencePage([{ occurrenceId: cursor ?? 'first' }], 'upcoming', cursor ? null : 'second', 101),
+      playbackDescribeOccurrences: customDescribe ?? (async (_s, ids) => { metadataCalls++; return ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })); }),
+      isPlaybackQueueConflict: () => false, ...rest },
+    '../i18n': { t: (key, values) => values?.id ? `${key}:${values.id}` : key },
+    '../serverIdentity': { formatServerIdentity: s => ({ label: s.name }) },
   }, clock.runtime);
   const container = new Element('section'); const component = new PlaybackDestination(container, () => {});
   return { component, container, clock, receive: s => subscriber(s), metadataCalls: () => metadataCalls,
+    current: findClass(container, 'playback-destination__current'),
     button: key => container.querySelectorAll('button').find(b => b.textContent === key) };
 }
+
+test('current occurrence requires live transport and matching loaded metadata', async () => {
+  const h = queueHarness();
+  h.receive({ ...queueSnapshot, playback: { status: 'paused', metadata: null } }); await settle();
+  const metadataCalls = h.metadataCalls();
+  assert.equal(h.current.textContent, 'playback.queue.no_current',
+    'a restored active pointer without loaded metadata must not display its UUID');
+  let sequence = 2;
+  for (const status of ['idle', 'stopped', 'completed', 'error']) {
+    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: {
+      status, metadata: { title: 'Stale', source: queueSnapshot.mainCurrent.source },
+    } });
+    await settle();
+    assert.equal(h.current.textContent, 'playback.queue.no_current', `status ${status} must hide current metadata`);
+  }
+  for (const source of [{ serverId: 'other', trackId: 'track' }, { serverId: 'srv', trackId: 'other' }]) {
+    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: {
+      status: 'paused', metadata: { title: 'Wrong source', source },
+    } });
+    await settle();
+    assert.equal(h.current.textContent, 'playback.queue.no_current');
+  }
+  for (const status of ['loading', 'active', 'paused']) {
+    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: { status, metadata: null } });
+    await settle();
+    assert.equal(h.current.textContent, 'playback.queue.no_current');
+    h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: {
+      status, metadata: { title: 'Loaded', source: queueSnapshot.mainCurrent.source },
+    } });
+    await settle();
+    assert.match(h.current.textContent, /playback\.queue\.current_occurrence:Loaded/);
+    assert.doesNotMatch(h.current.textContent, /current_occurrence:current/);
+  }
+  h.receive({ ...queueSnapshot, stateSequence: String(sequence++), playback: { status: 'paused', metadata: null } });
+  await settle();
+  assert.equal(h.current.textContent, 'playback.queue.no_current', 'metadata removal must clear stale current text');
+  assert.equal(h.metadataCalls(), metadataCalls, 'transport-only changes must not reload queue metadata');
+  h.component.destroy();
+});
 
 test('queue paging keeps focus and ignores transport-only updates and repeated Next clicks', async () => {
   const second = deferred(); let pageCalls = 0;
@@ -262,7 +332,7 @@ test('queue paging keeps focus and ignores transport-only updates and repeated N
   h.receive(queueSnapshot); await settle();
   const next = h.button('playback.queue.next'); next.focus();
   await next.click(); await next.click(); await settle();
-  h.receive({ ...queueSnapshot, stateSequence: '2', mode: 'preview', playback: { metadata: { title: 'Audition' } } }); await settle();
+  h.receive({ ...queueSnapshot, stateSequence: '2', mode: 'preview', playback: { status: 'active', metadata: { title: 'Audition' } } }); await settle();
   assert.equal(pageCalls, 2);
   second.resolve({ occurrences: [{ occurrenceId: 'second' }], nextCursor: null, totalOccurrenceCount: 101 }); await settle();
   assert.equal(h.metadataCalls(), 2);
@@ -384,4 +454,35 @@ test('partial offline queue metadata has an explicit retry without progress-driv
   await h.button('playback.retry').click(); await settle();
   assert.match(text(h.container), /Recovered song/); assert.equal(h.button('playback.retry').hidden, true);
   h.component.destroy();
+});
+
+test('editable upcoming rows submit occurrence moves without blind conflict replay', async () => {
+  const moves = []; let subscriber; let revision = '1';
+  const snapshot = () => ({ ...queueSnapshot, queueRevision: revision });
+  const { PlaybackDestination } = load('../../hifimule-ui/src/components/PlaybackDestination.ts', {
+    '../state/playback': { playbackStore: { subscribe(cb) { subscriber = cb; return () => {}; }, refresh: async () => snapshot() } },
+    '../rpc': {
+      serverList: async () => [], isPlaybackQueueConflict: () => false,
+      playbackListOccurrences: async (_s, _cursor, _limit, options) => options.section === 'history'
+        ? occurrencePage([], 'history')
+        : { ...occurrencePage([
+          { occurrenceId: 'a', source: { serverId: 'srv', trackId: 'a' } },
+          { occurrenceId: 'b', source: { serverId: 'srv', trackId: 'b' } },
+          { occurrenceId: 'c', source: { serverId: 'srv', trackId: 'c' } },
+        ]), followingOccurrenceIds: [], endOfSection: true },
+      playbackDescribeOccurrences: async (_s, ids) => ids.map(id => ({ occurrenceId: id, source: { serverId: 'srv' }, title: id, status: 'available' })),
+      playbackMoveUpcoming: async (observed, occurrenceId, beforeOccurrenceId) => {
+        moves.push({ revision: observed.queueRevision, occurrenceId, beforeOccurrenceId }); revision = '2';
+      },
+      playbackRemoveUpcoming: async () => {},
+    },
+    '../i18n': { t: key => key }, '../serverIdentity': { formatServerIdentity: s => ({ label: s.name }) },
+  });
+  const container = new Element('section'); const component = new PlaybackDestination(container, () => {});
+  subscriber(snapshot()); await settle();
+  const moveDown = container.querySelectorAll('button').filter(button => button.textContent === 'playback.queue.move_down')[0];
+  await moveDown.click(); await settle();
+  assert.deepEqual(moves, [{ revision: '1', occurrenceId: 'a', beforeOccurrenceId: 'c' }]);
+  assert.match(text(container), /playback\.queue\.moved/);
+  component.destroy();
 });

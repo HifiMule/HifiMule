@@ -22,12 +22,14 @@ import {
     getImageUrl,
     rpcCall,
     playbackPlayTrack,
+    playbackAppendQueue,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { createAlbumPlayButton } from './components/AlbumPlayButton';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { TracksBrowseView } from './components/TracksBrowseView';
 import { createTrackPreviewButton } from './components/TrackPreviewButton';
+import { createTrackQueueButton } from './components/TrackQueueButton';
 import { basketStore } from './state/basket';
 import { t } from './i18n';
 import { showToast, ERROR_TOAST_DURATION } from './toast';
@@ -778,6 +780,19 @@ function renderBulkBar(): HTMLElement {
     addBtn.addEventListener('click', () => bulkAddSelectionToBasket(addBtn));
     bar.appendChild(addBtn);
 
+    const selected = resolveSelectedItems();
+    const queueBtn = document.createElement('sl-button') as any;
+    queueBtn.size = 'small';
+    queueBtn.dataset.bulkQueueAdd = '';
+    const queueEligible = selected.length <= 200
+        && selected.every(item => item.type === 'Audio' && !!item.serverId);
+    queueBtn.disabled = !queueEligible;
+    queueBtn.textContent = selected.length > 200
+        ? t('playback.queue_limit_selection', { count: selected.length })
+        : t('playback.add_selection_to_queue');
+    queueBtn.addEventListener('click', () => void bulkAddSelectionToQueue(queueBtn));
+    bar.appendChild(queueBtn);
+
     if (_supportsPlaylistWrite) {
         const plBtn = document.createElement('sl-button') as any;
         plBtn.size = 'small';
@@ -808,6 +823,15 @@ function updateBulkBar(content: HTMLElement | null = document.getElementById('li
     if (existing) {
         const count = existing.querySelector('.bulk-action-bar__count');
         if (count) count.textContent = t('library.selection.count', { count: state.selectedIds.size });
+        const queue = existing.querySelector<HTMLElement>('[data-bulk-queue-add]') as any;
+        if (queue) {
+            const selected = resolveSelectedItems();
+            queue.disabled = selected.length > 200
+                || selected.some(item => item.type !== 'Audio' || !item.serverId);
+            queue.textContent = selected.length > 200
+                ? t('playback.queue_limit_selection', { count: selected.length })
+                : t('playback.add_selection_to_queue');
+        }
         return;
     }
     const scroller = (content as any).__listScroller as HTMLElement | undefined;
@@ -834,6 +858,24 @@ function resolveSelectedItems(): BrowseDisplayItem[] {
     return state.items.filter(
         it => isSelectableListItem(it) && state.selectedIds.has(it.basketId ?? it.id)
     );
+}
+
+async function bulkAddSelectionToQueue(button: any): Promise<void> {
+    // Resolve in displayed data order and freeze portable identities before awaiting.
+    const selected = resolveSelectedItems();
+    if (selected.length === 0 || selected.length > 200
+        || selected.some(item => item.type !== 'Audio' || !item.serverId)) return;
+    const sources = selected.map(item => ({ serverId: item.serverId as string, trackId: item.id }));
+    button.loading = true;
+    try {
+        await playbackAppendQueue(sources);
+        showToast(t('playback.queue_add_success', { count: sources.length }), 'success');
+        // Preserve the unrelated browser multi-selection after a local queue action.
+    } catch (error) {
+        showToast((error as Error).message, 'danger');
+    } finally {
+        button.loading = false;
+    }
 }
 
 // Shared basket-add used by both the per-row (+) toggle and the bulk action.
@@ -1055,6 +1097,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
         });
         row.appendChild(play);
         row.appendChild(createTrackPreviewButton(item.serverId, item.id, item.name));
+        row.appendChild(createTrackQueueButton(item.serverId, item.id, item.name));
     }
     if (item.type === 'MusicAlbum') {
         const play = createAlbumPlayButton(item.id, item.serverId, item.name);

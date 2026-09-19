@@ -12965,13 +12965,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied["result"]["data"]["queueRevision"], "1");
-        let selected_id =
+        let removed_id =
             applied["result"]["data"]["assignedOccurrences"][1]["occurrenceId"].clone();
+        let mut edit_body = apply_body.clone();
+        edit_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
+        edit_body["params"]["expectedQueueRevision"] = json!("1");
+        edit_body["params"]["operation"] =
+            json!({"type":"appendQueue","sources":[{"serverId":"offline","trackId":"three"}]});
+        let appended: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&edit_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let selected_id =
+            appended["result"]["data"]["assignedOccurrences"][0]["occurrenceId"].clone();
+        edit_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
+        edit_body["params"]["expectedQueueRevision"] = json!("2");
+        edit_body["params"]["operation"] = json!({"type":"moveUpcoming","occurrenceId":selected_id.clone(),"beforeOccurrenceId":removed_id.clone()});
+        let moved: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&edit_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(moved["result"]["data"]["queueRevision"], "3");
+        edit_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
+        edit_body["params"]["expectedQueueRevision"] = json!("3");
+        edit_body["params"]["operation"] =
+            json!({"type":"removeUpcoming","occurrenceIds":[removed_id]});
+        let removed: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&edit_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(removed["result"]["data"]["queueRevision"], "4");
         let mut select_body = apply_body.clone();
         select_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
-        select_body["params"]["expectedQueueRevision"] = json!("1");
+        select_body["params"]["expectedQueueRevision"] = json!("4");
         select_body["params"]["operation"] =
-            json!({"type":"selectCurrent","occurrenceId":selected_id});
+            json!({"type":"selectCurrent","occurrenceId":selected_id.clone()});
         let selected: Value = client
             .post(format!("http://127.0.0.1:{port}"))
             .bearer_auth(&descriptor.token)
@@ -12983,7 +13029,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            selected["result"]["data"]["queueRevision"], "1",
+            selected["result"]["data"]["queueRevision"], "4",
             "{selected}"
         );
         let snapshot: Value = client

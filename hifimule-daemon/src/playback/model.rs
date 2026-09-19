@@ -4,6 +4,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_PAGE_SIZE: usize = 100;
 pub const MAX_PAGE_SIZE: usize = 200;
 pub const MAX_INSERT_BATCH: usize = 200;
+pub const MAX_REMOVE_BATCH: usize = 200;
+pub const MAX_MANUAL_ACTIVE_OCCURRENCES: usize = 10_000;
 pub const MAX_ID_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,9 +88,11 @@ pub struct SessionSnapshot {
     pub state_sequence: String,
     pub generation_id: String,
     pub mode: PlaybackMode,
+    pub queue_kind: QueueKind,
     pub preview: Option<PreviewSummary>,
     pub state: TransportState,
     pub current: Option<Occurrence>,
+    pub main_current: Option<Occurrence>,
     pub position_ms: u64,
     pub checkpointed_position_ms: u64,
     pub persistence: Status,
@@ -105,6 +109,13 @@ pub struct SessionSnapshot {
 pub enum PlaybackMode {
     Main,
     Preview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueueKind {
+    Album,
+    Manual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +404,13 @@ pub enum SessionOperation {
     AppendQueue {
         sources: Vec<TrackSource>,
     },
+    RemoveUpcoming {
+        occurrence_ids: Vec<String>,
+    },
+    MoveUpcoming {
+        occurrence_id: String,
+        before_occurrence_id: Option<String>,
+    },
     SelectCurrent {
         occurrence_id: String,
     },
@@ -447,8 +465,21 @@ pub struct ListOccurrencesParams {
     pub schema_version: u32,
     pub session_id: String,
     pub expected_queue_revision: String,
+    #[serde(default)]
+    pub section: OccurrenceSection,
     pub cursor: Option<String>,
+    pub around_occurrence_id: Option<String>,
+    pub expected_main_occurrence_id: Option<String>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OccurrenceSection {
+    #[default]
+    All,
+    Upcoming,
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +488,12 @@ pub struct OccurrencePage {
     pub occurrences: Vec<Occurrence>,
     pub next_cursor: Option<String>,
     pub total_occurrence_count: u64,
+    pub section: OccurrenceSection,
+    pub section_count: u64,
+    pub main_current_occurrence_id: Option<String>,
+    pub preceding_occurrence_id: Option<String>,
+    pub following_occurrence_ids: Vec<String>,
+    pub end_of_section: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +563,9 @@ pub struct PersistedSession {
     pub state: TransportState,
     pub current_occurrence_id: Option<String>,
     pub position_ms: u64,
+    pub queue_kind: QueueKind,
+    pub(crate) current_gain_bits: u32,
+    pub(crate) current_qualified_suffix: Option<String>,
     pub(crate) album_context: Option<FrozenAlbumContext>,
 }
 
@@ -762,5 +802,61 @@ mod seek_contract_tests {
             serde_json::to_value(ControlAction::ReturnToSession).unwrap(),
             "returnToSession"
         );
+    }
+
+    #[test]
+    fn queue_edit_wire_is_occurrence_based_and_strict() {
+        let remove = serde_json::json!({
+            "type": "removeUpcoming",
+            "occurrenceIds": ["first", "second"]
+        });
+        assert_eq!(
+            serde_json::from_value::<SessionOperation>(remove).unwrap(),
+            SessionOperation::RemoveUpcoming {
+                occurrence_ids: vec!["first".into(), "second".into()]
+            }
+        );
+
+        let move_to_end = serde_json::json!({
+            "type": "moveUpcoming",
+            "occurrenceId": "first",
+            "beforeOccurrenceId": null
+        });
+        assert_eq!(
+            serde_json::from_value::<SessionOperation>(move_to_end).unwrap(),
+            SessionOperation::MoveUpcoming {
+                occurrence_id: "first".into(),
+                before_occurrence_id: None
+            }
+        );
+
+        let unknown = serde_json::json!({
+            "type": "removeUpcoming",
+            "occurrenceIds": ["first"],
+            "sourceId": "must-not-be-accepted"
+        });
+        assert!(serde_json::from_value::<SessionOperation>(unknown).is_err());
+    }
+
+    #[test]
+    fn scoped_occurrence_read_contract_is_bounded_and_explicit() {
+        let parsed = serde_json::from_value::<ListOccurrencesParams>(serde_json::json!({
+            "schemaVersion": 1,
+            "sessionId": "session",
+            "expectedQueueRevision": "9",
+            "section": "upcoming",
+            "expectedMainOccurrenceId": "current",
+            "aroundOccurrenceId": "target",
+            "limit": 200
+        }))
+        .unwrap();
+        assert_eq!(parsed.section, OccurrenceSection::Upcoming);
+        assert_eq!(
+            parsed.expected_main_occurrence_id.as_deref(),
+            Some("current")
+        );
+        assert_eq!(parsed.around_occurrence_id.as_deref(), Some("target"));
+        assert_eq!(MAX_MANUAL_ACTIVE_OCCURRENCES, 10_000);
+        assert_eq!(MAX_REMOVE_BATCH, 200);
     }
 }

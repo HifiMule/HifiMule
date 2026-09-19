@@ -107,6 +107,8 @@ pub(super) fn run_output(
     mut seek_commit: Option<(String, u64)>,
     boundary_pending: Arc<AtomicBool>,
     handoff: Arc<HandoffReceipt>,
+    successor_epoch: Arc<AtomicU64>,
+    successor_authorized: Arc<AtomicBool>,
     gain: f32,
     qualified_suffix: Option<String>,
 ) -> Result<(), PlaybackPipelineError> {
@@ -266,7 +268,17 @@ pub(super) fn run_output(
                     seek_mechanism,
                     gain,
                     qualified_suffix,
+                    successor_epoch: prepared_epoch,
+                    successor_epoch_source,
+                    successor_authorized: prepared_authorized,
                 } = prepared;
+                if prepared_epoch != successor_epoch.load(Ordering::Acquire)
+                    || prepared_epoch != successor_epoch_source.load(Ordering::Acquire)
+                {
+                    continue;
+                }
+                prepared_authorized.store(true, Ordering::Release);
+                successor_authorized.store(true, Ordering::Release);
                 let qualified = Arc::new(AtomicU64::new(0));
                 let decoder_qualified = qualified.clone();
                 handoff.arm(
@@ -480,7 +492,7 @@ pub(super) fn run_output(
                         slot_a_ready,
                         slot_a_finished,
                         &successor_pcm,
-                        successor_ready,
+                        successor_ready && successor_authorized.load(Ordering::Acquire),
                         slot_b_finished,
                         true,
                     );
@@ -531,7 +543,7 @@ pub(super) fn run_output(
                         slot_a_ready,
                         slot_a_finished,
                         &successor_pcm,
-                        successor_ready,
+                        successor_ready && successor_authorized.load(Ordering::Acquire),
                         slot_b_finished,
                         true,
                     );

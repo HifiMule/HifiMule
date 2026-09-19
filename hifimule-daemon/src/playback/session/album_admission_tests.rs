@@ -68,7 +68,7 @@ fn replace(owner: &PlaybackSession, command_id: String) -> PResult<ApplyResult> 
 }
 
 #[test]
-fn frozen_album_gain_follows_members_but_not_appended_occurrences() {
+fn manual_album_edit_preserves_current_gain_but_future_occurrences_use_unity() {
     let owner = Owner::new();
     let initial = owner.0.snapshot().unwrap();
     let reservation = resolve(&owner.0, request(&initial));
@@ -106,8 +106,15 @@ fn frozen_album_gain_follows_members_but_not_appended_occurrences() {
         .pop()
         .unwrap();
     let after_append = owner.0.snapshot().unwrap();
-    owner
-        .0
+    assert_eq!(after_append.queue_kind, QueueKind::Manual);
+    assert_eq!(f32::from_bits(after_append.gain_bits), 0.75);
+    let db = owner.0.inner.lock().unwrap().db.clone();
+    drop(owner);
+    let restored = PlaybackSession::restore(db, "manual-policy-restored".into());
+    let after_append = restored.snapshot().unwrap();
+    assert_eq!(after_append.queue_kind, QueueKind::Manual);
+    assert_eq!(f32::from_bits(after_append.gain_bits), 0.75);
+    restored
         .apply(ApplySessionParams {
             schema_version: SCHEMA_VERSION,
             instance_id: after_append.instance_id,
@@ -119,11 +126,10 @@ fn frozen_album_gain_follows_members_but_not_appended_occurrences() {
             },
         })
         .unwrap();
-    assert_eq!(f32::from_bits(owner.0.snapshot().unwrap().gain_bits), 1.0);
+    assert_eq!(f32::from_bits(restored.snapshot().unwrap().gain_bits), 1.0);
 
-    let selected = owner.0.snapshot().unwrap();
-    owner
-        .0
+    let selected = restored.snapshot().unwrap();
+    restored
         .apply(ApplySessionParams {
             schema_version: SCHEMA_VERSION,
             instance_id: selected.instance_id,
@@ -135,7 +141,8 @@ fn frozen_album_gain_follows_members_but_not_appended_occurrences() {
             },
         })
         .unwrap();
-    assert_eq!(f32::from_bits(owner.0.snapshot().unwrap().gain_bits), 0.75);
+    assert_eq!(f32::from_bits(restored.snapshot().unwrap().gain_bits), 1.0);
+    restored.stop_and_join().unwrap();
 }
 
 #[test]
@@ -350,7 +357,10 @@ fn full_album_commit_keeps_rows_beyond_snapshot_page() {
                 schema_version: SCHEMA_VERSION,
                 session_id: committed.session_id.clone(),
                 expected_queue_revision: committed.queue_revision.clone(),
+                section: OccurrenceSection::All,
                 cursor,
+                around_occurrence_id: None,
+                expected_main_occurrence_id: None,
                 limit: None,
             })
             .unwrap();
@@ -824,6 +834,7 @@ fn legacy_v3_album_restores_and_allows_new_album_without_resetting_gain_or_queue
             assert_eq!(before.current.as_ref().unwrap().occurrence_id, current);
             assert_eq!(before.position_ms, 321);
             assert_eq!(before.state, TransportState::Paused);
+            assert_eq!(before.queue_kind, QueueKind::Album);
             assert_eq!(before.total_occurrence_count, 2);
             assert_eq!(before.gain_bits, gain_bits);
             assert_eq!(
@@ -842,7 +853,7 @@ fn legacy_v3_album_restores_and_allows_new_album_without_resetting_gain_or_queue
                 .unwrap()
                 .query_row("SELECT version FROM playback_schema", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
             // Re-reading does not guess formats or change the frozen policy.
             assert_eq!(
                 db.load_playback_session()

@@ -223,7 +223,7 @@ export interface PlaybackOutputState {
 }
 export interface PlaybackSessionSnapshot {
     schemaVersion: number; instanceId: string; sessionId: string; queueRevision: string;
-    stateSequence: string; generationId: string; mode: 'main' | 'preview';
+    stateSequence: string; generationId: string; mode: 'main' | 'preview'; queueKind: 'album' | 'manual';
     preview: { auditionId: string; hasMainSession: boolean; savedMainOccurrenceId: string | null;
         savedMainPositionMs: number; savedMainIntent: string; resumeInhibited: boolean } | null;
     state: string; positionMs: number;
@@ -231,6 +231,7 @@ export interface PlaybackSessionSnapshot {
     occurrences: PlaybackOccurrence[];
     nextCursor: string | null;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
+    mainCurrent: { occurrenceId: string; ordinal: number; source: { serverId: string; trackId: string }; availability: 'unknown' | 'notConfigured' } | null;
     playback: { status: PlaybackStatus; canGoNext: boolean; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
         seek: { available: boolean; reason?: string | null; mechanism?: string | null; decodedLandingToleranceMs?: number | null };
         pendingSeek?: { operationId: string; requestedPositionMs: number; priorCommittedPositionMs: number } | null;
@@ -249,6 +250,12 @@ export interface PlaybackOccurrencePage {
     occurrences: PlaybackOccurrence[];
     nextCursor: string | null;
     totalOccurrenceCount: number;
+    section: 'all' | 'upcoming' | 'history';
+    sectionCount: number;
+    mainCurrentOccurrenceId: string | null;
+    precedingOccurrenceId: string | null;
+    followingOccurrenceIds: string[];
+    endOfSection: boolean;
 }
 export interface OccurrenceDisplay {
     occurrenceId: string;
@@ -300,15 +307,97 @@ export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
 }
 
 export async function playbackListOccurrences(
-    observed: Pick<PlaybackSessionSnapshot, 'sessionId' | 'queueRevision'>,
+    observed: Pick<PlaybackSessionSnapshot, 'sessionId' | 'queueRevision'> & Partial<Pick<PlaybackSessionSnapshot, 'mainCurrent'>>,
     cursor: string | null = null,
     limit = 100,
+    options: { section?: 'all' | 'upcoming' | 'history'; aroundOccurrenceId?: string | null } = {},
 ): Promise<PlaybackOccurrencePage> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new RangeError('limit must be between 1 and 200');
     return (await rpcCall('playback.listOccurrences', {
         schemaVersion: 1, sessionId: observed.sessionId,
-        expectedQueueRevision: observed.queueRevision, cursor, limit,
+        expectedQueueRevision: observed.queueRevision,
+        section: options.section ?? 'all',
+        cursor,
+        aroundOccurrenceId: options.aroundOccurrenceId ?? null,
+        expectedMainOccurrenceId: options.section && options.section !== 'all'
+            ? observed.mainCurrent?.occurrenceId ?? null
+            : null,
+        limit,
     })).data;
+}
+
+export type PlaybackTrackSource = { serverId: string; trackId: string };
+export type PlaybackQueueOperation =
+    | { type: 'appendQueue'; sources: PlaybackTrackSource[] }
+    | { type: 'removeUpcoming'; occurrenceIds: string[] }
+    | { type: 'moveUpcoming'; occurrenceId: string; beforeOccurrenceId: string | null };
+
+export interface PlaybackApplyResult {
+    sessionId: string;
+    queueRevision: string;
+    stateSequence: string;
+    generationId: string;
+    assignedOccurrences: PlaybackOccurrence[];
+}
+
+export async function playbackApplyQueueOperation(
+    observed: Pick<PlaybackSessionSnapshot, 'instanceId' | 'sessionId' | 'queueRevision'>,
+    operation: PlaybackQueueOperation,
+    commandId = crypto.randomUUID(),
+): Promise<PlaybackApplyResult> {
+    return (await rpcCall('playback.applySession', {
+        schemaVersion: 1,
+        instanceId: observed.instanceId,
+        sessionId: observed.sessionId,
+        commandId,
+        expectedQueueRevision: observed.queueRevision,
+        operation,
+    })).data;
+}
+
+export async function playbackAppendQueue(
+    sources: PlaybackTrackSource[],
+    observed?: PlaybackSessionSnapshot,
+): Promise<PlaybackApplyResult> {
+    if (sources.length > 200) throw new RangeError('at most 200 tracks may be added at once');
+    for (const source of sources) {
+        if (!source.serverId || !source.trackId) throw new TypeError('portable track sources are required');
+    }
+    return playbackApplyQueueOperation(observed ?? await playbackGetSession(), {
+        type: 'appendQueue',
+        sources: sources.map(source => ({ ...source })),
+    });
+}
+
+export async function playbackRemoveUpcoming(
+    observed: PlaybackSessionSnapshot,
+    occurrenceIds: string[],
+): Promise<PlaybackApplyResult> {
+    if (occurrenceIds.length < 1 || occurrenceIds.length > 200) {
+        throw new RangeError('between 1 and 200 upcoming occurrences are required');
+    }
+    return playbackApplyQueueOperation(observed, { type: 'removeUpcoming', occurrenceIds: [...occurrenceIds] });
+}
+
+export async function playbackMoveUpcoming(
+    observed: PlaybackSessionSnapshot,
+    occurrenceId: string,
+    beforeOccurrenceId: string | null,
+): Promise<PlaybackApplyResult> {
+    return playbackApplyQueueOperation(observed, { type: 'moveUpcoming', occurrenceId, beforeOccurrenceId });
+}
+
+export function isPlaybackQueueConflict(error: unknown): boolean {
+    if (!(error instanceof RpcError) || !error.data || typeof error.data !== 'object') return false;
+    const data = error.data as Record<string, unknown>;
+    if (error.code === 409) {
+        return ['QUEUE_REVISION_CONFLICT', 'QUEUE_CONFLICT', 'OCCURRENCE_NOT_UPCOMING']
+            .includes(String(data.code ?? ''));
+    }
+    if (error.code === -7 && data.code === 'QUEUE_CONFLICT') {
+        return typeof data.authoritative === 'object' && data.authoritative !== null;
+    }
+    return false;
 }
 
 export async function playbackDescribeOccurrences(

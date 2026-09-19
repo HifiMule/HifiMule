@@ -681,9 +681,19 @@ mod tests {
             state_sequence: "2".into(),
             generation_id: "generation".into(),
             mode: PlaybackMode::Main,
+            queue_kind: QueueKind::Manual,
             preview: None,
             state,
             current: Some(Occurrence {
+                occurrence_id: "occurrence".into(),
+                ordinal: 0,
+                source: TrackSource {
+                    server_id: "server".into(),
+                    track_id: "track".into(),
+                },
+                availability: SourceAvailability::Unknown,
+            }),
+            main_current: Some(Occurrence {
                 occurrence_id: "occurrence".into(),
                 ordinal: 0,
                 source: TrackSource {

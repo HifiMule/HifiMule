@@ -204,6 +204,7 @@ struct PendingTerminal {
     status: PlaybackStatus,
     failure: Option<PlaybackFailure>,
     resolve_successor: bool,
+    preserve_existing_outcome: bool,
 }
 
 #[derive(Clone)]
@@ -261,13 +262,17 @@ impl PlaybackSession {
             .db
             .playback_successor(&inner.session.session_id, predecessor.ordinal)
             .ok()??;
-        let gain_bits = inner
-            .session
-            .album_context
-            .as_ref()
-            .map_or(1.0f32.to_bits(), |context| {
-                context.scalar_for(&successor).to_bits()
-            });
+        let gain_bits = if inner.session.queue_kind == QueueKind::Album {
+            inner
+                .session
+                .album_context
+                .as_ref()
+                .map_or(1.0f32.to_bits(), |context| {
+                    context.scalar_for(&successor).to_bits()
+                })
+        } else {
+            1.0f32.to_bits()
+        };
         Some(super::continuity::SuccessorCandidate {
             instance_id: inner.instance_id.clone(),
             session_id: inner.session.session_id.clone(),
@@ -276,11 +281,15 @@ impl PlaybackSession {
             queue_revision: inner.session.queue_revision,
             control_epoch,
             preparation_generation: self.generation_serial.load(Ordering::Acquire),
-            qualified_suffix: inner
-                .session
-                .album_context
-                .as_ref()
-                .and_then(|context| context.suffix_for(&successor)),
+            qualified_suffix: (inner.session.queue_kind == QueueKind::Album)
+                .then(|| {
+                    inner
+                        .session
+                        .album_context
+                        .as_ref()
+                        .and_then(|context| context.suffix_for(&successor))
+                })
+                .flatten(),
             gain_bits,
         })
     }
@@ -773,29 +782,132 @@ fn list_inner(inner: &Inner, p: ListOccurrencesParams) -> PResult<OccurrencePage
             "limit must be between 1 and 200",
         ));
     }
-    let after = match p.cursor {
-        Some(c) => Some(decode_cursor(&c, &inner.session)?),
-        None => None,
+    if p.cursor.is_some() && p.around_occurrence_id.is_some() {
+        return Err(PlaybackError::invalid(
+            "INVALID_CURSOR",
+            "cursor and aroundOccurrenceId are mutually exclusive",
+        ));
+    }
+    let main_current = inner
+        .session
+        .current_occurrence_id
+        .as_deref()
+        .map(|id| inner.db.playback_occurrence(&inner.session.session_id, id))
+        .transpose()
+        .map_err(storage)?
+        .flatten();
+    let main_id = main_current.as_ref().map(|row| row.occurrence_id.clone());
+    if p.section != OccurrenceSection::All && p.expected_main_occurrence_id != main_id {
+        return Err(PlaybackError::conflict(
+            "QUEUE_CONFLICT",
+            "main occurrence changed",
+        ));
+    }
+    let (lower, upper) = match p.section {
+        OccurrenceSection::All => (None, None),
+        OccurrenceSection::Upcoming => (main_current.as_ref().map(|row| row.ordinal), None),
+        OccurrenceSection::History => (None, main_current.as_ref().map(|row| row.ordinal)),
     };
-    let mut rows = inner
-        .db
-        .playback_page(&inner.session.session_id, after, limit + 1)
-        .map_err(storage)?;
-    let next = if rows.len() > limit {
-        rows.truncate(limit);
-        rows.last()
-            .map(|o| encode_cursor(&inner.session, o.ordinal))
+    let after = if let Some(cursor) = p.cursor.as_deref() {
+        Some(decode_section_cursor(
+            cursor,
+            &inner.session,
+            p.section,
+            main_id.as_deref(),
+        )?)
+    } else if let Some(around) = p.around_occurrence_id.as_deref() {
+        let target = inner
+            .db
+            .playback_occurrence(&inner.session.session_id, around)
+            .map_err(storage)?
+            .ok_or_else(|| PlaybackError::conflict("INVALID_CURSOR", "locator is absent"))?;
+        if lower.is_some_and(|value| target.ordinal <= value)
+            || upper.is_some_and(|value| target.ordinal >= value)
+        {
+            return Err(PlaybackError::conflict(
+                "INVALID_CURSOR",
+                "locator is outside the requested section",
+            ));
+        }
+        let desired_start = target.ordinal.saturating_sub((limit / 2) as u64);
+        match lower {
+            Some(exclusive_floor) => Some(desired_start.saturating_sub(1).max(exclusive_floor)),
+            None => desired_start.checked_sub(1),
+        }
     } else {
         None
     };
+    let mut rows = inner
+        .db
+        .playback_range_page(&inner.session.session_id, lower, upper, after, limit + 1)
+        .map_err(storage)?;
+    let next = if rows.len() > limit {
+        rows.truncate(limit);
+        rows.last().map(|o| {
+            encode_section_cursor(&inner.session, p.section, main_id.as_deref(), o.ordinal)
+        })
+    } else {
+        None
+    };
+    let preceding = if p.section == OccurrenceSection::Upcoming {
+        rows.first()
+            .map(|row| {
+                inner.db.playback_predecessor_in_range(
+                    &inner.session.session_id,
+                    row.ordinal,
+                    lower,
+                )
+            })
+            .transpose()
+            .map_err(storage)?
+            .flatten()
+            .map(|row| row.occurrence_id)
+    } else {
+        None
+    };
+    let following = if p.section == OccurrenceSection::Upcoming {
+        rows.last()
+            .map(|row| {
+                inner.db.playback_range_page(
+                    &inner.session.session_id,
+                    lower,
+                    upper,
+                    Some(row.ordinal),
+                    2,
+                )
+            })
+            .transpose()
+            .map_err(storage)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.occurrence_id)
+            .collect()
+    } else {
+        Vec::new()
+    };
     decorate_availability(&inner.db, &mut rows)?;
+    let total_occurrence_count = inner
+        .db
+        .playback_count(&inner.session.session_id)
+        .map_err(storage)?;
+    let section_count = if p.section == OccurrenceSection::All {
+        total_occurrence_count
+    } else {
+        inner
+            .db
+            .playback_range_count(&inner.session.session_id, lower, upper)
+            .map_err(storage)?
+    };
     Ok(OccurrencePage {
         occurrences: rows,
-        next_cursor: next,
-        total_occurrence_count: inner
-            .db
-            .playback_count(&inner.session.session_id)
-            .map_err(storage)?,
+        next_cursor: next.clone(),
+        total_occurrence_count,
+        section: p.section,
+        section_count,
+        main_current_occurrence_id: main_id,
+        preceding_occurrence_id: preceding,
+        end_of_section: following.is_empty() && next.is_none(),
+        following_occurrence_ids: following,
     })
 }
 
@@ -1561,6 +1673,17 @@ fn metadata(i: &Inner) -> SessionMetadata {
         generation_id: i.generation_id.clone(),
     }
 }
+fn noop_apply_result(i: &Inner) -> ApplyResult {
+    ApplyResult {
+        start_audio: false,
+        session_id: i.session.session_id.clone(),
+        queue_revision: i.session.queue_revision.to_string(),
+        state_sequence: i.state_sequence.to_string(),
+        generation_id: i.generation_id.clone(),
+        assigned_occurrences: Vec::new(),
+        current_metadata: metadata(i),
+    }
+}
 fn with_metadata<T>(result: PResult<T>, i: &Inner) -> PResult<T> {
     result.map_err(|mut error| {
         error.authoritative = Some(Box::new(metadata(i)));
@@ -1786,6 +1909,9 @@ fn fresh_session() -> PersistedSession {
         state: TransportState::Idle,
         current_occurrence_id: None,
         position_ms: 0,
+        queue_kind: QueueKind::Manual,
+        current_gain_bits: 1.0f32.to_bits(),
+        current_qualified_suffix: None,
         album_context: None,
     }
 }
@@ -1864,22 +1990,33 @@ fn apply_inner_with_album_context(
             "stored playback state must be recovered first",
         ));
     }
-    if i.preview.is_some()
-        && matches!(
-            p.operation,
-            SessionOperation::AppendQueue { .. } | SessionOperation::SelectCurrent { .. }
-        )
-    {
+    if i.preview.is_some() && matches!(p.operation, SessionOperation::SelectCurrent { .. }) {
         return Err(PlaybackError::conflict(
             "PREVIEW_ACTIVE",
-            "the preserved main queue cannot be edited while preview is active",
+            "the main current cannot be replaced while preview is active",
         ));
     }
-    if i.pending_terminal.is_some() && matches!(p.operation, SessionOperation::AppendQueue { .. }) {
+    if i.pending_terminal.is_some()
+        && matches!(
+            p.operation,
+            SessionOperation::AppendQueue { .. }
+                | SessionOperation::RemoveUpcoming { .. }
+                | SessionOperation::MoveUpcoming { .. }
+        )
+    {
         return Err(PlaybackError::conflict(
             "PERSISTENCE_FAILED",
             "retry or replace the pending storage transition before appending",
         ));
+    }
+    let is_queue_edit = matches!(
+        p.operation,
+        SessionOperation::AppendQueue { .. }
+            | SessionOperation::RemoveUpcoming { .. }
+            | SessionOperation::MoveUpcoming { .. }
+    );
+    if is_queue_edit && i.preview.is_none() {
+        reconcile_presented_handoff(i, generation_serial)?;
     }
     let mut next_session = i.session.clone();
     let superseded_audition = i
@@ -1906,8 +2043,14 @@ fn apply_inner_with_album_context(
                 } else {
                     None
                 };
+            next_session.queue_kind = if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
+                QueueKind::Album
+            } else {
+                QueueKind::Manual
+            };
             decorate_availability(&i.db, &mut assigned)?;
             next_session.current_occurrence_id = assigned.first().map(|o| o.occurrence_id.clone());
+            set_current_policy(&mut next_session, assigned.first());
             next_session.position_ms = 0;
             next_session.queue_revision = next_session
                 .queue_revision
@@ -1937,6 +2080,36 @@ fn apply_inner_with_album_context(
         }
         SessionOperation::AppendQueue { sources } => {
             validate_sources(sources)?;
+            if sources.is_empty() {
+                return Ok(noop_apply_result(i));
+            }
+            next_session.queue_kind = QueueKind::Manual;
+            if let Some(current_id) = next_session.current_occurrence_id.as_deref() {
+                let current = i
+                    .db
+                    .playback_occurrence(&i.session.session_id, current_id)
+                    .map_err(storage)?
+                    .ok_or_else(|| {
+                        PlaybackError::conflict("QUEUE_CONFLICT", "current occurrence is absent")
+                    })?;
+                let lower = current.ordinal.checked_sub(1);
+                let active =
+                    i.db.playback_range_count(&i.session.session_id, lower, None)
+                        .map_err(storage)?;
+                if active.saturating_add(sources.len() as u64)
+                    > MAX_MANUAL_ACTIVE_OCCURRENCES as u64
+                {
+                    return Err(PlaybackError::invalid(
+                        "QUEUE_LIMIT_EXCEEDED",
+                        "manual queue capacity would be exceeded",
+                    ));
+                }
+            } else if sources.len() > MAX_MANUAL_ACTIVE_OCCURRENCES {
+                return Err(PlaybackError::invalid(
+                    "QUEUE_LIMIT_EXCEEDED",
+                    "manual queue capacity would be exceeded",
+                ));
+            }
             let next_ordinal =
                 i.db.playback_next_ordinal(&i.session.session_id)
                     .map_err(storage)?;
@@ -1956,6 +2129,7 @@ fn apply_inner_with_album_context(
                 next_session.current_occurrence_id =
                     assigned.first().map(|o| o.occurrence_id.clone());
                 next_session.position_ms = 0;
+                set_current_policy(&mut next_session, assigned.first());
             }
             next_session.queue_revision = next_session
                 .queue_revision
@@ -1971,11 +2145,148 @@ fn apply_inner_with_album_context(
                     TransportState::Paused
                 };
             }
-            i.db.append_playback_occurrences(&next_session, &assigned)
+            let preview_needs_baseline = i
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.saved_main_occurrence_id.is_none());
+            if preview_needs_baseline {
+                fence_successor_for_edit(i)?;
+                i.db.append_playback_occurrences_with_audition_baseline(&next_session, &assigned)
+                    .map_err(storage)?;
+                if let Some(preview) = i.preview.as_mut() {
+                    preview.saved_main_occurrence_id = next_session.current_occurrence_id.clone();
+                    preview.saved_main_position_ms = 0;
+                    preview.saved_main_intent = TransportState::Paused;
+                }
+            } else {
+                fence_successor_for_edit(i)?;
+                i.db.append_playback_occurrences(&next_session, &assigned)
+                    .map_err(storage)?;
+            }
+        }
+        SessionOperation::RemoveUpcoming { occurrence_ids } => {
+            if occurrence_ids.is_empty() || occurrence_ids.len() > MAX_REMOVE_BATCH {
+                return Err(PlaybackError::invalid(
+                    "INVALID_SESSION",
+                    "remove requires between 1 and 200 occurrence IDs",
+                ));
+            }
+            let unique: std::collections::HashSet<_> = occurrence_ids.iter().collect();
+            if unique.len() != occurrence_ids.len()
+                || occurrence_ids.iter().any(|id| Uuid::parse_str(id).is_err())
+            {
+                return Err(PlaybackError::invalid(
+                    "INVALID_SESSION",
+                    "remove occurrence IDs must be distinct UUIDs",
+                ));
+            }
+            let current = canonical_main_current(i)?;
+            let mut upcoming =
+                i.db.playback_range_page(
+                    &i.session.session_id,
+                    Some(current.ordinal),
+                    None,
+                    None,
+                    MAX_MANUAL_ACTIVE_OCCURRENCES + 1,
+                )
+                .map_err(storage)?;
+            if occurrence_ids
+                .iter()
+                .any(|id| !upcoming.iter().any(|row| &row.occurrence_id == id))
+            {
+                return Err(PlaybackError::conflict(
+                    "OCCURRENCE_NOT_UPCOMING",
+                    "an occurrence is no longer upcoming",
+                ));
+            }
+            upcoming.retain(|row| !unique.contains(&row.occurrence_id));
+            next_session.queue_kind = QueueKind::Manual;
+            next_session.queue_revision = checked_next_revision(next_session.queue_revision)?;
+            fence_successor_for_edit(i)?;
+            i.db.edit_playback_upcoming(&next_session, &upcoming, occurrence_ids)
+                .map_err(storage)?;
+        }
+        SessionOperation::MoveUpcoming {
+            occurrence_id,
+            before_occurrence_id,
+        } => {
+            if Uuid::parse_str(occurrence_id).is_err()
+                || before_occurrence_id
+                    .as_ref()
+                    .is_some_and(|id| Uuid::parse_str(id).is_err())
+            {
+                return Err(PlaybackError::invalid(
+                    "INVALID_SESSION",
+                    "move occurrence IDs must be UUIDs",
+                ));
+            }
+            let current = canonical_main_current(i)?;
+            let mut upcoming =
+                i.db.playback_range_page(
+                    &i.session.session_id,
+                    Some(current.ordinal),
+                    None,
+                    None,
+                    MAX_MANUAL_ACTIVE_OCCURRENCES + 1,
+                )
+                .map_err(storage)?;
+            let Some(original_index) = upcoming
+                .iter()
+                .position(|row| row.occurrence_id == *occurrence_id)
+            else {
+                return Err(PlaybackError::conflict(
+                    "OCCURRENCE_NOT_UPCOMING",
+                    "the moved occurrence is no longer upcoming",
+                ));
+            };
+            if before_occurrence_id.as_deref() == Some(occurrence_id.as_str()) {
+                return Ok(noop_apply_result(i));
+            }
+            if let Some(anchor) = before_occurrence_id.as_deref()
+                && !upcoming.iter().any(|row| row.occurrence_id == anchor)
+            {
+                return Err(PlaybackError::conflict(
+                    "OCCURRENCE_NOT_UPCOMING",
+                    "the move anchor is no longer upcoming",
+                ));
+            }
+            let already_noop = before_occurrence_id.as_deref().map_or(
+                original_index + 1 == upcoming.len(),
+                |anchor| {
+                    upcoming
+                        .get(original_index + 1)
+                        .is_some_and(|row| row.occurrence_id == anchor)
+                },
+            );
+            if already_noop {
+                return Ok(noop_apply_result(i));
+            }
+            let moved = upcoming.remove(original_index);
+            let insertion = before_occurrence_id
+                .as_deref()
+                .map(|anchor| {
+                    upcoming
+                        .iter()
+                        .position(|row| row.occurrence_id == anchor)
+                        .expect("validated move anchor")
+                })
+                .unwrap_or(upcoming.len());
+            upcoming.insert(insertion, moved);
+            next_session.queue_kind = QueueKind::Manual;
+            next_session.queue_revision = checked_next_revision(next_session.queue_revision)?;
+            fence_successor_for_edit(i)?;
+            i.db.edit_playback_upcoming(&next_session, &upcoming, &[])
                 .map_err(storage)?;
         }
         SessionOperation::SelectCurrent { occurrence_id } => {
             next_session.current_occurrence_id = Some(occurrence_id.clone());
+            let selected =
+                i.db.playback_occurrence(&i.session.session_id, occurrence_id)
+                    .map_err(storage)?
+                    .ok_or_else(|| {
+                        PlaybackError::invalid("INVALID_SESSION", "selected occurrence is absent")
+                    })?;
+            set_current_policy(&mut next_session, Some(&selected));
             next_session.position_ms = 0;
             next_session.state = TransportState::Paused;
             i.db.select_playback_current(&next_session).map_err(|_| {
@@ -1984,8 +2295,11 @@ fn apply_inner_with_album_context(
         }
         SessionOperation::Clear => {
             next_session.album_context = None;
+            next_session.queue_kind = QueueKind::Manual;
             next_session.current_occurrence_id = None;
             next_session.position_ms = 0;
+            next_session.current_gain_bits = 1.0f32.to_bits();
+            next_session.current_qualified_suffix = None;
             next_session.queue_revision = next_session
                 .queue_revision
                 .checked_add(1)
@@ -2004,6 +2318,7 @@ fn apply_inner_with_album_context(
         }
         SessionOperation::PlayTrack { source } => {
             next_session.album_context = None;
+            next_session.queue_kind = QueueKind::Manual;
             source
                 .validate()
                 .map_err(|m| PlaybackError::invalid("INVALID_SESSION", m))?;
@@ -2011,6 +2326,8 @@ fn apply_inner_with_album_context(
             decorate_availability(&i.db, &mut assigned)?;
             next_session.current_occurrence_id = Some(assigned[0].occurrence_id.clone());
             next_session.position_ms = 0;
+            next_session.current_gain_bits = 1.0f32.to_bits();
+            next_session.current_qualified_suffix = None;
             next_session.queue_revision = next_session
                 .queue_revision
                 .checked_add(1)
@@ -2032,8 +2349,13 @@ fn apply_inner_with_album_context(
             }
         }
     }
-    let preserve_generation = matches!(p.operation, SessionOperation::AppendQueue { .. })
-        && i.session.current_occurrence_id == next_session.current_occurrence_id;
+    let preserve_generation = matches!(
+        p.operation,
+        SessionOperation::AppendQueue { .. }
+            | SessionOperation::RemoveUpcoming { .. }
+            | SessionOperation::MoveUpcoming { .. }
+    ) && (i.preview.is_some()
+        || i.session.current_occurrence_id == next_session.current_occurrence_id);
     if !preserve_generation {
         i.preview = None;
         i.preview_return_pending = false;
@@ -2044,13 +2366,15 @@ fn apply_inner_with_album_context(
         i.generation_id = Uuid::new_v4().to_string();
     }
     i.session = next_session;
-    i.output_gate.store(
-        matches!(
-            i.session.state,
-            TransportState::Playing | TransportState::Buffering
-        ),
-        Ordering::Release,
-    );
+    if i.preview.is_none() {
+        i.output_gate.store(
+            matches!(
+                i.session.state,
+                TransportState::Playing | TransportState::Buffering
+            ),
+            Ordering::Release,
+        );
+    }
     i.state_sequence = next_sequence;
     i.dirty = false;
     i.checkpointed_position_ms = i.session.position_ms;
@@ -2064,7 +2388,29 @@ fn apply_inner_with_album_context(
             ..Default::default()
         },
         SessionOperation::Clear => PlaybackState::default(),
-        SessionOperation::AppendQueue { .. } => i.playback.clone(),
+        SessionOperation::AppendQueue { .. }
+        | SessionOperation::RemoveUpcoming { .. }
+        | SessionOperation::MoveUpcoming { .. } => {
+            let mut playback = i.playback.clone();
+            if i.preview.is_none() {
+                playback.can_go_next = i
+                    .session
+                    .current_occurrence_id
+                    .as_deref()
+                    .and_then(|id| {
+                        i.db.playback_occurrence(&i.session.session_id, id)
+                            .ok()
+                            .flatten()
+                    })
+                    .and_then(|current| {
+                        i.db.playback_successor(&i.session.session_id, current.ordinal)
+                            .ok()
+                            .flatten()
+                    })
+                    .is_some();
+            }
+            playback
+        }
         _ => PlaybackState {
             status: PlaybackStatus::Paused,
             ..Default::default()
@@ -2386,6 +2732,47 @@ fn make_occurrences(s: &[TrackSource], start: u64) -> Vec<Occurrence> {
         })
         .collect()
 }
+fn canonical_main_current(i: &Inner) -> PResult<Occurrence> {
+    let occurrence_id =
+        i.session.current_occurrence_id.as_deref().ok_or_else(|| {
+            PlaybackError::conflict("OCCURRENCE_NOT_UPCOMING", "main queue is empty")
+        })?;
+    i.db.playback_occurrence(&i.session.session_id, occurrence_id)
+        .map_err(storage)?
+        .ok_or_else(|| PlaybackError::conflict("QUEUE_CONFLICT", "main current is absent"))
+}
+fn checked_next_revision(revision: u64) -> PResult<u64> {
+    revision
+        .checked_add(1)
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "queue revision overflow"))
+}
+fn fence_successor_for_edit(i: &Inner) -> PResult<()> {
+    if i.preview.is_none() && super::audio::global().revoke_successor(&i.generation_id) {
+        return Err(PlaybackError::conflict(
+            "PLAYBACK_BUSY",
+            "the prepared boundary is already submitted; retry after playback advances",
+        ));
+    }
+    Ok(())
+}
+fn set_current_policy(session: &mut PersistedSession, current: Option<&Occurrence>) {
+    let policy = if session.queue_kind == QueueKind::Album {
+        current.and_then(|occurrence| {
+            session.album_context.as_ref().map(|context| {
+                (
+                    context.scalar_for(occurrence).to_bits(),
+                    context.suffix_for(occurrence),
+                )
+            })
+        })
+    } else {
+        None
+    };
+    let (gain_bits, suffix) = policy.unwrap_or((1.0f32.to_bits(), None));
+    session.current_gain_bits = gain_bits;
+    session.current_qualified_suffix = suffix;
+}
 fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
     let failed = i.restoration.status == "error";
     let mut rows = if failed {
@@ -2423,29 +2810,12 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         qualified_suffix: i
             .preview
             .is_none()
-            .then(|| {
-                current.as_ref().and_then(|occurrence| {
-                    i.session
-                        .album_context
-                        .as_ref()
-                        .and_then(|context| context.suffix_for(occurrence))
-                })
-            })
+            .then(|| i.session.current_qualified_suffix.clone())
             .flatten(),
-        gain_bits: i.preview.as_ref().map_or_else(
-            || {
-                current
-                    .as_ref()
-                    .and_then(|occurrence| {
-                        i.session
-                            .album_context
-                            .as_ref()
-                            .map(|context| context.scalar_for(occurrence).to_bits())
-                    })
-                    .unwrap_or(1.0f32.to_bits())
-            },
-            |_| 1.0f32.to_bits(),
-        ),
+        gain_bits: i
+            .preview
+            .as_ref()
+            .map_or(i.session.current_gain_bits, |_| 1.0f32.to_bits()),
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
         session_id: i.session.session_id.clone(),
@@ -2457,6 +2827,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         } else {
             PlaybackMode::Main
         },
+        queue_kind: i.session.queue_kind,
         preview: i.preview.as_ref().map(|preview| PreviewSummary {
             audition_id: preview.occurrence.occurrence_id.clone(),
             has_main_session: preview.saved_main_occurrence_id.is_some(),
@@ -2467,6 +2838,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         }),
         state: active_state(i),
         current: current.clone(),
+        main_current,
         position_ms: active_position(i),
         checkpointed_position_ms: if i.preview.is_some() {
             active_position(i)
@@ -2751,6 +3123,10 @@ fn control_inner(
                 },
             );
             terminal.session = next_session;
+            terminal.preserve_existing_outcome =
+                i.db.playback_outcome(&p.occurrence_id)
+                    .map_err(storage)?
+                    .is_some();
             committed_snapshot = Some(commit_terminal(i, terminal, generation_serial, false)?);
         }
         ControlAction::Stop => {
@@ -3193,6 +3569,62 @@ fn decorate_availability(db: &Database, rows: &mut [Occurrence]) -> PResult<()> 
 fn encode_cursor(s: &PersistedSession, ordinal: u64) -> String {
     format!("{}:{}:{}", s.session_id, s.queue_revision, ordinal)
 }
+fn encode_section_cursor(
+    s: &PersistedSession,
+    section: OccurrenceSection,
+    main_id: Option<&str>,
+    ordinal: u64,
+) -> String {
+    if section == OccurrenceSection::All {
+        return encode_cursor(s, ordinal);
+    }
+    let section = match section {
+        OccurrenceSection::Upcoming => "upcoming",
+        OccurrenceSection::History => "history",
+        OccurrenceSection::All => unreachable!(),
+    };
+    format!(
+        "{}:{}:{}:{}:{}",
+        s.session_id,
+        s.queue_revision,
+        section,
+        main_id.unwrap_or("-"),
+        ordinal
+    )
+}
+fn decode_section_cursor(
+    value: &str,
+    session: &PersistedSession,
+    section: OccurrenceSection,
+    main_id: Option<&str>,
+) -> PResult<u64> {
+    if section == OccurrenceSection::All {
+        return decode_cursor(value, session);
+    }
+    let expected_section = match section {
+        OccurrenceSection::Upcoming => "upcoming",
+        OccurrenceSection::History => "history",
+        OccurrenceSection::All => unreachable!(),
+    };
+    let mut parts = value.rsplitn(5, ':');
+    let ordinal = parts.next().and_then(|part| parse_revision(part).ok());
+    let anchor = parts.next();
+    let actual_section = parts.next();
+    let revision = parts.next().and_then(|part| parse_revision(part).ok());
+    let session_id = parts.next();
+    if session_id != Some(session.session_id.as_str())
+        || revision != Some(session.queue_revision)
+        || actual_section != Some(expected_section)
+        || anchor != Some(main_id.unwrap_or("-"))
+        || ordinal.is_none()
+    {
+        return Err(PlaybackError::conflict(
+            "INVALID_CURSOR",
+            "cursor does not belong to this queue section",
+        ));
+    }
+    Ok(ordinal.unwrap())
+}
 fn decode_cursor(v: &str, s: &PersistedSession) -> PResult<u64> {
     let mut x = v.rsplitn(3, ':');
     let ord = x.next().and_then(|v| parse_revision(v).ok());
@@ -3552,6 +3984,11 @@ fn adopt_presented_handoff(
     }
     let mut next = i.session.clone();
     next.current_occurrence_id = Some(token.successor_occurrence_id.clone());
+    let successor =
+        i.db.playback_occurrence(&i.session.session_id, &token.successor_occurrence_id)
+            .map_err(storage)?
+            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "successor absent"))?;
+    set_current_policy(&mut next, Some(&successor));
     next.position_ms = successor_offset_frames.saturating_mul(1000) / u64::from(sample_rate);
     next.state = if i.output_gate.load(Ordering::Acquire) {
         TransportState::Playing
@@ -3677,6 +4114,7 @@ fn terminal_plan(i: &Inner, outcome: &'static str, status: PlaybackStatus) -> Pe
         status,
         failure: None,
         resolve_successor: false,
+        preserve_existing_outcome: false,
     }
 }
 
@@ -3756,26 +4194,12 @@ fn commit_terminal(
         if let Some(current) = response.current.as_mut() {
             current.availability = availability(&i.db, &current.source.server_id)?;
         }
+        response.main_current = response.current.clone();
+        set_current_policy(&mut terminal.session, response.current.as_ref());
         // The projection began with the predecessor snapshot. Transport effects
         // must use the destination occurrence's frozen policy after the commit.
-        response.gain_bits = response
-            .current
-            .as_ref()
-            .map_or(1.0f32.to_bits(), |current| {
-                terminal
-                    .session
-                    .album_context
-                    .as_ref()
-                    .map_or(1.0, |context| context.scalar_for(current))
-                    .to_bits()
-            });
-        response.qualified_suffix = response.current.as_ref().and_then(|current| {
-            terminal
-                .session
-                .album_context
-                .as_ref()
-                .and_then(|context| context.suffix_for(current))
-        });
+        response.gain_bits = terminal.session.current_gain_bits;
+        response.qualified_suffix = terminal.session.current_qualified_suffix.clone();
         response.playback.can_go_next = if let Some(current) = response.current.as_ref() {
             i.db.playback_successor(&i.session.session_id, current.ordinal)
                 .map_err(storage)?
@@ -3792,12 +4216,17 @@ fn commit_terminal(
             return Err(error);
         }
     };
-    if let Err(error) = i.db.persist_playback_terminal(
-        &terminal.session,
-        &terminal.occurrence_id,
-        terminal.outcome,
-        terminal.failure.as_ref().map(|f| f.code.as_str()),
-    ) {
+    let persisted = if terminal.preserve_existing_outcome {
+        i.db.persist_playback_departure(&terminal.session, &terminal.occurrence_id)
+    } else {
+        i.db.persist_playback_terminal(
+            &terminal.session,
+            &terminal.occurrence_id,
+            terminal.outcome,
+            terminal.failure.as_ref().map(|f| f.code.as_str()),
+        )
+    };
+    if let Err(error) = persisted {
         freeze_terminal(i, terminal);
         return Err(storage(error));
     }
@@ -4166,7 +4595,15 @@ mod tests {
             .unwrap()
             .execute_batch("DROP TRIGGER fail_position")
             .unwrap();
-        let command = params(&s, SessionOperation::AppendQueue { sources: vec![] });
+        let command = params(
+            &s,
+            SessionOperation::AppendQueue {
+                sources: vec![TrackSource {
+                    server_id: "s".into(),
+                    track_id: "structural-recovery".into(),
+                }],
+            },
+        );
         let first = p.apply(command.clone()).unwrap();
         let s = p.snapshot().unwrap();
         assert_eq!(s.persistence.status, "ok");
@@ -4204,7 +4641,10 @@ mod tests {
                 schema_version: 1,
                 session_id: s.session_id.clone(),
                 expected_queue_revision: s.queue_revision.clone(),
+                section: OccurrenceSection::All,
                 cursor: Some(format!("{}:{}:{number}", s.session_id, s.queue_revision)),
+                around_occurrence_id: None,
+                expected_main_occurrence_id: None,
                 limit: Some(1),
             });
             assert_eq!(result.unwrap_err().code, "INVALID_CURSOR");
@@ -4321,7 +4761,10 @@ mod tests {
                 schema_version: 1,
                 session_id: s.session_id.clone(),
                 expected_queue_revision: s.queue_revision.clone(),
+                section: OccurrenceSection::All,
                 cursor: s.next_cursor.clone(),
+                around_occurrence_id: None,
+                expected_main_occurrence_id: None,
                 limit: Some(200),
             })
             .unwrap();
@@ -4332,7 +4775,10 @@ mod tests {
                 schema_version: 1,
                 session_id: s.session_id,
                 expected_queue_revision: s.queue_revision,
+                section: OccurrenceSection::All,
                 cursor: Some("foreign:0:0".into()),
+                around_occurrence_id: None,
+                expected_main_occurrence_id: None,
                 limit: None,
             })
             .unwrap_err();
@@ -4367,6 +4813,9 @@ mod tests {
             state: TransportState::Playing,
             current_occurrence_id: None,
             position_ms: 0,
+            queue_kind: QueueKind::Manual,
+            current_gain_bits: 1.0f32.to_bits(),
+            current_qualified_suffix: None,
             album_context: None,
         };
         let mut occurrences: Vec<_> = (0..10_000)
@@ -4404,7 +4853,10 @@ mod tests {
                     schema_version: 1,
                     session_id: snapshot.session_id.clone(),
                     expected_queue_revision: snapshot.queue_revision.clone(),
+                    section: OccurrenceSection::All,
                     cursor: Some(cursor),
+                    around_occurrence_id: None,
+                    expected_main_occurrence_id: None,
                     limit: Some(200),
                 })
                 .unwrap();
@@ -6691,5 +7143,278 @@ mod tests {
             .unwrap();
         restored.final_checkpoint().unwrap();
         assert_eq!(restored.snapshot().unwrap().position_ms, 100);
+    }
+
+    #[test]
+    fn manual_queue_edits_preserve_current_repeats_and_authoritative_order() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "queue-edit-owner".into());
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let initial = playback.snapshot().unwrap();
+        let source = |track: &str| TrackSource {
+            server_id: "offline".into(),
+            track_id: track.into(),
+        };
+        let admitted = playback
+            .apply(params(
+                &initial,
+                SessionOperation::ReplaceQueue {
+                    sources: vec![
+                        source("current"),
+                        source("repeat"),
+                        source("middle"),
+                        source("repeat"),
+                    ],
+                },
+            ))
+            .unwrap();
+        let current_id = admitted.assigned_occurrences[0].occurrence_id.clone();
+        let first_repeat = admitted.assigned_occurrences[1].occurrence_id.clone();
+        let middle = admitted.assigned_occurrences[2].occurrence_id.clone();
+        let last_repeat = admitted.assigned_occurrences[3].occurrence_id.clone();
+
+        let snapshot = playback.snapshot().unwrap();
+        let removed = playback
+            .apply(params(
+                &snapshot,
+                SessionOperation::RemoveUpcoming {
+                    occurrence_ids: vec![first_repeat],
+                },
+            ))
+            .unwrap();
+        assert_eq!(removed.queue_revision, "2");
+        let snapshot = playback.snapshot().unwrap();
+        assert_eq!(snapshot.current.as_ref().unwrap().occurrence_id, current_id);
+        assert_eq!(snapshot.queue_kind, QueueKind::Manual);
+
+        playback
+            .apply(params(
+                &snapshot,
+                SessionOperation::MoveUpcoming {
+                    occurrence_id: last_repeat.clone(),
+                    before_occurrence_id: Some(middle.clone()),
+                },
+            ))
+            .unwrap();
+        let snapshot = playback.snapshot().unwrap();
+        let page = playback
+            .list(ListOccurrencesParams {
+                schema_version: SCHEMA_VERSION,
+                session_id: snapshot.session_id.clone(),
+                expected_queue_revision: snapshot.queue_revision.clone(),
+                section: OccurrenceSection::Upcoming,
+                cursor: None,
+                around_occurrence_id: None,
+                expected_main_occurrence_id: Some(current_id.clone()),
+                limit: Some(100),
+            })
+            .unwrap();
+        assert_eq!(
+            page.occurrences
+                .iter()
+                .map(|row| row.occurrence_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![last_repeat.as_str(), middle.as_str()]
+        );
+        assert_eq!(page.section_count, 2);
+        assert_eq!(
+            page.main_current_occurrence_id.as_deref(),
+            Some(current_id.as_str())
+        );
+
+        drop(_cleanup);
+        let restored = PlaybackSession::restore(db, "queue-edit-restored".into());
+        let _restored_cleanup = OwnerThreadCleanup(restored.clone());
+        let restored_snapshot = restored.snapshot().unwrap();
+        assert_eq!(restored_snapshot.state, TransportState::Paused);
+        assert_eq!(restored_snapshot.queue_kind, QueueKind::Manual);
+        assert_eq!(
+            restored_snapshot.main_current.unwrap().occurrence_id,
+            current_id
+        );
+    }
+
+    #[test]
+    fn queue_edit_noops_are_stable_and_current_is_never_upcoming() {
+        let (_db, playback, snapshot) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let current = snapshot.current.as_ref().unwrap().occurrence_id.clone();
+        playback
+            .apply(params(
+                &snapshot,
+                SessionOperation::AppendQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "successor".into(),
+                    }],
+                },
+            ))
+            .unwrap();
+        let snapshot = playback.snapshot().unwrap();
+        let upcoming = snapshot.occurrences[1].occurrence_id.clone();
+        let no_op = playback
+            .apply(params(
+                &snapshot,
+                SessionOperation::MoveUpcoming {
+                    occurrence_id: upcoming,
+                    before_occurrence_id: None,
+                },
+            ))
+            .unwrap();
+        assert_eq!(no_op.queue_revision, snapshot.queue_revision);
+        let conflict = playback
+            .apply(params(
+                &snapshot,
+                SessionOperation::RemoveUpcoming {
+                    occurrence_ids: vec![current],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(conflict.code, "OCCURRENCE_NOT_UPCOMING");
+        assert_eq!(
+            conflict.authoritative.unwrap().queue_revision,
+            snapshot.queue_revision
+        );
+    }
+
+    #[test]
+    fn append_after_final_completion_allows_next_without_rewriting_outcome() {
+        let (db, playback, selected) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let completed_id = selected.current.as_ref().unwrap().occurrence_id.clone();
+        playback.publish_event(
+            selected.generation_id.clone(),
+            PlaybackEvent::Completed { position_ms: 1_234 },
+        );
+        let completed = playback.snapshot().unwrap();
+        assert_eq!(completed.playback.status, PlaybackStatus::Completed);
+        assert_eq!(
+            db.playback_outcome(&completed_id).unwrap().as_deref(),
+            Some("naturalCompletion")
+        );
+
+        playback
+            .apply(params(
+                &completed,
+                SessionOperation::AppendQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "late-successor".into(),
+                    }],
+                },
+            ))
+            .unwrap();
+        let appended = playback.snapshot().unwrap();
+        assert!(appended.playback.can_go_next);
+        let next = playback
+            .control_with_guard(transport(&appended, ControlAction::Next), None)
+            .unwrap();
+        assert_eq!(
+            next.current.as_ref().unwrap().source.track_id,
+            "late-successor"
+        );
+        assert_eq!(next.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(
+            db.playback_outcome(&completed_id).unwrap().as_deref(),
+            Some("naturalCompletion")
+        );
+        assert_eq!(next.persistence.status, "ok");
+    }
+
+    #[test]
+    fn preview_safe_edits_create_and_preserve_an_empty_main_baseline() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db, "preview-queue-owner".into());
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let empty = playback.snapshot().unwrap();
+        let preview = playback
+            .preview_with_guard(preview_params(&empty, "audition"), None)
+            .unwrap();
+        let preview_generation = preview.generation_id.clone();
+        let appended = playback
+            .apply(params(
+                &preview,
+                SessionOperation::AppendQueue {
+                    sources: vec![
+                        TrackSource {
+                            server_id: "offline".into(),
+                            track_id: "main".into(),
+                        },
+                        TrackSource {
+                            server_id: "offline".into(),
+                            track_id: "remove".into(),
+                        },
+                        TrackSource {
+                            server_id: "offline".into(),
+                            track_id: "keep".into(),
+                        },
+                    ],
+                },
+            ))
+            .unwrap();
+        assert_eq!(appended.generation_id, preview_generation);
+        assert_eq!(appended.assigned_occurrences.len(), 3);
+        let main_id = appended.assigned_occurrences[0].occurrence_id.clone();
+        let remove_id = appended.assigned_occurrences[1].occurrence_id.clone();
+        let keep_id = appended.assigned_occurrences[2].occurrence_id.clone();
+
+        let preview = playback.snapshot().unwrap();
+        assert_eq!(preview.mode, PlaybackMode::Preview);
+        assert_eq!(
+            preview.main_current.as_ref().unwrap().occurrence_id,
+            main_id
+        );
+        playback
+            .apply(params(
+                &preview,
+                SessionOperation::MoveUpcoming {
+                    occurrence_id: keep_id.clone(),
+                    before_occurrence_id: Some(remove_id.clone()),
+                },
+            ))
+            .unwrap();
+        let preview = playback.snapshot().unwrap();
+        playback
+            .apply(params(
+                &preview,
+                SessionOperation::RemoveUpcoming {
+                    occurrence_ids: vec![remove_id],
+                },
+            ))
+            .unwrap();
+        let preview = playback.snapshot().unwrap();
+        assert_eq!(preview.generation_id, preview_generation);
+
+        let returned = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: preview.instance_id.clone(),
+                    session_id: preview.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: preview.generation_id.clone(),
+                    occurrence_id: preview.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::ReturnToSession,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(returned.mode, PlaybackMode::Main);
+        assert_eq!(returned.current.as_ref().unwrap().occurrence_id, main_id);
+        assert_eq!(returned.state, TransportState::Paused);
+        let page = playback
+            .list(ListOccurrencesParams {
+                schema_version: SCHEMA_VERSION,
+                session_id: returned.session_id.clone(),
+                expected_queue_revision: returned.queue_revision.clone(),
+                section: OccurrenceSection::Upcoming,
+                cursor: None,
+                around_occurrence_id: None,
+                expected_main_occurrence_id: Some(main_id),
+                limit: Some(100),
+            })
+            .unwrap();
+        assert_eq!(page.occurrences.len(), 1);
+        assert_eq!(page.occurrences[0].occurrence_id, keep_id);
     }
 }
