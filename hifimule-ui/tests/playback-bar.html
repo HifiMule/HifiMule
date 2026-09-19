@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Playback bar renderer checks</title>
+<style>
+  #checks { padding:8px; background:#10182b; color:#f1f5f9; font:14px system-ui; }
+  #checks label { margin-right:12px; }
+  #stage { height:calc(100vh - 100px); max-width:100%; }
+  #stage .basket-view { height:100%; }
+  #measurements { white-space:pre-wrap; }
+  #library-content button { display:block; margin:16px; }
+</style>
+<div id="checks">
+  <label>Width <select id="width"><option>1280</option><option>1000</option><option>900</option><option>800</option><option>599</option></select></label>
+  <label>State <select id="state"><option>Playing</option><option>Paused</option><option>Preview</option><option>Idle</option><option>Disconnected</option><option>Output lost</option></select></label>
+  <label>Text <select id="zoom"><option value="16">100%</option><option value="32">200%</option></select></label>
+  <label>Language <select id="lang"><option>en</option><option>fr</option><option>es</option><option>de</option></select></label>
+  <button id="last">Focus final row</button>
+  <output id="measurements"></output>
+</div>
+<div id="stage">
+  <sl-split-panel primary="end" position="32" class="split-panel">
+    <div slot="start" class="library-view">
+      <header><div class="library-title-block"><h1 id="surface-title">Library</h1><p id="surface-subtitle">Select media to sync to your device.</p></div></header>
+      <div id="browse-mode-bar"><button id="browse">Albums</button></div>
+      <div id="library-content" class="content"></div>
+      <div id="playback-destination-container" class="content" hidden><h3>Upcoming</h3><p>Queue item</p></div>
+      <div id="playback-controls-container"></div>
+    </div>
+    <div slot="end" class="basket-view"><h2>Device basket</h2><p>Independent scroll surface</p><button>Basket action</button></div>
+  </sl-split-panel>
+</div>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '@shoelace-style/shoelace/dist/shoelace.js';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+import '../src/styles.css';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const params = new URLSearchParams(location.search);
+let offline=false;
+const source={serverId:'server',trackId:'track'};
+let snapshot={schemaVersion:1,instanceId:'renderer',sessionId:'session',queueRevision:'1',stateSequence:'1',generationId:'generation',mode:'main',state:'playing',positionMs:134000,
+current:{occurrenceId:'current',source},mainCurrent:{occurrenceId:'current',source,availability:'unknown'},
+playback:{status:'active',metadata:{title:'Everything in Its Right Place',artist:'Radiohead',source},durationMs:251000,seek:{available:true},canGoNext:true},
+output:{revision:'1',selected:{outputId:'headphones',displayName:'USB headphones',available:true},status:'available',pending:null,error:null}};
+const commands=[];
+window.__TAURI_INTERNALS__={invoke:async (_command,{method,params})=>{
+ if(method==='server.list') return [{id:'local',serverId:'server',name:'Home Jellyfin — music collection',serverType:'jellyfin',url:'https://example.invalid',username:'test',selected:true}];
+ if(method==='playback.getSession'){if(offline)throw new Error('Fixture disconnection');return {data:structuredClone(snapshot)};}
+ if(method==='playback.listOutputs')return {data:{instanceId:snapshot.instanceId,outputs:[snapshot.output.selected],output:snapshot.output}};
+ if(method==='playback.describeOccurrences')return {data:{occurrences:[]}};
+ commands.push({method,params});
+ if(method==='playback.control') {snapshot.state=params.action==='resume'?'playing':'paused';snapshot.playback.status=snapshot.state==='playing'?'active':'paused';if(params.action==='returnToSession'||params.action==='stop')snapshot.mode='main';}
+ if(method==='playback.seek')snapshot.positionMs=params.positionMs;
+ snapshot.stateSequence=String(BigInt(snapshot.stateSequence)+1n);
+ return {data:structuredClone(snapshot)};
+}};
+const {PlaybackControls}=await import('../src/components/PlaybackControls.ts');
+const {playbackStore}=await import('../src/state/playback.ts');
+const {setLanguage}=await import('../src/i18n.ts');
+const library=document.getElementById('library-content');
+for(let i=1;i<=50;i++){const row=document.createElement('button');row.textContent=`Library row ${i}`;library.append(row);}
+let controls;
+let surface='library';
+const showSurface=next=>{surface=next;const playing=next==='playback';library.hidden=playing;document.getElementById('browse-mode-bar').hidden=playing;document.getElementById('playback-destination-container').hidden=!playing;document.getElementById('surface-title').textContent=playing?'Playing':'Library';document.getElementById('surface-subtitle').hidden=playing;controls?.setSurface(next);};
+const mount=()=>{controls?.destroy();controls=new PlaybackControls(document.getElementById('playback-controls-container'),showSurface);controls.setSurface(surface);};
+mount();
+const width=document.getElementById('width'), state=document.getElementById('state'),zoom=document.getElementById('zoom'),lang=document.getElementById('lang');
+width.value=params.get('width')||'1280';zoom.value=params.get('zoom')||'16';state.value=params.get('state')||'Playing';lang.value=params.get('lang')||'en';
+function measure(){
+ const bar=document.getElementById('playback-controls-container').getBoundingClientRect(),content=library.getBoundingClientRect(),basket=document.querySelector('.basket-view').getBoundingClientRect(),last=library.lastElementChild.getBoundingClientRect();
+ document.getElementById('measurements').textContent=`Stage ${Math.round(document.getElementById('stage').getBoundingClientRect().width)}px · bar ${Math.round(bar.width)}×${Math.round(bar.height)} · content bottom ${Math.round(content.bottom)} / bar top ${Math.round(bar.top)} · basket left ${Math.round(basket.left)} / bar right ${Math.round(bar.right)} · final row bottom ${Math.round(last.bottom)} · horizontal overflow ${document.documentElement.scrollWidth>innerWidth} · commands ${commands.length}`;
+}
+async function update(){
+ document.getElementById('stage').style.width=width.value+'px';document.documentElement.style.fontSize=zoom.value+'px';
+ offline=state.value==='Disconnected';snapshot.mode=state.value==='Preview'?'preview':'main';snapshot.preview=snapshot.mode==='preview'?{hasMainSession:true}:null;
+ snapshot.current=state.value==='Idle'?null:{occurrenceId:'current',source};snapshot.state=state.value==='Paused'?'paused':'playing';snapshot.playback.status=snapshot.state==='playing'?'active':'paused';
+ snapshot.output.selected.available=state.value!=='Output lost';snapshot.output.error=state.value==='Output lost'?{code:'OUTPUT_LOST',retryable:true}:null;
+ snapshot.stateSequence=String(BigInt(snapshot.stateSequence)+1n);
+ await playbackStore.refresh().catch(()=>{});requestAnimationFrame(measure);
+}
+width.onchange=state.onchange=zoom.onchange=update;
+lang.onchange=()=>{setLanguage(lang.value);mount();update();};
+setLanguage(lang.value);mount();await update();
+document.getElementById('last').onclick=()=>{library.lastElementChild.focus();library.lastElementChild.scrollIntoView({block:'nearest'});measure();};
+new ResizeObserver(measure).observe(document.getElementById('stage'));
+document.querySelector('sl-split-panel').addEventListener('sl-reposition',measure);
+setInterval(measure,1000);
+</script>
+</html>

@@ -658,3 +658,93 @@ libraries. No installed-platform row is promoted by this review.
 - [ ] macOS x64 installed: append/move/remove, repeats, callback race, Preview edit, keyboard and screen-reader focus, long history.
 - [ ] macOS ARM64 installed: append/move/remove, repeats, callback race, Preview edit, keyboard and screen-reader focus, long history.
 - [ ] Physical-basket mutation guard R16 inherited from Story 15.12 remains unresolved; Story 15.13 queue actions introduce no basket path and do not certify that deferred acceptance item.
+
+## Story 15.14 floating playback bar evidence (2026-09-19)
+
+Implementation uses the user-selected **B: two-row bar**, with icon actions,
+hover/focus hints, and a full-width timeline. Baseline:
+`e35b1365a4c6db9fde3f1cfce5905feb0d83e827` plus this working tree. Host:
+macOS/Darwin ARM64. No installed package was built or certified in this run.
+
+Automated results: **80/80** production-component/store UI tests pass with
+`rtk proxy node --test scripts/tests/playback-ui.test.mjs scripts/tests/destination-ui.test.mjs`.
+`rtk npm --prefix hifimule-ui run build` and `rtk git diff --check` pass.
+Vite reports the existing mixed-import and large-chunk warnings. No daemon/RPC
+production code changed, so no daemon/audio test result is claimed.
+
+The browser fixture `hifimule-ui/tests/playback-bar.html` mounts the actual
+PlaybackControls, shared store, catalog, stylesheet and locked Shoelace package.
+Only the Tauri RPC boundary and example library/basket content are simulated.
+Run the UI Vite server and visit `/tests/playback-bar.html`; its controls exercise
+width, text scale, language, Preview, idle, output loss and connection loss.
+This fixture does **not** certify the installed application, virtualized rows,
+nested Tracks/curation scrollers, real basket actions or physical audio.
+
+Observed in the Codex in-app browser, with real layout and keyboard events:
+
+| CSS viewport | Bar width × height | Content bottom / bar top | Bar right / basket left | Final-row bottom | Horizontal overflow |
+| --- | --- | --- | --- | --- | --- |
+| 1280×860 | 914×117 | 669 / 681 | 930 / 950 | 621 | None |
+| 1000×860 | 634×117 | 669 / 681 | 650 / 670 | 621 | None |
+| 800×860 | 446×161 | 642 / 654 | 462 / 482 | 626 | None |
+| 599×860 | 261×176 | 629 / 641 | 269 / 281 | 613 | None |
+
+These measurements include the fixture's diagnostic header; split-panel width
+varies as its retained divider is resized. The final row was focused and scrolled
+into view before measurement. Each final row fits above the actual bar bounds.
+
+- The browser accessibility tree exposes named Pause, Stop, Next, Browse library,
+  output and Preview Return buttons. Hidden text inside the Shoelace button slot
+  was necessary: an `aria-label` on its host alone did not name every inner button.
+- Native range ArrowRight issued one seek. Preview Return issued one command and
+  displayed the fixture's returned paused main state. These are UI routing checks,
+  not proof of audio restoration or daemon intent policy.
+- Escape from the native output select closed the chooser and returned focus to
+  the inner button of the output `sl-icon-button`.
+- At 1000×860, the chooser measured 632×96 px, x=0–632, y=614–710, with actual
+  `top-end` placement and no basket overlap. A real renderer exposed two issues
+  that were corrected: the tooltip needed a measurable trigger wrapper, and
+  backdrop filtering the bar itself trapped the fixed popup. Blur now belongs
+  only to a pointer-transparent pseudo-element.
+- At 900×640 with 200% text and German disconnection guidance, the bar measured
+  514×270 px, with 484 px of internally scrollable content and no horizontal
+  overflow. Keyboard activation brought Refresh into view and performed a read
+  without replaying transport. The height cap preserves browsing space under
+  constrained text/window combinations; controls remain in the normal tab order.
+- Rendered status color is `rgb(176,186,198)` on a
+  `rgba(21,29,49,.96)` backing. Conservative compositing over pure white gives
+  contrast ratios of **7.67:1** for status, **13.75:1** for primary text and
+  **7.91:1** for amber warnings; dark application backgrounds improve these bounds.
+  Native screen-reader announcements were not tested.
+
+Post-feedback refinement on the same host moved the Library/Playing surface
+switch into the bar and removed the top Playback chip, Playback page heading,
+Back to library action, and duplicate current-occurrence block. The shared page
+title now changes from Library to Playing. The source label became the configured
+server icon before the title, with the server name retained as a hoisted hint.
+Routine active/paused status remains available to assistive technology without a
+visible panel; idle, Preview, loading, connection, output, seek, and error guidance
+opens as an absolutely positioned panel above the bar, so it does not change the
+bar's measured height. The Library hint uses `top-end` placement and grows toward
+the library rather than beneath the basket.
+
+The revised fixture was checked in French at the available 641 px fixture stage:
+the bar remained 305×131 px both with routine Playing status hidden and with the
+disconnected guidance panel visible above it. The Playing switch changed the
+header, hid its subtitle, exposed the queue surface, changed to the Library icon,
+and showed “Parcourir la bibliothèque” above and inward from the split divider.
+Repository-wide JavaScript tests pass **141/141**; the focused destination/playback
+suite remains **80/80**. The production UI build and whitespace check pass.
+
+Remaining required real-application observations (do not treat the fixture as a pass):
+
+- [ ] Nested Tracks artist/album/track panes and playlist curation: final-row keyboard actions, long lists and divider extremes.
+- [ ] Production virtual library rows, Playback current/upcoming/history paging and physical basket bottom actions.
+- [ ] Installed macOS ARM64: real Preview/Stop restoration, output removal/reattachment, daemon loss/recovery, full application at minimum size and 200% browser zoom.
+- [ ] Installed macOS x64: same scenarios, theme and screen-reader observations.
+- [ ] Installed Windows: same scenarios, forced-colors/high contrast and screen reader.
+- [ ] Installed Linux: same scenarios, themes and screen reader.
+- [ ] Reduced-motion, high-contrast and no-backdrop-filter preferences in supported installed webviews; CSS fallback exists but preference behavior is unverified.
+
+The Story 15.12 R16 physical-basket mutation gap remains open. No installed row
+from earlier stories is promoted by these results.

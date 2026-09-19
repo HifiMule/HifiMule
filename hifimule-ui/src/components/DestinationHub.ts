@@ -10,6 +10,7 @@ export class DestinationHub {
     private refreshRequest = 0;
     private selecting = false;
     private selectedKind?: Destination['kind'];
+    private selectedKey?: string;
     private issueNodes = new Map<string, { element: HTMLDivElement; revision: string }>();
     private buttons = new Map<string, HTMLButtonElement>();
     private readonly list = document.createElement('div');
@@ -51,8 +52,8 @@ export class DestinationHub {
 
     async applyState(state: DaemonDestinationState, programmatic = false): Promise<void> {
         if (this.disposed) return;
-        const previousSelected = [...this.buttons.values()].find(button => button.getAttribute('aria-pressed') === 'true')?.dataset.destinationKey;
-        const ordered = [...state.destinations].sort((a, b) => a.kind === 'playback' ? -1 : b.kind === 'playback' ? 1 : 0);
+        const previousSelected = this.selectedKey;
+        const ordered = state.destinations.filter(destination => destination.kind !== 'playback');
         const mounted: HTMLButtonElement[] = [];
         for (const destination of ordered) {
             const key = this.key(destination);
@@ -67,7 +68,7 @@ export class DestinationHub {
             button.dataset.destinationKind = destination.kind;
             button.className = `destination-hub__item${destination.selected ? ' is-selected' : ''}`;
             button.setAttribute('aria-pressed', String(destination.selected));
-            button.textContent = destination.kind === 'playback' ? t('destination.playback') : destination.name;
+            button.textContent = destination.name;
             if (destination.kind === 'pendingDevice') {
                 button.textContent = `${destination.name} — ${t('destination.setup')}`;
                 button.setAttribute('aria-label', t('destination.setup_named', { name: destination.name }));
@@ -105,13 +106,15 @@ export class DestinationHub {
         for (const [id, node] of this.issueNodes) {
             if (!issueIds.has(id)) { node.element.remove(); this.issueNodes.delete(id); }
         }
-        const selected = ordered.find(item => item.selected);
+        const selected = state.destinations.find(item => item.selected);
         if (programmatic && selected && this.key(selected) !== previousSelected) {
             const name = selected.kind === 'playback' ? t('destination.playback') : selected.name;
             this.announcement.textContent = t('destination.arrival_selected', { name });
         }
         this.selectedKind = selected?.kind;
+        this.selectedKey = selected ? this.key(selected) : undefined;
         this.revision = state.destinationRevision;
+        this.container.hidden = mounted.length === 0 && issueIds.size === 0;
         if (selected && this.key(selected) !== previousSelected) this.onChange();
     }
 

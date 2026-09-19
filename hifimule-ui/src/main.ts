@@ -9,7 +9,7 @@ import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } 
 import { PlaybackControls } from './components/PlaybackControls';
 import { DestinationHub } from './components/DestinationHub';
 import { PlaybackDestination } from './components/PlaybackDestination';
-import { getDaemonState } from './rpc';
+import { destinationSelect, getDaemonState } from './rpc';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -23,6 +23,7 @@ let activeBasketSidebar: any = null;
 let activePlaybackControls: PlaybackControls | null = null;
 let activeDestinationHub: DestinationHub | null = null;
 let activePlaybackDestination: PlaybackDestination | null = null;
+let activeSurface: 'library' | 'playback' = 'library';
 function disposePlaybackControls(): void {
     activePlaybackControls?.destroy();
     activePlaybackControls = null;
@@ -437,8 +438,8 @@ function renderMainLayout(_state: any = null) {
         <header>
           <div class="library-header-row">
             <div class="library-title-block">
-              <h1>${t('ui.library.title')}</h1>
-              <p>${t('ui.library.subtitle')}</p>
+              <h1 id="surface-title">${t('ui.library.title')}</h1>
+              <p id="surface-subtitle">${t('ui.library.subtitle')}</p>
             </div>
             <div id="server-hub-container"></div>
           </div>
@@ -448,12 +449,11 @@ function renderMainLayout(_state: any = null) {
 
         <div id="browse-mode-bar"></div>
 
-        <div id="playback-controls-container"></div>
-
         <div id="library-content" class="content">
           <!-- Media grid will be rendered here by library.ts -->
         </div>
         <div id="playback-destination-container" class="content" hidden></div>
+        <div id="playback-controls-container"></div>
       </div>
 
       <div slot="end" class="basket-view" id="basket-sidebar-container">
@@ -474,7 +474,11 @@ function renderMainLayout(_state: any = null) {
 
     disposePlaybackControls();
     const playbackContainer = document.getElementById('playback-controls-container');
-    if (playbackContainer) activePlaybackControls = new PlaybackControls(playbackContainer);
+    activeSurface = 'library';
+    if (playbackContainer) activePlaybackControls = new PlaybackControls(playbackContainer, surface => {
+        if (surface === 'library') showLibrarySurface();
+        else void showPlaybackSurface();
+    });
 
     activeDestinationHub?.destroy();
     const destinationContainer = document.getElementById('destination-hub-container');
@@ -497,38 +501,60 @@ function renderMainLayout(_state: any = null) {
 async function refreshDestinationView(): Promise<void> {
     const state = await getDaemonState();
     const selected = state.destinations?.find(destination => destination.selected);
-    const playbackSelected = !selected || selected.kind === 'playback';
+    if (selected?.kind === 'device') showLibrarySurface(false);
+    else showSurface(activeSurface, false);
+}
+
+function showSurface(surface: 'library' | 'playback', focus = true): void {
+    activeSurface = surface;
     const library = document.getElementById('library-content');
     const browse = document.getElementById('browse-mode-bar');
     const playback = document.getElementById('playback-destination-container');
-    if (library) library.hidden = playbackSelected;
-    if (browse) browse.hidden = playbackSelected;
-    if (playback) playback.hidden = !playbackSelected;
-    if (playbackSelected && playback && !activePlaybackDestination) {
-        activePlaybackDestination = new PlaybackDestination(playback, showLibrarySurface);
-    } else if (!playbackSelected && activePlaybackDestination) {
+    const serverHub = document.getElementById('server-hub-container');
+    const playing = surface === 'playback';
+    if (library) library.hidden = playing;
+    if (browse) browse.hidden = playing;
+    if (playback) playback.hidden = !playing;
+    if (serverHub) serverHub.hidden = playing;
+    const title = document.getElementById('surface-title');
+    const subtitle = document.getElementById('surface-subtitle');
+    if (title) title.textContent = t(playing ? 'playback.playing_title' : 'ui.library.title');
+    if (subtitle) {
+        subtitle.hidden = playing;
+        if (!playing) subtitle.textContent = t('ui.library.subtitle');
+    }
+    activePlaybackControls?.setSurface(surface);
+    if (playing && playback && !activePlaybackDestination) {
+        activePlaybackDestination = new PlaybackDestination(playback);
+    } else if (!playing && activePlaybackDestination) {
         activePlaybackDestination.destroy();
         activePlaybackDestination = null;
         playback?.replaceChildren();
     }
+    if (!focus) return;
+    if (playing) {
+        const focusTarget = playback?.querySelector<HTMLElement>('button:not([disabled])');
+        if (focusTarget) focusTarget.focus();
+        else playback?.focus();
+    } else {
+        const focusTarget = browse?.querySelector<HTMLElement>('button:not([disabled])');
+        if (focusTarget) focusTarget.focus();
+        else if (library) {
+            library.tabIndex = -1;
+            library.focus();
+        }
+    }
 }
 
-function showLibrarySurface(): void {
-    const library = document.getElementById('library-content');
-    const browse = document.getElementById('browse-mode-bar');
-    const playback = document.getElementById('playback-destination-container');
-    if (library) library.hidden = false;
-    if (browse) browse.hidden = false;
-    if (playback) playback.hidden = true;
-    activePlaybackDestination?.destroy();
-    activePlaybackDestination = null;
-    playback?.replaceChildren();
-    const focusTarget = browse?.querySelector<HTMLElement>('button:not([disabled])');
-    if (focusTarget) focusTarget.focus();
-    else if (library) {
-        library.tabIndex = -1;
-        library.focus();
+function showLibrarySurface(focus = true): void { showSurface('library', focus); }
+
+async function showPlaybackSurface(): Promise<void> {
+    const state = await getDaemonState();
+    if (!state.destinations?.some(destination => destination.selected && destination.kind === 'playback')) {
+        await destinationSelect({ kind: 'playback' });
+        await activeDestinationHub?.refresh();
     }
+    showSurface('playback');
 }
 
 async function initSplashScreen(mainWin: Window | null, splashWin: Window | null) {

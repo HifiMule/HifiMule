@@ -26,8 +26,6 @@ export class PlaybackDestination {
     private loadIdentity = '';
     private labels = new Map<string, string>();
     private readonly body = document.createElement('div');
-    private readonly audition = document.createElement('div');
-    private readonly current = document.createElement('section');
     private readonly error = document.createElement('p');
     private readonly retry = document.createElement('button');
     private readonly status = document.createElement('p');
@@ -35,23 +33,14 @@ export class PlaybackDestination {
     private mutating = false;
     private deferPageLoads = false;
     private refreshInFlight?: Promise<boolean>;
-    private currentRequest = 0;
-    private currentIdentity = '';
-    private currentRow?: OccurrenceDisplay;
-    private currentFailed = false;
-    private currentRetryNeeded = false;
     private labelAttempts = 0;
     private labelTimer?: ReturnType<typeof setTimeout>;
     private focusAfterLoad?: { occurrenceId: string | null; action: string };
 
-    constructor(container: HTMLElement, private readonly onBrowseLibrary: () => void) {
+    constructor(container: HTMLElement) {
         container.classList.add('playback-destination');
         container.setAttribute('aria-label', t('destination.playback'));
         this.body.className = 'playback-destination__body';
-        this.audition.className = 'playback-destination__preview';
-        this.audition.hidden = true;
-        this.current.className = 'playback-destination__current';
-        this.current.tabIndex = -1;
         this.error.setAttribute('role', 'status');
         this.error.hidden = this.retry.hidden = true;
         this.retry.type = 'button';
@@ -64,9 +53,9 @@ export class PlaybackDestination {
         this.status.setAttribute('role', 'status');
         this.status.setAttribute('aria-live', 'polite');
         this.regions = { upcoming: this.createRegion('upcoming'), history: this.createRegion('history') };
-        this.body.append(this.audition, this.status, this.error, this.retry, this.current,
+        this.body.append(this.status, this.error, this.retry,
             this.regionElement(this.regions.upcoming), this.regionElement(this.regions.history));
-        container.replaceChildren(this.heading(), this.body);
+        container.replaceChildren(this.body);
         this.unsubscribe = playbackStore.subscribe(snapshot => void this.receive(snapshot));
         void this.loadLabels();
     }
@@ -121,7 +110,7 @@ export class PlaybackDestination {
             const servers = await serverList(); if (this.disposed) return;
             this.labels = new Map(servers.filter(server => server.serverId)
                 .map(server => [server.serverId as string, formatServerIdentity(server).label]));
-            this.renderRegions(); this.renderTransport();
+            this.renderRegions();
         } catch {
             if (!this.disposed && this.labelAttempts++ < 3)
                 this.labelTimer = setTimeout(() => void this.loadLabels(), 1000 * 2 ** this.labelAttempts);
@@ -137,17 +126,9 @@ export class PlaybackDestination {
         const identity = this.identity(snapshot);
         const changed = identity !== this.loadIdentity;
         this.snapshot = snapshot;
-        const currentIdentity = `${snapshot.instanceId}:${snapshot.sessionId}:${snapshot.mainCurrent?.occurrenceId ?? '-'}`;
-        const currentChanged = currentIdentity !== this.currentIdentity;
-        if (currentChanged) {
-            this.currentIdentity = currentIdentity; this.currentRow = undefined;
-            this.currentFailed = this.currentRetryNeeded = false;
-        }
-        this.renderTransport();
         if (!changed) return;
         this.loadIdentity = identity;
         for (const region of Object.values(this.regions)) this.resetRegion(region);
-        if (currentChanged || this.currentRetryNeeded) void this.loadCurrent();
         if (!this.deferPageLoads) await this.loadPages();
     }
 
@@ -240,10 +221,7 @@ export class PlaybackDestination {
 
     private async retryPages(): Promise<void> {
         if (this.disposed || this.mutating) return;
-        await Promise.all([
-            ...Object.values(this.regions).filter(region => region.retryNeeded).map(region => this.retryRegion(region)),
-            ...(this.currentRetryNeeded ? [this.loadCurrent()] : []),
-        ]);
+        await Promise.all(Object.values(this.regions).filter(region => region.retryNeeded).map(region => this.retryRegion(region)));
     }
 
     private cancelRetry(region: Region): void {
@@ -253,49 +231,9 @@ export class PlaybackDestination {
 
     private updateRecovery(): void {
         const regions = Object.values(this.regions);
-        this.error.hidden = !this.currentFailed && !regions.some(region => region.failed);
+        this.error.hidden = !regions.some(region => region.failed);
         this.error.textContent = this.error.hidden ? '' : t('playback.queue.recoverable_error');
-        this.retry.hidden = !this.currentRetryNeeded && !regions.some(region => region.retryNeeded);
-    }
-
-    private async loadCurrent(): Promise<void> {
-        const observed = this.snapshot; if (!observed || this.disposed) return;
-        const main = observed.mainCurrent;
-        const request = ++this.currentRequest; const identity = this.currentIdentity;
-        const current = () => !this.disposed && request === this.currentRequest && identity === this.currentIdentity;
-        if (!main) { this.currentRow = undefined; this.renderTransport(); return; }
-        try {
-            const rows = await playbackDescribeOccurrences(observed, [main.occurrenceId]);
-            if (!current()) return;
-            const row = rows.find(row => row.occurrenceId === main.occurrenceId);
-            if (!row) throw new Error('Current occurrence metadata is absent');
-            this.currentRow = row;
-            this.currentFailed = false; this.currentRetryNeeded = row.status !== 'available';
-        } catch (error) {
-            if (!current()) return;
-            this.currentFailed = this.currentRetryNeeded = true;
-            if (isPlaybackQueueConflict(error) && !this.refreshInFlight) void this.refreshAuthoritative();
-        } finally {
-            if (current()) { this.renderTransport(); this.updateRecovery(); }
-        }
-    }
-
-    private renderTransport(): void {
-        const snapshot = this.snapshot;
-        this.audition.hidden = snapshot?.mode !== 'preview';
-        this.audition.textContent = snapshot?.mode === 'preview'
-            ? t('playback.queue.preview', { title: snapshot.playback.metadata?.title ?? t('playback.nothing_selected') }) : '';
-        const main = snapshot?.mainCurrent;
-        if (!main) {
-            this.current.textContent = t('playback.queue.no_current');
-            return;
-        }
-        const row = this.currentRow;
-        const title = row?.title ?? t(`playback.queue.${row?.status ?? 'sourceUnavailable'}`);
-        const source = main.source
-            ? this.labels.get(main.source.serverId) ?? t('playback.queue.source_unavailable')
-            : t('playback.queue.source_unavailable');
-        this.current.textContent = `${t('playback.queue.current_occurrence', { id: title })} — ${row?.artist ?? t('playback.queue.unknown_artist')} · ${source}`;
+        this.retry.hidden = !regions.some(region => region.retryNeeded);
     }
 
     private renderRegions(): void { this.renderRegion(this.regions.upcoming); this.renderRegion(this.regions.history); }
@@ -345,9 +283,25 @@ export class PlaybackDestination {
         return item;
     }
 
-    private action(occurrenceId: string, action: string, label: string, run: () => Promise<void>): HTMLButtonElement {
+    private action(occurrenceId: string, action: 'moveUp' | 'moveDown' | 'remove', label: string, run: () => Promise<void>): HTMLElement {
         const button = document.createElement('button'); button.type = 'button'; button.dataset.queueAction = action;
-        button.dataset.occurrenceId = occurrenceId; button.textContent = label; button.addEventListener('click', () => void run()); return button;
+        button.dataset.occurrenceId = occurrenceId;
+        button.className = 'playback-destination__icon-action';
+        button.setAttribute('aria-label', label);
+        const icon = document.createElement('sl-icon');
+        icon.setAttribute('name', { moveUp: 'arrow-up', moveDown: 'arrow-down', remove: 'x-lg' }[action]);
+        icon.setAttribute('aria-hidden', 'true');
+        const accessibleLabel = document.createElement('span');
+        accessibleLabel.className = 'sr-only';
+        accessibleLabel.textContent = label;
+        button.append(icon, accessibleLabel);
+        button.addEventListener('click', () => void run());
+        const hint = document.createElement('sl-tooltip');
+        hint.setAttribute('content', label);
+        hint.setAttribute('placement', 'top');
+        hint.setAttribute('hoist', '');
+        hint.append(button);
+        return hint;
     }
 
     private async move(region: Region, index: number, delta: -1 | 1): Promise<void> {
@@ -426,11 +380,4 @@ export class PlaybackDestination {
         this.body.setAttribute('aria-busy', String(this.mutating || Object.values(this.regions).some(region => region.loading)));
     }
 
-    private heading(): HTMLDivElement {
-        const heading = document.createElement('div'); heading.className = 'playback-destination__heading';
-        const title = document.createElement('h2'); title.textContent = t('destination.playback');
-        const browse = document.createElement('button'); browse.type = 'button'; browse.className = 'playback-destination__browse';
-        browse.textContent = t('playback.queue.back_to_library'); browse.addEventListener('click', this.onBrowseLibrary);
-        heading.append(title, browse); return heading;
-    }
 }

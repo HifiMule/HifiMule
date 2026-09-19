@@ -1,5 +1,14 @@
 {
   "en": {
+    "playback.browse_library": "Browse library",
+    "playback.show_playing": "Show Playing",
+    "playback.playing_title": "Playing",
+    "playback.idle_guidance": "Browse your library and choose Play or Preview to start listening.",
+    "playback.unknown_track": "Track information unavailable",
+    "playback.connection.connecting": "Connecting to playback…",
+    "playback.connection.disconnected": "Connection lost. Current playback status is unknown. Refresh to reconnect.",
+    "playback.connection.stale": "Playback status is out of date. Refresh to check the current state.",
+    "playback.refresh": "Refresh playback status",
     "destination.group": "Playback and device destinations",
     "destination.selection_failed": "Could not change destination. Check that the device is available and try again.",
     "destination.playback": "Playback",
@@ -523,6 +532,15 @@
     "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
+    "playback.browse_library": "Parcourir la bibliothèque",
+    "playback.show_playing": "Afficher Lecture",
+    "playback.playing_title": "Lecture",
+    "playback.idle_guidance": "Parcourez la bibliothèque et choisissez Lecture ou Aperçu pour écouter.",
+    "playback.unknown_track": "Informations du morceau indisponibles",
+    "playback.connection.connecting": "Connexion à la lecture…",
+    "playback.connection.disconnected": "Connexion perdue. État de lecture inconnu. Actualisez pour vous reconnecter.",
+    "playback.connection.stale": "État de lecture périmé. Actualisez pour vérifier l’état actuel.",
+    "playback.refresh": "Actualiser l’état de lecture",
     "destination.group": "Destinations de lecture et appareils",
     "destination.selection_failed": "Impossible de changer de destination. Vérifiez que l’appareil est disponible et réessayez.",
     "destination.playback": "Lecture",
@@ -1026,6 +1044,15 @@
     "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
+    "playback.browse_library": "Explorar biblioteca",
+    "playback.show_playing": "Mostrar reproducción",
+    "playback.playing_title": "Reproducción",
+    "playback.idle_guidance": "Explora tu biblioteca y elige Reproducir o Vista previa para escuchar.",
+    "playback.unknown_track": "Información de la pista no disponible",
+    "playback.connection.connecting": "Conectando con la reproducción…",
+    "playback.connection.disconnected": "Conexión perdida. Estado de reproducción desconocido. Actualiza para reconectar.",
+    "playback.connection.stale": "El estado de reproducción está desactualizado. Actualiza para comprobarlo.",
+    "playback.refresh": "Actualizar estado de reproducción",
     "destination.group": "Destinos de reproducción y dispositivos",
     "destination.selection_failed": "No se pudo cambiar de destino. Comprueba que el dispositivo esté disponible e inténtalo de nuevo.",
     "destination.playback": "Reproducción",
@@ -1529,6 +1556,15 @@
     "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
+    "playback.browse_library": "Bibliothek durchsuchen",
+    "playback.show_playing": "Wiedergabe anzeigen",
+    "playback.playing_title": "Wiedergabe",
+    "playback.idle_guidance": "Durchsuche deine Bibliothek und wähle Wiedergabe oder Vorschau.",
+    "playback.unknown_track": "Titelinformationen nicht verfügbar",
+    "playback.connection.connecting": "Verbindung zur Wiedergabe wird hergestellt…",
+    "playback.connection.disconnected": "Verbindung unterbrochen. Wiedergabestatus unbekannt. Zum Verbinden aktualisieren.",
+    "playback.connection.stale": "Wiedergabestatus veraltet. Zum Prüfen des aktuellen Status aktualisieren.",
+    "playback.refresh": "Wiedergabestatus aktualisieren",
     "destination.group": "Wiedergabe- und Geräteziele",
     "destination.selection_failed": "Das Ziel konnte nicht gewechselt werden. Prüfen Sie, ob das Gerät verfügbar ist, und versuchen Sie es erneut.",
     "destination.playback": "Wiedergabe",

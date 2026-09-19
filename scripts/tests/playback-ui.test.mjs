@@ -13,13 +13,14 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
     textContent = ''; value = ''; hidden = false; disabled = false; isConnected = true;
     constructor(tag) { this.tagName = tag; }
     setAttribute(key, value) { this.attributes[key] = value; }
+    getAttribute(key) { return this.attributes[key] ?? null; }
     append(...children) { for (const child of children) { child.remove(); child.parent = this; this.children.push(child); } }
     remove() { if (this.parent) { this.parent.children = this.parent.children.filter(child => child !== this); this.parent = null; } }
     appendChild(child) { this.append(child); return child; }
     contains(node) { return this === node || this.children.some(child => child.contains(node)); }
     replaceChildren(...children) {
       if (this.children.some(child => child.contains(document.activeElement))) document.activeElement = null;
-      this.children = children;
+      this.children = []; this.append(...children);
     }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     querySelector(selector) {
@@ -52,10 +53,10 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(storeSource, {
-    exports: storeExports,
+    exports: storeExports, Date: class extends Date { static now() { return now; } },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: id => timers.delete(id),
-    require: () => ({ playbackGetSession: async () => { calls++; return snapshot; } }),
+    require: () => ({ playbackGetSession: async () => { calls++; return outputRpc.load ? outputRpc.load() : snapshot; } }),
   });
   vm.runInNewContext(source, {
     exports, document, window, console, Date: class extends Date { static now() { return now; } },
@@ -67,17 +68,18 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
           playbackListOutputs: outputRpc.list ?? (async () => ({ instanceId: snapshot.instanceId, outputs: snapshot.output?.selected ? [snapshot.output.selected] : [], output: snapshot.output })),
           playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
           playbackSeek: outputRpc.seek ?? (async () => snapshot),
+          playbackDescribeOccurrences: outputRpc.describe ?? (async () => []),
         }
       : name === '../state/playback'
         ? { playbackStore: storeExports.playbackStore }
       : name === '../serverIdentity'
-        ? { formatServerIdentity: server => ({ label: server.name || 'Jellyfin' }) }
+        ? { formatServerIdentity: server => ({ label: server.name || 'Jellyfin', icon: server.icon || 'collection-play' }) }
         : { t: (key, values) => values?.source ? `${key}: ${values.source}` : key },
   });
   const container = new Element('section');
-  const component = new exports.PlaybackControls(container);
+  const component = new exports.PlaybackControls(container, outputRpc.surfaceChange ?? outputRpc.browse);
   return {
-    container, component, document, timers, listeners,
+    container, component, document, timers, listeners, store: storeExports.playbackStore,
     setSnapshot: value => { snapshot = value; }, calls: () => calls, advance: ms => { now += ms; },
     async tick() {
       for (let turn = 0; turn < 12; turn++) await Promise.resolve();
@@ -98,6 +100,119 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
   };
 }
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
+
+test('two-row icon controls retain top hints and expose the Library/Playing surface switch', async () => {
+  const idle = { ...snapshot('paused'), current: null };
+  let browsed = 0; let commands = 0;
+  const surfaces = [];
+  const h = harness(idle, async () => commands++, { surfaceChange: surface => { browsed++; surfaces.push(surface); } }); await h.tick();
+  assert.equal(h.component.primary.textContent, '');
+  assert.equal(h.component.primary.querySelector('sl-icon').attributes.name, 'play-fill');
+  assert.equal(h.component.outputDropdown.attributes.placement, 'top-end');
+  assert.equal(h.component.timeline.parent.parent, h.container);
+  assert.equal(h.component.hints.get(h.component.surfaceToggle).attributes.placement, 'top-end');
+  await h.component.surfaceToggle.click();
+  assert.equal(browsed, 1); assert.equal(commands, 0);
+  assert.deepEqual(surfaces, ['playback']);
+  h.component.setSurface('playback');
+  assert.equal(h.component.surfaceToggle.querySelector('sl-icon').attributes.name, 'collection');
+  assert.match(text(h.container), /playback.idle_guidance/);
+  h.component.destroy();
+});
+
+test('restored metadata is bounded, source-safe and does not reload on progress', async () => {
+  const initial = snapshot('paused'); initial.playback.metadata = null;
+  let calls = 0;
+  const h = harness(initial, undefined, { describe: async (_observed, ids) => {
+    calls++; assert.deepEqual(Array.from(ids), ['occurrence']);
+    return [{ occurrenceId: 'occurrence', source: initial.current.source, title: 'Restored song', artist: 'Artist', status: 'available' }];
+  } }); await h.tick();
+  assert.match(text(h.container), /Restored song/); assert.match(text(h.container), /Artist/);
+  h.setSnapshot({ ...initial, stateSequence: '3' }); await h.tick();
+  assert.equal(calls, 1); h.component.destroy();
+});
+
+test('hung reads freeze interpolation and mutations; equal recovery never replays work', async () => {
+  const current = snapshot('playing'); current.playback.durationMs = 10000; current.playback.seek.available = true;
+  let hang = false; let commands = 0;
+  const h = harness(current, async () => commands++, { load: () => hang ? new Promise(() => {}) : current });
+  await h.tick();
+  assert.equal(h.component.messages.className, 'playback-controls__messages');
+  hang = true; h.advance(2001); await h.tick();
+  assert.equal(h.store.connection(), 'stale');
+  assert.equal(h.component.messages.className, 'playback-controls__messages is-visible');
+  assert.equal(h.component.primary.disabled, true); assert.equal(h.component.outputSelect.disabled, true);
+  const position = h.component.shownPositionMs(); h.advance(500); assert.equal(h.component.shownPositionMs(), position);
+  await h.component.primary.click(); assert.equal(commands, 0);
+  hang = false; await h.component.refresh.click(); await h.tick();
+  assert.equal(h.store.connection(), 'fresh'); assert.equal(h.component.primary.disabled, false);
+  assert.equal(commands, 0); h.component.destroy();
+});
+
+test('generation-only changes cancel queued seek and stale output failures', async () => {
+  let releaseSeek; let rejectOutput; let seeks = 0;
+  const initial = snapshot('paused'); initial.playback.durationMs = 10000; initial.playback.seek.available = true;
+  const h = harness(initial, undefined, {
+    seek: () => { seeks++; return new Promise(resolve => releaseSeek = resolve); },
+    select: () => new Promise((_resolve, reject) => rejectOutput = reject),
+  }); await h.tick();
+  await h.component.timeline.change('2000'); await h.component.timeline.change('4000');
+  await h.component.outputSelect.change('headphones');
+  const next = { ...initial, generationId: 'new-generation', stateSequence: '8' };
+  h.setSnapshot(next); await h.tick();
+  releaseSeek({ ...initial, stateSequence: '99' }); rejectOutput(new Error('old output failure'));
+  await h.tick();
+  assert.equal(h.component.snapshot, next); assert.equal(h.store.current(), next);
+  assert.equal(seeks, 1); assert.equal(h.component.commandError, '');
+  assert.equal(h.component.seekBusy, false); assert.equal(h.component.outputBusy, false);
+  h.component.destroy();
+});
+
+test('Preview never requests main metadata and late restoration cannot repaint a new occurrence', async () => {
+  let resolve; let calls = 0;
+  const initial = snapshot('paused'); initial.playback.metadata = null;
+  const h = harness(initial, undefined, { describe: () => { calls++; return new Promise(r => resolve = r); } });
+  await h.tick();
+  h.setSnapshot({ ...initial, stateSequence:'2', mode:'preview', current: { ...initial.current, occurrenceId:'audition' } });
+  await h.tick(); resolve([{ occurrenceId:'occurrence', source:initial.current.source, title:'Obsolete title', status:'available' }]);
+  await h.tick(); assert.equal(calls, 1); assert.doesNotMatch(text(h.container), /Obsolete title/);
+  assert.match(text(h.container), /unknown_track/); h.component.destroy();
+});
+
+test('all new bar labels are translated in every shipped locale', () => {
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  for (const locale of ['en','fr','es','de']) for (const key of ['playback.browse_library','playback.show_playing','playback.playing_title','playback.idle_guidance','playback.unknown_track','playback.refresh','playback.connection.connecting','playback.connection.stale','playback.connection.disconnected']) {
+    assert.ok(catalog[locale][key], `${locale}: ${key}`);
+  }
+});
+
+test('initial read failure offers local browsing and refresh without pretending playback paused', async () => {
+  let failing = true; let browsed = 0;
+  const current = snapshot('playing');
+  const h = harness(current, undefined, { browse: () => browsed++, load: async () => {
+    if (failing) throw new Error('offline'); return current;
+  } }); await h.tick();
+  assert.match(h.component.status.textContent, /connection.disconnected/);
+  assert.equal(h.component.primary.hidden, true);
+  await h.component.surfaceToggle.click(); assert.equal(browsed, 1);
+  failing = false; await h.component.refresh.click(); await h.tick();
+  assert.equal(h.component.snapshot.state, 'playing');
+  assert.equal(h.component.status.textContent, 'playback.status.active');
+  h.component.destroy();
+});
+
+test('elapsed paints leave unchanged live-region text untouched', async () => {
+  const h = harness(snapshot('paused')); await h.tick();
+  let writes = 0;
+  for (const node of [h.component.status, h.component.seekStatus, h.component.error]) {
+    let value = node.textContent;
+    Object.defineProperty(node, 'textContent', { get: () => value, set: next => { writes++; value = next; } });
+  }
+  for (let i = 0; i < 10; i++) { h.advance(100); h.component.renderTimeline(); }
+  assert.equal(writes, 0);
+  assert.equal(h.component.elapsed.attributes['aria-live'], undefined);
+  h.component.destroy();
+});
 
 function albumButtonHarness() {
   const calls = []; const toasts = [];
@@ -439,10 +554,11 @@ test('Shoelace cannot override hidden transport actions', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.playback-controls sl-button\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
 });
-test('transport errors use the full player row before wrapping', () => {
+test('transport messages overlay the content without changing bar height', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.playback-controls\s*\{[\s\S]*?flex-wrap:\s*wrap;/);
-  assert.match(styles, /\.playback-controls__error\s*\{[^}]*flex:\s*1 0 100%;/);
+  assert.match(styles, /\.playback-controls__messages\s*\{[^}]*position:\s*absolute;/);
+  assert.match(styles, /inset-block-end:\s*calc\(100% \+ var\(--space-xs\)\)/);
 });
 test('album actions capture portable source identity and preserve parent navigation', async () => {
   const h = albumButtonHarness();
@@ -458,10 +574,12 @@ test('album actions capture portable source identity and preserve parent navigat
   await unavailable.dispatch('click');
   assert.equal(h.calls.length, 1);
 });
-test('playback source renders the configured server label instead of its portable UUID', async () => {
+test('playback source renders the configured server icon before the title with a hover label', async () => {
   const h = harness(snapshot()); await h.tick();
-  assert.match(text(h.container), /playback\.source: Salon/);
-  assert.doesNotMatch(text(h.container), /playback\.source: server(?:\s|$)/);
+  assert.equal(h.component.source.attributes.name, 'collection-play');
+  assert.equal(h.component.sourceHint.attributes.content, 'Salon');
+  assert.equal(h.component.sourceHint.parent.children[0], h.component.sourceHint);
+  assert.doesNotMatch(text(h.container), /playback\.source:|Source:/);
   h.component.destroy();
 });
 test('audio output selection is tucked behind a compact icon control', async () => {
@@ -477,7 +595,7 @@ test('audio output selection is tucked behind a compact icon control', async () 
 test('audio output panel expands left from its right-aligned trigger', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.playback-controls__output-dropdown::part\(panel\)\s*\{[\s\S]*width: min\(42rem, calc\(100vw - 2rem\)\)/);
-  assert.match(styles, /\.playback-controls__output-dropdown::part\(panel\)\s*\{[\s\S]*max-width: calc\(100vw - 2rem\)/);
+  assert.match(styles, /max-width: min\(calc\(100vw - 2rem\), var\(--playback-column-width, 42rem\)\)/);
 });
 test('primary transport retains keyboard focus when Pause becomes Resume', async () => {
   const h = harness(snapshot('playing')); await h.tick();
@@ -489,7 +607,7 @@ test('primary transport retains keyboard focus when Pause becomes Resume', async
 });
 test('output loss resumes only the selected output', async () => {
   const h = harness(snapshot('paused', '1', { code: 'OUTPUT_LOST', retryable: true })); await h.tick();
-  assert.match(text(h.container), /playback.resume_selected_output/);
+  assert.equal(h.component.primary.attributes['aria-label'], 'playback.resume_selected_output');
   h.component.destroy();
 });
 test('transport rejection is caught and shown without exposing raw diagnostics', async () => {
@@ -662,7 +780,7 @@ test('repeated scrubs coalesce to the latest target while seek RPC is pending', 
   initial.playback.seek = { available: true };
   const h = harness(initial, async () => {}, { seek: (position, observed) => {
     calls.push([position, observed.generationId]);
-    const response = { ...initial, stateSequence: String(calls.length + 1), generationId: `seek-${calls.length}` };
+    const response = { ...initial, stateSequence: String(calls.length + 1), generationId: initial.generationId };
     if (calls.length === 1) return new Promise(resolve => { releaseFirst = () => resolve(response); });
     return Promise.resolve(response);
   }});
@@ -674,7 +792,7 @@ test('repeated scrubs coalesce to the latest target while seek RPC is pending', 
   assert.deepEqual(calls, [[2000, 'generation']]);
   releaseFirst();
   for (let turn = 0; turn < 24; turn++) await Promise.resolve();
-  assert.deepEqual(calls, [[2000, 'generation'], [4000, 'seek-1']]);
+  assert.deepEqual(calls, [[2000, 'generation'], [4000, 'generation']]);
   h.component.destroy();
 });
 
