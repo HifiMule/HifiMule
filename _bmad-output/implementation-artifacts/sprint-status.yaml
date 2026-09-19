@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-19  # Story 15.13 review patches complete; installed evidence and Story 15.12 deferred acceptance gap remain
+last_updated: 2026-09-19  # Story 15.14 prepared; installed evidence and Story 15.12 deferred acceptance gap remain
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -182,7 +182,7 @@ development_status:
   14-3-per-server-producer-fairness-and-priority-buckets: done  # review complete: 6 patches applied; 627 daemon tests pass
 
   # Epic 15 — Desktop Playback (epics.md; 29 approved planning stories)
-  # Stories 15.1–15.13 prepared; remaining dedicated story files and contract gates are pending.
+  # Stories 15.1–15.14 prepared; remaining dedicated story files and contract gates are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
   15-2-quit-safely-while-a-device-sync-is-running: done
@@ -197,7 +197,7 @@ development_status:
   15-11-preview-a-full-track-without-losing-the-main-listening-session: done
   15-12-access-playback-as-an-always-available-destination: done
   15-13-edit-the-upcoming-listening-queue: done
-  15-14-control-listening-from-a-floating-playback-bar-across-views: backlog
+  15-14-control-listening-from-a-floating-playback-bar-across-views: ready-for-dev
   15-15-configure-playback-selection-and-start-its-first-selected-track: backlog
   15-16-replenish-radio-within-a-bounded-upcoming-queue: backlog
   15-17-continue-radio-through-meaningful-artist-connections: backlog
