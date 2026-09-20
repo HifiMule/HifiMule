@@ -98,6 +98,15 @@ echo "==> STEP 2: Launching HifiMule via Xvfb ..."
 start_xvfb || fail "launch" "Unable to start Xvfb on an available display"
 echo "  DISPLAY: $DISPLAY"
 
+# Use X11 software rendering without WebKit compositing for this Xvfb smoke run.
+# Export once so every UI launch below inherits the same headless configuration.
+export GDK_BACKEND=x11
+export LIBGL_ALWAYS_SOFTWARE=1
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+echo "  GDK_BACKEND: $GDK_BACKEND"
+echo "  LIBGL_ALWAYS_SOFTWARE: $LIBGL_ALWAYS_SOFTWARE"
+echo "  WEBKIT_DISABLE_COMPOSITING_MODE: $WEBKIT_DISABLE_COMPOSITING_MODE"
+
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
 APP_BIN="hifimule-ui"
 if ! command -v "$APP_BIN" &>/dev/null; then
