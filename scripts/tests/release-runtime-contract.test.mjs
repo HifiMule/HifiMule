@@ -98,6 +98,7 @@ test("Linux packages use host GUI libraries and allow the lifecycle startup budg
     "libmtp9",
     "libayatana-appindicator3-1 | libappindicator3-1",
     "libssl3 | libssl3t64",
+    "libxdo3",
   ]);
   const runtime = read("scripts/linux-audio-runtime.mjs");
   assert.match(runtime, /The daemon's GUI and tray dependencies must resolve from the host/);

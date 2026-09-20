@@ -66,7 +66,8 @@
         "depends": [
           "libmtp9",
           "libayatana-appindicator3-1 | libappindicator3-1",
-          "libssl3 | libssl3t64"
+          "libssl3 | libssl3t64",
+          "libxdo3"
         ]
       }
     },

@@ -679,6 +679,24 @@ test("installed Linux verification permits the host OpenSSL runtime", (t) => {
   }));
 });
 
+test("installed Linux verification permits the host XDo runtime", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  assert.doesNotThrow(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    assertElf: (path) => ({
+      needed: path === fixture.allFiles[0]
+        ? [...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`), "libxdo.so.3"]
+        : [],
+      soname: basename(path),
+    }),
+  }));
+});
+
 
 test("Linux preflight requires Pulse shared-output development metadata", () => {
   assert.throws(() => preflightLinuxBuild(target, {

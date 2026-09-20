@@ -22,7 +22,7 @@ const hostRuntimeLibraryPrefixes = Object.freeze([
   "libglib-2.0.so.", "libgobject-2.0.so.", "libpango", "libpangocairo-", "libcairo.so.",
   "libatk-1.0.so.", "libatk-bridge-2.0.so.", "libatspi.so.", "libX11.so.", "libXcursor.so.",
   "libXi.so.", "libXrandr.so.", "libXrender.so.", "libXfixes.so.", "libXext.so.",
-  "libxkbcommon.so.", "libwayland-", "libssl.so.", "libcrypto.so.",
+  "libxkbcommon.so.", "libwayland-", "libssl.so.", "libcrypto.so.", "libxdo.so.",
 ]);
 const isHostRuntimeLibrary = (name) => hostRuntimeLibraryPrefixes.some((prefix) => name.startsWith(prefix));
 export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev", "libpulse-dev", "libdbus-1-dev"]);
