@@ -748,8 +748,29 @@ fn ui_log(msg: &str) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn initialize_xlib_threads() {
+    #[link(name = "X11")]
+    unsafe extern "C" {
+        fn XInitThreads() -> std::ffi::c_int;
+    }
+
+    // Tao's X11 input thread and GTK/WebKit can call Xlib concurrently.
+    // XInitThreads must precede every other Xlib call, including GTK startup.
+    // SAFETY: run() calls this on the entry thread before creating the runtime
+    // or any windows; the function takes no pointers and returns a status code.
+    assert_ne!(
+        unsafe { XInitThreads() },
+        0,
+        "Unable to initialize Xlib thread support"
+    );
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    initialize_xlib_threads();
+
     ui_log(&format!(
         "HifiMule UI starting (release={})",
         !cfg!(debug_assertions)

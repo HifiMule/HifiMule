@@ -105,3 +105,33 @@ Diagnostics now retain each recorded child exit status (including successful exi
 Local validation: nine Linux helper tests, five shared acknowledgment tests, and four macOS harness tests pass. Bash syntax passes. These checks validate the diagnostic changes, not the Linux application startup.
 
 Reproduction is blocked on obtaining the failing installer: the public v0.15.0 deb URL returned HTTP 404; local Docker is available. The supplied [job](https://github.com/HifiMule/HifiMule/actions/runs/35517051715/job/106097984998) confirms revision `910ee17`; the available browser is signed out and cannot expand job logs. No matching deb is present in Downloads. Three independent reviewers found no actionable diagnostic-change defects. Actual application exit cause and Ubuntu smoke success remain unverified.
+
+## Follow-up: Exact Installer and Xlib Initialization
+
+The user supplied the failing installer and full log. SHA256 `e27262cb7209c263e72a308bdfa90f7be4fbc9aee044f6e7297136812100f237` matches the job. The earlier artifact-access blocker is resolved.
+
+Reproduction uses Ubuntu 22.04 amd64 with WebKitGTK 2.50.4, in a disposable Docker container on the ARM development machine through QEMU. This is useful comparative evidence, not native GitHub runner validation. The unchanged installer intermittently exits during initial, concurrent, reopened, or recovery UI hydration. A diagnostic preload captures GTK `_exit(1)` through `libX11::_XReply` and `XGetWindowProperty`, with `errno=11` but `xcb_connection_has_error=0`. The latter means a physical connection failure is not established. Adding Openbox did not help. Window-sizing calls dispatch through Tauri's main-thread message mechanism; no app sizing thread violation was found.
+
+The original trace records no `XInitThreads` call. Tao 0.34.5 starts an X11 input worker after GTK initialization, and its explicit `XInitThreads` belongs to a separate optional API unused by Tauri. Calling `XInitThreads` before application startup passed three complete smoke runs with tracing; restoring the original startup failed again at concurrent hydration. A minimal initialization-only preload then passed five additional complete runs without diagnostic hooks: eight successful full smoke runs, 32 real UI hydration acknowledgments, with early initialization. The original-startup control failed between the two batches.
+
+The original smoke-rendering mitigation remains smoke-scoped. The repeated user request to fix the persistent failure now requires a separate Linux application startup correction: initialize Xlib threading at the beginning of `hifimule_ui_lib::run`, before Tauri/GTK or application worker creation. This changes neither rendering defaults nor the existing release artifact/tag. The previous rendering-only hypothesis is insufficient; retain its history above rather than presenting it as the root cause.
+
+Implementation: `hifimule-ui/src-tauri/src/lib.rs` links the X11 library already required by GTK on Linux, calls `XInitThreads`, and reports a clear fatal error if initialization fails. Other platforms compile out the call. Xlib documents that initialization must precede all other Xlib calls: https://www.x.org/releases/current/doc/libX11/libX11/libX11.html#Using_Xlib_with_Threads.
+
+Acceptance: a newly built Linux installer must pass the existing native Ubuntu smoke, including all four real hydration gates. The unchanged installer plus diagnostic/preload experiments are evidence for this correction, not verification of the rebuilt Rust binary. Keep native integration pending until that run completes.
+
+Validation for the startup correction:
+- cargo check -p hifimule-ui --lib --locked passed on macOS.
+- cargo test -p hifimule-ui --lib --locked passed all seven tests on macOS.
+- Extracted Linux initialization code compiled to metadata for aarch64-unknown-linux-gnu with Rust 2024; this validates the Linux branch syntax/types, not a Linux package link/build.
+- rustfmt --check and git diff --check passed.
+- Independent blind, edge-case, and acceptance reviewers reported no actionable defects.
+- Comparative Linux logs and the minimal C preload source are preserved at /tmp/hifimule-linux-smoke-evidence. No preload is shipped or added to the smoke harness.
+- A rebuilt native Linux candidate remains required. Dispatch the existing Release workflow with candidate_ref set to the new commit SHA and candidate_version=0.15.0; its candidate smoke consumes freshly built artifacts without altering the published release tag.
+
+## Suggested Review Order
+
+- Initialize Xlib threading before Tauri or GTK starts.
+  [lib.rs:752](../../hifimule-ui/src-tauri/src/lib.rs#L752)
+- Preserve actual UI hydration as the acceptance gate.
+  [smoke-linux.sh:125](../../scripts/smoke-tests/smoke-linux.sh#L125)
