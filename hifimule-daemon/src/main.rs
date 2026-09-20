@@ -81,6 +81,7 @@ pub mod device_io;
 // the current daemon binary only uses the sync-facing subset.
 #[allow(dead_code)]
 mod domain;
+mod notifications;
 mod paths;
 mod playback;
 #[allow(dead_code)]
@@ -485,7 +486,7 @@ pub fn start_daemon_core(
                                     }
                                 }
                                 drop(tokio::task::spawn_blocking(|| {
-                                    if let Err(e) = notify_rust::Notification::new()
+                                    if let Err(e) = notifications::new_notification()
                                         .summary(&hifimule_i18n::t("app.name"))
                                         .body(&hifimule_i18n::t(
                                             "notification.sync_interrupted_removed",
@@ -589,7 +590,7 @@ fn playback_failure_message(code: &str) -> String {
 
 fn send_playback_failure_notification(body: String) {
     thread::spawn(move || {
-        if let Err(error) = notify_rust::Notification::new()
+        if let Err(error) = notifications::new_notification()
             .summary(&hifimule_i18n::t("app.name"))
             .body(&body)
             .show()
@@ -1597,7 +1598,7 @@ async fn run_auto_sync_via_provider(
             if outcome == sync::SyncStatus::Complete {
                 daemon_log!("[AutoSync] Sync completed successfully");
                 drop(tokio::task::spawn_blocking(|| {
-                    if let Err(e) = notify_rust::Notification::new()
+                    if let Err(e) = notifications::new_notification()
                         .summary(&hifimule_i18n::t("app.name"))
                         .body(&hifimule_i18n::t("notification.sync_complete_safe"))
                         .show()
@@ -1613,7 +1614,7 @@ async fn run_auto_sync_via_provider(
                 );
                 let error_msg = format!("Sync failed with {} error(s)", final_errors.len());
                 drop(tokio::task::spawn_blocking(move || {
-                    if let Err(e) = notify_rust::Notification::new()
+                    if let Err(e) = notifications::new_notification()
                         .summary("HifiMule")
                         .body(&error_msg)
                         .show()
@@ -1642,7 +1643,7 @@ async fn run_auto_sync_via_provider(
             }
             let error_msg = format!("Sync failed: {}", e);
             drop(tokio::task::spawn_blocking(move || {
-                if let Err(e) = notify_rust::Notification::new()
+                if let Err(e) = notifications::new_notification()
                     .summary("HifiMule")
                     .body(&error_msg)
                     .show()

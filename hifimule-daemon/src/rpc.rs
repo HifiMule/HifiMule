@@ -13,7 +13,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use notify_rust::Notification;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -171,7 +170,7 @@ async fn authenticate_local_request(
 }
 
 fn send_sync_complete_notification() {
-    if let Err(e) = Notification::new()
+    if let Err(e) = crate::notifications::new_notification()
         .summary(&hifimule_i18n::t("notification.sync_complete_ready"))
         .show()
     {
