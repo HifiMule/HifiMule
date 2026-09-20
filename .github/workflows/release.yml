@@ -19,8 +19,35 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Tag releases share one active run; candidate dispatches remain independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
+  prepare-release:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.draft.outputs.release-id }}
+    steps:
+      # Keep the job successful for candidates so the matrix is not skipped.
+      - uses: actions/checkout@v6
+        if: github.event_name == 'push'
+        with:
+          ref: ${{ github.sha }}
+      - name: Prepare shared draft release
+        if: github.event_name == 'push'
+        id: draft
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const prepareDraftRelease = require('./scripts/prepare-draft-release.cjs');
+            await prepareDraftRelease({ github, context, core });
+
   release:
+    needs: prepare-release
     permissions:
       contents: write
 
@@ -50,7 +77,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.candidate_ref || github.ref }}
+          ref: ${{ inputs.candidate_ref || github.sha }}
 
       - name: Install pnpm
         # action-v4.0.0 (latest reviewed for this hardening pass)
@@ -251,6 +278,16 @@ jobs:
           unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
           pnpm exec tauri build ${{ matrix.args }}
 
+      - name: Revalidate prepared draft before packaging
+        if: github.event_name == 'push'
+        uses: actions/github-script@v8
+        env:
+          PREPARED_RELEASE_ID: ${{ needs.prepare-release.outputs.release-id }}
+        with:
+          script: |
+            const prepareDraftRelease = require('./scripts/prepare-draft-release.cjs');
+            await prepareDraftRelease({ github, context, core, releaseId: process.env.PREPARED_RELEASE_ID });
+
       - name: Build draft release
         if: github.event_name == 'push' && !startsWith(matrix.platform, 'macos')
         # action-v0.6.2 (latest reviewed for this hardening pass)
@@ -259,6 +296,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFIMULE_SKIP_SIDECAR_PREP: "1"
         with:
+          releaseId: ${{ needs.prepare-release.outputs.release-id }}
           tagName: ${{ github.ref_name }}
           releaseName: 'HifiMule ${{ github.ref_name }}'
           releaseBody: 'See the release notes for details.'
@@ -281,6 +319,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
+          releaseId: ${{ needs.prepare-release.outputs.release-id }}
           tagName: ${{ github.ref_name }}
           releaseName: 'HifiMule ${{ github.ref_name }}'
           releaseBody: 'See the release notes for details.'
@@ -297,6 +336,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFIMULE_SKIP_SIDECAR_PREP: "1"
         with:
+          releaseId: ${{ needs.prepare-release.outputs.release-id }}
           tagName: ${{ github.ref_name }}
           releaseName: 'HifiMule ${{ github.ref_name }}'
           releaseBody: 'See the release notes for details.'

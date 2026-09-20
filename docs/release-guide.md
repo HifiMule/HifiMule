@@ -72,7 +72,13 @@ git tag v0.15.0 <verified-commit-sha>
 git push origin v0.15.0
 ```
 
-The tag path rebuilds the same four rows and creates a **draft** release. The release workflow must remain draft-only. Confirm all expected MSI, NSIS, deb, AppImage, x64 DMG and ARM64 DMG artifacts and their checksums are present; a partial matrix is a blocker.
+The tag path first prepares a **draft** release in one job. It verifies that the remote tag still resolves to the triggering commit, reuses the matching draft or creates it, and passes its release ID to all four platform builds. Existing draft notes are preserved. A matching published release is rejected. The builds check out the triggering commit rather than following a tag that could move during the run. Manual candidate builds bypass these release operations.
+
+Runs for the same tag are serialized without canceling the active run. GitHub concurrency retains only one pending run; it is not an unlimited queue. Rerunning failed jobs reuses the prepared release ID and revalidates the live draft and tag before packaging; rerunning the entire workflow finds the existing draft again. Do not move the tag or publish the draft while builds are running: these API checks cannot lock out external changes. If a tag was moved, start a new run from the intended tag event instead of rerunning an older event, and require every platform to succeed before accepting its artifacts.
+
+If preparation fails, packaging does not begin. Review the reported operation, HTTP status, request ID and tag/revision context. A `403 Resource not accessible by integration` is an authorization failure, not evidence of a platform-specific build problem. Centralizing creation removes independent creation attempts from the matrix but cannot guarantee resolution of GitHub authorization failures. Confirm the job has `contents: write` and the tag exists at the expected commit; do not publish the draft or introduce a broader credential as a workaround. After a creation error, preparation checks once for a matching draft in case another actor created it, then fails if no usable draft exists.
+
+The release workflow must remain draft-only. Confirm all expected MSI, NSIS, deb, AppImage, x64 DMG and ARM64 DMG artifacts and their checksums are present; a partial matrix is a blocker.
 
 The called smoke workflow installs the release packages. Review its logs as lifecycle evidence only, then link the separately recorded manual and installed-playback evidence.
 

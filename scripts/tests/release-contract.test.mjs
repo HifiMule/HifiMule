@@ -94,10 +94,55 @@ test("smoke callers and callee retain draft-release visibility without publishin
   assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-release"), 4), draftPermissions);
   assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-candidate"), 4), draftPermissions);
   assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "release"), 4), { contents: "write" });
-  assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 3);
+  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "prepare-release"), 4), { contents: "write" });
+  assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 4);
   assert.match(releaseWorkflow, /releaseDraft: true/);
   assert.doesNotMatch(smokeWorkflow, /gh release (?:edit|create)|--draft=false/);
   assert.match(smokeWorkflow, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
+});
+
+test("tag builds use one prepared draft and an immutable source revision", () => {
+  const workflow = normalizeWorkflow(read(".github/workflows/release.yml"));
+  const prepare = jobBlock(workflow, "prepare-release");
+  const release = jobBlock(workflow, "release");
+
+  assert.match(prepare, /release-id: \$\{\{ steps\.draft\.outputs\.release-id \}\}/);
+  assert.match(prepare, /contents: write/);
+  assert.match(prepare, /prepare-draft-release\.cjs/);
+  assert.match(prepare, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(release, /needs: prepare-release/);
+  assert.match(release, /ref: \$\{\{ inputs\.candidate_ref \|\| github\.sha \}\}/);
+  const revalidate = release.split(/(?=^      - )/m).find((step) => step.includes('name: Revalidate prepared draft before packaging'));
+  assert.ok(revalidate, 'failed platform reruns must revalidate saved preparation output');
+  assert.match(revalidate, /if: github\.event_name == 'push'/);
+  assert.match(revalidate, /PREPARED_RELEASE_ID: \$\{\{ needs\.prepare-release\.outputs\.release-id \}\}/);
+  assert.match(revalidate, /releaseId: process\.env\.PREPARED_RELEASE_ID/);
+  assert.ok(release.indexOf(revalidate) < release.indexOf('name: Build draft release'));
+
+  const tauriSteps = release.split(/(?=^      - )/m).filter((step) => step.includes("uses: tauri-apps/tauri-action@"));
+  assert.equal(tauriSteps.length, 3, "all distribution-signing branches remain covered");
+  for (const step of tauriSteps) {
+    assert.match(step, /if: github\.event_name == 'push'/);
+    assert.match(step, /releaseId: \$\{\{ needs\.prepare-release\.outputs\.release-id \}\}/);
+    assert.match(step, /releaseDraft: true/);
+  }
+  assert.match(workflow, /concurrency:\n  group: .*github\.ref/);
+  assert.match(workflow, /cancel-in-progress: false/);
+  assert.match(workflow, /group: .*github\.run_id/, "candidate runs must not compete with tag builds");
+});
+
+test("candidate preparation is a successful no-op, not a skipped dependency", () => {
+  const workflow = normalizeWorkflow(read(".github/workflows/release.yml"));
+  const prepare = jobBlock(workflow, "prepare-release");
+  assert.doesNotMatch(prepare, /^    if:/m, "skipping the preparation job would skip its candidate dependents");
+  const steps = prepare.split(/(?=^      - )/m).slice(1);
+  assert.ok(steps.length > 0);
+  for (const step of steps) {
+    assert.match(step, /if: github\.event_name == 'push'/, "candidates must perform no release preparation operations");
+  }
+  const candidateSmoke = jobBlock(workflow, "smoke-candidate");
+  assert.match(candidateSmoke, /if: github\.event_name == 'workflow_dispatch'/);
+  assert.match(candidateSmoke, /needs: release/);
 });
 
 test("workflow permission parsing is independent of line endings", () => {
