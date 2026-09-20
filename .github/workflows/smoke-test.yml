@@ -22,8 +22,10 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Draft releases are only listed for callers with push access. Both reusable
+# workflow callers must grant this permission even when using candidate artifacts.
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:

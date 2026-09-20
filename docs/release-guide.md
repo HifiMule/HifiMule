@@ -76,6 +76,8 @@ The tag path rebuilds the same four rows and creates a **draft** release. The re
 
 The called smoke workflow installs the release packages. Review its logs as lifecycle evidence only, then link the separately recorded manual and installed-playback evidence.
 
+Draft-release smoke tests require `contents: write` on both the release workflow's reusable-workflow caller and `smoke-test.yml`. GitHub hides draft releases from tokens without push access, so reducing either side to `contents: read` makes an existing draft appear missing. The smoke tests only download and test assets; they do not publish the draft. Candidate calls grant the same permission ceiling because they invoke the same reusable workflow.
+
 ## 6. Publish or reject
 
 The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes. A signed row must include a verified signing identity and pass the Windows Authenticode or macOS Developer ID/notarization checks; a row without distribution credentials (including ad-hoc signed macOS) must record signing status `not-configured` without an identity and must not be described as trusted by SmartScreen or Gatekeeper. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.

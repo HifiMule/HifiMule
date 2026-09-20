@@ -85,23 +85,26 @@ test("release workflow supports explicit immutable candidates without publishing
   assert.match(workflow, /releaseDraft: true/);
 });
 
-test("smoke workflows use a read-only caller and callee permission contract", () => {
+test("smoke callers and callee retain draft-release visibility without publishing", () => {
   const releaseWorkflow = read(".github/workflows/release.yml");
   const smokeWorkflow = read(".github/workflows/smoke-test.yml");
-  const readOnlyPermissions = { contents: "read", actions: "read" };
+  const draftPermissions = { contents: "write", actions: "read" };
 
-  assert.deepEqual(permissionMap(smokeWorkflow, 0), readOnlyPermissions);
-  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-release"), 4), readOnlyPermissions);
-  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-candidate"), 4), readOnlyPermissions);
+  assert.deepEqual(permissionMap(smokeWorkflow, 0), draftPermissions);
+  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-release"), 4), draftPermissions);
+  assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "smoke-candidate"), 4), draftPermissions);
   assert.deepEqual(permissionMap(jobBlock(releaseWorkflow, "release"), 4), { contents: "write" });
-  assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 1);
+  assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 3);
+  assert.match(releaseWorkflow, /releaseDraft: true/);
+  assert.doesNotMatch(smokeWorkflow, /gh release (?:edit|create)|--draft=false/);
+  assert.match(smokeWorkflow, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
 });
 
 test("workflow permission parsing is independent of line endings", () => {
   const releaseWorkflow = normalizeWorkflow(read(".github/workflows/release.yml"));
   const smokeWorkflow = normalizeWorkflow(read(".github/workflows/smoke-test.yml"));
   const expectedPermissions = {
-    smoke: { contents: "read", actions: "read" },
+    smoke: { contents: "write", actions: "read" },
     release: { contents: "write" },
   };
 

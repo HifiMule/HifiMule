@@ -451,7 +451,7 @@ jobs:
     if: github.event_name == 'push'
     needs: release
     permissions:
-      contents: read
+      contents: write
       actions: read
     uses: ./.github/workflows/smoke-test.yml
     with:
@@ -462,7 +462,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: release
     permissions:
-      contents: read
+      contents: write
       actions: read
     uses: ./.github/workflows/smoke-test.yml
     with:
