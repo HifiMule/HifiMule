@@ -1,6 +1,6 @@
 # HifiMule — Source Tree Analysis
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Deep
 
 ---
 
@@ -124,6 +124,7 @@ hifimule/
 | `api.rs` | ~1500 | `JellyfinClient`: Jellyfin API calls; `CredentialManager`: config.json + keyring secret map |
 | `db.rs` | ~1650 | SQLite CRUD/migrations: devices, scrobbles, server config, server identity, auto-fill history/rotation/pity |
 | `sync.rs` | ~5900 | `calculate_delta`, provider-aware `execute_sync`, path sanitization, M3U generation, cancellation, warnings |
+| `playback/*` | ~10000+ | Daemon-owned playback session, FFmpeg decoding/streaming, CPAL outputs, queue/history persistence, seeking, preview auditions, and native media controls |
 | `auto_fill/*` | ~5000+ | Legacy fill facade, provider fetch layer, pure configurable `AutoFillPipeline` engine |
 | `scrobbler.rs` | 577 | Rockbox log parse, Jellyfin match, `process_device_scrobbles` |
 | `transcoding.rs` | 142 | `DeviceProfileEntry`, `load_profiles`, `find_device_profile` |
@@ -183,9 +184,13 @@ Main thread (macOS: event loop; Windows: main)
 | `login.ts` | Media-server connection form, debounced `server.probe`, `server.connect` submission |
 | `library.ts` | Provider-neutral browser: capability-driven modes, hierarchy, paginated items, quick-nav, favorite tree |
 | `state/basket.ts` | `BasketStore` singleton: in-memory Map + localStorage + 1s debounced daemon save |
+| `state/playback.ts` | `PlaybackStore`: authoritative session snapshot, connection freshness, read coalescing, and subscriber lifecycle |
 | `components/ServerHub.ts` | Multi-server chip/menu: switch, add, edit identity, remove, logout; reconciles legacy basket server IDs |
 | `components/BasketSidebar.ts` | Main sidebar: basket list, capacity bar, sync flow, auto-fill, device hub, folder info |
 | `components/MediaCard.ts` | Grid card: cover art, basket toggle, playlist context actions, navigation click |
+| `components/AlbumPlayButton.ts` / `TrackPreviewButton.ts` / `TrackQueueButton.ts` | Starts ordered album playback, auditions a track, or adds a track to the playback queue |
+| `components/PlaybackControls.ts` | Floating transport bar: playback state, seeking, output selection, recovery guidance, and surface switch |
+| `components/PlaybackDestination.ts` | Dedicated listening view with current playback plus paged upcoming/history queues and upcoming-item edits |
 | `components/PlaylistCurationView.ts` | Playlist editor: rename/delete, artist/album filters, add/remove/reorder tracks |
 | `components/TracksBrowseView.ts` | Tracks mode: artist/album/track panels, paginated loading, A-Z strips, multi-select |
 | `components/AutoFillPanel.ts` | Builder UI for per-server auto-fill pipeline settings and live preview |
@@ -233,4 +238,4 @@ No `.github/workflows` files are present in this checkout. Release process docum
 - `hifimule-daemon/src/sync.rs` — Delta calculation tests
 - `hifimule-daemon/src/device/tests.rs` — Device module tests
 - `hifimule-daemon/src/tests.rs` — Top-level integration tests
-- No UI tests (Tauri/DOM testing not wired up)
+- `hifimule-ui/tests/playback-bar.html` and `scripts/tests/playback-ui.test.mjs` — browser-style playback-bar and UI-contract coverage

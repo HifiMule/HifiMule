@@ -1,14 +1,14 @@
 # HifiMule — Project Overview
 
-**Version:** 0.11.1 | **Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
+**Version:** 0.15.0 | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Deep
 
 ---
 
 ## Purpose
 
-HifiMule is a cross-platform desktop application that synchronizes music from a self-hosted media server to legacy portable audio players — primarily iPods running Rockbox firmware, but also any USB MSC device or MTP device.
+HifiMule is a cross-platform desktop music application for self-hosted media libraries. It plays music directly from a connected media server on the computer and synchronizes selected music to legacy portable audio players — primarily iPods running Rockbox firmware, but also any USB MSC device or MTP device.
 
-The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic, and OpenSubsonic manage music libraries with rich metadata, but portable players like Rockbox iPods cannot connect to them directly. HifiMule bridges this gap by letting users curate a "basket" of albums/playlists/artists and then copying the files to the device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports played tracks back through the active provider when that provider supports scrobbling.
+The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic, and OpenSubsonic manage music libraries with rich metadata, but portable players like Rockbox iPods cannot connect to them directly. HifiMule bridges this gap by letting users browse and listen to that library on their computer, manage a listening queue, then curate a "basket" of albums/playlists/artists and copy them to a device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports played tracks back through the active provider when that provider supports scrobbling.
 
 ---
 
@@ -18,6 +18,7 @@ The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic
 2. **Provider-Neutral Media Server Layer** — Library metadata, cover art, downloads, changes, scrobbling, and browse modes flow through the daemon's `MediaProvider` trait. Jellyfin, Subsonic, Navidrome, and OpenSubsonic adapters normalize their server-specific APIs into the same domain model.
 3. **Speed is King** — Delta sync: only copy what changed. Skipping files that are already present and byte-identical (via provider version/metadata comparison) keeps syncs fast.
 4. **Scrobble Bridge** — After each sync, parse the Rockbox `.scrobbler.log` and submit plays back through the active provider so listening history stays in sync.
+5. **Listen, Then Sync** — Playback and device sync share the same provider-neutral library, so the desktop app is a music-library companion in the spirit of iTunes as well as a transfer tool.
 
 ---
 
@@ -51,6 +52,7 @@ The Tauri shell is responsible for:
 | Async runtime | Tokio (multi-thread) |
 | HTTP server | Axum 0.8 |
 | Provider abstraction | `MediaProvider` trait + Jellyfin/Subsonic/OpenSubsonic adapters |
+| Audio playback | FFmpeg 9 decoding, CPAL audio output, Souvlaki native media controls |
 | Database | SQLite via rusqlite (bundled) |
 | Keyring | `keyring` crate (OS credential store) |
 | System tray | `tray-icon` + `tao` |
@@ -73,6 +75,13 @@ The Tauri shell is responsible for:
 - **Dirty-flag recovery**: if sync is interrupted, the manifest is marked dirty; on next connect the UI shows a Repair workflow to reconcile missing/orphaned files
 - **Write-temp-rename atomicity**: MSC backend writes to a `.tmp` file then renames, preventing partial writes
 - **FAT32/Rockbox path constraints**: paths are sanitized to ≤255 chars/component, ≤250 total (Windows MAX_PATH), with illegal characters replaced
+
+### Desktop playback
+- **Play from the library**: start a whole album or preview an individual track without first copying it to a portable device
+- **Listening queue**: add tracks to the queue, inspect listening history and upcoming tracks, then reorder or remove upcoming entries
+- **Transport controls**: pause/resume, previous/next, stop, seek, retry failed preparation, and return from a preview to the interrupted session
+- **Output selection**: choose an available audio output; the selected endpoint is retained safely and playback recovers predictably when an output disappears
+- **Native controls**: operating-system media controls continue to control the daemon-owned session while the main window is closed
 
 ### Multi-device
 - Multiple devices can be connected simultaneously (stored in a `HashMap` keyed by mount path)
@@ -121,6 +130,7 @@ The Tauri shell is responsible for:
 | OS keyring | System credential store | Access token or password-derived provider secret |
 | SQLite DB | Same app data dir as `config.json` | `devices`, `scrobble_history`, `server_config`, `autofill_history`, `autofill_rotation`, and `autofill_pity` tables |
 | `device-profiles.json` | Same app data dir | Available transcoding profiles (seeded from embedded asset) |
+| `playback.json` | Same app data dir | Selected audio-output preference and playback configuration |
 | Browser `localStorage` | Tauri WebView | Basket state (session persistence) |
 
 ---
@@ -137,4 +147,4 @@ The Tauri shell is responsible for:
 
 ## Project Status
 
-Active development (v0.11.1). Core sync, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization, and Jellyfin/Subsonic/OpenSubsonic media-server support are implemented.
+Active development (v0.15.0). Core sync, desktop playback, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization, and Jellyfin/Subsonic/OpenSubsonic media-server support are implemented.

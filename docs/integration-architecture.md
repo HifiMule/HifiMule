@@ -1,6 +1,6 @@
 # HifiMule — Integration Architecture
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Exhaustive
 
 ---
 
@@ -51,6 +51,7 @@ HifiMule consists of two cooperating processes that run on the same machine. The
 │  - MSC device observer (1s polling, filesystem)             │
 │  - MTP device observer (3s polling, WPD/libmtp)             │
 │  - Sync executor (tokio::spawn, per-sync background task)   │
+│  - Playback session owner (FFmpeg decode → CPAL output)      │
 └──────────────────────────────────────────────────────────────┘
                         │
                ┌────────▼─────────┐
@@ -265,6 +266,30 @@ The UI has no global state store framework. State is managed at two levels:
   - Multi-device changes
 - Polls `sync_get_operation_status` every **500ms** during an active sync
 - `StatusBar` polls `get_daemon_state` every **3 seconds** independently via direct fetch (not invoke, because it was written before the mixed-content constraint was fully appreciated)
+
+### Playback flow
+
+Playback uses the same Tauri RPC proxy as browse and sync; audio bytes never enter the WebView. The UI requests a session mutation, then renders the authoritative snapshot returned by `playback.getSession`.
+
+```
+User chooses Play, Preview, Queue, transport, seek, or output
+        │
+        ▼
+UI component → rpc_proxy → daemon playback.* JSON-RPC
+        │
+        ▼
+PlaybackSession serializes admission and validates session/generation identity
+        │
+        ├─ Resolve authenticated stream via MediaProvider
+        ├─ FFmpeg decodes and resamples the stream
+        ├─ CPAL writes frames to the selected system output
+        └─ Persist authoritative queue/session state in SQLite
+        │
+        ▼
+PlaybackStore refreshes `playback.getSession` → controls and destination repaint
+```
+
+Native media-key commands enter the same daemon command path through Souvlaki. A preview is an audition, not a replacement of the main queue; the daemon checkpoints the main position and can return to it. See [Playback Guide](./playback.md) for the product behavior and [API Contracts](./api-contracts-hifimule-daemon.md) for exact RPC envelopes.
 
 ## Provider-Neutral Browse Flow
 

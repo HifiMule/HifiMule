@@ -1,8 +1,8 @@
 {
   "repository_type": "monorepo",
   "workspace_type": "cargo",
-  "last_updated": "2026-06-17",
-  "version": "0.11.1",
+  "last_updated": "2026-09-20",
+  "version": "0.15.0",
   "parts": [
     {
       "part_id": "hifimule-i18n",
@@ -22,7 +22,7 @@
       "primary_language": "Rust",
       "primary_framework": "Axum",
       "entry_points": ["src/main.rs"],
-      "description": "Background daemon service with system tray, provider-aware JSON-RPC API, Jellyfin/Subsonic/OpenSubsonic adapters, SQLite storage, portable server identity, playlist editing, and configurable auto-fill"
+      "description": "Background daemon service with system tray, provider-aware JSON-RPC API, FFmpeg/CPAL desktop playback, native media controls, Jellyfin/Subsonic/OpenSubsonic adapters, SQLite storage, portable server identity, playlist editing, and configurable auto-fill"
     },
     {
       "part_id": "hifimule-ui",
@@ -32,7 +32,7 @@
       "primary_language": "TypeScript",
       "primary_framework": "Tauri 2",
       "entry_points": ["src/main.ts", "src-tauri/src/main.rs"],
-      "description": "Tauri 2 desktop application with TypeScript/Vite frontend, Shoelace web components, server hub, playlist curation, tracks browse, auto-fill builder, and provider-neutral browse/sync UI"
+      "description": "Tauri 2 desktop music application with TypeScript/Vite frontend, Shoelace web components, server hub, playback controls and destination, playlist curation, tracks browse, auto-fill builder, and provider-neutral browse/sync UI"
     }
   ],
   "integration_points": [
@@ -41,8 +41,8 @@
       "to": "hifimule-daemon",
       "type": "JSON-RPC 2.0 over HTTP",
       "endpoint": "http://127.0.0.1:19140/",
-      "method_count": 70,
-      "details": "UI sends JSON-RPC requests to daemon for server connection/management, provider-neutral browse, playlist editing, auto-fill pipeline preview/persistence, device management, sync, manifests, scrobbling, and transcoding"
+      "method_count": 90,
+      "details": "UI sends JSON-RPC requests to daemon for server connection/management, provider-neutral browse, desktop playback and queue control, playlist editing, auto-fill pipeline preview/persistence, device management, sync, manifests, scrobbling, and transcoding"
     },
     {
       "from": "hifimule-ui",

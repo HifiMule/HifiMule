@@ -1,6 +1,6 @@
 # HifiMule UI — Architecture
 
-**Part:** `hifimule-ui` | **Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Part:** `hifimule-ui` | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Exhaustive
 
 ---
 
@@ -9,8 +9,9 @@
 The UI is a **Tauri 2** desktop application that provides a thin shell around the daemon. All business logic lives in the daemon; the UI's responsibility is:
 1. Launching and monitoring the daemon process
 2. Rendering the library browser and basket using data from the daemon
-3. Proxying RPC calls and provider cover-art requests to the daemon
-4. Keeping browse and sync UI provider-neutral so Jellyfin, Subsonic, Navidrome, and OpenSubsonic share the same interaction model
+3. Providing an always-available playback bar and dedicated playback destination
+4. Proxying RPC calls and provider cover-art requests to the daemon
+5. Keeping browse, playback, and sync UI provider-neutral so Jellyfin, Subsonic, Navidrome, and OpenSubsonic share the same interaction model
 
 ---
 
@@ -106,6 +107,10 @@ The UI uses the returned `BrowseMode[]` to decide which buttons to render. Serve
 
 ## State Management
 
+### PlaybackStore (`state/playback.ts`)
+
+`PlaybackStore` is a singleton projection of the daemon-owned playback session. It coalesces reads of `playback.getSession`, accepts only strictly newer snapshots for the same session, exposes `connecting`/`fresh`/`stale`/`disconnected` connection state, and refreshes while one or more playback surfaces are subscribed. It does not keep an independent queue or playback engine in the WebView.
+
 ### BasketStore (`state/basket.ts`)
 
 Singleton `BasketStore extends EventTarget`. Holds items selected for the next sync.
@@ -175,6 +180,16 @@ The main sidebar component owns the UI's sync lifecycle. It runs two polling loo
 - Navigation click (on card body) vs. basket toggle click (on `basket-toggle-btn`) are distinguished via `composedPath()`
 - When adding to basket: fetches metadata via `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` concurrently
 
+### Playback components
+
+- **`AlbumPlayButton`** starts ordered album playback through `playback.playAlbum`.
+- **`TrackPreviewButton`** starts a full-track audition through `playback.previewTrack` without replacing the main queue.
+- **`TrackQueueButton`** adds a track to the daemon-owned upcoming queue.
+- **`PlaybackControls`** is the floating bar across library and playback views. It renders safe track metadata, transport controls, seek state, output selection, recovery guidance, and a switch to the dedicated playback destination.
+- **`PlaybackDestination`** renders the listening surface: current playback plus separately paged upcoming and history sections. It supports moving or removing upcoming entries and preserves focus through refreshes.
+
+The UI always treats the daemon snapshot as authoritative; after a transport or queue mutation it refreshes rather than predicting a local final state.
+
 ### `StatusBar`
 
 Shows daemon health at the bottom of the window. Polls `get_daemon_state` every 3s via direct `fetch()` (Note: this uses fetch rather than invoke — works in dev mode but may be unreliable in release builds due to mixed content). Listens for `rpc:call`, `rpc:success`, `rpc:error`, `rpc:disconnect` custom window events.
@@ -229,7 +244,7 @@ initLibraryView()
 ```json
 {
   "productName": "HifiMule",
-  "version": "0.11.1",
+  "version": "0.15.0",
   "identifier": "hifimule.github.io",
   "bundle": {
     "externalBin": ["sidecars/hifimule-daemon"],

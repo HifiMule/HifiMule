@@ -1,6 +1,6 @@
 # HifiMule Daemon — Architecture
 
-**Part:** `hifimule-daemon` | **Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Part:** `hifimule-daemon` | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Exhaustive
 
 ---
 
@@ -79,6 +79,7 @@ pub struct AppState {
 | Manifest | `manifest_get_basket`, `manifest_save_basket`, `manifest_get_discrepancies`, `manifest_prune`, `manifest_relink`, `manifest_clear_dirty` |
 | Sync | `sync_get_device_status_map`, `sync_calculate_delta`, `sync_detect_changes`, `sync_execute`, `sync_get_operation_status`, `sync_get_resume_state`, `sync.setAutoFill` |
 | Auto-fill | `basket.autoFill` |
+| Playback | `playback.getSession`, `playback.applySession`, `playback.playAlbum`, `playback.previewTrack`, `playback.control`, `playback.seek`, `playback.listOutputs`, `playback.selectOutput`, `playback.listOccurrences`, `playback.describeOccurrences`, `playback.retryRestore` |
 | Scrobbler | `scrobbler_get_last_result` |
 | Transcoding | `device_profiles.list` |
 
@@ -351,6 +352,21 @@ Parses Rockbox `.scrobbler.log` (AudioScrobbler 1.1, tab-separated). Matching st
 2. Filter by duration ±10 seconds
 3. Submit the played event through the active provider (`PlayedItems` for Jellyfin, `scrobble.view` for Subsonic/OpenSubsonic)
 4. `INSERT OR IGNORE` into `scrobble_history` for deduplication
+
+---
+
+## Playback (`playback/`)
+
+The daemon owns desktop audio playback independently of the UI. `PlaybackSession` is the authoritative serialized session owner: it admits album plays, single-track sessions, queue edits, previews, transport commands, output changes, and seeks without letting stale UI requests overwrite newer state.
+
+The playback pipeline resolves an authenticated source through `MediaProvider`, streams and decodes it with the controlled FFmpeg runtime, resamples as necessary, and writes audio to CPAL. Souvlaki forwards operating-system media-key events into the same command path, so transport remains available when the UI window is closed.
+
+- **Main session and audition**: a preview is an isolated audition that preserves the main queue and cursor; returning or finishing restores the main session when safe.
+- **Queue and history**: occurrences have stable identities, allowing the UI to page upcoming/history entries and edit only upcoming entries.
+- **Outputs and recovery**: the selected output is persisted in `playback.json`; unavailable or disconnected outputs pause safely rather than silently routing sound elsewhere.
+- **Durability**: the SQLite playback schema persists the session, queue, history, and preview outcomes. The daemon restores this state at launch and exposes recovery status through JSON-RPC.
+
+See [Playback Guide](./playback.md) and [API Contracts](./api-contracts-hifimule-daemon.md) for the public contract.
 
 ---
 

@@ -1,6 +1,6 @@
 # Component Inventory — HifiMule UI
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Deep
 
 ---
 
@@ -14,7 +14,7 @@ The DOMContentLoaded handler and application bootstrapper.
 - Detects which window is loaded (main vs splashscreen) by checking `window.location.pathname`
 - **Splashscreen path**: polls `rpc_proxy('get_daemon_state')` every 1s until daemon responds, then shows main window and closes splash (timeout: 10s)
 - **Main path**: calls `rpcCall('get_daemon_state')` → routes to first-run login, no-server-selected empty state, or library view
-- `renderMainLayout()`: injects `sl-split-panel` with library-view left and basket-view right; instantiates `ServerHub` and `BasketSidebar`
+- `renderMainLayout()`: injects the library, device/sync destination, and daemon-backed playback surfaces; instantiates `ServerHub`, `BasketSidebar`, `PlaybackControls`, and `PlaybackDestination`
 - Registers a global `hifimule:server-unauthorized` handler for scoped re-auth when browse RPCs return daemon error `-8`
 
 ---
@@ -92,6 +92,7 @@ interface AppState {
 - Provider-neutral browse wrappers (`fetchBrowseModes`, `fetchBrowseArtists`, `fetchBrowseAlbum`, `fetchBrowseFavoriteItems`, etc.)
 - Multi-server wrappers (`serverList`, `serverSelect`, `serverUpdate`, `serverRemove`)
 - Auto-fill preview wrapper (`previewAutoFill`) for provider-routed pipeline previews
+- Playback contracts and wrappers for album play, track preview, queue edits, transport, seeking, session snapshots, occurrence pages, and audio-output selection
 
 **Error normalization:** `getErrorMessage()` handles plain string errors (from Tauri), `Error` objects, and object errors with `message`/`error`/`details` fields; falls back to JSON serialization. Browse RPCs returning `ERR_UNAUTHORIZED = -8` dispatch `hifimule:server-unauthorized` so `main.ts` can show a re-auth dialog for the selected server.
 
@@ -134,9 +135,23 @@ Singleton class extending `EventTarget`.
 
 **Events:** Emits `CustomEvent('update', { detail: items[] })` on every mutation.
 
+### PlaybackStore (`state/playback.ts`)
+
+The singleton holds the latest authoritative `PlaybackSessionSnapshot` and is shared by the floating controls and playback destination. It polls only while subscribed, coalesces in-flight reads, rejects stale snapshots, and reports connection freshness. The daemon—not the UI—owns audio output, queue mutation, persistence, and media-key handling.
+
 ---
 
 ## Components
+
+### Playback controls and destination
+
+| Component | Responsibility |
+|-----------|----------------|
+| `AlbumPlayButton` | Begins ordered album playback from a library album. |
+| `TrackPreviewButton` | Auditions a track while preserving the main listening session. |
+| `TrackQueueButton` | Adds a track to the daemon-owned upcoming queue. |
+| `PlaybackControls` | Persistent transport bar with track metadata, pause/resume, previous/next, stop, seek, output picker, retry/recovery state, and destination switch. |
+| `PlaybackDestination` | Full listening view with current state and paged Upcoming/History lists; upcoming tracks can be reordered or removed. |
 
 ### `BasketSidebar`
 

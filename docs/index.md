@@ -1,6 +1,6 @@
 # HifiMule — Project Documentation Index
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep | **Version:** 0.11.1 | **Deep-Dives:** 1
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Deep | **Version:** 0.15.0 | **Deep-Dives:** 1
 
 ---
 
@@ -10,7 +10,7 @@
 - **Primary Languages:** Rust, TypeScript
 - **Architecture:** Two-process desktop app (daemon + Tauri 2 UI shell)
 - **Communication:** JSON-RPC 2.0 over local HTTP on `localhost:19140`
-- **Purpose:** Synchronizes Jellyfin, Navidrome, Subsonic, and OpenSubsonic music libraries to legacy portable audio players (Rockbox iPods, USB/MTP devices), with multi-server basket routing, playlist editing, auto-fill, scrobbling, and shared i18n
+- **Purpose:** Plays and synchronizes Jellyfin, Navidrome, Subsonic, and OpenSubsonic music libraries: desktop playback with a queue, previews, output selection, and native controls alongside device sync for Rockbox iPods and USB/MTP players
 
 ---
 
@@ -56,6 +56,7 @@
 
 - [API Contracts — Daemon](./api-contracts-hifimule-daemon.md) — RPC methods for server connection, provider-neutral browse, sync, device management, and legacy Jellyfin-compatible calls
 - [Data Models — Daemon](./data-models-hifimule-daemon.md) — DeviceManifest, per-server AutoFillPipeline, provider-domain models, SyncedItem, BasketItem, SyncDelta, SyncOperation, DeviceMapping, ServerConfig
+- [Playback Guide](./playback.md) — Desktop listening, queue and previews, outputs, native media controls, persistence, and boundaries
 
 ### UI
 
