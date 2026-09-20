@@ -1181,3 +1181,28 @@ Continue stories in the approved Epic 15/16 sequence above; Story 15.17 closes m
 Keep experiments/playback-probe as the audio regression reference. No production playback code was added by this architecture workflow. Do not treat prior ARM64 VM tests as shipping-architecture certification.
 
 Playback architecture workflow complete: context, decisions, implementation patterns, structure and validation approved. Outstanding implementation gates are explicit above.
+
+## Epic 17 — Audiobookshelf Architecture Amendment
+
+`ServerType` gains `Audiobookshelf`, implemented by `AudiobookshelfProvider` behind the existing
+`MediaProvider` boundary. A persisted server configuration records the selected upstream library
+ID and immutable library role (`Audiobook` or `Podcast`), allowing multiple independent HifiMule
+servers to share one endpoint and credentials while retaining separate identities and budgets.
+
+The provider owns authentication, discovery, catalog/search pagination, artwork, direct stream /
+transcode acquisition, progress calls, and all provider-specific DTO mapping. Authenticated URLs
+and tokens remain daemon-side and are sanitized from logs. The integration contract must be
+validated against supported Audiobookshelf versions before an enabled provider is shipped.
+
+Audiobooks map into existing album/ordered-track primitives only where that is faithful: book →
+album, chapter/file → ordered track, author → primary artist-equivalent, narrator → secondary
+credit. Stable remote item IDs are retained as provider metadata. A player-owned identity bridge
+stores stable ID plus whole-item offset and performs progress read/write only for a proven matching
+item during HifiMule playback. Background synchronization never reads or writes progress.
+
+Podcasts use a distinct show/episode representation and must not be modeled as audiobooks merely
+to reuse album UI. Podcast Autofill exposes a per-podcast-server recent/unplayed retention policy
+to the existing pipeline; audiobook and podcast servers retain independent budgets. Local transfer
+uses existing sync, reconciliation, and compatibility mechanisms, blocking media when no verified
+direct/transcoded representation can meet the target constraints. Series and collections become
+read-only playlists; remote collection mutation is excluded.

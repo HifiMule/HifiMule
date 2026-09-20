@@ -220,3 +220,16 @@ development_status:
   16-13-protect-playback-during-sync-without-unnecessary-throttling: backlog
   16-14-keep-long-listening-sessions-bounded-and-recoverable: backlog
   epic-16-retrospective: optional
+
+  # Epic 17 — Audiobookshelf Integration (sprint-change-proposal-2026-09-20-audiobookshelf)
+  epic-17: backlog
+  17-1-validate-audiobookshelf-integration-contract: backlog
+  17-2-connect-audiobookshelf-libraries-as-independent-servers: backlog
+  17-3-map-audiobookshelf-books-faithfully-into-the-hifimule-catalog: backlog
+  17-4-browse-and-search-an-audiobookshelf-audiobook-server: backlog
+  17-5-directly-play-audiobookshelf-audiobooks-through-hifimule: backlog
+  17-6-preserve-audiobookshelf-listening-continuity-safely: backlog
+  17-7-add-audiobookshelf-podcast-servers-and-direct-playback: backlog
+  17-8-synchronize-audiobookshelf-media-with-independent-policies: backlog
+  17-9-refine-audiobookshelf-grouping-and-compatibility-feedback: backlog
+  epic-17-retrospective: optional

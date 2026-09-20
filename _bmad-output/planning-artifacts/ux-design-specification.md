@@ -160,3 +160,22 @@ Add Back alongside transport in the existing two-row bar. Above three seconds re
 Refine §5.1 Navigation: Tracks, Albums, Recently Added and every other supported browse mode use consistent recognizable icons and smaller visible localized labels with reduced spacing/bulk. Preserve capability filtering, current/loading state, existing mode-switch semantics and the grid/list toggle. Reuse Shoelace tokens; keep readable contrast, usable targets, full accessible names and visible focus. Any abbreviated label has a full hover/focus hint. Set icon mapping, sizing and wrapping/accessible overflow during story preparation, then compare actual before/after layouts at matching widths/languages. All modes remain reachable at narrow library widths and 200% text scaling without clipping, overlap or horizontal page overflow. Avoid global button/track typography changes.
 
 Story 15.17 verifies both changes in the installed manual release; Story 16.14 later verifies the expanded Radio experience. Historical UI evidence is not automatically promoted by this amendment.
+
+## 8. Audiobookshelf integration — Epic 17
+
+The server-add flow offers Audiobookshelf through reliable detection or an explicit provider choice.
+After successful authentication, a library picker identifies Books and Podcasts libraries. Selecting
+one creates an independent server card in the existing Server Hub; multiple selections from the
+same endpoint remain separate roles with their own budgets and settings.
+
+Audiobook browsing uses book/chapter language, artwork, author-first metadata, narrator credits,
+and the established accessible loading, empty, error, keyboard, and focus states. Podcast browsing
+uses show/episode language and does not inherit album semantics. Both use the normal playback
+controls and transparent compatibility errors.
+
+For device syncing, audiobook servers use existing capacity/selection behavior. Podcast servers
+show a dedicated capacity-managed recent/unplayed Autofill policy. Series and collections may be
+shown as read-only playlists. The UI does not offer remote collection editing, collection write-back,
+or Audiobookshelf-specific folder/collection filtering. Playback-progress updates remain invisible
+background player behavior; when identity cannot be proved, the UI presents a recoverable
+re-sync/re-link explanation rather than implying a write was made.

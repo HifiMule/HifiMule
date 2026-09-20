@@ -5051,6 +5051,112 @@ So that leaving music playing through a workday does not progressively consume m
 **Implementation gate:** Before execution, set soak duration, sampling interval, memory/task/handle budgets, workload sizes, fault schedule, acceptable growth and evidence method using earlier measurements. Investigate reproducible growth or recovery failures, rerun affected scenarios after fixes, and retain raw evidence locations. Do not invent passing thresholds after seeing the results.
 
 
+## Epic 17: Audiobookshelf Integration
+
+Add Audiobookshelf as a multi-server provider for independently selected Books and Podcasts
+libraries. This epic delivers the complete phased roadmap: audiobook catalog and direct playback;
+player-centric progress continuity; podcast catalog and direct playback; local synchronization and
+Autofill; then read-only series/collection grouping and compatibility feedback. Audiobooks and
+podcasts remain distinct catalogue models, server roles, budgets, and selection behavior.
+
+**Dependencies:** Epic 8’s provider/multi-server foundation and Epic 15’s direct album/track
+playback. Epic 15 release verification and Epic 16 Radio work remain independently sequenced.
+
+**Out of scope:** editable remote collections, remote collection write-back, and
+Audiobookshelf-specific folder or collection filtering.
+
+### Story 17.1: Validate the Audiobookshelf integration contract
+
+As a developer, I want a versioned, fixture-backed Audiobookshelf integration contract,
+So that implementation does not depend on inferred endpoint or item-identity behavior.
+
+**Acceptance Criteria:** Validate authentication, library discovery/type, Books and Podcasts
+catalog/search pagination, book/part ordering, author/narrator/artwork fields, stable IDs, stream
+and transcode behavior, progress endpoints, and failure semantics against supported server
+versions. Store redacted fixtures and record unsupported or ambiguous behavior. Do not enable a
+user-visible provider before this contract exists.
+
+### Story 17.2: Connect Audiobookshelf libraries as independent servers
+
+As a user, I want to authenticate to Audiobookshelf and select one library for a server,
+So that Books and Podcasts libraries become independent HifiMule servers.
+
+**Acceptance Criteria:** Credentials use the encrypted vault; endpoint type, library ID, and role
+persist with the stable HifiMule server identity; Books create audiobook servers and Podcasts
+create podcast servers; multiple libraries from one endpoint are supported; restart, upsert,
+authentication failure, and sanitized logging follow existing provider rules. No folder or
+collection picker appears.
+
+### Story 17.3: Map Audiobookshelf books faithfully into the HifiMule catalog
+
+As a listener, I want books represented as ordered albums with accurate credits,
+So that I can find and play long-form audio naturally.
+
+**Acceptance Criteria:** Each book maps to an album; ordered parts/chapters map to deterministic
+tracks; a single-file book maps to one track; artwork, author-primary and narrator-secondary
+credits are preserved; stable remote IDs are retained as provider metadata; pagination/search and
+remote removal use normal provider conventions; fixtures cover ordering and metadata edge cases.
+
+### Story 17.4: Browse and search an Audiobookshelf audiobook server
+
+As a listener, I want to browse and search my audiobook library,
+So that I can choose books without confusing them with music or podcasts.
+
+**Acceptance Criteria:** Reuse existing browse/search/RPC capability conventions; provide
+accessible book/chapter labels and author/narrator hierarchy; explain empty, loading,
+unavailable, and stale-source states; preserve existing provider behavior. Do not introduce
+podcast views or series/collection playlists in this story.
+
+### Story 17.5: Directly play Audiobookshelf audiobooks through HifiMule
+
+As a listener, I want to play a selected book or chapter through the existing playback path,
+So that Audiobookshelf delivers immediate listening value without device synchronization.
+
+**Acceptance Criteria:** Direct playback honors ordered tracks and existing session/output safety;
+authenticated URLs stay daemon-side; only verified compatible delivery paths are used; unavailable
+or incompatible media returns a truthful recoverable error. Do not write progress, transfer media,
+or run Autofill yet.
+
+### Story 17.6: Preserve Audiobookshelf listening continuity safely
+
+As a listener, I want HifiMule playback to resume and report a book at the correct whole-book position,
+So that I can move safely between HifiMule and Audiobookshelf.
+
+**Acceptance Criteria:** Persist stable item identity plus whole-item offset; read remote position
+when HifiMule begins playback; translate whole-item and chapter/track positions; report position
+or completion only while HifiMule plays a proven matching item; reject missing/stale mappings; do
+not add background-sync progress import or propagation.
+
+### Story 17.7: Add Audiobookshelf podcast servers and direct playback
+
+As a listener, I want to select a Podcasts library and browse/play shows and episodes,
+So that podcasts work without being forced into audiobook or album semantics.
+
+**Acceptance Criteria:** A selected Podcasts library has an independent role and budget;
+show/episode mapping and presentation are distinct from book mapping; browse/search/direct
+playback use existing safety contracts; audiobook and podcast catalogues never leak into one
+another.
+
+### Story 17.8: Synchronize Audiobookshelf media with independent policies
+
+As a portable-listening user, I want audiobooks and podcasts to sync under appropriate rules,
+So that durable books and changing episode feeds fit my device.
+
+**Acceptance Criteria:** Audiobook servers reuse existing per-server selection, budget, and remote
+removal reconciliation. Podcast servers use a capacity-managed recent/unplayed retention policy as
+an existing Autofill source. Block incompatible media before transfer with an explanation; give each
+server an independent budget; do not promise protection for unobservable external playback.
+
+### Story 17.9: Refine Audiobookshelf grouping and compatibility feedback
+
+As a listener, I want source groupings and compatibility feedback that make the integration clear,
+So that I can curate and synchronize confidently as the library changes.
+
+**Acceptance Criteria:** Import series and collections as read-only playlists; progressively
+disclose direct/transcoded compatibility where probing is cheap and reliable, otherwise explain
+eligibility during sync planning; preserve responsive browsing. Collection editing/write-back and
+source-specific folder selection remain unavailable.
+
 ## Playback Story Coverage and Readiness
 
 All 31 stories across 15.1–15.17 and 16.1–16.14 have planning approval under the [2026-09-19 amendment](sprint-change-proposal-2026-09-19.md). See [playback-epic-validation.md](playback-epic-validation.md) for requirement coverage, dependency checks and readiness limits. Stories 15.1–15.14 remain done; new and moved stories remain backlog. Implementation contracts and actual installed evidence must still be completed by their owners.

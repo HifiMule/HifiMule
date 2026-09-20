@@ -324,3 +324,33 @@ The owning implementation story must settle source-selection ranking, reporting 
 Playback destination: the always-available local listening context. Main session: the queue/state preserved while auditioning. Audition: temporary full-track playback. Radio center: the current artist around which selection proceeds. Logical session: listening state that survives restoration and ends when replaced with a new Radio. Recording: musical identity distinct from server copies and queue occurrences. Snapshot: immutable export of the agreed queue/history contents.
 
 Implementation mechanisms, module layout and technology decisions remain in [architecture.md](architecture.md), Playback Extension, rather than being duplicated here.
+
+## Audiobookshelf Extension — Approved Product Requirements
+
+These requirements add Audiobookshelf as an expansion provider. They do not alter the core MVP
+or delay the independent Epic 15 release-verification gate. Audiobooks and podcasts are distinct
+server roles and catalogue domains even when they use the same Audiobookshelf endpoint.
+
+- **FR82:** Users can configure an Audiobookshelf endpoint, authenticate, discover its libraries,
+  and create an independent HifiMule server from one selected library. A Books library creates an
+  audiobook server and a Podcasts library creates a podcast server. No Audiobookshelf-specific
+  folder or collection filter is introduced.
+- **FR83:** HifiMule represents an Audiobookshelf audiobook as an album and its ordered
+  chapter/file parts as tracks, including artwork, author as primary artist-equivalent and
+  narrator credits. A single-file book remains a one-track album.
+- **FR84:** Users can browse, search and directly play eligible Audiobookshelf audiobooks through
+  the established desktop playback path. The system uses only a verified compatible stream or
+  transcode path and explains incompatibility truthfully.
+- **FR85:** During HifiMule playback, the system can read and safely update Audiobookshelf
+  progress and completion using a stable remote item identity and whole-item offset. It never
+  guesses identity or performs progress synchronization during background media synchronization.
+- **FR86:** Users can browse and directly play podcasts from an independent Audiobookshelf
+  podcast server. For local sync, a podcast server can use a separate capacity-managed recent /
+  unplayed episode policy as an Autofill source.
+- **FR87:** Audiobookshelf local synchronization uses normal HifiMule reconciliation and
+  per-server capacity behavior. It transfers only compatible direct/transcoded media and clearly
+  explains an ineligible item.
+
+**Audiobookshelf non-goals:** editable remote collections, remote collection write-back, and
+Audiobookshelf-only folder or collection selection. Series and collections are read-only when
+introduced. Progress belongs to the player integration, not ordinary background synchronization.
