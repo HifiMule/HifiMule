@@ -39,6 +39,10 @@ type PResult<T> = std::result::Result<T, PlaybackError>;
 
 type PendingEvents = Arc<Mutex<VecDeque<(u64, u64, String, PlaybackEvent)>>>;
 
+// A one-shot test handshake after Apply is dequeued, before locking session state.
+#[cfg(test)]
+type ApplyGate = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
+
 #[derive(Clone)]
 pub struct PlaybackSession {
     instance_id: String,
@@ -51,6 +55,8 @@ pub struct PlaybackSession {
     control_tx: mpsc::Sender<OwnerControl>,
     #[allow(dead_code)]
     executing: Arc<AtomicBool>,
+    #[cfg(test)]
+    before_apply: ApplyGate,
     fenced: Arc<AtomicBool>,
     ingress: Arc<Mutex<ProgressIngress>>,
     health: Arc<Mutex<PlaybackHealth>>,
@@ -235,6 +241,8 @@ struct OwnerResources {
     events: PendingEvents,
     inner: Arc<Mutex<Inner>>,
     executing: Arc<AtomicBool>,
+    #[cfg(test)]
+    before_apply: ApplyGate,
     ingress: Arc<Mutex<ProgressIngress>>,
     fenced: Arc<AtomicBool>,
     health: Arc<Mutex<PlaybackHealth>>,
@@ -436,10 +444,14 @@ impl PlaybackSession {
         let worker_ingress = ingress.clone();
         let worker_fenced = fenced.clone();
         let worker_health = health.clone();
+        #[cfg(test)]
+        let before_apply: ApplyGate = Arc::new(Mutex::new(None));
         let resources = OwnerResources {
             events: events.clone(),
             inner: worker_inner,
             executing: worker_executing,
+            #[cfg(test)]
+            before_apply: before_apply.clone(),
             ingress: worker_ingress,
             fenced: worker_fenced,
             health: worker_health,
@@ -459,6 +471,8 @@ impl PlaybackSession {
             command_tx,
             control_tx,
             executing,
+            #[cfg(test)]
+            before_apply,
             fenced,
             ingress,
             health,
@@ -933,6 +947,8 @@ fn owner_loop(
         events,
         inner,
         executing,
+        #[cfg(test)]
+        before_apply,
         ingress,
         fenced,
         health,
@@ -1340,6 +1356,15 @@ fn owner_loop(
             }
             Ok(OwnerCommand::Apply(params, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
+                #[cfg(test)]
+                {
+                    let gate = before_apply.lock().unwrap().take();
+                    if let Some((started, resume)) = gate {
+                        let _ = started.send(());
+                        // Disconnect also releases the owner if the test unwinds.
+                        let _ = resume.recv();
+                    }
+                }
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
@@ -5329,16 +5354,19 @@ mod tests {
     fn saturated_mailbox_cannot_block_shutdown_or_commit_queued_work_after_snapshot() {
         let db = Arc::new(Database::memory().unwrap());
         let playback = PlaybackSession::restore(db, "owner".into());
+        let _cleanup = OwnerThreadCleanup(playback.clone());
         let snapshot = playback.snapshot().unwrap();
-        let guard = playback.inner.lock().unwrap();
-        let executing = playback
+        // Pause only after a successful dequeue. Holding inner or events can
+        // instead block an idle owner's maintenance before it receives anything.
+        let (started_tx, started_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *playback.before_apply.lock().unwrap() = Some((started_tx, resume_rx));
+        let dequeued = playback
             .admit_apply(params(&snapshot, SessionOperation::Clear), None)
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while !playback.executing.load(Ordering::Acquire) {
-            assert!(Instant::now() < deadline, "owner did not begin the command");
-            std::thread::yield_now();
-        }
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner did not dequeue the command");
         let queued: Vec<_> = (0..64)
             .map(|_| {
                 playback
@@ -5346,6 +5374,13 @@ mod tests {
                     .unwrap()
             })
             .collect();
+        assert_eq!(
+            playback
+                .admit_apply(params(&snapshot, SessionOperation::Clear), None)
+                .unwrap_err()
+                .code,
+            "PLAYBACK_BUSY"
+        );
         let shutdown_session = playback.clone();
         let shutdown = std::thread::spawn(move || shutdown_session.shutdown_checkpoint());
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -5353,9 +5388,9 @@ mod tests {
             assert!(Instant::now() < deadline, "shutdown did not fence playback ingress");
             std::thread::yield_now();
         }
-        drop(guard);
+        drop(resume_tx);
         assert_eq!(
-            executing.recv().unwrap().unwrap_err().code,
+            dequeued.recv().unwrap().unwrap_err().code,
             "DAEMON_STOPPED"
         );
         shutdown.join().unwrap().unwrap();
