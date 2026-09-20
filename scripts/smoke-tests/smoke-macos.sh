@@ -31,9 +31,67 @@ fail() {
     exit 1
 }
 
+# Match the executable literally: pgrep -f would treat the app path as a regex
+# and could match unrelated command lines. comm excludes potentially secret args.
+installed_ui_pids() {
+    local pid executable
+    ps -axww -o pid=,comm= | while read -r pid executable; do
+        if [[ "$executable" == "$APP_PATH/Contents/MacOS/hifimule-ui" ]]; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+ui_diagnostics() {
+    local stage="$1" pid
+    echo "DIAGNOSTIC [ui] stage=$stage smokeId=${UI_SMOKE_ID:-unset}"
+    for pid in $(installed_ui_pids); do
+        ps -p "$pid" -o pid=,ppid=,stat=,etime=,comm= || true
+    done
+}
+
+close_installed_ui() {
+    local stage="$1" pid remaining
+    local deadline=$((SECONDS + 10))
+    for pid in $(installed_ui_pids); do
+        kill "$pid" 2>/dev/null || true
+    done
+    while true; do
+        remaining=$(installed_ui_pids)
+        [[ -z "$remaining" ]] && return 0
+        if (( SECONDS >= deadline )); then
+            ui_diagnostics "$stage"
+            fail "$stage" "Installed UI did not terminate within 10s"
+        fi
+        sleep 0.25
+    done
+}
+
+launch_installed_ui() {
+    local stage="$1"
+    new_ui_smoke_id
+    open -n "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || {
+        ui_diagnostics "$stage"
+        fail "$stage" "Could not launch a fresh installed UI"
+    }
+}
+
+require_ui_ready() {
+    local stage="$1"
+    poll_ui_ready 30 || {
+        ui_diagnostics "$stage"
+        fail "ui-hydration" "Installed UI failed to confirm attachment at $stage"
+    }
+}
+
 cleanup() {
     echo "  Cleaning up ..."
-    [[ -n "$APP_PATH" ]] && pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
+    local pid
+    if [[ -n "$APP_PATH" ]]; then
+        for pid in $(installed_ui_pids); do
+            kill "$pid" 2>/dev/null || true
+        done
+    fi
     [[ -n "$DAEMON_PID" ]] && kill "$DAEMON_PID" 2>/dev/null || true
     hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
     [[ -n "$APP_PATH" ]] && rm -rf "$APP_PATH" 2>/dev/null || true
@@ -62,6 +120,7 @@ if [[ -z "$APP_IN_DMG" ]]; then
 fi
 APP_NAME="$(basename "$APP_IN_DMG" .app)"
 mkdir -p "$INSTALL_ROOT"
+INSTALL_ROOT=$(cd "$INSTALL_ROOT" && pwd -P)
 APP_PATH="${INSTALL_ROOT}/${APP_NAME}.app"
 
 cp -R "$APP_IN_DMG" "$INSTALL_ROOT/" ||
@@ -79,11 +138,11 @@ echo "  Quarantine removed (or not present)"
 # --- STEP 3: Launch ---
 echo ""
 echo "==> STEP 3: Launching ${APP_NAME} ..."
-new_ui_smoke_id
-open "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "launch" "open $APP_PATH failed"
+launch_installed_ui "launch"
 # Give Tauri time to spawn the daemon sidecar
 sleep 3
-if ! pgrep -f "$APP_PATH" >/dev/null 2>&1 && ! pgrep -f "$APP_NAME" >/dev/null 2>&1; then
+if [[ -z "$(installed_ui_pids)" ]]; then
+    ui_diagnostics "launch"
     fail "launch" "Application process not found after launch — may have crashed immediately"
 fi
 echo "  Launch triggered"
@@ -97,7 +156,7 @@ if ! poll_health 30; then
     cleanup
     fail "daemon-health" "Daemon did not respond with status=ok after 30s"
 fi
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to render authoritative state"
+require_ui_ready "initial-launch"
 echo "  Daemon responded OK"
 
 INITIAL_IDENTITY=$(lifecycle_identity)
@@ -105,18 +164,15 @@ DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
 assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
 
 echo "==> STEP 4a: Concurrent launch and UI close/reopen ..."
-new_ui_smoke_id
-open -n "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "concurrent-launch" "Second application launch failed"
+launch_installed_ui "concurrent-launch"
 poll_health 15 || fail "concurrent-launch" "Concurrent launch lost the daemon"
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
+require_ui_ready "concurrent-launch"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
-pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" || fail "close-ui" "Could not close the UI"
-sleep 1
+close_installed_ui "close-ui"
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"
-new_ui_smoke_id
-open "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "reopen-ui" "Could not reopen the UI"
+launch_installed_ui "reopen-ui"
 poll_health 15 || fail "reopen-ui" "Reopened UI did not attach"
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
+require_ui_ready "reopen-ui"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "reopen-ui" "Reopen created a competing daemon"
 echo "  Concurrent launch and close/reopen preserved PID and instance"
 
@@ -127,11 +183,10 @@ for _ in $(seq 1 20); do
     sleep 0.25
 done
 kill -0 "$DAEMON_PID" 2>/dev/null && fail "crash-recovery" "Original daemon did not terminate"
-pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
-new_ui_smoke_id
-open "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "crash-recovery" "Could not relaunch the UI"
+close_installed_ui "crash-recovery-close-ui"
+launch_installed_ui "crash-recovery"
 poll_health 30 || fail "crash-recovery" "UI did not recover a fresh authenticated daemon"
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
+require_ui_ready "crash-recovery"
 RECOVERED_IDENTITY=$(lifecycle_identity)
 [[ "$RECOVERED_IDENTITY" != "$INITIAL_IDENTITY" ]] || fail "crash-recovery" "Recovered daemon retained stale identity"
 DAEMON_PID=${RECOVERED_IDENTITY%%$'\t'*}
@@ -140,8 +195,7 @@ echo "  Crash recovery published a new PID and instance"
 # --- STEP 5: Remove app ---
 echo ""
 echo "==> STEP 5: Removing installed app ..."
-pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
-sleep 1
+close_installed_ui "uninstall-close-ui"
 rm -rf "$APP_PATH" || fail "uninstall" "Failed to remove $APP_PATH"
 echo "  Removal OK"
 
