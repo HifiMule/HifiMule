@@ -443,8 +443,6 @@ function renderMainLayout(_state: any = null) {
           </div>
         </header>
 
-        <div id="destination-hub-container"></div>
-
         <div id="browse-mode-bar"></div>
 
         <div id="library-content" class="content">
@@ -478,12 +476,9 @@ function renderMainLayout(_state: any = null) {
     });
 
     activeDestinationHub?.destroy();
-    const destinationContainer = document.getElementById('destination-hub-container');
-    if (destinationContainer) {
-        activeDestinationHub = new DestinationHub(destinationContainer, selected => {
-            if (selected?.kind === 'device') showLibrarySurface(false);
-        });
-    }
+    activeDestinationHub = new DestinationHub(document.createElement('div'), selected => {
+        if (selected?.kind === 'device') showLibrarySurface(false);
+    }, () => activeBasketSidebar?.openDeviceSettings());
 
     // Initialize Basket Sidebar
     import('./components/BasketSidebar').then(({ BasketSidebar }) => {
@@ -493,6 +488,7 @@ function renderMainLayout(_state: any = null) {
         const container = document.getElementById('basket-sidebar-container');
         if (container) {
             activeBasketSidebar = new BasketSidebar(container);
+            activeBasketSidebar.setDestinationHub(activeDestinationHub);
         }
     });
 }

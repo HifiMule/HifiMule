@@ -18,10 +18,16 @@ export class DestinationHub {
     private readonly issues = document.createElement('div');
     private readonly announcement = document.createElement('div');
     private readonly selectionError = document.createElement('p');
+    private readonly chooser = document.createElement('div');
 
-    constructor(private readonly container: HTMLElement, private readonly onChange: (selected?: Destination) => void) {
+    constructor(
+        private readonly container: HTMLElement,
+        private readonly onChange: (selected?: Destination) => void,
+        private readonly onDeviceSettings?: () => void,
+    ) {
         container.className = 'destination-hub';
         container.setAttribute('aria-label', t('destination.group'));
+        this.chooser.className = 'basket-device-chooser__content';
         this.list.className = 'destination-hub__list';
         this.list.setAttribute('role', 'group');
         this.list.setAttribute('aria-label', t('destination.group'));
@@ -32,13 +38,25 @@ export class DestinationHub {
         this.selectionError.className = 'destination-hub__issue';
         this.selectionError.setAttribute('role', 'alert');
         this.selectionError.hidden = true;
-        container.replaceChildren(this.list, this.issues, this.announcement, this.selectionError);
+        this.chooser.replaceChildren(this.list, this.issues, this.announcement, this.selectionError);
+        container.replaceChildren(this.chooser);
         void this.refresh();
     }
 
     destroy(): void {
         this.disposed = true;
         if (this.timer !== undefined) clearTimeout(this.timer);
+    }
+
+    /**
+     * The Basket owns the physical-device presentation. This deliberately moves
+     * only the DOM; selection remains serialized here so Library/Playing and a
+     * device choice cannot race each other.
+     */
+    mountDeviceChooser(host: HTMLElement | null): void {
+        if (!host) return;
+        host.hidden = this.chooser.hidden;
+        host.replaceChildren(this.chooser);
     }
 
     async refresh(): Promise<void> {
@@ -73,7 +91,28 @@ export class DestinationHub {
             button.dataset.destinationKind = destination.kind;
             button.className = `destination-hub__item${destination.selected ? ' is-selected' : ''}`;
             button.setAttribute('aria-pressed', String(destination.selected));
-            button.textContent = destination.name;
+            button.replaceChildren();
+            if (destination.kind === 'device') {
+                const icon = document.createElement('sl-icon');
+                icon.setAttribute('name', destination.icon || 'usb-drive');
+                icon.setAttribute('aria-hidden', 'true');
+                button.append(icon);
+            }
+            const label = document.createElement('span');
+            label.textContent = destination.name;
+            button.append(label);
+            button.setAttribute('aria-label', destination.name);
+            if (destination.kind === 'device' && destination.selected && this.onDeviceSettings) {
+                const settings = document.createElement('sl-icon-button');
+                settings.setAttribute('name', 'gear');
+                settings.setAttribute('label', t('basket.device.settings'));
+                settings.className = 'destination-hub__settings';
+                settings.addEventListener('click', event => {
+                    event.stopPropagation();
+                    this.onDeviceSettings?.();
+                });
+                button.append(settings);
+            }
             if (destination.kind === 'pendingDevice') {
                 button.textContent = `${destination.name} — ${t('destination.setup')}`;
                 button.setAttribute('aria-label', t('destination.setup_named', { name: destination.name }));
@@ -118,7 +157,8 @@ export class DestinationHub {
         }
         this.selectedKey = selected ? this.key(selected) : undefined;
         this.revision = state.destinationRevision;
-        this.container.hidden = mounted.length === 0 && issueIds.size === 0 && this.selectionError.hidden;
+        this.chooser.hidden = mounted.length === 0 && issueIds.size === 0 && this.selectionError.hidden;
+        this.container.hidden = this.chooser.hidden;
         if (selected && this.key(selected) !== previousSelected) this.onChange(selected);
     }
 
@@ -182,6 +222,7 @@ export class DestinationHub {
             if (current()) {
                 this.selectionError.textContent = t('destination.selection_failed');
                 this.selectionError.hidden = false;
+                this.chooser.hidden = false;
                 this.container.hidden = false;
             }
         } finally {

@@ -99,6 +99,34 @@ test('destination hub omits Playback because the bar owns that surface switch', 
   hub.destroy();
 });
 
+test('physical device chooser moves into Basket with icon-bearing accessible controls', async () => {
+  const state = { destinationRevision: '4', destinations: [
+    { kind: 'playback', selected: true },
+    { kind: 'device', path: '/media/player', deviceId: 'd1', name: 'Player', icon: 'headphones', selected: false },
+  ], deviceDiscoveryIssues: [] };
+  const { DestinationHub } = load('../../hifimule-ui/src/components/DestinationHub.ts', {
+    '../rpc': { getDaemonState: async () => state, destinationSelect: async () => {} },
+    '../i18n': { t: key => key }, './InitDeviceModal': { InitDeviceModal: class {} },
+    '../state/basket': { basketStore: { flushPendingSave: async () => {} } },
+  });
+  const library = new Element('div'); const basket = new Element('div'); basket.connectedRoot = true;
+  const hub = new DestinationHub(library, () => {}); await hub.refresh();
+  hub.mountDeviceChooser(basket);
+  const button = basket.querySelectorAll('button')[0];
+  assert.equal(library.querySelectorAll('button').length, 0);
+  assert.equal(button.children[0].tagName, 'sl-icon');
+  assert.equal(button.children[0].getAttribute('name'), 'headphones');
+  assert.equal(button.getAttribute('aria-label'), 'Player');
+  hub.destroy();
+});
+
+test('Basket owns every chooser host and no longer renders the duplicate device shortcut', () => {
+  const source = readFileSync(new URL('../../hifimule-ui/src/components/BasketSidebar.ts', import.meta.url), 'utf8');
+  assert.equal((source.match(/renderDestinationChooserHost\(\)/g) ?? []).length, 4);
+  assert.match(source, /mountDestinationHub\(\);/);
+  assert.doesNotMatch(source, /renderDeviceHub|device-settings-shortcut/);
+});
+
 test('playback store accepts only a new owner or strictly newer decimal sequence', () => {
   const { PlaybackStore } = load('../../hifimule-ui/src/state/playback.ts', { '../rpc': {} });
   const store = new PlaybackStore(async () => { throw new Error('unused'); });
@@ -439,15 +467,15 @@ test('destination switches flush outgoing basket and retain one poll timer and s
     '../i18n': { t: key => key },
   }, clock.runtime);
   const container = new Element('nav'); container.connectedRoot = true; const hub = new DestinationHub(container, () => {}); await settle();
-  const issue = container.children[1].children[0];
-  await hub.refresh(); assert.equal(container.children[1].children[0], issue);
+  const chooser = container.children[0]; const issue = chooser.children[1].children[0];
+  await hub.refresh(); assert.equal(chooser.children[1].children[0], issue);
   assert.equal(clock.timers.size, 1);
   await container.querySelectorAll('button')[0].click(); await settle();
   assert.deepEqual(calls, ['flush']);
   flush.resolve(); await settle(); assert.deepEqual(calls, ['flush', 'select']);
   for (let i = 0; i < 3; i++) { await container.querySelectorAll('button')[0].click(); await settle(); }
   assert.equal(clock.timers.size, 1);
-  assert.equal(container.children[1].children[0], issue);
+  assert.equal(chooser.children[1].children[0], issue);
   hub.destroy(); assert.equal(clock.timers.size, 0);
 });
 

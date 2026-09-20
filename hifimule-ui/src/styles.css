@@ -2371,11 +2371,15 @@ h2 {
 }
 .destination-hub[hidden] { display: none; }
 .destination-hub__list { display: flex; gap: var(--space-xs); overflow-x: auto; }
+.basket-device-chooser { border-block-end: 1px solid var(--surface-border-soft); padding-block-end: var(--space-sm); }
+.basket-device-chooser[hidden] { display: none; }
+.basket-device-chooser__content[hidden] { display: none; }
 .destination-hub__item {
-  flex: 0 0 auto; padding: .45rem .7rem; color: var(--ink-dim);
+  display: inline-flex; align-items: center; gap: .4rem; flex: 0 0 auto; padding: .45rem .7rem; color: var(--ink-dim);
   background: var(--surface-fill); border: 1px solid var(--surface-border);
   border-radius: var(--radius); cursor: pointer;
 }
+.destination-hub__settings { margin-inline-start: .15rem; }
 .destination-hub__item.is-selected { color: var(--ink); border-color: var(--accent); background: var(--surface-fill-hover); }
 .destination-hub__item:focus-visible,
 .playback-destination button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2393,7 +2397,6 @@ h2 {
 .playback-destination__region { margin-block-start: var(--space-md); }
 .playback-destination__paging { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-block-start: var(--space-sm); }
 .playback-destination__paging button { padding: .4rem .65rem; color: inherit; background: var(--surface-fill); border: 1px solid var(--surface-border); border-radius: var(--radius); }
-.device-settings-shortcut { display: flex; align-items: center; justify-content: space-between; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 @media (max-width: 599px) {

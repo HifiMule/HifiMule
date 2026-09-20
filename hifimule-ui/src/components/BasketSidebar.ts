@@ -201,6 +201,8 @@ export class BasketSidebar {
     private completedFilesCount: number = 0;
     private completedBytesCount: number = 0;
     private supportsPlaylistWrite: boolean = false;
+    private destinationHub?: { mountDeviceChooser(host: HTMLElement | null): void };
+    private focusedDestinationKey?: string;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -539,7 +541,7 @@ export class BasketSidebar {
         return this.connectedDevices.find(d => d.path === this.selectedDevicePath) ?? this.connectedDevices[0] ?? null;
     }
 
-    private async openDeviceSettings(): Promise<void> {
+    public async openDeviceSettings(): Promise<void> {
         const selected = this.selectedDeviceSummary();
         const current = this.currentDevice ?? {};
         if (!selected) return;
@@ -778,15 +780,22 @@ export class BasketSidebar {
     }
 
 
-    private renderDeviceHub(): string {
-        const selected = this.selectedDeviceSummary();
-        if (!selected || selected.path !== this.selectedDevicePath) return '';
-        return `
-            <div class="device-settings-shortcut">
-                <span>${this.escapeHtml(selected.name || selected.deviceId)}</span>
-                <sl-icon-button name="gear" label="${t('basket.device.settings')}" class="device-settings-btn"></sl-icon-button>
-            </div>
-        `;
+    /** Mount the daemon-owned device chooser after each Basket re-render. */
+    public setDestinationHub(destinationHub: { mountDeviceChooser(host: HTMLElement | null): void }): void {
+        this.destinationHub = destinationHub;
+        this.mountDestinationHub();
+    }
+
+    private renderDestinationChooserHost(): string {
+        return '<div class="basket-device-chooser" aria-label="Device selection"></div>';
+    }
+
+    private mountDestinationHub(): void {
+        this.destinationHub?.mountDeviceChooser(this.container.querySelector('.basket-device-chooser'));
+        if (this.focusedDestinationKey) {
+            this.container.querySelector<HTMLElement>(`[data-destination-key="${this.focusedDestinationKey}"]`)?.focus();
+            this.focusedDestinationKey = undefined;
+        }
     }
 
     private renderDeviceFolders(): string {
@@ -920,7 +929,7 @@ export class BasketSidebar {
                 <p style="opacity: 0.5;">${t('basket.select_device')}</p>
             </div>
             <div class="basket-footer">
-                ${this.renderDeviceHub()}
+                ${this.renderDestinationChooserHost()}
                 ${this.renderDeviceFolders()}
             </div>
             <div class="basket-actions">
@@ -931,6 +940,7 @@ export class BasketSidebar {
             </div>
         `;
         this.updateDeviceLockState();
+        this.mountDestinationHub();
         this.bindDeviceHubEvents();
         this.container.querySelector('#device-folders-toggle')?.addEventListener('click', () => {
             this.isFoldersExpanded = !this.isFoldersExpanded;
@@ -941,6 +951,8 @@ export class BasketSidebar {
 
     public render() {
         if (this.isDestroyed) return;
+        const active = document.activeElement as HTMLElement | null;
+        this.focusedDestinationKey = active?.dataset.destinationKey;
         if (this.showSyncComplete) {
             this.updateDeviceLockState();
             this.renderSyncComplete();
@@ -997,10 +1009,10 @@ export class BasketSidebar {
                     <sl-icon name="basket" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
                     <p style="opacity: 0.5;">${t('basket.empty')}</p>
                 </div>
-                <div class="basket-footer">
-                    ${this.renderAutoFillControls()}
+            <div class="basket-footer">
+                     ${this.renderDestinationChooserHost()}
+                     ${this.renderAutoFillControls()}
                     ${this.renderStatusZone()}
-                    ${this.renderDeviceHub()}
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
@@ -1020,6 +1032,7 @@ export class BasketSidebar {
             this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => this.handleStartSync());
             this.bindAutoFillEvents();
             this.bindDeviceHubEvents();
+            this.mountDestinationHub();
             return;
         }
 
@@ -1052,13 +1065,13 @@ export class BasketSidebar {
             </div>
 
             <div class="basket-footer">
-                <div class="basket-summary">
+                 ${this.renderDestinationChooserHost()}
+                 <div class="basket-summary">
                     <span>${t('basket.summary.tracks_size', { count: totalTracks, size: formatSize(totalSizeBytes) })}</span>
                 </div>
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
-                ${this.renderDeviceHub()}
                 ${this.renderDeviceFolders()}
             </div>
             <div class="basket-actions">
@@ -1097,6 +1110,7 @@ export class BasketSidebar {
         `;
 
         // Load basket item images asynchronously
+        this.mountDestinationHub();
         this.loadBasketImages();
 
         // Bind events
