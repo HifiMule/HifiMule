@@ -126,22 +126,26 @@ test("ad-hoc macOS release paths do not export Apple signing credentials to Taur
 });
 
 
-test("every macOS release verifies bundle and nested signature integrity before conditional trust checks", () => {
-  const release = read(".github/workflows/release.yml");
-  const integrity = namedWorkflowStep(release, "Verify macOS bundle signature integrity");
-  const trust = namedWorkflowStep(release, "Verify macOS Developer ID and notarization");
-  assert.match(integrity, /^        if: startsWith\(matrix.platform, 'macos'\)$/m);
-  assert.match(integrity, /set -euo pipefail/);
-  assert.match(integrity, /codesign --verify --deep --strict --verbose=2 "\$APP_DIR"/);
-  assert.match(integrity, /grep -q 'Sealed Resources'/);
-  assert.match(integrity, /Bundle signature is missing sealed resources[\s\S]*exit 1/);
-  assert.match(integrity, /codesign --verify --strict --verbose=2 "\$APP_DIR\/Contents\/MacOS\/hifimule-daemon"/);
-  assert.match(integrity, /for library in "\$APP_DIR"\/Contents\/Resources\/bundled-libs\/\*\.dylib/);
-  assert.match(integrity, /codesign --verify --strict --verbose=2 "\$library"/);
-  assert.doesNotMatch(integrity, /macos_signing|spctl|stapler|Authority=Developer ID/);
-  assert.match(trust, /^        if: startsWith\(matrix.platform, 'macos'\) && steps\.macos_signing\.outputs\.enabled == 'true'$/m);
-  assert.match(trust, /Authority=Developer ID Application:/);
-  assert.match(trust, /spctl --assess --type execute/);
-  assert.match(trust, /xcrun stapler validate "\$DMG"/);
-  assert.ok(release.indexOf(integrity) < release.indexOf(trust));
-});
+for (const [lineEnding, newline] of [["LF", "\n"], ["CRLF", "\r\n"], ["CR", "\r"]]) {
+  test(`every macOS release verifies bundle and nested signature integrity before conditional trust checks (${lineEnding})`, () => {
+    const workflow = read(".github/workflows/release.yml").replace(/\r\n?/g, "\n").replaceAll("\n", newline);
+    // Compare offsets in the same normalized text used by namedWorkflowStep.
+    const release = workflow.replace(/\r\n?/g, "\n");
+    const integrity = namedWorkflowStep(release, "Verify macOS bundle signature integrity");
+    const trust = namedWorkflowStep(release, "Verify macOS Developer ID and notarization");
+    assert.match(integrity, /^        if: startsWith\(matrix.platform, 'macos'\)$/m);
+    assert.match(integrity, /set -euo pipefail/);
+    assert.match(integrity, /codesign --verify --deep --strict --verbose=2 "\$APP_DIR"/);
+    assert.match(integrity, /grep -q 'Sealed Resources'/);
+    assert.match(integrity, /Bundle signature is missing sealed resources[\s\S]*exit 1/);
+    assert.match(integrity, /codesign --verify --strict --verbose=2 "\$APP_DIR\/Contents\/MacOS\/hifimule-daemon"/);
+    assert.match(integrity, /for library in "\$APP_DIR"\/Contents\/Resources\/bundled-libs\/\*\.dylib/);
+    assert.match(integrity, /codesign --verify --strict --verbose=2 "\$library"/);
+    assert.doesNotMatch(integrity, /macos_signing|spctl|stapler|Authority=Developer ID/);
+    assert.match(trust, /^        if: startsWith\(matrix.platform, 'macos'\) && steps\.macos_signing\.outputs\.enabled == 'true'$/m);
+    assert.match(trust, /Authority=Developer ID Application:/);
+    assert.match(trust, /spctl --assess --type execute/);
+    assert.match(trust, /xcrun stapler validate "\$DMG"/);
+    assert.ok(release.indexOf(integrity) < release.indexOf(trust));
+  });
+}
