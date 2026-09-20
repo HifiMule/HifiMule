@@ -29,3 +29,10 @@ test("NSIS stops the daemon before copying its runtime DLLs", () => {
   const hooks = readFileSync(resolve(root, "hifimule-ui/src-tauri/nsis/hooks.nsh"), "utf8");
   assert.match(hooks, /!macro NSIS_HOOK_PREINSTALL[\s\S]*?!insertmacro CheckIfAppIsRunning "hifimule-daemon\.exe" "\$\{PRODUCTNAME\}"[\s\S]*?!macroend/);
 });
+
+
+test("macOS platform overrides preserve certificate-free ad-hoc bundle signing", () => {
+  const effective = merge(base, macos);
+  assert.equal(effective.bundle.macOS.signingIdentity, "-");
+  assert.equal(effective.bundle.macOS.hardenedRuntime, false);
+});

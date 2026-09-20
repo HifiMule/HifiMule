@@ -68,8 +68,8 @@ test("macOS builds provision controlled source and every platform verifies insta
 
 test("shipping workflow makes platform signing optional but strict when configured", () => {
   const config = JSON.parse(read("hifimule-ui/src-tauri/tauri.conf.json"));
-  assert.equal(config.bundle.macOS.signingIdentity, null);
-  assert.equal(config.bundle.macOS.hardenedRuntime, true);
+  assert.equal(config.bundle.macOS.signingIdentity, "-");
+  assert.equal(config.bundle.macOS.hardenedRuntime, false);
   const release = read(".github/workflows/release.yml");
   assert.match(release, /Configure optional Windows Authenticode signing/);
   assert.match(release, /Windows Authenticode credentials are not configured; building unsigned MSI and NSIS artifacts/);
@@ -79,7 +79,7 @@ test("shipping workflow makes platform signing optional but strict when configur
   assert.match(release, /steps\.windows_signing\.outputs\.enabled == 'true'/);
   assert.match(release, /Verify Windows Authenticode signatures/);
   assert.match(release, /Configure optional macOS Developer ID signing and notarization/);
-  assert.match(release, /Apple signing and notarization credentials are not configured; building unsigned app and DMG artifacts/);
+  assert.match(release, /Apple signing and notarization credentials are not configured; building ad-hoc signed app and DMG artifacts/);
   assert.match(release, /Developer ID and notarization verification will be skipped/);
   assert.match(release, /Apple signing and notarization credentials are partially configured; missing:/);
   assert.match(release, /steps\.macos_signing\.outputs\.enabled == 'true'/);
@@ -90,13 +90,12 @@ test("shipping workflow makes platform signing optional but strict when configur
   assert.match(release, /echo 'enabled=true' >> "\$GITHUB_OUTPUT"/);
   assert.match(release, /value="\$\{!name:-\}"/);
   assert.match(release, /value\/\/\[\[:space:\]\]\//);
-  assert.doesNotMatch(release, /validly ad-hoc signed/);
 });
 
-test("unsigned macOS release paths do not export Apple signing credentials to Tauri", () => {
+test("ad-hoc macOS release paths do not export Apple signing credentials to Tauri", () => {
   const release = read(".github/workflows/release.yml");
-  const unsignedCandidate = namedWorkflowStep(release, "Build unsigned macOS immutable candidate");
-  const unsignedTag = namedWorkflowStep(release, "Build unsigned macOS draft release");
+  const unsignedCandidate = namedWorkflowStep(release, "Build ad-hoc signed macOS immutable candidate");
+  const unsignedTag = namedWorkflowStep(release, "Build ad-hoc signed macOS draft release");
   const signedCandidate = namedWorkflowStep(release, "Build signed macOS immutable candidate");
   const signedTag = namedWorkflowStep(release, "Build signed macOS draft release");
 
@@ -120,4 +119,29 @@ test("unsigned macOS release paths do not export Apple signing credentials to Ta
   }
   assert.match(signedCandidate, /steps\.macos_signing\.outputs\.enabled == 'true'/);
   assert.match(signedTag, /steps\.macos_signing\.outputs\.enabled == 'true'/);
+  for (const step of [signedCandidate, signedTag]) {
+    assert.match(step, /--config '\{"bundle":\{"macOS":\{"hardenedRuntime":true\}\}\}'/);
+  }
+  for (const step of [unsignedCandidate, unsignedTag]) assert.doesNotMatch(step, /hardenedRuntime/);
+});
+
+
+test("every macOS release verifies bundle and nested signature integrity before conditional trust checks", () => {
+  const release = read(".github/workflows/release.yml");
+  const integrity = namedWorkflowStep(release, "Verify macOS bundle signature integrity");
+  const trust = namedWorkflowStep(release, "Verify macOS Developer ID and notarization");
+  assert.match(integrity, /^        if: startsWith\(matrix.platform, 'macos'\)$/m);
+  assert.match(integrity, /set -euo pipefail/);
+  assert.match(integrity, /codesign --verify --deep --strict --verbose=2 "\$APP_DIR"/);
+  assert.match(integrity, /grep -q 'Sealed Resources'/);
+  assert.match(integrity, /Bundle signature is missing sealed resources[\s\S]*exit 1/);
+  assert.match(integrity, /codesign --verify --strict --verbose=2 "\$APP_DIR\/Contents\/MacOS\/hifimule-daemon"/);
+  assert.match(integrity, /for library in "\$APP_DIR"\/Contents\/Resources\/bundled-libs\/\*\.dylib/);
+  assert.match(integrity, /codesign --verify --strict --verbose=2 "\$library"/);
+  assert.doesNotMatch(integrity, /macos_signing|spctl|stapler|Authority=Developer ID/);
+  assert.match(trust, /^        if: startsWith\(matrix.platform, 'macos'\) && steps\.macos_signing\.outputs\.enabled == 'true'$/m);
+  assert.match(trust, /Authority=Developer ID Application:/);
+  assert.match(trust, /spctl --assess --type execute/);
+  assert.match(trust, /xcrun stapler validate "\$DMG"/);
+  assert.ok(release.indexOf(integrity) < release.indexOf(trust));
 });

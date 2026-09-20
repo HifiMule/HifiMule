@@ -24,10 +24,18 @@ The required same-host upgrade baseline is `0.14.0`. Older direct upgrades are u
 - [ ] The controlled audio-runtime manifest, source receipt and notices are present.
 - [ ] The complete automated suite and platform bundle verifiers pass.
 - [ ] If Windows signing is enabled, both Authenticode certificate secrets are available for MSI and NSIS.
-- [ ] If macOS signing is enabled, all Developer ID signing and notarization secrets are available for both macOS rows.
+- [ ] If macOS Developer ID signing is enabled, all Developer ID signing and notarization secrets are available for both macOS rows.
 - [ ] Clean-install, `0.14.0` upgrade, provider, physical-output, accessibility and real-sync fixtures have named owners.
 
-Signing is optional. With no platform signing secrets, the workflow produces unsigned Windows or macOS artifacts and skips only the corresponding trust verification. A partial credential set is a configuration error and fails before packaging. Unsigned Windows builds can trigger SmartScreen warnings, and unsigned macOS builds can trigger Gatekeeper warnings or require an explicit user override. Missing target hardware, provider fixtures or other required results remain blockers.
+Distribution signing is optional. With no platform signing secrets, the workflow produces unsigned Windows artifacts and ad-hoc signed macOS apps and DMGs, and skips only the corresponding trust verification. Every macOS build must pass strict bundle signature verification, sealed-resource checks, and individual daemon and dylib signature verification. Tauri signs the assembled app before creating its DMG; the same ad-hoc default applies to local builds. When configured, `APPLE_SIGNING_IDENTITY` overrides the ad-hoc fallback and the signed build steps enable the hardened runtime; Developer ID signing and notarization remain required. Ad-hoc builds leave the hardened runtime disabled because its library validation rejects the bundled libraries without a shared Team ID. A partial credential set is a configuration error and fails before packaging. Unsigned Windows builds can trigger SmartScreen warnings, and ad-hoc signed macOS builds are not notarized or Developer ID trusted and can trigger Gatekeeper warnings or require an explicit user override. Missing target hardware, provider fixtures or other required results remain blockers.
+
+For a local Developer ID build, configure the Apple signing and notarization environment variables and explicitly enable the hardened runtime, as the release workflow does. From `hifimule-ui`, run:
+
+```sh
+pnpm exec tauri build --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+```
+
+The plain local build command uses the ad-hoc runtime settings; setting an Apple identity alone does not enable the hardened runtime.
 
 ## 3. Build a non-publishing candidate
 
@@ -70,6 +78,6 @@ The called smoke workflow installs the release packages. Review its logs as life
 
 ## 6. Publish or reject
 
-The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes. A signed row must include a verified signing identity and pass the Windows Authenticode or macOS Developer ID/notarization checks; an unsigned row must record signing status `not-configured` without an identity and must not be described as trusted by SmartScreen or Gatekeeper. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.
+The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes. A signed row must include a verified signing identity and pass the Windows Authenticode or macOS Developer ID/notarization checks; a row without distribution credentials (including ad-hoc signed macOS) must record signing status `not-configured` without an identity and must not be described as trusted by SmartScreen or Gatekeeper. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.
 
 Downgrade is not automatically rollback-safe. Preserve a backup before migration testing and document the exact supported recovery procedure without claiming erased device state as success.

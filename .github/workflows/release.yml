@@ -203,7 +203,7 @@ jobs:
           done
           if [[ "$configured" -eq 0 ]]; then
             echo 'enabled=false' >> "$GITHUB_OUTPUT"
-            echo 'Apple signing and notarization credentials are not configured; building unsigned app and DMG artifacts. Developer ID and notarization verification will be skipped.'
+            echo 'Apple signing and notarization credentials are not configured; building ad-hoc signed app and DMG artifacts. Bundle signature integrity remains required. Developer ID and notarization verification will be skipped.'
           elif [[ "$configured" -ne "${#names[@]}" ]]; then
             echo "Apple signing and notarization credentials are partially configured; missing: ${missing[*]}" >&2
             exit 1
@@ -240,9 +240,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: pnpm exec tauri build ${{ matrix.args }}
+        run: pnpm exec tauri build ${{ matrix.args }} --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
 
-      - name: Build unsigned macOS immutable candidate
+      - name: Build ad-hoc signed macOS immutable candidate
         if: github.event_name == 'workflow_dispatch' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'false'
         working-directory: hifimule-ui
         env:
@@ -287,9 +287,9 @@ jobs:
           releaseDraft: true
           prerelease: false
           projectPath: hifimule-ui
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
 
-      - name: Build unsigned macOS draft release
+      - name: Build ad-hoc signed macOS draft release
         if: github.event_name == 'push' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'false'
         # action-v0.6.2 (latest reviewed for this hardening pass)
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
@@ -353,6 +353,31 @@ jobs:
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/macos-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" "$APP_DIR"
 
+      - name: Verify macOS bundle signature integrity
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          set -euo pipefail
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
+          APP_DIR="$(find "${TARGET_DIRS[@]}" -path '*.app' -type d -print -quit)"
+          test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+          codesign -dv --verbose=2 "$APP_DIR" 2>&1 | grep -q 'Sealed Resources' || {
+            echo "Bundle signature is missing sealed resources"
+            codesign -dv --verbose=2 "$APP_DIR" 2>&1
+            exit 1
+          }
+          # Dylibs in Resources are sealed as data; --deep does not verify their signatures.
+          codesign --verify --strict --verbose=2 "$APP_DIR/Contents/MacOS/hifimule-daemon"
+          for library in "$APP_DIR"/Contents/Resources/bundled-libs/*.dylib; do
+            codesign --verify --strict --verbose=2 "$library"
+          done
+
       - name: Verify macOS Developer ID and notarization
         if: startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'true'
         run: |
@@ -366,13 +391,7 @@ jobs:
           test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
           APP_DIR="$(find "${TARGET_DIRS[@]}" -path '*.app' -type d -print -quit)"
           test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
-          codesign --verify --deep --strict --verbose=2 "$APP_DIR"
           codesign -dv --verbose=4 "$APP_DIR" 2>&1 | grep -q 'Authority=Developer ID Application:'
-          codesign -dv --verbose=2 "$APP_DIR" 2>&1 | grep -q 'Sealed Resources' || {
-            echo "Bundle signature is missing sealed resources"
-            codesign -dv --verbose=2 "$APP_DIR" 2>&1
-            exit 1
-          }
           spctl --assess --type execute --verbose=4 "$APP_DIR"
           DMG="$(find "${TARGET_DIRS[@]}" -path '*/release/bundle/*' -name '*.dmg' -print -quit)"
           test -n "$DMG" || { echo 'DMG artifact not found'; exit 1; }
