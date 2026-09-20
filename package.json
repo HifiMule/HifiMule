@@ -11,7 +11,7 @@
     "@eslint/js": "^9.39.2",
     "@eslint/plugin-kit": "^0.5.1",
     "archiver": "^7.0.1",
-    "astro": "^5.16.15",
+    "astro": "^7.3.3",
     "c8": "^10.1.3",
     "core-js-compat": "^3.48.0",
     "eslint": "^9.39.2",
@@ -25,10 +25,10 @@
     "globals": "^17.2.0",
     "jest": "^30.2.0",
     "lint-staged": "^16.2.7",
-    "markdownlint-cli2": "^0.20.0",
+    "markdownlint-cli2": "^0.23.3",
     "prettier": "^3.8.1",
     "prettier-plugin-packagejson": "^3.0.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.4",
     "yaml-eslint-parser": "^2.0.0",
     "yaml-lint": "^1.7.0"
   }
