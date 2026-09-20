@@ -5,17 +5,20 @@
 <h1 align="center">HifiMule</h1>
 
 <p align="center">
-  Sync your open source media server library to portable devices — DAPs, iPods with Rockbox, USB players, and more.
+  Play music from your open source media servers and sync your library to portable devices — DAPs, iPods with Rockbox, USB players, and more.
 </p>
 
 ---
 
-HifiMule is a desktop application that bridges open source media servers and portable music players — from legacy mass-storage MP3 players to modern DAPs, MTP phones, and Garmin smartwatches. It supports [Jellyfin](https://jellyfin.org/) and Subsonic-compatible servers such as [Navidrome](https://www.navidrome.org/), and can manage several servers at once. Browse your library, pick what you want (or let auto-fill do it for you), and sync it to your device with delta transfers and resume support. Runs on Windows and macOS.
+HifiMule is a desktop application that bridges open source media servers and portable music players — from legacy mass-storage MP3 players to modern DAPs, MTP phones, and Garmin smartwatches. It supports [Jellyfin](https://jellyfin.org/) and Subsonic-compatible servers such as [Navidrome](https://www.navidrome.org/), and can manage several servers at once. Browse your library, listen directly on your computer, preview tracks, and manage your playback queue. Pick what you want (or let auto-fill do it for you) and sync it to your device with delta transfers and resume support. Runs on Windows and macOS.
 
 ## Features
 
 - **Multi-server hub** — Connect several media servers (any mix of Jellyfin, Subsonic, and Navidrome), name them, give them custom icons, and switch with a click. Your basket can hold music from multiple servers at once, syncing each item back to where it came from.
 - **Rich library browsing** — Nine browse modes: Artists, Albums, Playlists, Tracks, Genres, Recently Added, Frequently Played, Recently Played, and Favorites. Switch between grid and list views with an A–Z jump strip for large collections.
+- **Built-in audio playback** — Play albums directly from your media server on your computer, with pause/resume, previous/next, seeking, and audio output selection.
+- **Track previews** — Preview a track while browsing, then return to your listening session.
+- **Playback queue** — Add tracks to the queue, view listening history and upcoming tracks, and reorder or remove upcoming tracks.
 - **Multi-select** — Tick checkboxes (or Ctrl/Cmd-click and Shift-click for ranges) to add many items to your basket or a playlist in one action.
 - **Playlist editing** — Create, rename, delete, and reorder playlists; add or remove tracks; or turn your basket into a new playlist. Works on Jellyfin and Subsonic/Navidrome.
 - **Auto-fill** — Automatically fill a device to a size or duration budget from your library, favorites, history, or playlists — with ordering rules, genre filters, quality/version preferences, and discovery mechanics (rarity, pity, context windows).
@@ -51,7 +54,7 @@ HifiMule is a desktop application that bridges open source media servers and por
 
 ![Sync starting state](docs/images/sync-running-state.png)
 
-### Play albums, preview track, manage upcoming tracks
+### Play albums, preview tracks, and manage upcoming tracks
 
 ![Play albums](docs/images/start-playing-album.png)
 
@@ -73,13 +76,14 @@ This software was developed with the assistance of AI and the BMAD Method. As an
 └─────────────┘                         └─────────────────┘                └─────────────────────────┘
 ```
 
-Two-process design: the daemon handles all sync, provider, and device operations while the UI is a detachable Tauri window. A pluggable provider layer abstracts Jellyfin and Subsonic-compatible servers, and a server manager keeps multiple configured servers with a stable identity that travels with your devices. The daemon continues working even if the UI is closed, with an idle memory footprint under 10 MB.
+Two-process design: the daemon handles audio playback alongside sync, provider, and device operations while the UI is a detachable Tauri window. A pluggable provider layer abstracts Jellyfin and Subsonic-compatible servers, and a server manager keeps multiple configured servers with a stable identity that travels with your devices. The daemon continues working even if the UI is closed, with an idle memory footprint under 10 MB.
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Daemon | Rust, Tokio, Axum, Reqwest, SQLite (rusqlite), tray-icon |
+| Audio playback | FFmpeg decoding, CPAL audio output, Souvlaki media controls |
 | Devices | Mass-storage (USB), MTP via libmtp |
 | UI | TypeScript, Tauri 2, Vite, Shoelace web components |
 | i18n | Shared `hifimule-i18n` catalog crate (en, fr, es, de) |
@@ -143,6 +147,7 @@ HifiMule/
 │   │   ├── rpc.rs             # JSON-RPC 2.0 router
 │   │   ├── providers/         # Jellyfin & Subsonic media clients
 │   │   ├── server_manager.rs  # Multi-server configuration & identity
+│   │   ├── playback/          # Audio decoding, output, sessions, and queue
 │   │   ├── sync.rs            # Sync engine with delta + resume
 │   │   ├── auto_fill/         # Auto-fill selection pipeline
 │   │   ├── device/            # Device handling, incl. MTP (libmtp)
@@ -163,6 +168,7 @@ HifiMule/
 │   │   ├── library.ts         # Library browser
 │   │   ├── rpc.ts             # JSON-RPC client
 │   │   ├── components/        # ServerHub, BasketSidebar, AutoFillPanel,
+│   │   │                      #   PlaybackControls, PlaybackDestination,
 │   │   │                      #   PlaylistCurationView, TracksBrowseView,
 │   │   │                      #   MediaCard, InitDeviceModal, RepairModal, StatusBar
 │   │   └── state/             # State management
@@ -177,10 +183,18 @@ HifiMule/
 
 1. **Connect** — Add one or more media servers (Jellyfin, Navidrome, or any Subsonic-compatible server) in the Server Hub and log in
 2. **Browse** — Navigate your library across nine browse modes, switching servers as you go
-3. **Select** — Add items to the sync basket — one at a time, in bulk, or automatically with auto-fill
-4. **Plug in** — Connect your portable device, initialize it, and configure its folders and transcoding profile
-5. **Sync** — HifiMule calculates deltas and transfers only what's needed; syncs can resume or be cancelled
-6. **Listen** — Play music on your device; scrobble logs sync back to your media server
+3. **Play** — Start an album or preview a track directly in HifiMule; use the playback controls and queue to manage your listening session
+4. **Select** — Add items to the sync basket — one at a time, in bulk, or automatically with auto-fill
+5. **Plug in** — Connect your portable device, initialize it, and configure its folders and transcoding profile
+6. **Sync** — HifiMule calculates deltas and transfers only what's needed; syncs can resume or be cancelled
+7. **Listen on the go** — Play music on your device; scrobble logs sync back to your media server
+
+### Listening in HifiMule
+
+- Use an album’s play button to start listening on your computer. Control playback with pause/resume, previous/next, stop, and the seek bar.
+- Use a track’s preview button to try it while browsing. **Return to session** takes you back to your main listening session.
+- Use **Add to queue** on tracks to build your listening queue. Open the playback view to see listening history and **Upcoming** tracks, then move upcoming tracks up or down or remove them.
+- Choose an **Audio output** from the playback controls to listen through your preferred device.
 
 ## Contributing
 
