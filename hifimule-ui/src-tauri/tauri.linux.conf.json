@@ -4,6 +4,13 @@
     "targets": ["deb", "appimage"],
     "resources": {
       "bundled-libs/*": "bundled-libs/"
+    },
+    "linux": {
+      "appimage": {
+        "files": {
+          "usr/lib": "bundled-libs"
+        }
+      }
     }
   }
 }

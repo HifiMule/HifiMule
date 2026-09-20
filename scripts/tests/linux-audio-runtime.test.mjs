@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -362,6 +362,40 @@ test("installed Linux verification walks reachable transitive dependencies by ex
     }),
   });
   assert.equal(result.libraryCount, controlledNames.length + 2);
+});
+
+test("AppImage custom files preserve libmtp's excluded libusb dependency in the effective closure", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9", "libpulse.so.0",
+  ];
+  const usb = "libusb-1.0.so.0";
+  // Discovery copied libmtp to usr/lib but left its excluded dependency in resources.
+  const fixture = installedBundleFixture(t, controlledNames, [usb]);
+  const options = {
+    ...fixture.options,
+    assertElf: (path) => ({
+      ...fixture.options.assertElf(path),
+      ...(basename(path) === "libmtp.so.9" ? { needed: [usb] } : {}),
+    }),
+  };
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, options),
+    /Installed private closure is missing libusb-1\.0\.so\.0, required by .*libmtp\.so\.9/);
+
+  const staging = mkdtempSync(join(tmpdir(), "hifimule-appimage-staging-"));
+  t.after(() => rmSync(staging, { recursive: true, force: true }));
+  mkdirSync(join(staging, "bundled-libs"));
+  for (const name of [...controlledNames, usb]) writeFileSync(join(staging, "bundled-libs", name), "ELF fixture");
+  const config = JSON.parse(readFileSync(join(root, "hifimule-ui/src-tauri/tauri.linux.conf.json"), "utf8"));
+  // Match Tauri copy_custom_files: package destination -> source relative to src-tauri.
+  for (const [destination, source] of Object.entries(config.bundle.linux.appimage.files)) {
+    cpSync(join(staging, source), join(fixture.bundleRoot, destination), { recursive: true });
+  }
+  const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, options);
+  assert.equal(result.libraryCount, controlledNames.length + 1);
+  rmSync(join(fixture.libdir, usb));
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, options),
+    /Installed private closure is missing libusb-1\.0\.so\.0/);
 });
 
 test("installed Linux verification rejects missing and path-containing reachable dependencies", (t) => {

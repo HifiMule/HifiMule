@@ -30,6 +30,15 @@ test("NSIS stops the daemon before copying its runtime DLLs", () => {
   assert.match(hooks, /!macro NSIS_HOOK_PREINSTALL[\s\S]*?!insertmacro CheckIfAppIsRunning "hifimule-daemon\.exe" "\$\{PRODUCTNAME\}"[\s\S]*?!macroend/);
 });
 
+test("AppImage explicitly places the staged private closure in the loader directory", () => {
+  const effective = merge(base, linux);
+  // AppImage custom files map destination to source, unlike resource mappings.
+  // Copy the whole closure, including libraries excluded by linuxdeploy discovery.
+  assert.deepEqual(effective.bundle.linux.appimage.files, { "usr/lib": "bundled-libs" });
+  assert.equal(effective.bundle.linux.deb.files, undefined);
+  assert.deepEqual(effective.bundle.resources["bundled-libs/*"], "bundled-libs/");
+});
+
 
 test("macOS platform overrides preserve certificate-free ad-hoc bundle signing", () => {
   const effective = merge(base, macos);
