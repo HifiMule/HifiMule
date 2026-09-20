@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
+import { verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateInstalledSidecarRunpath, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -210,6 +210,71 @@ test("Linux packaging rejects a daemon linked against the system FFmpeg ABI", ()
   for (const invalid of [correct.slice(1), ["libavcodec.so.62", ...correct.slice(1)], [...correct, "libavcodec.so.62"]]) {
     assert.throws(() => verifyLinuxAudioLinkage(invalid), /Daemon FFmpeg linkage mismatch/);
   }
+});
+
+test("installed Linux sidecar RUNPATH reaches AppImage and deb private libraries", (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "hifimule-installed-runpath-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+
+  const appImageRoot = join(scratch, "appimage");
+  const appImageSidecar = join(appImageRoot, "usr/bin/hifimule-daemon");
+  const appImageLibdir = join(appImageRoot, "usr/lib");
+  mkdirSync(dirname(appImageSidecar), { recursive: true });
+  mkdirSync(appImageLibdir, { recursive: true });
+  assert.equal(
+    validateInstalledSidecarRunpath(appImageRoot, appImageSidecar, appImageLibdir, "$ORIGIN/../lib"),
+    realpathSync(appImageLibdir),
+  );
+
+  const debRoot = join(scratch, "deb");
+  const debSidecar = join(debRoot, "usr/bin/hifimule-daemon");
+  const debLibdir = join(debRoot, "usr/lib/HifiMule/bundled-libs");
+  mkdirSync(dirname(debSidecar), { recursive: true });
+  mkdirSync(debLibdir, { recursive: true });
+  assert.equal(
+    validateInstalledSidecarRunpath(
+      debRoot,
+      debSidecar,
+      debLibdir,
+      "$ORIGIN/../bundled-libs:$ORIGIN/bundled-libs:$ORIGIN/../lib/HifiMule/bundled-libs:$ORIGIN/../lib/hifimule/bundled-libs",
+    ),
+    realpathSync(debLibdir),
+  );
+});
+
+test("installed Linux sidecar RUNPATH rejects unreachable, absolute, and escaping entries", (t) => {
+  const bundleRoot = mkdtempSync(join(tmpdir(), "hifimule-invalid-runpath-"));
+  t.after(() => rmSync(bundleRoot, { recursive: true, force: true }));
+  const sidecar = join(bundleRoot, "usr/bin/hifimule-daemon");
+  const libdir = join(bundleRoot, "usr/lib");
+  mkdirSync(dirname(sidecar), { recursive: true });
+  mkdirSync(libdir, { recursive: true });
+  mkdirSync(join(bundleRoot, "usr/collision"));
+  writeFileSync(join(dirname(sidecar), "not-a-directory"), "");
+
+  for (const runpath of ["$ORIGIN/../share", "/usr/lib", "$ORIGIN/../../../outside", "$ORIGIN/../lib:/usr/lib", "$ORIGIN/../collision:$ORIGIN/../lib", "$ORIGIN/missing/../../lib:$ORIGIN/../lib", "$ORIGIN/not-a-directory/../../lib:$ORIGIN/../lib"]) {
+    assert.throws(
+      () => validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, runpath),
+      (error) => error.message === `Invalid installed sidecar RUNPATH: ${runpath}`,
+    );
+  }
+});
+
+test("installed Linux sidecar RUNPATH cannot escape through a symlink before parent traversal", { skip: process.platform === "win32" }, (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "hifimule-symlink-runpath-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const bundleRoot = join(scratch, "bundle");
+  const sidecar = join(bundleRoot, "usr/bin/hifimule-daemon");
+  const libdir = join(bundleRoot, "usr/lib");
+  const outside = join(scratch, "outside");
+  mkdirSync(dirname(sidecar), { recursive: true });
+  mkdirSync(libdir, { recursive: true });
+  mkdirSync(outside);
+  symlinkSync(outside, join(bundleRoot, "usr/escape-link"));
+  assert.throws(
+    () => validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, "$ORIGIN/../escape-link/../lib"),
+    (error) => error.message === "Invalid installed sidecar RUNPATH: $ORIGIN/../escape-link/../lib",
+  );
 });
 
 

@@ -6,6 +6,15 @@ import test from "node:test";
 const root = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 const manifest = JSON.parse(read("hifimule-daemon/audio-runtime.json"));
+const appleSigningVariables = ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"];
+
+function namedWorkflowStep(workflow, name) {
+  const marker = `      - name: ${name}\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `workflow step must exist: ${name}`);
+  const next = workflow.indexOf("\n      - name:", start + marker.length);
+  return workflow.slice(start, next === -1 ? workflow.length : next);
+}
 
 test("controlled runtime is the signed FFmpeg 9.0.2 source on shipping targets only", () => {
   assert.equal(manifest.ffmpegRelease, "9.0.2");
@@ -65,4 +74,33 @@ test("shipping workflow makes platform signing optional but strict when configur
   assert.match(release, /value="\$\{!name:-\}"/);
   assert.match(release, /value\/\/\[\[:space:\]\]\//);
   assert.doesNotMatch(release, /validly ad-hoc signed/);
+});
+
+test("unsigned macOS release paths do not export Apple signing credentials to Tauri", () => {
+  const release = read(".github/workflows/release.yml");
+  const unsignedCandidate = namedWorkflowStep(release, "Build unsigned macOS immutable candidate");
+  const unsignedTag = namedWorkflowStep(release, "Build unsigned macOS draft release");
+  const signedCandidate = namedWorkflowStep(release, "Build signed macOS immutable candidate");
+  const signedTag = namedWorkflowStep(release, "Build signed macOS draft release");
+
+  assert.match(unsignedCandidate, /steps\.macos_signing\.outputs\.enabled == 'false'/);
+  assert.match(unsignedCandidate, new RegExp(`unset ${appleSigningVariables.join(" ")}`));
+  assert.match(unsignedCandidate, /pnpm exec tauri build/);
+  assert.match(unsignedTag, /steps\.macos_signing\.outputs\.enabled == 'false'/);
+  assert.match(unsignedTag, /uses: tauri-apps\/tauri-action@/);
+  for (const variable of appleSigningVariables) {
+    const environmentEntry = new RegExp(`^\\s+${variable}:`, "m");
+    const allEnvironmentEntries = new RegExp(`^\\s+${variable}:`, "gm");
+    assert.doesNotMatch(unsignedCandidate, environmentEntry);
+    assert.doesNotMatch(unsignedTag, environmentEntry);
+    assert.match(signedCandidate, environmentEntry);
+    assert.match(signedTag, environmentEntry);
+    assert.equal(
+      [...release.matchAll(allEnvironmentEntries)].length,
+      3,
+      `${variable} must appear only in signing preflight and the two signed macOS build steps`,
+    );
+  }
+  assert.match(signedCandidate, /steps\.macos_signing\.outputs\.enabled == 'true'/);
+  assert.match(signedTag, /steps\.macos_signing\.outputs\.enabled == 'true'/);
 });

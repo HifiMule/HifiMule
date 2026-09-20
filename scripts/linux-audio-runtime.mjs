@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
-import { basename, dirname, join, posix, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   audioRuntimeVerification,
@@ -215,6 +215,58 @@ export function bundleLinuxAudioRuntime(prefix, sidecar, target) {
   const resolveEnv = { ...process.env, LD_LIBRARY_PATH: out }; for (const name of copied.keys()) resolved(join(out, name), resolveEnv); resolved(sidecar, process.env);
 }
 function walk(dir) { return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : entry.isFile() ? [join(dir, entry.name)] : []); }
+function isWithin(root, candidate) {
+  const path = relative(root, candidate);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+function isSameFile(left, right) {
+  const leftStat = statSync(left);
+  const rightStat = statSync(right);
+  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+}
+function resolveRunpathEntry(root, origin, suffix, invalid) {
+  let candidate = origin;
+  let hasMissingComponent = false;
+  for (const component of suffix.split("/")) {
+    if (!component || component === ".") continue;
+    if (component === "..") {
+      if (hasMissingComponent) throw invalid();
+      candidate = dirname(candidate);
+    } else {
+      candidate = join(candidate, component);
+      if (existsSync(candidate)) {
+        candidate = realpathSync(candidate);
+        if (!statSync(candidate).isDirectory()) throw invalid();
+      } else hasMissingComponent = true;
+    }
+    if (!isWithin(root, candidate)) throw invalid();
+  }
+  return candidate;
+}
+export function validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, runpath) {
+  const root = realpathSync(bundleRoot);
+  const origin = realpathSync(dirname(sidecar));
+  const privateLibdir = realpathSync(libdir);
+  const invalid = () => new Error(`Invalid installed sidecar RUNPATH: ${runpath}`);
+  if (!isWithin(root, origin) || !isWithin(root, privateLibdir)) throw invalid();
+  const entries = runpath.split(":");
+  if (!runpath || entries.some((entry) => !entry)) throw invalid();
+  let reachesPrivateLibdir = false;
+  for (const entry of entries) {
+    if (isAbsolute(entry)) throw invalid();
+    let suffix;
+    if (entry === "$ORIGIN" || entry === "${ORIGIN}") suffix = ".";
+    else if (entry.startsWith("$ORIGIN/")) suffix = entry.slice("$ORIGIN/".length);
+    else if (entry.startsWith("${ORIGIN}/")) suffix = entry.slice("${ORIGIN}/".length);
+    else throw invalid();
+    const candidate = resolveRunpathEntry(root, origin, suffix, invalid);
+    const reachesThisEntry = existsSync(candidate) && isSameFile(candidate, privateLibdir);
+    if (existsSync(candidate) && !reachesThisEntry) throw invalid();
+    if (reachesThisEntry) reachesPrivateLibdir = true;
+  }
+  if (!reachesPrivateLibdir) throw invalid();
+  return privateLibdir;
+}
 export function verifyInstalledLinuxBundle(bundleRoot, target) {
   const files = walk(bundleRoot);
   const sidecar = files.find((path) => basename(path).startsWith("hifimule-daemon"));
@@ -237,7 +289,7 @@ export function verifyInstalledLinuxBundle(bundleRoot, target) {
     }
   }
   const sidecarRunpath = run("patchelf", ["--print-rpath", sidecar]).trim();
-  if (!sidecarRunpath.includes("bundled-libs")) throw new Error(`Invalid installed sidecar RUNPATH: ${sidecarRunpath}`);
+  validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, sidecarRunpath);
   const env = { ...process.env, LD_LIBRARY_PATH: libdir }; for (const path of libs) resolved(path, env); resolved(sidecar, process.env);
   return { sidecar, libdir, libraryCount: libs.length };
 }

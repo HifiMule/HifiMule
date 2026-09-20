@@ -223,7 +223,14 @@ jobs:
         run: node scripts/check-macos-minimum-system-version.mjs
 
       - name: Build immutable candidate
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && !startsWith(matrix.platform, 'macos')
+        working-directory: hifimule-ui
+        env:
+          HIFIMULE_SKIP_SIDECAR_PREP: "1"
+        run: pnpm exec tauri build ${{ matrix.args }}
+
+      - name: Build signed macOS immutable candidate
+        if: github.event_name == 'workflow_dispatch' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'true'
         working-directory: hifimule-ui
         env:
           HIFIMULE_SKIP_SIDECAR_PREP: "1"
@@ -235,9 +242,33 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: pnpm exec tauri build ${{ matrix.args }}
 
+      - name: Build unsigned macOS immutable candidate
+        if: github.event_name == 'workflow_dispatch' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'false'
+        working-directory: hifimule-ui
+        env:
+          HIFIMULE_SKIP_SIDECAR_PREP: "1"
+        run: |
+          unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          pnpm exec tauri build ${{ matrix.args }}
+
       - name: Build draft release
-        if: github.event_name == 'push'
-        id: build_and_release
+        if: github.event_name == 'push' && !startsWith(matrix.platform, 'macos')
+        # action-v0.6.2 (latest reviewed for this hardening pass)
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HIFIMULE_SKIP_SIDECAR_PREP: "1"
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'HifiMule ${{ github.ref_name }}'
+          releaseBody: 'See the release notes for details.'
+          releaseDraft: true
+          prerelease: false
+          projectPath: hifimule-ui
+          args: ${{ matrix.args }}
+
+      - name: Build signed macOS draft release
+        if: github.event_name == 'push' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'true'
         # action-v0.6.2 (latest reviewed for this hardening pass)
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
@@ -249,6 +280,22 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'HifiMule ${{ github.ref_name }}'
+          releaseBody: 'See the release notes for details.'
+          releaseDraft: true
+          prerelease: false
+          projectPath: hifimule-ui
+          args: ${{ matrix.args }}
+
+      - name: Build unsigned macOS draft release
+        if: github.event_name == 'push' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'false'
+        # action-v0.6.2 (latest reviewed for this hardening pass)
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HIFIMULE_SKIP_SIDECAR_PREP: "1"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'HifiMule ${{ github.ref_name }}'
