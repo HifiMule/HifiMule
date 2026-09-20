@@ -15,7 +15,7 @@ use uuid::Uuid;
 pub const SCHEMA_VERSION: u32 = 1;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DESCRIPTOR_MAX_BYTES: usize = 16 * 1024;
-pub const STARTUP_DEADLINE: Duration = Duration::from_secs(15);
+pub const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 

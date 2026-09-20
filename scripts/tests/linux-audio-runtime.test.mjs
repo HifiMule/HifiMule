@@ -640,15 +640,15 @@ test("installed Linux verification rejects a regular required library with the w
   );
 });
 
-test("installed Linux verification rejects a missing direct sidecar dependency", (t) => {
+test("installed Linux verification permits GUI sidecar dependencies supplied by the host", (t) => {
   const controlledNames = [
     ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
     "libmtp.so.9",
     "libpulse.so.0",
   ];
   const fixture = installedBundleFixture(t, controlledNames, []);
-  const directDependency = "libhifimule-device.so.1";
-  assert.throws(
+  const directDependency = "libgdk-3.so.0";
+  assert.doesNotThrow(
     () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
       ...fixture.options,
       assertElf: (path) => ({
@@ -658,7 +658,6 @@ test("installed Linux verification rejects a missing direct sidecar dependency",
         soname: basename(path),
       }),
     }),
-    new RegExp(`Installed private closure is missing ${directDependency.replaceAll(".", "\\.")}, required by`),
   );
 });
 
@@ -680,7 +679,7 @@ test("Linux preflight requires D-Bus native-controls development metadata", () =
 });
 
 
-test("staging follows the daemon GTK graph beyond the explicit audio and MTP roots", (t) => {
+test("staging keeps the daemon GTK graph on the host beyond the explicit audio and MTP roots", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "hifimule-stage-closure-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const sources = join(dir, "sources"), out = join(dir, "staged");
@@ -690,9 +689,6 @@ test("staging follows the daemon GTK graph beyond the explicit audio and MTP roo
     "libaudio.so.1": [],
     "libmtp.so.9": ["libusb-1.0.so.0"],
     "libusb-1.0.so.0": ["libc.so.6"],
-    "libgdk-3.so.0": ["libfontconfig.so.1"],
-    "libfontconfig.so.1": ["libfreetype.so.6"],
-    "libfreetype.so.6": ["libfontconfig.so.1"],
   };
   for (const name of Object.keys(graph)) writeFileSync(join(sources, name), name);
   const options = {
@@ -705,15 +701,15 @@ test("staging follows the daemon GTK graph beyond the explicit audio and MTP roo
   const stage = () => stageLinuxDependencyClosure(join(sources, "hifimule-daemon"),
     [join(sources, "libaudio.so.1"), join(sources, "libmtp.so.9")], out, target, [sources], options);
   const copied = stage();
-  assert.deepEqual([...copied.keys()].sort(), Object.keys(graph).filter(name => name !== "hifimule-daemon").sort());
+  assert.deepEqual([...copied.keys()].sort(), ["libaudio.so.1", "libmtp.so.9", "libusb-1.0.so.0"]);
   for (const name of copied.keys()) assert.equal(readFileSync(join(out, name), "utf8"), name);
   assert.equal(existsSync(join(out, "hifimule-daemon")), false);
-  rmSync(join(sources, "libfontconfig.so.1"));
+  rmSync(join(sources, "libusb-1.0.so.0"));
   assert.throws(stage, /ENOENT/);
 });
 
 
-test("native ELF staging collects a daemon-only GDK/fontconfig dependency chain", { skip: process.platform !== "linux" }, (t) => {
+test("native ELF staging excludes a daemon-only GDK/fontconfig dependency chain", { skip: process.platform !== "linux" }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), "hifimule-native-closure-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const out = join(dir, "staged");
@@ -730,6 +726,5 @@ test("native ELF staging collects a daemon-only GDK/fontconfig dependency chain"
     [`-L${dir}`, "-l:libgdk-3.so.0", `-Wl,-rpath,${dir}`]);
   const nativeTarget = process.arch === "arm64" ? "aarch64-unknown-linux-gnu" : target;
   const copied = stageLinuxDependencyClosure(join(dir, "hifimule-daemon"), [], out, nativeTarget, []);
-  assert.deepEqual([...copied.keys()].sort(), ["libfontconfig.so.1", "libgdk-3.so.0"]);
-  for (const name of copied.keys()) assert.ok(existsSync(join(out, name)));
+  assert.deepEqual([...copied.keys()], []);
 });

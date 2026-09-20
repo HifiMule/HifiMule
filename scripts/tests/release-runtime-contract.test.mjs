@@ -92,6 +92,19 @@ test("shipping workflow makes platform signing optional but strict when configur
   assert.match(release, /value\/\/\[\[:space:\]\]\//);
 });
 
+test("Linux packages use host GUI libraries and allow the lifecycle startup budget", () => {
+  const config = JSON.parse(read("hifimule-ui/src-tauri/tauri.conf.json"));
+  assert.deepEqual(config.bundle.linux.deb.depends, [
+    "libmtp9",
+    "libayatana-appindicator3-1 | libappindicator3-1",
+  ]);
+  const runtime = read("scripts/linux-audio-runtime.mjs");
+  assert.match(runtime, /The daemon's GUI and tray dependencies must resolve from the host/);
+  assert.doesNotMatch(runtime, /for \(const name of inspectElf\(sidecar, target\)\.needed\)/);
+  assert.match(read("hifimule-lifecycle/src/lib.rs"), /STARTUP_DEADLINE: Duration = Duration::from_secs\(30\)/);
+  assert.match(read("hifimule-ui/src/main.ts"), /performance\.now\(\) \+ 30_000/);
+});
+
 test("ad-hoc macOS release paths do not export Apple signing credentials to Tauri", () => {
   const release = read(".github/workflows/release.yml");
   const unsignedCandidate = namedWorkflowStep(release, "Build ad-hoc signed macOS immutable candidate");

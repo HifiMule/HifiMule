@@ -17,6 +17,14 @@ const receiptName = ".hifimule-audio-runtime.json";
 const machines = { "aarch64-unknown-linux-gnu": "AArch64", "x86_64-unknown-linux-gnu": "Advanced Micro Devices X86-64" };
 const baseline = new Set(["libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libgcc_s.so.1", "libstdc++.so.6"]);
 const linuxLoaders = { "aarch64-unknown-linux-gnu": "ld-linux-aarch64.so.1", "x86_64-unknown-linux-gnu": "ld-linux-x86-64.so.2" };
+const hostGuiLibraryPrefixes = Object.freeze([
+  "libgtk-3.so.", "libgdk-3.so.", "libgdk_pixbuf-2.0.so.", "libgio-2.0.so.",
+  "libglib-2.0.so.", "libgobject-2.0.so.", "libpango", "libpangocairo-", "libcairo.so.",
+  "libatk-1.0.so.", "libatk-bridge-2.0.so.", "libatspi.so.", "libX11.so.", "libXcursor.so.",
+  "libXi.so.", "libXrandr.so.", "libXrender.so.", "libXfixes.so.", "libXext.so.",
+  "libxkbcommon.so.", "libwayland-",
+]);
+const isHostGuiLibrary = (name) => hostGuiLibraryPrefixes.some((prefix) => name.startsWith(prefix));
 export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev", "libpulse-dev", "libdbus-1-dev"]);
 export function requiresHostAudioVerification(platform) { return platform !== "win32"; }
 
@@ -183,11 +191,10 @@ export function stageLinuxDependencyClosure(sidecar, roots, out, target, dirs, o
   const resolveDependency = options.resolveNeeded ?? resolveNeeded;
   const isSystem = (name) => baseline.has(name) || name === linuxLoaders[target];
   const queue = [...roots], copied = new Map();
-  // The verifier follows the daemon's whole DT_NEEDED graph, including its tray
-  // and GTK stack. Seed the same graph here instead of only audio/MTP roots.
-  for (const name of inspectElf(sidecar, target).needed) {
-    if (!isSystem(name)) queue.push(resolveDependency(sidecar, name, dirs));
-  }
+  // The daemon's GUI and tray dependencies must resolve from the host. Bundling
+  // Ubuntu 22 GLib/GTK libraries makes their older ABI override newer distro
+  // modules (for example Ubuntu 26's GVfs and dconf modules). Only stage the
+  // explicit audio, MTP, and Pulse roots and their private dependency closure.
   while (queue.length) {
     const source = realpathSync(queue.shift()), meta = inspectElf(source, target);
     if (!meta.soname) throw new Error(`ELF library has no SONAME: ${source}`);
@@ -309,7 +316,7 @@ export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
     }
     queue.push({ name, requiredBy });
   };
-  for (const name of sidecarMeta.needed) enqueue(name, sidecar);
+  for (const name of sidecarMeta.needed) if (!isHostGuiLibrary(name)) enqueue(name, sidecar);
   for (const name of controlledRoots) enqueue(name, "the controlled Linux runtime");
   const libraries = new Map();
   while (queue.length) {

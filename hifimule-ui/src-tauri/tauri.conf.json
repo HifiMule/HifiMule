@@ -64,7 +64,8 @@
     "linux": {
       "deb": {
         "depends": [
-          "libmtp9"
+          "libmtp9",
+          "libayatana-appindicator3-1 | libappindicator3-1"
         ]
       }
     },

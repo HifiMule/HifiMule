@@ -240,7 +240,7 @@ async function showMainWindow(): Promise<void> {
 
 async function waitForNativeReadiness(): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core');
-    const deadline = performance.now() + 15_000;
+    const deadline = performance.now() + 30_000;
     while (performance.now() < deadline) {
         const status = await invoke<{ state: string; errorCode?: string }>('get_sidecar_status');
         if (status.state === 'ready') return;
