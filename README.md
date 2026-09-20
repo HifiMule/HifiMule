@@ -48,12 +48,16 @@ HifiMule is a desktop application that bridges open source media servers and por
 
 ![Device settings modal](docs/images/device-settings-modal.png)
 
-![Device selection and managed folders](docs/images/device-selection-and-folders.png)
 
-![Basket ready to sync](docs/images/basket-ready-to-sync.png)
+![Sync starting state](docs/images/sync-running-state.png)
 
-![Sync starting state](docs/images/sync-starting-state.png)
+### Play albums, preview track, manage upcoming tracks
 
+![Play albums](docs/images/start-playing-album.png)
+
+![Preview track](docs/images/preview-while-playing.png)
+
+![Upcoming tracks](docs/images/upcoming-plays.png)
 
 ## Disclaimer
 
