@@ -78,12 +78,24 @@ fail() {
 }
 
 ui_diagnostics() {
-    local stage="$1" pid
+    local stage="$1" pid exit_code signal_name
     echo "DIAGNOSTIC [ui] stage=$stage smokeId=${UI_SMOKE_ID:-unset}"
     for pid in "$APP_PID" "$SECOND_UI_PID"; do
         [[ -n "$pid" ]] || continue
-        # comm deliberately excludes arguments, which may contain private data.
-        ps -p "$pid" -o pid=,ppid=,stat=,etime=,comm= || true
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "UI_PROCESS_EVIDENCE stage=$stage pid=$pid state=running"
+            # comm deliberately excludes arguments, which may contain private data.
+            ps -p "$pid" -o pid=,ppid=,stat=,etime=,comm= || true
+        else
+            # Reap only a recorded child that has already exited: never block here.
+            exit_code=0
+            wait "$pid" 2>/dev/null || exit_code=$?
+            echo "UI_PROCESS_EVIDENCE stage=$stage pid=$pid state=exited exitCode=$exit_code"
+            if (( exit_code > 128 )); then
+                signal_name=$(kill -l "$((exit_code - 128))" 2>/dev/null || true)
+                echo "UI_PROCESS_EVIDENCE stage=$stage pid=$pid possibleSignal=$signal_name"
+            fi
+        fi
     done
 }
 
@@ -114,7 +126,8 @@ close_installed_ui() {
 
 require_ui_ready() {
     local stage="$1"
-    poll_ui_ready 30 || {
+    local expected_pid="${2:-$APP_PID}"
+    poll_ui_ready 30 "$expected_pid" || {
         ui_diagnostics "$stage"
         fail "ui-hydration" "Installed UI failed to confirm attachment at $stage"
     }
@@ -178,6 +191,7 @@ new_ui_smoke_id
 APP_PID=$!
 sleep 1
 if ! kill -0 "$APP_PID" 2>/dev/null; then
+    ui_diagnostics "initial-launch"
     fail "launch" "Application exited immediately after launch"
 fi
 
@@ -190,11 +204,10 @@ if ! poll_health 30; then
     kill "$APP_PID" "$XVFB_PID" 2>/dev/null || true
     fail "daemon-health" "Daemon did not respond with status=ok after 30s"
 fi
-require_ui_ready "initial-launch"
-echo "  Daemon responded OK"
-
 INITIAL_IDENTITY=$(lifecycle_identity)
 DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
+require_ui_ready "initial-launch"
+echo "  Daemon responded OK"
 assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
 
 echo "==> STEP 3a: Concurrent launch and UI close/reopen ..."
@@ -203,7 +216,7 @@ new_ui_smoke_id
 SECOND_UI_PID=$!
 sleep 1
 poll_health 15 || fail "concurrent-launch" "Concurrent UI lost the daemon"
-require_ui_ready "concurrent-launch"
+require_ui_ready "concurrent-launch" "$SECOND_UI_PID"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
 close_installed_ui "close-ui"
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"

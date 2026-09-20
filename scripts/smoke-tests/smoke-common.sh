@@ -93,17 +93,25 @@ poll_ui_ready() {
     local timeout=$1
     local descriptor
     descriptor=$(lifecycle_descriptor_path)
-    python3 - "$descriptor" "$UI_SMOKE_ID" "$timeout" <<'PYCODE'
+    python3 - "$descriptor" "$UI_SMOKE_ID" "$timeout" "${2:-}" <<'PYCODE'
 import json, os, pathlib, sys, time
 owner_path = pathlib.Path(sys.argv[1])
 marker = sys.argv[2]
+expected_pid = int(sys.argv[4]) if sys.argv[4] else None
 ready_path = owner_path.parent / f"ui-ready-{marker}.json"
 deadline = time.monotonic() + int(sys.argv[3])
 while time.monotonic() < deadline:
+    if expected_pid is not None:
+        try:
+            os.kill(expected_pid, 0)
+        except ProcessLookupError:
+            print(f"Expected UI process {expected_pid} exited before confirming hydration", file=sys.stderr)
+            sys.exit(1)
     try:
         ready = json.loads(ready_path.read_text())
         owner = json.loads(owner_path.read_text())
         assert ready["smokeId"] == marker and ready["state"] == "hydrated"
+        assert expected_pid is None or ready["uiPid"] == expected_pid
         assert (ready["daemonPid"], ready["instanceId"]) == (owner["pid"], owner["instanceId"])
         os.kill(ready["uiPid"], 0)
         print("UI_ATTACHMENT_EVIDENCE " + json.dumps(ready))

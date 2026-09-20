@@ -18,11 +18,12 @@ class UiEvidenceTests(unittest.TestCase):
         self.owner = {'pid': os.getpid(), 'instanceId': 'expected-owner', 'token': 'must-not-be-logged'}
         (self.runtime / 'owner.json').write_text(json.dumps(self.owner))
 
-    def poll(self, timeout):
+    def poll(self, timeout, expected_pid=''):
         helper = Path(__file__).resolve().with_name('smoke-common.sh')
         environment = dict(os.environ, HIFIMULE_APP_DATA_DIR=self.profile.name,
-                           UI_SMOKE_ID=self.marker, HELPER=str(helper), TIMEOUT=str(timeout))
-        return subprocess.run(['bash', '-c', 'source "$HELPER"; poll_ui_ready "$TIMEOUT"'],
+                           UI_SMOKE_ID=self.marker, HELPER=str(helper), TIMEOUT=str(timeout),
+                           EXPECTED_PID=str(expected_pid))
+        return subprocess.run(['bash', '-c', 'source "$HELPER"; poll_ui_ready "$TIMEOUT" "$EXPECTED_PID"'],
                               env=environment, capture_output=True, text=True, timeout=5)
 
     def poll_shutdown(self, timeout, shutdown_id):
@@ -42,6 +43,24 @@ class UiEvidenceTests(unittest.TestCase):
 
     def test_daemon_metadata_alone_is_not_ui_attachment(self):
         self.assertNotEqual(self.poll(0).returncode, 0)
+
+    def test_exited_expected_ui_fails_without_waiting_for_timeout(self):
+        child = subprocess.Popen(['bash', '-c', 'exit 0'])
+        child.wait()
+        result = self.poll(30, child.pid)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('exited before confirming hydration', result.stderr)
+        self.assertNotIn(self.owner['token'], result.stdout + result.stderr)
+
+    def test_live_acknowledgment_must_belong_to_expected_ui(self):
+        child = subprocess.Popen(['sleep', '10'])
+        try:
+            self.write_ready('expected-owner')
+            self.assertNotEqual(self.poll(1, child.pid).returncode, 0)
+            self.assertEqual(self.poll(1, os.getpid()).returncode, 0)
+        finally:
+            child.terminate()
+            child.wait()
 
     def test_only_matching_live_ui_acknowledgment_passes(self):
         self.write_ready('wrong-owner')

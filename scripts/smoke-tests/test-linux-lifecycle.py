@@ -31,13 +31,14 @@ kill() {
     log "kill:$*"
     if [[ "$1" == -0 ]]; then
         if [[ "$SCENARIO" == stuck ]]; then return 0; fi
+        if [[ "$SCENARIO" == exited* ]]; then return 1; fi
         if [[ "$2" == 801 ]]; then (( ticks < 2 ));
         elif [[ "$2" == 802 ]]; then (( ticks < 3 ));
         else return 1; fi
     fi
 }
 sleep() { ticks=$((ticks + 1)); SECONDS=$((SECONDS + 1)); log "tick:$ticks"; }
-wait() { log "wait:$*"; return 143; }
+wait() { log "wait:$*"; return "${EXIT_CODE:-143}"; }
 ps() { log "diagnostic:$*"; }
 poll_ui_ready() { log "poll:$*"; [[ "$SCENARIO" != missing ]]; }
 '''
@@ -85,6 +86,21 @@ class LinuxLifecycleTests(unittest.TestCase):
         result = self.run_shell("require_ui_ready concurrent-launch")
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("DIAGNOSTIC", result.stdout)
+
+    def test_exited_ui_reports_clean_exit_and_signal_status(self):
+        clean = self.run_shell('EXIT_CODE=0; ui_diagnostics initial-launch', 'exited')
+        self.assertEqual(clean.returncode, 0)
+        self.assertIn('pid=801 state=exited exitCode=0', clean.stdout)
+        self.assertNotIn('possibleSignal', clean.stdout)
+        crashed = self.run_shell('EXIT_CODE=139; ui_diagnostics reopen-ui', 'exited')
+        self.assertEqual(crashed.returncode, 0)
+        self.assertIn('pid=801 state=exited exitCode=139', crashed.stdout)
+        self.assertIn('possibleSignal=', crashed.stdout)
+
+    def test_concurrent_hydration_checks_secondary_pid(self):
+        result = self.run_shell('require_ui_ready concurrent-launch "$SECOND_UI_PID"')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('poll:30 802', result.stdout)
 
     def test_cleanup_signals_secondary_ui_even_after_failure(self):
         result = self.run_shell("cleanup")

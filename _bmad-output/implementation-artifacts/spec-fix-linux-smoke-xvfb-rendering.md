@@ -95,3 +95,13 @@ Follow-up review stops:
 - [smoke-linux.sh:18](../../scripts/smoke-tests/smoke-linux.sh#L18) — private bus shared across every lifecycle phase.
 - [smoke-linux.sh:90](../../scripts/smoke-tests/smoke-linux.sh#L90) — bounded shutdown before reopening and stage-specific diagnostics.
 - [test-linux-lifecycle.py:1](../../scripts/smoke-tests/test-linux-lifecycle.py#L1) — mocked failure and ordering regressions.
+
+## Follow-up: Initial UI Disappears
+
+The latest supplied run activates the private session portals successfully and reports daemon health after one second. Initial UI hydration still fails; the process diagnostic prints no process row. This suggests the recorded UI exited, but its exit status was not captured. Neither the accessibility warning nor PipeWire connection warning establishes the cause. No further graphics/session override is justified by this log.
+
+Diagnostics now retain each recorded child exit status (including successful exit), label possible signal encodings, and preserve failure. Linux passes the expected launch PID into the shared hydration poll so it fails promptly when that process disappears and cannot accept another UI's acknowledgment. macOS callers retain the existing marker-based behavior. Capture daemon identity before the first hydration gate so failure cleanup can terminate the known daemon.
+
+Local validation: nine Linux helper tests, five shared acknowledgment tests, and four macOS harness tests pass. Bash syntax passes. These checks validate the diagnostic changes, not the Linux application startup.
+
+Reproduction is blocked on obtaining the failing installer: the public v0.15.0 deb URL returned HTTP 404; local Docker is available. The supplied [job](https://github.com/HifiMule/HifiMule/actions/runs/35517051715/job/106097984998) confirms revision `910ee17`; the available browser is signed out and cannot expand job logs. No matching deb is present in Downloads. Three independent reviewers found no actionable diagnostic-change defects. Actual application exit cause and Ubuntu smoke success remain unverified.
