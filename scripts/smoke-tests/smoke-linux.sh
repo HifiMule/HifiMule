@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke-linux.sh — Linux .deb smoke test for HifiMule
 # Runs from the directory containing the .deb installer artifact.
-# Requires: dpkg, Xvfb, curl
+# Requires: dpkg, Xvfb, curl, dbus-run-session, dbus-update-activation-environment
 #
 # Steps:
 #   1. Silent .deb install via dpkg
@@ -13,16 +13,24 @@
 
 set -euo pipefail
 
+# A desktop session inherited from the CI runner does not belong to our Xvfb.
+# Keep one private bus alive across all UI launches and daemon recovery.
+if [[ "${HIFIMULE_SMOKE_DBUS_SESSION:-}" != 1 ]]; then
+    exec dbus-run-session -- env HIFIMULE_SMOKE_DBUS_SESSION=1 bash "$0" "$@"
+fi
+
 PLATFORM="linux"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/smoke-common.sh"
 
 XVFB_PID=""
 APP_PID=""
+SECOND_UI_PID=""
 DAEMON_PID=""
 
 cleanup() {
     [[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null || true
+    [[ -n "$SECOND_UI_PID" ]] && kill "$SECOND_UI_PID" 2>/dev/null || true
     [[ -n "$DAEMON_PID" ]] && kill "$DAEMON_PID" 2>/dev/null || true
     [[ -n "$XVFB_PID" ]] && kill "$XVFB_PID" 2>/dev/null || true
 }
@@ -69,6 +77,49 @@ fail() {
     exit 1
 }
 
+ui_diagnostics() {
+    local stage="$1" pid
+    echo "DIAGNOSTIC [ui] stage=$stage smokeId=${UI_SMOKE_ID:-unset}"
+    for pid in "$APP_PID" "$SECOND_UI_PID"; do
+        [[ -n "$pid" ]] || continue
+        # comm deliberately excludes arguments, which may contain private data.
+        ps -p "$pid" -o pid=,ppid=,stat=,etime=,comm= || true
+    done
+}
+
+close_installed_ui() {
+    local stage="$1" pid
+    local deadline=$((SECONDS + 10))
+    for pid in "$APP_PID" "$SECOND_UI_PID"; do
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    done
+    for pid in "$APP_PID" "$SECOND_UI_PID"; do
+        [[ -n "$pid" ]] || continue
+        while kill -0 "$pid" 2>/dev/null; do
+            if (( SECONDS >= deadline )); then
+                ui_diagnostics "$stage"
+                # Terminate only our recorded UI children; keep the test failed.
+                for pid in "$APP_PID" "$SECOND_UI_PID"; do
+                    [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
+                done
+                fail "$stage" "Installed UI did not terminate within 10s"
+            fi
+            sleep 0.25
+        done
+        wait "$pid" 2>/dev/null || true
+    done
+    APP_PID=""
+    SECOND_UI_PID=""
+}
+
+require_ui_ready() {
+    local stage="$1"
+    poll_ui_ready 30 || {
+        ui_diagnostics "$stage"
+        fail "ui-hydration" "Installed UI failed to confirm attachment at $stage"
+    }
+}
+
 # --- STEP 1: Install ---
 echo ""
 echo "==> STEP 1: Installing .deb package ..."
@@ -107,6 +158,10 @@ echo "  GDK_BACKEND: $GDK_BACKEND"
 echo "  LIBGL_ALWAYS_SOFTWARE: $LIBGL_ALWAYS_SOFTWARE"
 echo "  WEBKIT_DISABLE_COMPOSITING_MODE: $WEBKIT_DISABLE_COMPOSITING_MODE"
 
+# Bus-activated desktop services must see the same display as the webview.
+dbus-update-activation-environment DISPLAY GDK_BACKEND LIBGL_ALWAYS_SOFTWARE WEBKIT_DISABLE_COMPOSITING_MODE ||
+    fail "launch" "Unable to configure the private D-Bus activation environment"
+
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
 APP_BIN="hifimule-ui"
 if ! command -v "$APP_BIN" &>/dev/null; then
@@ -135,7 +190,7 @@ if ! poll_health 30; then
     kill "$APP_PID" "$XVFB_PID" 2>/dev/null || true
     fail "daemon-health" "Daemon did not respond with status=ok after 30s"
 fi
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to render authoritative state"
+require_ui_ready "initial-launch"
 echo "  Daemon responded OK"
 
 INITIAL_IDENTITY=$(lifecycle_identity)
@@ -148,18 +203,15 @@ new_ui_smoke_id
 SECOND_UI_PID=$!
 sleep 1
 poll_health 15 || fail "concurrent-launch" "Concurrent UI lost the daemon"
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
+require_ui_ready "concurrent-launch"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
-kill "$SECOND_UI_PID" 2>/dev/null || true
-kill "$APP_PID" 2>/dev/null || true
-APP_PID=""
-sleep 1
+close_installed_ui "close-ui"
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"
 new_ui_smoke_id
 "$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 APP_PID=$!
 poll_health 15 || fail "reopen-ui" "Reopened UI did not attach"
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
+require_ui_ready "reopen-ui"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "reopen-ui" "Reopen created a competing daemon"
 echo "  Concurrent launch and close/reopen preserved PID and instance"
 
@@ -170,13 +222,12 @@ for _ in {1..50}; do
     sleep 0.1
 done
 kill -0 "$DAEMON_PID" 2>/dev/null && fail "crash-recovery" "Test-owned daemon did not terminate"
-kill "$APP_PID" 2>/dev/null || true
-APP_PID=""
+close_installed_ui "crash-recovery-close-ui"
 new_ui_smoke_id
 "$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 APP_PID=$!
 poll_health 15 || fail "crash-recovery" "Replacement owner did not become ready"
-poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
+require_ui_ready "crash-recovery"
 RECOVERED_IDENTITY=$(lifecycle_identity)
 [[ "$RECOVERED_IDENTITY" != "$INITIAL_IDENTITY" ]] || fail "crash-recovery" "Replacement reused the stale PID and instance identity"
 DAEMON_PID=${RECOVERED_IDENTITY%%$'\t'*}
@@ -185,7 +236,7 @@ echo "  Crash recovery replaced the stale owner identity"
 # --- STEP 4: Uninstall ---
 echo ""
 echo "==> STEP 4: Uninstalling ..."
-kill "$APP_PID" 2>/dev/null || true
+close_installed_ui "uninstall-close-ui"
 kill "$DAEMON_PID" 2>/dev/null || true
 kill "$XVFB_PID" 2>/dev/null || true
 APP_PID=""

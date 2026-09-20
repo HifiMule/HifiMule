@@ -72,3 +72,26 @@ The reusable workflow in the failed run came from v0.15.0. Re-running that origi
 
 - Smoke-scoped exports apply consistently to all four installed UI launches.
   [smoke-linux.sh:101](../../scripts/smoke-tests/smoke-linux.sh#L101)
+
+## Follow-up: Reopen Hydration Timeout
+
+The subsequent user-supplied run installed a different deb hash (`912b3d6eb100d054cbafab3ae9d7c2a71e6e84836293c22424b85ebc8a928bc2`). Initial and concurrent UI hydration passed; reopening failed to acknowledge within 30 seconds. This proves progress past the previous crash in that run, but cannot isolate the rendering change from the rebuilt artifact.
+
+The concurrent launch and reopen timestamps are 26.699 seconds apart, including the harness's one-second close sleep. Together with the initial 25-second daemon readiness delay, this suggests a native startup delay. D-Bus timeout and WebKit teardown overlap are hypotheses, not established causes.
+
+Confirmed harness gaps: Xvfb's DISPLAY was not propagated to D-Bus activation; no private session bus was provisioned; UI termination was not awaited; secondary UI cleanup was missing on early failure; hydration failures did not identify the launch stage or report process status.
+
+Follow-up implementation:
+- [x] `scripts/smoke-tests/smoke-linux.sh` — use one private D-Bus session for the full lifecycle, propagate display/rendering settings to activated services, await both owned UI PIDs before reopen, and report stage-specific process diagnostics without command arguments.
+- [x] `.github/workflows/smoke-test.yml` — explicitly install D-Bus runtime tools.
+- [x] `scripts/smoke-tests/test-linux-lifecycle.py` — exercise shutdown ordering, failure diagnostics, and session setup with controlled mocks (7 tests pass).
+- [ ] Run the updated harness on Ubuntu; preserve the existing 30-second hydration requirement.
+
+Keep the original smoke-only rendering settings and all authoritative hydration/identity gates. Leave unrelated README edits untouched. No application rendering defaults, credentials, release artifacts, or tags are changed.
+
+Validation: 7 Linux harness tests, 3 shared UI evidence tests, and 4 macOS harness tests passed; Bash syntax and diff whitespace checks passed. Three independent reviewers found one cleanup issue, patched by sending SIGKILL only to recorded UI PIDs on the bounded close timeout while retaining failure. No other actionable findings. Actual Ubuntu reopen validation remains pending.
+
+Follow-up review stops:
+- [smoke-linux.sh:18](../../scripts/smoke-tests/smoke-linux.sh#L18) — private bus shared across every lifecycle phase.
+- [smoke-linux.sh:90](../../scripts/smoke-tests/smoke-linux.sh#L90) — bounded shutdown before reopening and stage-specific diagnostics.
+- [test-linux-lifecycle.py:1](../../scripts/smoke-tests/test-linux-lifecycle.py#L1) — mocked failure and ordering regressions.
