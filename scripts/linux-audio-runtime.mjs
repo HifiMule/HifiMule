@@ -16,6 +16,7 @@ const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runti
 const receiptName = ".hifimule-audio-runtime.json";
 const machines = { "aarch64-unknown-linux-gnu": "AArch64", "x86_64-unknown-linux-gnu": "Advanced Micro Devices X86-64" };
 const baseline = new Set(["libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libgcc_s.so.1", "libstdc++.so.6"]);
+const linuxLoaders = { "aarch64-unknown-linux-gnu": "ld-linux-aarch64.so.1", "x86_64-unknown-linux-gnu": "ld-linux-x86-64.so.2" };
 export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev", "libpulse-dev", "libdbus-1-dev"]);
 export function requiresHostAudioVerification(platform) { return platform !== "win32"; }
 
@@ -269,7 +270,6 @@ export function validateInstalledSidecarRunpath(bundleRoot, sidecar, runpath) {
 export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
   const listFiles = options.walk ?? walk;
   const inspectElf = options.assertElf ?? assertElf;
-  const readElf = options.elf ?? elf;
   const execute = options.run ?? run;
   const verifyResolved = options.resolved ?? resolved;
   const files = listFiles(bundleRoot);
@@ -279,44 +279,56 @@ export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
   verifyLinuxAudioLinkage(sidecarMeta.needed);
   const sidecarRunpath = execute("patchelf", ["--print-rpath", sidecar]).trim();
   const libdir = validateInstalledSidecarRunpath(bundleRoot, sidecar, sidecarRunpath);
-  const libraryEntries = readdirSync(libdir, { withFileTypes: true })
-    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && /\.so(?:\.|$)/.test(entry.name));
-  const symlinkLibraries = libraryEntries
-    .filter((entry) => entry.isSymbolicLink())
-    .map((entry) => {
-      const path = join(libdir, entry.name);
-      let canonicalTarget;
-      try { canonicalTarget = realpathSync(path); } catch { throw new Error(`Invalid installed library symlink: ${path}`); }
-      if (dirname(canonicalTarget) !== libdir || !statSync(canonicalTarget).isFile()) throw new Error(`Invalid installed library symlink: ${path}`);
-      return { path, target: canonicalTarget, soname: entry.name };
-    });
-  const symlinkTargets = new Set(symlinkLibraries.map(({ target: libraryTarget }) => libraryTarget));
-  const regularLibraries = libraryEntries
-    .filter((entry) => entry.isFile())
-    .map((entry) => ({ path: join(libdir, entry.name), target: join(libdir, entry.name), soname: entry.name }))
-    .filter(({ target: libraryTarget }) => !symlinkTargets.has(libraryTarget));
-  const libs = [...regularLibraries, ...symlinkLibraries];
-  const names = new Set(libs.map(({ path }) => basename(path)));
-  for (const [library, version] of Object.entries(manifest.abiVersions)) {
-    const required = `lib${library}.so.${version.split(".")[0]}`;
-    if (!names.has(required)) throw new Error(`Required controlled library is missing: ${required}`);
-  }
-  if (!names.has("libmtp.so.9")) throw new Error("Required controlled library is missing: libmtp.so.9");
-  if (!names.has("libpulse.so.0")) throw new Error("Required controlled library is missing: libpulse.so.0");
-  for (const needed of sidecarMeta.needed) {
-    if (!baseline.has(needed) && !/^ld-linux/.test(needed) && !names.has(needed)) throw new Error(`Installed private closure is missing ${needed}, required by ${sidecar}`);
-  }
-  for (const library of libs) {
-    inspectElf(library.target, target, library.soname);
-    if (execute("patchelf", ["--print-rpath", library.target]).trim() !== "$ORIGIN") throw new Error(`Invalid installed RUNPATH: ${library.path}`);
-  }
-  for (const library of libs) {
-    for (const needed of readElf(library.target).needed) {
-      if (!baseline.has(needed) && !/^ld-linux/.test(needed) && !names.has(needed)) throw new Error(`Installed private closure is missing ${needed}, required by ${library.path}`);
+  const controlledRoots = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const queue = [];
+  const systemDependencies = new Set([...baseline, linuxLoaders[target]]);
+  const validateDependencyName = (name, requiredBy) => {
+    if (typeof name !== "string" || !name || name.includes("/") || name === "." || name === ".." || /[\x00-\x1f\x7f]/.test(name)) {
+      throw new Error(`Invalid installed dependency name ${JSON.stringify(name)}, required by ${requiredBy}`);
     }
+  };
+  const enqueue = (name, requiredBy) => {
+    validateDependencyName(name, requiredBy);
+    if (systemDependencies.has(name)) {
+      try { lstatSync(join(libdir, name)); } catch (error) {
+        if (error.code === "ENOENT") return;
+        throw error;
+      }
+    }
+    queue.push({ name, requiredBy });
+  };
+  for (const name of sidecarMeta.needed) enqueue(name, sidecar);
+  for (const name of controlledRoots) enqueue(name, "the controlled Linux runtime");
+  const libraries = new Map();
+  while (queue.length) {
+    const { name, requiredBy } = queue.shift();
+    if (libraries.has(name)) continue;
+    const path = join(libdir, name);
+    let pathStat;
+    try { pathStat = lstatSync(path); } catch (error) {
+      if (error.code === "ENOENT") throw new Error(`Installed private closure is missing ${name}, required by ${requiredBy}`);
+      throw error;
+    }
+    let targetPath = path;
+    if (pathStat.isSymbolicLink()) {
+      try { targetPath = realpathSync(path); } catch { throw new Error(`Invalid installed library symlink: ${path}`); }
+      if (dirname(targetPath) !== libdir || !statSync(targetPath).isFile()) throw new Error(`Invalid installed library symlink: ${path}`);
+    } else if (!pathStat.isFile()) {
+      throw new Error(`Expected regular ELF file: ${path}`);
+    }
+    const meta = inspectElf(targetPath, target, name);
+    if (execute("patchelf", ["--print-rpath", targetPath]).trim() !== "$ORIGIN") throw new Error(`Invalid installed RUNPATH: ${path}`);
+    libraries.set(name, { path, target: targetPath });
+    for (const dependency of meta.needed) enqueue(dependency, path);
   }
-  const env = { ...process.env, LD_LIBRARY_PATH: libdir }; for (const { path } of libs) verifyResolved(path, env); verifyResolved(sidecar, process.env);
-  return { sidecar, libdir, libraryCount: libs.length };
+  const env = { ...process.env, LD_LIBRARY_PATH: libdir };
+  for (const { path } of libraries.values()) verifyResolved(path, env);
+  verifyResolved(sidecar, process.env);
+  return { sidecar, libdir, libraryCount: libraries.size };
 }
 export function writeLinuxBuildEnvironment(prefix, path, target, options = {}) {
   const baseEnv = withoutAudioRuntimeVerification(options.env ?? process.env);

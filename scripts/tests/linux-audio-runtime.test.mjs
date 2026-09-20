@@ -311,6 +311,235 @@ test("installed Linux verification uses the RUNPATH closure despite duplicate ne
   }
 });
 
+test("installed Linux verification ignores linuxdeploy GTK modules and unrelated libraries outside the controlled closure", { skip: process.platform === "win32" }, (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const gtkModule = join(fixture.libdir, "gtk-3.0/3.0.0/immodules/im-am-et.so");
+  const gtkLink = join(fixture.libdir, "im-am-et.so");
+  const unrelatedLibrary = join(fixture.libdir, "libgstreamer-1.0.so.0");
+  mkdirSync(dirname(gtkModule), { recursive: true });
+  writeFileSync(gtkModule, "linuxdeploy GTK module");
+  symlinkSync("gtk-3.0/3.0.0/immodules/im-am-et.so", gtkLink);
+  writeFileSync(unrelatedLibrary, "unrelated linuxdeploy library");
+
+  const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    walk: () => [...fixture.allFiles, gtkLink, gtkModule, unrelatedLibrary],
+    assertElf: (path, ...args) => {
+      assert.notEqual(path, gtkModule, "unrelated GTK module must not be inspected");
+      assert.notEqual(path, unrelatedLibrary, "unrelated library must not be inspected");
+      return fixture.options.assertElf(path, ...args);
+    },
+    run: (command, args) => {
+      assert.notEqual(args[1], gtkModule, "unrelated GTK RUNPATH must not be inspected");
+      assert.notEqual(args[1], unrelatedLibrary, "unrelated library RUNPATH must not be inspected");
+      return fixture.options.run(command, args);
+    },
+  });
+  assert.equal(result.libraryCount, controlledNames.length);
+});
+
+test("installed Linux verification walks reachable transitive dependencies by exact SONAME", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const direct = "libhifimule-device.so.1";
+  const transitive = "libhifimule-transport.so.2";
+  const fixture = installedBundleFixture(t, [...controlledNames, direct, transitive], []);
+  const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    assertElf: (path) => ({
+      needed: path === fixture.allFiles[0]
+        ? [...controlledNames.slice(0, 4), direct]
+        : basename(path) === direct ? [transitive] : [],
+      soname: basename(path),
+    }),
+  });
+  assert.equal(result.libraryCount, controlledNames.length + 2);
+});
+
+test("installed Linux verification rejects missing and path-containing reachable dependencies", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const direct = "libhifimule-device.so.1";
+  const fixture = installedBundleFixture(t, [...controlledNames, direct], []);
+  for (const invalid of ["libmissing-transport.so.2", "../libescape.so.1", "nested/libescape.so.1"]) {
+    assert.throws(
+      () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+        ...fixture.options,
+        assertElf: (path) => ({
+          needed: path === fixture.allFiles[0]
+            ? [...controlledNames.slice(0, 4), direct]
+            : basename(path) === direct ? [invalid] : [],
+          soname: basename(path),
+        }),
+      }),
+      invalid.includes("/")
+        ? /Invalid installed dependency name/
+        : new RegExp(`Installed private closure is missing ${invalid.replaceAll(".", "\\.")}, required by .*${direct.replaceAll(".", "\\.")}`),
+    );
+  }
+});
+
+test("installed Linux verification validates loader-like dependency names before classification", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const direct = "libhifimule-device.so.1";
+  const fixture = installedBundleFixture(t, [...controlledNames, direct], []);
+  const ffmpegNames = controlledNames.slice(0, 4);
+  for (const invalid of ["ld-linux/../../escape.so", "", "ld-linux\nmalicious.so.2"]) {
+    assert.throws(
+      () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+        ...fixture.options,
+        assertElf: (path) => ({ needed: path === fixture.allFiles[0] ? [...ffmpegNames, invalid] : [], soname: basename(path) }),
+      }),
+      /Invalid installed dependency name/,
+      `direct dependency ${JSON.stringify(invalid)}`,
+    );
+    assert.throws(
+      () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+        ...fixture.options,
+        assertElf: (path) => ({
+          needed: path === fixture.allFiles[0] ? [...ffmpegNames, direct] : basename(path) === direct ? [invalid] : [],
+          soname: basename(path),
+        }),
+      }),
+      /Invalid installed dependency name/,
+      `transitive dependency ${JSON.stringify(invalid)}`,
+    );
+  }
+  for (const prefixed of ["ld-linux-malicious.so.2", "ld-linux-x86-64.so.2.extra"]) {
+    assert.throws(
+      () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+        ...fixture.options,
+        assertElf: (path) => ({ needed: path === fixture.allFiles[0] ? [...ffmpegNames, prefixed] : [], soname: basename(path) }),
+      }),
+      new RegExp(`Installed private closure is missing ${prefixed.replaceAll(".", "\\.")}`),
+      `direct dependency ${prefixed}`,
+    );
+    assert.throws(
+      () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+        ...fixture.options,
+        assertElf: (path) => ({
+          needed: path === fixture.allFiles[0] ? [...ffmpegNames, direct] : basename(path) === direct ? [prefixed] : [],
+          soname: basename(path),
+        }),
+      }),
+      new RegExp(`Installed private closure is missing ${prefixed.replaceAll(".", "\\.")}`),
+      `transitive dependency ${prefixed}`,
+    );
+  }
+});
+
+test("installed Linux verification validates bundled baseline libraries that can shadow the system", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const absent = installedBundleFixture(t, controlledNames, []);
+  const sidecarDependencies = [...controlledNames.slice(0, 4), "libc.so.6"];
+  const absentResult = verifyInstalledLinuxBundle(absent.bundleRoot, target, {
+    ...absent.options,
+    assertElf: (path) => ({ needed: path === absent.allFiles[0] ? sidecarDependencies : [], soname: basename(path) }),
+  });
+  assert.equal(absentResult.libraryCount, controlledNames.length);
+
+  const shadowed = installedBundleFixture(t, [...controlledNames, "libc.so.6"], []);
+  assert.throws(
+    () => verifyInstalledLinuxBundle(shadowed.bundleRoot, target, {
+      ...shadowed.options,
+      assertElf: (path) => {
+        if (basename(path) === "libc.so.6") throw new Error(`Malformed bundled baseline library: ${path}`);
+        return { needed: path === shadowed.allFiles[0] ? sidecarDependencies : [], soname: basename(path) };
+      },
+    }),
+    /Malformed bundled baseline library/,
+  );
+});
+
+test("installed Linux verification rejects a reachable SONAME symlink into a nested directory", { skip: process.platform === "win32" }, (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const soname = controlledNames[0];
+  const nestedTarget = join(fixture.libdir, "nested", `${soname}.1.0`);
+  mkdirSync(dirname(nestedTarget));
+  writeFileSync(nestedTarget, "nested ELF fixture");
+  rmSync(join(fixture.libdir, soname));
+  symlinkSync(join("nested", basename(nestedTarget)), join(fixture.libdir, soname));
+  assert.throws(
+    () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, fixture.options),
+    new RegExp(`Invalid installed library symlink: .*${soname.replaceAll(".", "\\.")}`),
+  );
+});
+
+test("installed Linux verification rejects broken and escaping reachable SONAME symlinks", { skip: process.platform === "win32" }, (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  for (const mode of ["broken", "escaping"]) {
+    const fixture = installedBundleFixture(t, controlledNames, []);
+    const soname = controlledNames[0];
+    const sonamePath = join(fixture.libdir, soname);
+    rmSync(sonamePath);
+    if (mode === "broken") {
+      symlinkSync(`${soname}.missing`, sonamePath);
+    } else {
+      const outside = join(dirname(fixture.bundleRoot), `${basename(fixture.bundleRoot)}-${soname}`);
+      writeFileSync(outside, "outside ELF fixture");
+      t.after(() => rmSync(outside, { force: true }));
+      symlinkSync(outside, sonamePath);
+    }
+    assert.throws(
+      () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, fixture.options),
+      new RegExp(`Invalid installed library symlink: .*${soname.replaceAll(".", "\\.")}`),
+      mode,
+    );
+  }
+});
+
+test("installed Linux verification rejects invalid RUNPATH and ldd failures in the reachable closure", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const required = controlledNames[0];
+  assert.throws(
+    () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+      ...fixture.options,
+      run: (_command, args) => args[1] === fixture.allFiles[0] ? "$ORIGIN/../lib\n" : basename(args[1]) === required ? "/usr/lib\n" : "$ORIGIN\n",
+    }),
+    new RegExp(`Invalid installed RUNPATH: .*${required.replaceAll(".", "\\.")}`),
+  );
+  assert.throws(
+    () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+      ...fixture.options,
+      resolved: (path) => { if (basename(path) === required) throw new Error(`Unresolved dependency for ${path}`); },
+    }),
+    new RegExp(`Unresolved dependency for .*${required.replaceAll(".", "\\.")}`),
+  );
+});
+
 test("installed Linux verification rejects a complete closure that is only in unreachable nested resources", (t) => {
   const controlledNames = [
     ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
@@ -320,7 +549,7 @@ test("installed Linux verification rejects a complete closure that is only in un
   const fixture = installedBundleFixture(t, controlledNames.slice(1), controlledNames);
   assert.throws(
     () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, { ...fixture.options, walk: () => fixture.allFiles }),
-    new RegExp(`Required controlled library is missing: ${controlledNames[0].replaceAll(".", "\\.")}`),
+    new RegExp(`Installed private closure is missing ${controlledNames[0].replaceAll(".", "\\.")}, required by`),
   );
 });
 
