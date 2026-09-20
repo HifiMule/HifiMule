@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateInstalledSidecarRunpath, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
+import { verifyInstalledLinuxBundle, verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateInstalledSidecarRunpath, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -222,7 +222,7 @@ test("installed Linux sidecar RUNPATH reaches AppImage and deb private libraries
   mkdirSync(dirname(appImageSidecar), { recursive: true });
   mkdirSync(appImageLibdir, { recursive: true });
   assert.equal(
-    validateInstalledSidecarRunpath(appImageRoot, appImageSidecar, appImageLibdir, "$ORIGIN/../lib"),
+    validateInstalledSidecarRunpath(appImageRoot, appImageSidecar, "$ORIGIN/../lib"),
     realpathSync(appImageLibdir),
   );
 
@@ -235,7 +235,6 @@ test("installed Linux sidecar RUNPATH reaches AppImage and deb private libraries
     validateInstalledSidecarRunpath(
       debRoot,
       debSidecar,
-      debLibdir,
       "$ORIGIN/../bundled-libs:$ORIGIN/bundled-libs:$ORIGIN/../lib/HifiMule/bundled-libs:$ORIGIN/../lib/hifimule/bundled-libs",
     ),
     realpathSync(debLibdir),
@@ -254,7 +253,7 @@ test("installed Linux sidecar RUNPATH rejects unreachable, absolute, and escapin
 
   for (const runpath of ["$ORIGIN/../share", "/usr/lib", "$ORIGIN/../../../outside", "$ORIGIN/../lib:/usr/lib", "$ORIGIN/../collision:$ORIGIN/../lib", "$ORIGIN/missing/../../lib:$ORIGIN/../lib", "$ORIGIN/not-a-directory/../../lib:$ORIGIN/../lib"]) {
     assert.throws(
-      () => validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, runpath),
+      () => validateInstalledSidecarRunpath(bundleRoot, sidecar, runpath),
       (error) => error.message === `Invalid installed sidecar RUNPATH: ${runpath}`,
     );
   }
@@ -272,8 +271,131 @@ test("installed Linux sidecar RUNPATH cannot escape through a symlink before par
   mkdirSync(outside);
   symlinkSync(outside, join(bundleRoot, "usr/escape-link"));
   assert.throws(
-    () => validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, "$ORIGIN/../escape-link/../lib"),
+    () => validateInstalledSidecarRunpath(bundleRoot, sidecar, "$ORIGIN/../escape-link/../lib"),
     (error) => error.message === "Invalid installed sidecar RUNPATH: $ORIGIN/../escape-link/../lib",
+  );
+});
+
+function installedBundleFixture(t, reachableNames, nestedNames) {
+  const bundleRoot = mkdtempSync(join(tmpdir(), "hifimule-installed-bundle-"));
+  t.after(() => rmSync(bundleRoot, { recursive: true, force: true }));
+  const sidecar = join(bundleRoot, "usr/bin/hifimule-daemon");
+  const libdir = join(bundleRoot, "usr/lib");
+  const nestedLibdir = join(bundleRoot, "usr/lib/HifiMule/resources/bundled-libs");
+  for (const path of [sidecar, ...reachableNames.map((name) => join(libdir, name)), ...nestedNames.map((name) => join(nestedLibdir, name))]) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "ELF fixture");
+  }
+  const allFiles = [sidecar, ...reachableNames.map((name) => join(libdir, name)), ...nestedNames.map((name) => join(nestedLibdir, name))];
+  const requiredFfmpeg = Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`);
+  const options = {
+    assertElf: (path) => ({ needed: path === sidecar ? requiredFfmpeg : [], soname: basename(path) }),
+    elf: () => ({ needed: [] }),
+    resolved: () => {},
+    run: (_command, args) => args[1] === sidecar ? "$ORIGIN/../lib\n" : "$ORIGIN\n",
+  };
+  return { allFiles, bundleRoot, libdir, options };
+}
+
+test("installed Linux verification uses the RUNPATH closure despite duplicate nested libraries and traversal order", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, [controlledNames[0]]);
+  for (const files of [fixture.allFiles, [...fixture.allFiles].reverse()]) {
+    const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, { ...fixture.options, walk: () => files });
+    assert.equal(result.libdir, realpathSync(fixture.libdir));
+    assert.equal(result.libraryCount, controlledNames.length);
+  }
+});
+
+test("installed Linux verification rejects a complete closure that is only in unreachable nested resources", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames.slice(1), controlledNames);
+  assert.throws(
+    () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, { ...fixture.options, walk: () => fixture.allFiles }),
+    new RegExp(`Required controlled library is missing: ${controlledNames[0].replaceAll(".", "\\.")}`),
+  );
+});
+
+test("installed Linux verification accepts an in-directory SONAME symlink to a versioned backing file", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const soname = controlledNames[0];
+  const sonamePath = join(fixture.libdir, soname);
+  const backingPath = `${sonamePath}.1.0`;
+  rmSync(sonamePath);
+  writeFileSync(backingPath, "ELF fixture");
+  symlinkSync(basename(backingPath), sonamePath);
+  const inspections = [];
+  const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    assertElf: (path, elfTarget, expectedSoname) => {
+      inspections.push({ path, elfTarget, expectedSoname });
+      if (path === fixture.allFiles[0]) return fixture.options.assertElf(path, elfTarget, expectedSoname);
+      const actualSoname = path === realpathSync(backingPath) ? soname : basename(path);
+      if (expectedSoname && expectedSoname !== actualSoname) throw new Error(`ELF SONAME mismatch for ${path}: ${actualSoname}`);
+      return { needed: [], soname: actualSoname };
+    },
+  });
+  assert.equal(result.libdir, realpathSync(fixture.libdir));
+  assert.deepEqual(
+    inspections.filter((inspection) => inspection.path === realpathSync(backingPath)).map(({ expectedSoname }) => expectedSoname),
+    [soname],
+  );
+});
+
+test("installed Linux verification rejects a regular required library with the wrong SONAME", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const requiredName = controlledNames[0];
+  assert.throws(
+    () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+      ...fixture.options,
+      assertElf: (path, elfTarget, expectedSoname) => {
+        if (path === fixture.allFiles[0]) return fixture.options.assertElf(path, elfTarget, expectedSoname);
+        const actualSoname = basename(path) === requiredName ? "libwrong.so.1" : basename(path);
+        if (expectedSoname && expectedSoname !== actualSoname) throw new Error(`ELF SONAME mismatch for ${path}: ${actualSoname}`);
+        return { needed: [], soname: actualSoname };
+      },
+    }),
+    new RegExp(`ELF SONAME mismatch for .*${requiredName.replaceAll(".", "\\.")}: libwrong\\.so\\.1`),
+  );
+});
+
+test("installed Linux verification rejects a missing direct sidecar dependency", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const directDependency = "libhifimule-device.so.1";
+  assert.throws(
+    () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+      ...fixture.options,
+      assertElf: (path) => ({
+        needed: path === fixture.allFiles[0]
+          ? [...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`), directDependency]
+          : [],
+        soname: basename(path),
+      }),
+    }),
+    new RegExp(`Installed private closure is missing ${directDependency.replaceAll(".", "\\.")}, required by`),
   );
 });
 

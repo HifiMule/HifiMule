@@ -9,12 +9,29 @@ const manifest = JSON.parse(read("hifimule-daemon/audio-runtime.json"));
 const appleSigningVariables = ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"];
 
 function namedWorkflowStep(workflow, name) {
+  workflow = workflow.replace(/\r\n?/g, "\n");
   const marker = `      - name: ${name}\n`;
   const start = workflow.indexOf(marker);
   assert.notEqual(start, -1, `workflow step must exist: ${name}`);
   const next = workflow.indexOf("\n      - name:", start + marker.length);
   return workflow.slice(start, next === -1 ? workflow.length : next);
 }
+
+test("named workflow steps are extracted with LF, CRLF, and CR line endings", () => {
+  const fixture = [
+    "jobs:",
+    "  release:",
+    "    steps:",
+    "      - name: First step",
+    "        run: echo first",
+    "      - name: Second step",
+    "        run: echo second",
+  ].join("\n");
+  const expected = "      - name: First step\n        run: echo first";
+  for (const newline of ["\n", "\r\n", "\r"]) {
+    assert.equal(namedWorkflowStep(fixture.replaceAll("\n", newline), "First step"), expected);
+  }
+});
 
 test("controlled runtime is the signed FFmpeg 9.0.2 source on shipping targets only", () => {
   assert.equal(manifest.ffmpegRelease, "9.0.2");

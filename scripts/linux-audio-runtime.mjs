@@ -243,15 +243,14 @@ function resolveRunpathEntry(root, origin, suffix, invalid) {
   }
   return candidate;
 }
-export function validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, runpath) {
+export function validateInstalledSidecarRunpath(bundleRoot, sidecar, runpath) {
   const root = realpathSync(bundleRoot);
   const origin = realpathSync(dirname(sidecar));
-  const privateLibdir = realpathSync(libdir);
   const invalid = () => new Error(`Invalid installed sidecar RUNPATH: ${runpath}`);
-  if (!isWithin(root, origin) || !isWithin(root, privateLibdir)) throw invalid();
+  if (!isWithin(root, origin)) throw invalid();
   const entries = runpath.split(":");
   if (!runpath || entries.some((entry) => !entry)) throw invalid();
-  let reachesPrivateLibdir = false;
+  const existingDirectories = [];
   for (const entry of entries) {
     if (isAbsolute(entry)) throw invalid();
     let suffix;
@@ -260,37 +259,63 @@ export function validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, run
     else if (entry.startsWith("${ORIGIN}/")) suffix = entry.slice("${ORIGIN}/".length);
     else throw invalid();
     const candidate = resolveRunpathEntry(root, origin, suffix, invalid);
-    const reachesThisEntry = existsSync(candidate) && isSameFile(candidate, privateLibdir);
-    if (existsSync(candidate) && !reachesThisEntry) throw invalid();
-    if (reachesThisEntry) reachesPrivateLibdir = true;
+    if (existsSync(candidate) && !existingDirectories.some((directory) => isSameFile(candidate, directory))) {
+      existingDirectories.push(candidate);
+    }
   }
-  if (!reachesPrivateLibdir) throw invalid();
-  return privateLibdir;
+  if (existingDirectories.length !== 1) throw invalid();
+  return existingDirectories[0];
 }
-export function verifyInstalledLinuxBundle(bundleRoot, target) {
-  const files = walk(bundleRoot);
+export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
+  const listFiles = options.walk ?? walk;
+  const inspectElf = options.assertElf ?? assertElf;
+  const readElf = options.elf ?? elf;
+  const execute = options.run ?? run;
+  const verifyResolved = options.resolved ?? resolved;
+  const files = listFiles(bundleRoot);
   const sidecar = files.find((path) => basename(path).startsWith("hifimule-daemon"));
   if (!sidecar) throw new Error(`No daemon sidecar under ${bundleRoot}`);
-  verifyLinuxAudioLinkage(assertElf(sidecar, target).needed);
-  const codec = files.find((path) => basename(path) === `libavcodec.so.${manifest.abiVersions.avcodec.split(".")[0]}`);
-  if (!codec) throw new Error("Controlled FFmpeg library missing"); const libdir = dirname(codec);
-  const libs = files.filter((path) => dirname(path) === libdir && /\.so(?:\.|$)/.test(basename(path)));
-  const names = new Set(libs.map((path) => basename(path)));
+  const sidecarMeta = inspectElf(sidecar, target);
+  verifyLinuxAudioLinkage(sidecarMeta.needed);
+  const sidecarRunpath = execute("patchelf", ["--print-rpath", sidecar]).trim();
+  const libdir = validateInstalledSidecarRunpath(bundleRoot, sidecar, sidecarRunpath);
+  const libraryEntries = readdirSync(libdir, { withFileTypes: true })
+    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && /\.so(?:\.|$)/.test(entry.name));
+  const symlinkLibraries = libraryEntries
+    .filter((entry) => entry.isSymbolicLink())
+    .map((entry) => {
+      const path = join(libdir, entry.name);
+      let canonicalTarget;
+      try { canonicalTarget = realpathSync(path); } catch { throw new Error(`Invalid installed library symlink: ${path}`); }
+      if (dirname(canonicalTarget) !== libdir || !statSync(canonicalTarget).isFile()) throw new Error(`Invalid installed library symlink: ${path}`);
+      return { path, target: canonicalTarget, soname: entry.name };
+    });
+  const symlinkTargets = new Set(symlinkLibraries.map(({ target: libraryTarget }) => libraryTarget));
+  const regularLibraries = libraryEntries
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({ path: join(libdir, entry.name), target: join(libdir, entry.name), soname: entry.name }))
+    .filter(({ target: libraryTarget }) => !symlinkTargets.has(libraryTarget));
+  const libs = [...regularLibraries, ...symlinkLibraries];
+  const names = new Set(libs.map(({ path }) => basename(path)));
   for (const [library, version] of Object.entries(manifest.abiVersions)) {
     const required = `lib${library}.so.${version.split(".")[0]}`;
     if (!names.has(required)) throw new Error(`Required controlled library is missing: ${required}`);
   }
   if (!names.has("libmtp.so.9")) throw new Error("Required controlled library is missing: libmtp.so.9");
   if (!names.has("libpulse.so.0")) throw new Error("Required controlled library is missing: libpulse.so.0");
-  for (const path of libs) { assertElf(path, target, basename(path)); if (run("patchelf", ["--print-rpath", path]).trim() !== "$ORIGIN") throw new Error(`Invalid installed RUNPATH: ${path}`); }
-  for (const path of libs) {
-    for (const needed of elf(path).needed) {
-      if (!baseline.has(needed) && !/^ld-linux/.test(needed) && !names.has(needed)) throw new Error(`Installed private closure is missing ${needed}, required by ${path}`);
+  for (const needed of sidecarMeta.needed) {
+    if (!baseline.has(needed) && !/^ld-linux/.test(needed) && !names.has(needed)) throw new Error(`Installed private closure is missing ${needed}, required by ${sidecar}`);
+  }
+  for (const library of libs) {
+    inspectElf(library.target, target, library.soname);
+    if (execute("patchelf", ["--print-rpath", library.target]).trim() !== "$ORIGIN") throw new Error(`Invalid installed RUNPATH: ${library.path}`);
+  }
+  for (const library of libs) {
+    for (const needed of readElf(library.target).needed) {
+      if (!baseline.has(needed) && !/^ld-linux/.test(needed) && !names.has(needed)) throw new Error(`Installed private closure is missing ${needed}, required by ${library.path}`);
     }
   }
-  const sidecarRunpath = run("patchelf", ["--print-rpath", sidecar]).trim();
-  validateInstalledSidecarRunpath(bundleRoot, sidecar, libdir, sidecarRunpath);
-  const env = { ...process.env, LD_LIBRARY_PATH: libdir }; for (const path of libs) resolved(path, env); resolved(sidecar, process.env);
+  const env = { ...process.env, LD_LIBRARY_PATH: libdir }; for (const { path } of libs) verifyResolved(path, env); verifyResolved(sidecar, process.env);
   return { sidecar, libdir, libraryCount: libs.length };
 }
 export function writeLinuxBuildEnvironment(prefix, path, target, options = {}) {
