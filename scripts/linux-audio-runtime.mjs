@@ -178,14 +178,22 @@ function resolveNeeded(source, name, dirs) {
   if (!path || !existsSync(path)) throw new Error(`Unable to resolve ${name}, required by ${source}`);
   return realpathSync(path);
 }
-function closure(roots, out, target, dirs) {
+export function stageLinuxDependencyClosure(sidecar, roots, out, target, dirs, options = {}) {
+  const inspectElf = options.assertElf ?? assertElf;
+  const resolveDependency = options.resolveNeeded ?? resolveNeeded;
+  const isSystem = (name) => baseline.has(name) || name === linuxLoaders[target];
   const queue = [...roots], copied = new Map();
+  // The verifier follows the daemon's whole DT_NEEDED graph, including its tray
+  // and GTK stack. Seed the same graph here instead of only audio/MTP roots.
+  for (const name of inspectElf(sidecar, target).needed) {
+    if (!isSystem(name)) queue.push(resolveDependency(sidecar, name, dirs));
+  }
   while (queue.length) {
-    const source = realpathSync(queue.shift()), meta = assertElf(source, target);
+    const source = realpathSync(queue.shift()), meta = inspectElf(source, target);
     if (!meta.soname) throw new Error(`ELF library has no SONAME: ${source}`);
     if (copied.has(meta.soname)) { if (sha(source) !== sha(copied.get(meta.soname))) throw new Error(`Conflicting SONAME ${meta.soname}`); continue; }
     copyFileSync(source, join(out, meta.soname)); copied.set(meta.soname, source);
-    for (const name of meta.needed) if (!baseline.has(name) && !/^ld-linux/.test(name)) queue.push(resolveNeeded(source, name, dirs));
+    for (const name of meta.needed) if (!isSystem(name)) queue.push(resolveDependency(source, name, dirs));
   }
   return copied;
 }
@@ -209,7 +217,7 @@ export function bundleLinuxAudioRuntime(prefix, sidecar, target) {
   for (const library of Object.keys(manifest.abiVersions)) { const dir = run("pkg-config", ["--variable=libdir", `lib${library}`], { env }).trim(); roots.push(realpathSync(join(dir, `lib${library}.so`))); }
   const mtpDir = run("pkg-config", ["--variable=libdir", "libmtp"], { env }).trim(); dirs.push(mtpDir); roots.push(realpathSync(join(mtpDir, "libmtp.so")));
   const pulseDir = run("pkg-config", ["--variable=libdir", "libpulse"], { env }).trim(); dirs.push(pulseDir); roots.push(realpathSync(join(pulseDir, "libpulse.so")));
-  const copied = closure(roots, out, target, dirs);
+  const copied = stageLinuxDependencyClosure(sidecar, roots, out, target, dirs);
   for (const name of copied.keys()) { const path = join(out, name); run("patchelf", ["--set-rpath", "$ORIGIN", path]); if (run("patchelf", ["--print-rpath", path]).trim() !== "$ORIGIN") throw new Error(`Invalid RUNPATH: ${path}`); }
   const sidecarPath = ["$ORIGIN/../bundled-libs", "$ORIGIN/bundled-libs", "$ORIGIN/../lib/HifiMule/bundled-libs", "$ORIGIN/../lib/hifimule/bundled-libs"].join(":");
   run("patchelf", ["--set-rpath", sidecarPath, sidecar]);

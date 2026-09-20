@@ -4,7 +4,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, re
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { verifyInstalledLinuxBundle, verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateInstalledSidecarRunpath, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
+import { stageLinuxDependencyClosure, verifyInstalledLinuxBundle, verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateInstalledSidecarRunpath, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -677,4 +677,59 @@ test("Linux preflight requires D-Bus native-controls development metadata", () =
     spawn: (_command, args) => ({ status: args.includes("dbus-1") ? 1 : 0 }),
   }), /D-Bus development files are missing/);
   assert.ok(linuxBuildPackages.includes("libdbus-1-dev"));
+});
+
+
+test("staging follows the daemon GTK graph beyond the explicit audio and MTP roots", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "hifimule-stage-closure-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const sources = join(dir, "sources"), out = join(dir, "staged");
+  mkdirSync(sources); mkdirSync(out);
+  const graph = {
+    "hifimule-daemon": ["libaudio.so.1", "libgdk-3.so.0", "libc.so.6", "ld-linux-x86-64.so.2"],
+    "libaudio.so.1": [],
+    "libmtp.so.9": ["libusb-1.0.so.0"],
+    "libusb-1.0.so.0": ["libc.so.6"],
+    "libgdk-3.so.0": ["libfontconfig.so.1"],
+    "libfontconfig.so.1": ["libfreetype.so.6"],
+    "libfreetype.so.6": ["libfontconfig.so.1"],
+  };
+  for (const name of Object.keys(graph)) writeFileSync(join(sources, name), name);
+  const options = {
+    assertElf: (path) => ({ soname: basename(path), needed: graph[basename(path)] }),
+    resolveNeeded: (_source, name) => {
+      assert.ok(name in graph, `must not resolve host baseline ${name}`);
+      return join(sources, name);
+    },
+  };
+  const stage = () => stageLinuxDependencyClosure(join(sources, "hifimule-daemon"),
+    [join(sources, "libaudio.so.1"), join(sources, "libmtp.so.9")], out, target, [sources], options);
+  const copied = stage();
+  assert.deepEqual([...copied.keys()].sort(), Object.keys(graph).filter(name => name !== "hifimule-daemon").sort());
+  for (const name of copied.keys()) assert.equal(readFileSync(join(out, name), "utf8"), name);
+  assert.equal(existsSync(join(out, "hifimule-daemon")), false);
+  rmSync(join(sources, "libfontconfig.so.1"));
+  assert.throws(stage, /ENOENT/);
+});
+
+
+test("native ELF staging collects a daemon-only GDK/fontconfig dependency chain", { skip: process.platform !== "linux" }, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "hifimule-native-closure-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const out = join(dir, "staged");
+  mkdirSync(out);
+  const compile = (name, code, args) => {
+    const source = join(dir, `${name}.c`);
+    writeFileSync(source, code);
+    execFileSync("cc", [source, "-o", join(dir, name), ...args]);
+  };
+  compile("libfontconfig.so.1", "int font(void) { return 0; }", ["-shared", "-fPIC", "-Wl,-soname,libfontconfig.so.1"]);
+  compile("libgdk-3.so.0", "extern int font(void); int gdk(void) { return font(); }",
+    ["-shared", "-fPIC", "-Wl,-soname,libgdk-3.so.0", `-L${dir}`, "-l:libfontconfig.so.1", `-Wl,-rpath,${dir}`]);
+  compile("hifimule-daemon", "extern int gdk(void); int main(void) { return gdk(); }",
+    [`-L${dir}`, "-l:libgdk-3.so.0", `-Wl,-rpath,${dir}`]);
+  const nativeTarget = process.arch === "arm64" ? "aarch64-unknown-linux-gnu" : target;
+  const copied = stageLinuxDependencyClosure(join(dir, "hifimule-daemon"), [], out, nativeTarget, []);
+  assert.deepEqual([...copied.keys()].sort(), ["libfontconfig.so.1", "libgdk-3.so.0"]);
+  for (const name of copied.keys()) assert.ok(existsSync(join(out, name)));
 });
