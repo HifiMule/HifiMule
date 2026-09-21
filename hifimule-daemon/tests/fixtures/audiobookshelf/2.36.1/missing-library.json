@@ -1,0 +1,1 @@
+{"request":{"method":"GET","template":"/api/libraries/{libraryAlias}/items?page=0&limit=1"},"status":404,"classification":"not-found","retry":"no","body":"redacted"}

@@ -1,0 +1,1 @@
+{"request":{"method":"PATCH","template":"/api/me/progress/{libraryItemAlias}","samePayloadWrites":2},"statuses":[200,200],"recordCreated":true,"cleanupStatus":200,"classification":"idempotent"}

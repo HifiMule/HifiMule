@@ -1,0 +1,1 @@
+{"stableIdentity":{"libraryItemId":"book-item-stable","mediaId":"book-media-stable","libraryId":"library-book-1"},"artwork":{"endpointTemplate":"/api/items/{libraryItemAlias}/cover","authentication":"bearer-header","urlPersisted":false}}

@@ -1,0 +1,1 @@
+{"session":{"method":"POST","template":"/api/items/{libraryItemAlias}/play","request":{"forceTranscode":true,"mediaPlayer":"fixture-player","supportedMimeTypes":[]},"playMethod":2,"audioTracks":1,"contentUrl":"server-relative"},"scope":"playback-session-only","downloadTranscode":"unsupported"}

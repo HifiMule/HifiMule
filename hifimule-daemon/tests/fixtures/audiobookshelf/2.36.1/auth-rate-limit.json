@@ -1,0 +1,1 @@
+{"configuration":{"windowMilliseconds":15000,"maximumAttempts":2},"invalidLoginStatuses":[401,429,429],"classification":"rate-limited","retry":"after-server-window","body":"redacted"}
