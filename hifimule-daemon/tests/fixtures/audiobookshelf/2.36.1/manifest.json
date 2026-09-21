@@ -12,32 +12,150 @@
     ]
   },
   "cases": [
-    {"id":"auth-invalid","fixture":"auth-invalid.json","status":"verified"},
-    {"id":"auth-refresh-revocation","fixture":"auth-refresh-revocation.json","status":"verified"},
-    {"id":"auth-expiry-refresh","fixture":"auth-expiry-refresh.json","status":"verified"},
-    {"id":"auth-rate-limit","fixture":"auth-rate-limit.json","status":"verified"},
-    {"id":"libraries-roles","fixture":"libraries.json","status":"verified"},
-    {"id":"missing-library","fixture":"missing-library.json","status":"verified"},
-    {"id":"books-page-boundaries","fixture":"books-page.json","status":"verified"},
-    {"id":"catalogue-proxy-500","fixture":"catalogue-proxy-500.json","status":"verified"},
-    {"id":"podcasts-page-boundaries","fixture":"podcasts-page.json","status":"verified"},
-    {"id":"books-search-empty","fixture":"books-search-empty.json","status":"verified"},
-    {"id":"podcasts-search-empty","fixture":"podcasts-search-empty.json","status":"verified"},
-    {"id":"book-multipart-order","fixture":"book-multipart.json","status":"verified"},
-    {"id":"book-single-missing-credits","fixture":"book-single-missing-credits.json","status":"verified"},
-    {"id":"artwork-and-identity","fixture":"artwork-and-identity.json","status":"verified"},
-    {"id":"missing-item","fixture":"missing-item.json","status":"verified"},
-    {"id":"item-mutation-forbidden","fixture":"item-mutation-forbidden.json","status":"verified"},
-    {"id":"changed-and-removed-item","fixture":"changed-and-removed-item.json","status":"verified"},
-    {"id":"duplicate-title-identity","fixture":"duplicate-title-identity.json","status":"verified"},
-    {"id":"delivery-direct","fixture":"direct-delivery.json","status":"verified"},
-    {"id":"delivery-transcode","fixture":"transcode-delivery.json","status":"verified"},
-    {"id":"delivery-mime-mismatch","fixture":"delivery-mime-mismatch.json","status":"verified"},
-    {"id":"delivery-unavailable","fixture":"delivery-unavailable.json","status":"untested"},
-    {"id":"progress-contract","fixture":"progress-contract.json","status":"verified"},
-    {"id":"progress-idempotency","fixture":"progress-idempotency.json","status":"verified"},
-    {"id":"progress-empty-payload","fixture":"progress-empty-payload.json","status":"verified"},
-    {"id":"progress-conflict","fixture":"progress-conflict.json","status":"unsupported"},
-    {"id":"progress-failure","fixture":"progress-failure.json","status":"untested"}
+    {
+      "id": "auth-invalid",
+      "fixture": "auth-invalid.json",
+      "status": "verified"
+    },
+    {
+      "id": "auth-refresh-revocation",
+      "fixture": "auth-refresh-revocation.json",
+      "status": "verified"
+    },
+    {
+      "id": "auth-expiry-refresh",
+      "fixture": "auth-expiry-refresh.json",
+      "status": "verified"
+    },
+    {
+      "id": "auth-rate-limit",
+      "fixture": "auth-rate-limit.json",
+      "status": "verified"
+    },
+    {
+      "id": "libraries-roles",
+      "fixture": "libraries.json",
+      "status": "verified"
+    },
+    {
+      "id": "missing-library",
+      "fixture": "missing-library.json",
+      "status": "verified"
+    },
+    {
+      "id": "books-page-boundaries",
+      "fixture": "books-page.json",
+      "status": "verified"
+    },
+    {
+      "id": "catalogue-proxy-500",
+      "fixture": "catalogue-proxy-500.json",
+      "status": "verified"
+    },
+    {
+      "id": "podcasts-page-boundaries",
+      "fixture": "podcasts-page.json",
+      "status": "verified"
+    },
+    {
+      "id": "books-search-empty",
+      "fixture": "books-search-empty.json",
+      "status": "verified"
+    },
+    {
+      "id": "podcasts-search-empty",
+      "fixture": "podcasts-search-empty.json",
+      "status": "verified"
+    },
+    {
+      "id": "book-multipart-order",
+      "fixture": "book-multipart.json",
+      "status": "verified"
+    },
+    {
+      "id": "book-single-missing-credits",
+      "fixture": "book-single-missing-credits.json",
+      "status": "verified"
+    },
+    {
+      "id": "artwork-and-identity",
+      "fixture": "artwork-and-identity.json",
+      "status": "verified"
+    },
+    {
+      "id": "missing-item",
+      "fixture": "missing-item.json",
+      "status": "verified"
+    },
+    {
+      "id": "item-mutation-forbidden",
+      "fixture": "item-mutation-forbidden.json",
+      "status": "verified"
+    },
+    {
+      "id": "changed-and-removed-item",
+      "fixture": "changed-and-removed-item.json",
+      "status": "verified"
+    },
+    {
+      "id": "duplicate-title-identity",
+      "fixture": "duplicate-title-identity.json",
+      "status": "verified"
+    },
+    {
+      "id": "delivery-direct",
+      "fixture": "direct-delivery.json",
+      "status": "verified"
+    },
+    {
+      "id": "delivery-transcode",
+      "fixture": "transcode-delivery.json",
+      "status": "verified"
+    },
+    {
+      "id": "delivery-mime-mismatch",
+      "fixture": "delivery-mime-mismatch.json",
+      "status": "verified"
+    },
+    {
+      "id": "delivery-unavailable",
+      "fixture": "delivery-unavailable.json",
+      "status": "untested"
+    },
+    {
+      "id": "progress-contract",
+      "fixture": "progress-contract.json",
+      "status": "verified"
+    },
+    {
+      "id": "progress-idempotency",
+      "fixture": "progress-idempotency.json",
+      "status": "verified"
+    },
+    {
+      "id": "progress-empty-payload",
+      "fixture": "progress-empty-payload.json",
+      "status": "verified"
+    },
+    {
+      "id": "progress-conflict",
+      "fixture": "progress-conflict.json",
+      "status": "unsupported"
+    },
+    {
+      "id": "progress-failure",
+      "fixture": "progress-failure.json",
+      "status": "untested"
+    },
+    {
+      "id": "books-search-page-ignored",
+      "fixture": "books-search-pagination.json",
+      "status": "verified"
+    },
+    {
+      "id": "podcasts-search-page-ignored",
+      "fixture": "podcasts-search-pagination.json",
+      "status": "verified"
+    }
   ]
 }

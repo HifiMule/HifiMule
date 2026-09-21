@@ -1,1 +1,1 @@
-{"status":500,"classification":"server-failure","retry":"bounded-backoff-only-after-observation","observation":"untested-on-v2.36.1","body":"redacted"}
+{"observation":"untested-on-v2.36.1","classification":"undetermined","safeConsequence":"Do not infer retry or conflict handling for progress failures from this fixture."}

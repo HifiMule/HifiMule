@@ -1,1 +1,1 @@
-{"status":404,"classification":"unavailable-or-incompatible","retry":"no","body":"redacted","note":"Direct-session and transcode behavior requires a disposable playable fixture and is not yet a supported capability."}
+{"observation":"untested-on-v2.36.1","classification":"undetermined","safeConsequence":"Do not advertise an unavailable-or-incompatible delivery classification until a controlled failure is observed."}

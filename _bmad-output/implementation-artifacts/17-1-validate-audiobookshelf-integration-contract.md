@@ -4,7 +4,7 @@ baseline_commit: NO_VCS
 
 # Story 17.1: Validate the Audiobookshelf integration contract
 
-Status: review
+Status: done
 
 ## Story
 
@@ -29,7 +29,7 @@ so that implementation does not depend on inferred endpoint or item-identity beh
   - [x] Validate login/session or supported bearer/refresh behavior, authorization failures, expiry/refresh/revocation semantics, and safe error classification without persisting secrets.
   - [x] Validate library discovery, immutable upstream library IDs, and `book` versus `podcast` media type/role behavior; record mixed-library, inaccessible, missing, and changed-library outcomes.
 - [x] Probe and record catalogue, search, metadata, ordering, and identity behavior (AC: 1–3).
-  - [x] Exercise both Books and Podcasts catalogue/search pagination (including boundary/empty/final page behavior); record request parameters, response paging fields, sort/filter assumptions, duplicate/missing item behavior, and typed failures.
+  - [x] Exercise both Books and Podcasts catalogue/search pagination (including boundary/empty/final page behavior); live multi-result probes established that `page` is ignored and `limit` is honored by search on v2.36.1, so later stories must not paginate that route by page number.
   - [x] For Books, prove multi-part ordering, chapter/file ordering, a single-file book, multiple/missing authors and narrators, artwork availability, and the stable identity fields needed by later mapping/playback work.
   - [x] Cover changed and removed remote items. Do not infer identity from title, path, index, artwork URL, or a transient playback URL.
 - [x] Probe direct delivery and player-progress contracts (AC: 1–3).
@@ -43,6 +43,14 @@ so that implementation does not depend on inferred endpoint or item-identity beh
   - [x] Create `docs/audiobookshelf-integration-contract.md` (versioned sections or an adjacent versioned record) containing DTO field authority, transport/auth rules, endpoint observations, supported-version matrix, fixture mapping, failure semantics, and unsupported/ambiguous register.
   - [x] State the rules inherited by Stories 17.2–17.9: all server traffic remains behind `MediaProvider`; authenticated URLs/tokens stay daemon-side; Books and Podcasts retain separate roles; author is primary and narrator secondary for future book mapping; progress is player-owned only and uses proven stable remote identity plus whole-item offset.
   - [x] Keep this story discovery-only. Defer `AudiobookshelfProvider`, `ServerType::Audiobookshelf`, factory detection, encrypted-vault/config changes, UI, RPCs, catalogue mapping, direct playback, progress write-back, sync, Autofill, and collection behavior to their dedicated later stories.
+
+### Review Findings
+
+- [x] [Review][Patch] Search pagination was probed live for both roles; page is ignored and limit is honored on v2.36.1, with redacted fixture evidence. [docs/audiobookshelf-integration-contract.md:25]
+- [x] [Review][Patch] Offline validation now parses every manifest fixture and documents that provider response handling remains future work. [hifimule-daemon/tests/audiobookshelf_contract.rs:27]
+- [x] [Review][Patch] The multipart fixture now contains 24 chapters and tests the full file and chapter sequences. [hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/book-multipart.json:1]
+- [x] [Review][Patch] The untested delivery fixture no longer invents a response and the contract states its safe consequence. [hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/delivery-unavailable.json:1]
+- [x] [Review][Patch] The conflicting transcode source revision was removed; the record retains one pinned revision. [docs/audiobookshelf-integration-contract.md:43]
 
 ## Dev Notes
 
@@ -147,3 +155,5 @@ Story preparation: Codex.
 - 2026-09-21: Started controlled v2.36.1 contract discovery; added redacted offline fixtures, contract evidence, and deterministic validation without shipping provider code.
 - 2026-09-21: Added verified changed/removed-item evidence and completed the fixture-validation and handoff artifacts; retained unavailable live evidence as explicitly untested.
 - 2026-09-21: Recorded the one-request reverse-proxy 500 classification and finalized the controlled v2.36.1 contract for review.
+- 2026-09-21: Code review corrected fixture/contract inconsistencies and clarified test scope. Search pagination remains untested, so the story returned to in-progress.
+- 2026-09-21: Live read-only Books and Podcasts probes with a multi-result query confirmed that search ignores `page` but honors `limit`; added redacted fixtures and restored the completed story status.

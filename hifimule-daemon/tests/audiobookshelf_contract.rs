@@ -24,6 +24,76 @@ const PROGRESS_EMPTY: &str =
 const MIME_MISMATCH: &str =
     include_str!("fixtures/audiobookshelf/2.36.1/delivery-mime-mismatch.json");
 const PROXY_500: &str = include_str!("fixtures/audiobookshelf/2.36.1/catalogue-proxy-500.json");
+const FIXTURES: &[(&str, &str)] = &[
+    (
+        "auth-invalid.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/auth-invalid.json"),
+    ),
+    (
+        "auth-refresh-revocation.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/auth-refresh-revocation.json"),
+    ),
+    ("auth-expiry-refresh.json", AUTH_EXPIRY),
+    ("auth-rate-limit.json", AUTH_RATE_LIMIT),
+    (
+        "libraries.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/libraries.json"),
+    ),
+    ("missing-library.json", MISSING_LIBRARY),
+    ("books-page.json", BOOK_PAGE),
+    ("catalogue-proxy-500.json", PROXY_500),
+    (
+        "podcasts-page.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/podcasts-page.json"),
+    ),
+    (
+        "books-search-empty.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/books-search-empty.json"),
+    ),
+    (
+        "podcasts-search-empty.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/podcasts-search-empty.json"),
+    ),
+    (
+        "books-search-pagination.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/books-search-pagination.json"),
+    ),
+    (
+        "podcasts-search-pagination.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/podcasts-search-pagination.json"),
+    ),
+    ("book-multipart.json", MULTIPART_BOOK),
+    (
+        "book-single-missing-credits.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/book-single-missing-credits.json"),
+    ),
+    (
+        "artwork-and-identity.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/artwork-and-identity.json"),
+    ),
+    (
+        "missing-item.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/missing-item.json"),
+    ),
+    (
+        "item-mutation-forbidden.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/item-mutation-forbidden.json"),
+    ),
+    ("changed-and-removed-item.json", CHANGED_REMOVED),
+    ("duplicate-title-identity.json", DUPLICATE_IDENTITY),
+    ("direct-delivery.json", DELIVERY),
+    ("transcode-delivery.json", TRANSCODE),
+    ("delivery-mime-mismatch.json", MIME_MISMATCH),
+    (
+        "delivery-unavailable.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/delivery-unavailable.json"),
+    ),
+    ("progress-contract.json", PROGRESS),
+    ("progress-idempotency.json", PROGRESS_IDEMPOTENCY),
+    ("progress-empty-payload.json", PROGRESS_EMPTY),
+    ("progress-conflict.json", PROGRESS_CONFLICT),
+    ("progress-failure.json", PROGRESS_FAILURE),
+];
 
 #[test]
 fn manifest_is_versioned_complete_and_alias_only() {
@@ -31,6 +101,21 @@ fn manifest_is_versioned_complete_and_alias_only() {
     assert_eq!(manifest["schemaVersion"], 1);
     assert_eq!(manifest["serverVersion"], "2.36.1");
     let cases = manifest["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), FIXTURES.len());
+    for case in cases {
+        let name = case["fixture"].as_str().unwrap();
+        let (_, fixture) = FIXTURES.iter().find(|(file, _)| *file == name).unwrap();
+        let parsed: Value = serde_json::from_str(fixture).unwrap();
+        assert!(parsed.is_object(), "{name} must be a JSON object");
+        assert!(matches!(
+            case["status"].as_str(),
+            Some("verified" | "unsupported" | "ambiguous" | "blocked" | "untested")
+        ));
+        assert!(
+            !fixture.contains("http://") && !fixture.contains("https://"),
+            "{name} contains a URL"
+        );
+    }
     for required in [
         "auth-invalid",
         "libraries-roles",
@@ -70,10 +155,26 @@ fn fixture_pagination_and_ordering_invariants_are_explicit() {
     let files = book["media"]["audioFiles"].as_array().unwrap();
     let chapters = book["media"]["chapters"].as_array().unwrap();
     assert_eq!(files.len(), 10);
-    assert_eq!(files[0]["index"], 1);
-    assert_eq!(files[1]["index"], 2);
+    assert!(
+        files
+            .iter()
+            .enumerate()
+            .all(|(index, file)| file["index"].as_u64() == Some(index as u64 + 1))
+    );
+    assert_eq!(chapters.len(), 24);
     assert_eq!(chapters[0]["start"], 0);
-    assert_eq!(chapters[0]["end"], chapters[1]["start"]);
+    assert!(
+        chapters
+            .windows(2)
+            .all(|pair| pair[0]["end"] == pair[1]["start"])
+    );
+    assert_eq!(
+        chapters.last().unwrap()["end"],
+        files
+            .iter()
+            .map(|file| file["duration"].as_u64().unwrap())
+            .sum::<u64>()
+    );
     assert!(
         book["media"]["metadata"]["authors"]
             .as_array()
@@ -88,6 +189,77 @@ fn fixture_pagination_and_ordering_invariants_are_explicit() {
             .len()
             >= 2
     );
+}
+
+#[test]
+fn role_and_unobserved_cases_stay_distinct() {
+    let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+    for case_id in ["delivery-unavailable", "progress-failure"] {
+        let case = manifest["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == case_id)
+            .unwrap();
+        assert_eq!(case["status"], "untested");
+        let (_, raw) = FIXTURES
+            .iter()
+            .find(|(name, _)| *name == case["fixture"].as_str().unwrap())
+            .unwrap();
+        let fixture: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(fixture["classification"], "undetermined");
+        assert!(fixture.get("status").is_none());
+    }
+
+    let book_search: Value = serde_json::from_str(
+        FIXTURES
+            .iter()
+            .find(|(name, _)| *name == "books-search-empty.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    let podcast_search: Value = serde_json::from_str(
+        FIXTURES
+            .iter()
+            .find(|(name, _)| *name == "podcasts-search-empty.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert!(book_search["book"].as_array().unwrap().is_empty());
+    assert!(book_search.get("podcast").is_none());
+    assert!(podcast_search["podcast"].as_array().unwrap().is_empty());
+    assert!(podcast_search.get("book").is_none());
+
+    for (name, role) in [
+        ("books-search-pagination.json", "book"),
+        ("podcasts-search-pagination.json", "podcast"),
+    ] {
+        let (_, raw) = FIXTURES.iter().find(|(file, _)| *file == name).unwrap();
+        let fixture: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(fixture["role"], role);
+        assert_eq!(fixture["classification"], "page-ignored-limit-honored");
+        let probes = fixture["probes"].as_array().unwrap();
+        assert_eq!(
+            probes
+                .iter()
+                .map(|probe| probe["page"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [0, 1, 999999]
+        );
+        assert!(
+            probes.iter().all(|probe| probe["status"] == 200
+                && probe["pagingFields"].as_array().unwrap().is_empty())
+        );
+        assert!(
+            probes
+                .iter()
+                .all(|probe| probe["resultAliases"] == probes[0]["resultAliases"])
+        );
+        assert_eq!(fixture["limitProbes"][0]["resultCount"], 1);
+        assert_eq!(fixture["limitProbes"][1]["resultCount"], 2);
+    }
 }
 
 #[test]
@@ -126,9 +298,8 @@ fn delivery_and_book_progress_are_daemon_private_and_alias_only() {
     );
 
     let failure: Value = serde_json::from_str(PROGRESS_FAILURE).unwrap();
-    assert_eq!(failure["status"], 500);
-    assert_eq!(failure["classification"], "server-failure");
-    assert_eq!(failure["body"], "redacted");
+    assert_eq!(failure["observation"], "untested-on-v2.36.1");
+    assert_eq!(failure["classification"], "undetermined");
 
     let expiry: Value = serde_json::from_str(AUTH_EXPIRY).unwrap();
     assert_eq!(expiry["accessExpiry"]["protectedRequestStatus"], 401);
