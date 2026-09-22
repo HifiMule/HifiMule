@@ -20,6 +20,24 @@ impl MediaProvider for AlbumProvider {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
         self.release.notified().await;
+        if id == "book" {
+            let tracks = (1..=3)
+                .map(|number| {
+                    serde_json::from_value(json!({
+                        "id": format!("book-part-{number}"), "title": format!("Part {number}"),
+                        "duration": 1, "albumId": id, "trackNumber": number,
+                        "suffix": "mp3", "contentType": "audio/mpeg"
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            return Ok(AlbumWithTracks {
+                album: serde_json::from_value(json!({"id": id, "name": "Book", "trackCount": 3}))
+                    .unwrap(),
+                tracks,
+                provider_metadata: Default::default(),
+            });
+        }
         let mut track: Song = serde_json::from_value(json!({
             "id": format!("{id}-track"), "title": "Track", "duration": 1,
             "albumId": id, "suffix": "flac", "contentType": "audio/flac"
@@ -97,6 +115,26 @@ impl MediaProvider for AlbumProvider {
             supports_playlist_write: false,
             browse: crate::providers::BrowseCapabilities { list_modes: vec![] },
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn book_album_rpc_admits_each_part_in_order_with_portable_source() {
+    let f = Fixture::new().await;
+    let mut request = f.request();
+    request["source"]["albumId"] = "book".into();
+    f.provider.release.notify_one();
+    handle_playback_play_album(&f.state, Some(request), None)
+        .await
+        .unwrap();
+    let snapshot = f.state.playback.snapshot().unwrap();
+    assert_eq!(snapshot.occurrences.len(), 3);
+    for (index, occurrence) in snapshot.occurrences.iter().enumerate() {
+        assert_eq!(occurrence.source.server_id, f.server_id);
+        assert_eq!(
+            occurrence.source.track_id,
+            format!("book-part-{}", index + 1)
+        );
     }
 }
 

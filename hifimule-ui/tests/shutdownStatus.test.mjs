@@ -130,9 +130,9 @@ test('rendered failed fence retries the same daemon and Continue only reloads th
     let disposed = false;
     let latestPoller;
     class Poller { constructor(request) { this.request = request; latestPoller = this; } refresh() {} dispose() { disposed = true; } }
-    const render = new Function('document', 'window', 'sessionStorage', 't', 'ShutdownPoller', 'shutdownMessageKey', 'canRetryQuit', 'canRetryCheckpoint',
+    const render = new Function('document', 'window', 'sessionStorage', 't', 'ShutdownPoller', 'shutdownMessageKey', 'canRetryQuit', 'canRetryCheckpoint', 'disposePlaybackControls',
         'let activeBasketSidebar = null; ' + renderJs + '; return renderShutdownStatus;')(
-        document, window, sessionStorage, key => key, Poller, shutdownMessageKey, canRetryQuit, canRetryCheckpoint);
+        document, window, sessionStorage, key => key, Poller, shutdownMessageKey, canRetryQuit, canRetryCheckpoint, () => {});
     const calls = [];
     const health = { status: 'ok', errorCode: 'QUIT_PERSISTENCE_FAILED', shutdown: {
         shutdownId: 'failed-1', phase: 'fenceFailed', deadlineExceeded: false, activeOperationCount: 0, pendingMutationCount: 0 } };

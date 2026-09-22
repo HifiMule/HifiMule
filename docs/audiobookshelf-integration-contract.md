@@ -60,3 +60,21 @@ Do not corrupt a library, media file, database, or server configuration to obtai
 ### Binding rules for Stories 17.2–17.9
 
 All server traffic remains behind `MediaProvider`; authentication and authenticated URLs stay daemon-side. Books and Podcasts retain distinct roles. For future book mapping author is primary and narrator secondary. Progress is player-owned only, never ordinary device sync, and may use only proven stable remote identity plus a whole-item offset. This record grants no permission to add `AudiobookshelfProvider`, `ServerType::Audiobookshelf`, factory detection, vault/config, UI, RPCs, catalog mapping, direct playback, progress write-back, sync, Autofill, or collections.
+
+## Record 2 — controlled playback follow-up (2026-09-22)
+
+The user supplied access to a controlled endpoint with a disposable test account. Requests below were observed live; only redacted shapes and statuses are retained. A follow-up playback response reported `serverVersion: 2.36.1`.
+
+| Probe | Observation | Implementation consequence |
+| --- | --- | --- |
+| `POST /api/items/{item}/play` with `forceDirectPlay: true` | 200; `playMethod: 0`; one server-relative `audioTracks` entry with `mimeType: audio/mp4` and `codec: aac`. `POST /api/session/{session}/close` returned 200. | Direct AAC/MP4 is a candidate only after authenticated media range and decoder checks. |
+| `POST /api/items/{item}/play` with `forceTranscode: true` | 200; `playMethod: 2`; one server-relative track with `mimeType: application/vnd.apple.mpegurl` and no codec. Close returned 200. | The response is HLS, which the current byte-stream decoder does not accept as audio. Do not pass this representation to it or claim transcode playback support. |
+| `POST /api/items/{item}/play` with `forceDirectPlay: true` and an unsupported MIME in `supportedMimeTypes` | 200; `playMethod: 0`, AAC/MP4. Close returned 200. | The server did not honor the MIME list as an incompatibility trigger when direct play was forced. This does not establish an incompatible delivery failure mapping. |
+| `POST /api/items/{missingItem}/play` | 404. | A missing item is observed; the wider unavailable/incompatible delivery case remains untested. |
+| First catalog page with limit 50 | No multipart item in the returned page. | A later explicit item probe was needed for multipart evidence. |
+| User-identified ten-part book, `GET /api/items/{item}` then direct play | Detail contained ten indexed audio files. `forceDirectPlay: true` returned `playMethod: 0` and ten tracks. The first track was matched by `ino`; it reported `audio/mpeg` and `mp3`. Authenticated `Range: bytes=0-0` returned 206, `audio/mpeg`, and `Accept-Ranges: bytes`; session close returned 200. | Multipart direct response shape and first-part mapping are observed. This file was still readable during the probe, so it does not establish an unavailable delivery response. |
+| Same book, forced transcode | 200, `playMethod: 2`, one HLS track with no matching first-file `ino`; close returned 200. | Do not claim per-part transcode admission from this response. |
+| Indexed first part removed after detail and direct session were captured | After refreshing the disposable access token, authenticated `GET` of the previously returned first-track `contentUrl` with `Range: bytes=0-0` returned 404 and no range header. The session close returned 200. An earlier attempt without refresh returned 401 for both media and close; that was authentication expiry, not delivery evidence. | A file that vanishes after admission is a media-read 404. Keep the book available for explicit retry and never skip to another part. Refresh at most once after 401, including cleanup. |
+| Follow-up of the ten-part direct response | The session reported `serverVersion: 2.36.1`, `playMethod: 0`, and an item-scoped, server-relative `contentUrl` without a query string. Close returned 200. | Gate the provider adapter on the observed server version and reject URLs outside the selected item path. |
+
+The unavailable-after-admission race is verified. The incompatible-format failure remains `untested`; the forced-direct unsupported-MIME request did not trigger it. No failure body, session identifier, token, item identifier, title, or authenticated URL was retained.

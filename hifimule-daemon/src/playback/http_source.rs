@@ -200,24 +200,67 @@ impl Seek for HttpSource {
             headers.insert(reqwest::header::IF_RANGE, validator.clone());
         }
         let url = self.request.url.clone();
-        let response = self.runtime.block_on(self.preparation.run(async move {
+        let refresh = self.request.refresh.clone();
+        let (response, refreshed) = self.runtime.block_on(self.preparation.run(async move {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|_| io::Error::other("source client unavailable"))?;
-            client
-                .get(url)
-                .headers(headers)
+            let response = client
+                .get(url.clone())
+                .headers(headers.clone())
                 .send()
                 .await
-                .map_err(|_| io::Error::other("source seek failed"))
+                .map_err(|_| io::Error::other("source seek failed"))?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                && let Some(refresh) = refresh
+                && let Some(mut new_headers) = refresh().await
+            {
+                for key in [
+                    reqwest::header::RANGE,
+                    reqwest::header::ACCEPT_ENCODING,
+                    reqwest::header::IF_RANGE,
+                ] {
+                    if let Some(value) = headers.get(&key) {
+                        new_headers.insert(key, value.clone());
+                    }
+                }
+                let response = client
+                    .get(url)
+                    .headers(new_headers.clone())
+                    .send()
+                    .await
+                    .map_err(|_| io::Error::other("source seek failed"))?;
+                return Ok((response, Some(new_headers)));
+            }
+            Ok((response, None))
         }))?;
+        if let Some(refreshed) = refreshed
+            && let Some(token) = refreshed.get(reqwest::header::AUTHORIZATION)
+        {
+            self.request
+                .headers
+                .insert(reqwest::header::AUTHORIZATION, token.clone());
+        }
         let header = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
             .and_then(|value| value.to_str().ok());
+        let actual_mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
         if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+            || self
+                .request
+                .expected_content_type
+                .as_deref()
+                .is_some_and(|expected| {
+                    !actual_mime.is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+                })
             || !valid_content_range(header, target, self.length)
             || self
                 .validator
@@ -300,6 +343,9 @@ mod tests {
                 url,
                 headers: Default::default(),
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
             response,
             Preparation::new(Instant::now() + Duration::from_secs(60), cancel.clone()),
@@ -344,6 +390,9 @@ mod tests {
                 url,
                 headers: Default::default(),
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
             response,
             Preparation::new(
@@ -449,6 +498,9 @@ mod tests {
                 url,
                 headers,
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
             response,
             Preparation::new(
@@ -492,6 +544,9 @@ mod tests {
                 url,
                 headers: Default::default(),
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
             response,
             Preparation::new(
@@ -538,6 +593,9 @@ mod tests {
                 url,
                 headers: Default::default(),
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
             response,
             Preparation::new(

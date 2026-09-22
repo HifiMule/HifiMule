@@ -1273,10 +1273,11 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     }
     row.appendChild(thumb);
     row.appendChild(info);
-    if (item.type === 'Audio') {
+    if (item.type === 'Audio' || item.type === 'BookPart') {
+        const isPart = item.type === 'BookPart';
         const play = document.createElement('sl-icon-button') as any;
         play.name = 'play-fill';
-        play.label = t('playback.play_track', { title: item.name });
+        play.label = t(isPart ? 'library.books.play_part' : 'playback.play_track', { title: item.name });
         play.disabled = !item.serverId;
         const playbackSource = item.serverId
             ? { serverId: item.serverId, trackId: item.id }
@@ -1289,11 +1290,13 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
             catch (error) { showToast((error as Error).message, 'danger'); }
         });
         row.appendChild(play);
-        row.appendChild(createTrackPreviewButton(item.serverId, item.id, item.name));
-        row.appendChild(createTrackQueueButton(item.serverId, item.id, item.name));
+        if (!isPart) {
+            row.appendChild(createTrackPreviewButton(item.serverId, item.id, item.name));
+            row.appendChild(createTrackQueueButton(item.serverId, item.id, item.name));
+        }
     }
-    if (item.type === 'MusicAlbum') {
-        const play = createAlbumPlayButton(item.id, item.serverId, item.name);
+    if (item.type === 'MusicAlbum' || item.type === 'Book') {
+        const play = createAlbumPlayButton(item.id, item.serverId, item.name, item.type === 'Book' ? 'book' : 'album');
         row.appendChild(play);
     }
     // Curate button: appears on Playlist rows when playlist write is supported (mirrors MediaCard grid behavior)

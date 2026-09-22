@@ -88,6 +88,14 @@ const FIXTURES: &[(&str, &str)] = &[
         "delivery-unavailable.json",
         include_str!("fixtures/audiobookshelf/2.36.1/delivery-unavailable.json"),
     ),
+    (
+        "delivery-incompatible.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/delivery-incompatible.json"),
+    ),
+    (
+        "playback-follow-up-2026-09-22.json",
+        include_str!("fixtures/audiobookshelf/2.36.1/playback-follow-up-2026-09-22.json"),
+    ),
     ("progress-contract.json", PROGRESS),
     ("progress-idempotency.json", PROGRESS_IDEMPOTENCY),
     ("progress-empty-payload.json", PROGRESS_EMPTY),
@@ -194,7 +202,7 @@ fn fixture_pagination_and_ordering_invariants_are_explicit() {
 #[test]
 fn role_and_unobserved_cases_stay_distinct() {
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
-    for case_id in ["delivery-unavailable", "progress-failure"] {
+    for case_id in ["delivery-incompatible", "progress-failure"] {
         let case = manifest["cases"]
             .as_array()
             .unwrap()
@@ -210,6 +218,16 @@ fn role_and_unobserved_cases_stay_distinct() {
         assert_eq!(fixture["classification"], "undetermined");
         assert!(fixture.get("status").is_none());
     }
+    let unavailable: Value = serde_json::from_str(
+        FIXTURES
+            .iter()
+            .find(|(name, _)| *name == "delivery-unavailable.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(unavailable["mediaRequest"]["status"], 404);
+    assert_eq!(unavailable["cleanup"]["status"], 200);
 
     let book_search: Value = serde_json::from_str(
         FIXTURES

@@ -120,7 +120,17 @@
     {
       "id": "delivery-unavailable",
       "fixture": "delivery-unavailable.json",
+      "status": "verified"
+    },
+    {
+      "id": "delivery-incompatible",
+      "fixture": "delivery-incompatible.json",
       "status": "untested"
+    },
+    {
+      "id": "playback-follow-up-2026-09-22",
+      "fixture": "playback-follow-up-2026-09-22.json",
+      "status": "ambiguous"
     },
     {
       "id": "progress-contract",

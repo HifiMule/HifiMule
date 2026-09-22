@@ -1,11 +1,11 @@
-//! Audiobookshelf v2.36.1 connection and library-scope adapter.
-//!
-//! This story intentionally exposes no catalogue operations. Authentication,
-//! tokens, and upstream library identifiers stay daemon-side.
+//! Audiobookshelf v2.36.1 scoped catalogue and direct playback adapter.
+//! Authentication, playback sessions, tokens, and upstream identifiers stay daemon-side.
 
 use super::{
-    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, ProviderChangeContext,
-    ProviderError, ProviderLibraryRole, ScrobbleRequest, ServerType, TranscodeProfile,
+    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, PlaybackCleanup,
+    PlaybackDescription, PlaybackProvenance, PlaybackRefresh, PlaybackRepresentation,
+    PlaybackRequest, ProviderChangeContext, ProviderError, ProviderLibraryRole, ScrobbleRequest,
+    ServerType, TranscodeProfile,
 };
 use crate::domain::models::{
     Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChapterMarker, Credit,
@@ -13,11 +13,13 @@ use crate::domain::models::{
     ProviderPartIdentity, SearchResult, Song,
 };
 use async_trait::async_trait;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -62,7 +64,7 @@ impl fmt::Debug for AuthSession {
 pub struct AudiobookshelfProvider {
     client: Client,
     base_url: String,
-    session: Mutex<AuthSession>,
+    session: Arc<Mutex<AuthSession>>,
     library_id: Option<String>,
     library_role: Option<ProviderLibraryRole>,
     server_version: Option<String>,
@@ -195,6 +197,27 @@ struct ChapterDto {
     end: f64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaySessionDto {
+    id: String,
+    server_version: String,
+    library_id: String,
+    library_item_id: String,
+    media_type: String,
+    play_method: u8,
+    audio_tracks: Vec<PlayTrackDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayTrackDto {
+    ino: Option<String>,
+    content_url: String,
+    mime_type: String,
+    codec: Option<String>,
+}
+
 impl AudiobookshelfProvider {
     const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
     fn client() -> Result<Client, ProviderError> {
@@ -229,24 +252,7 @@ impl AudiobookshelfProvider {
             .await
             .map_err(transport_error)?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let refresh = session.refresh_token.as_ref().ok_or_else(|| {
-                ProviderError::Auth("Audiobookshelf authentication expired".into())
-            })?;
-            let refreshed = self
-                .client
-                .post(format!("{}/auth/refresh", self.base_url))
-                .header("x-refresh-token", refresh.expose_secret())
-                .send()
-                .await
-                .map_err(transport_error)?;
-            check_auth_status(&refreshed)?;
-            let tokens: RefreshResponse = refreshed.json().await.map_err(deserialization_error)?;
-            if tokens.user.access_token.trim().is_empty() {
-                return Err(ProviderError::Deserialization(
-                    "Audiobookshelf refresh omitted access token".into(),
-                ));
-            }
-            session.access_token = SecretString::new(tokens.user.access_token);
+            refresh_auth(&self.client, &self.base_url, &mut session).await?;
             response = self
                 .client
                 .get(endpoint)
@@ -265,6 +271,167 @@ impl AudiobookshelfProvider {
             });
         }
         Ok(response)
+    }
+
+    async fn protected_post(
+        &self,
+        endpoint: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let mut session = self.session.lock().await;
+        let mut response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(session.access_token.expose_secret())
+            .json(body)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            refresh_auth(&self.client, &self.base_url, &mut session).await?;
+            response = self
+                .client
+                .post(endpoint)
+                .bearer_auth(session.access_token.expose_secret())
+                .json(body)
+                .send()
+                .await
+                .map_err(transport_error)?;
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > Self::MAX_RESPONSE_BYTES)
+        {
+            return Err(ProviderError::Deserialization(
+                "Audiobookshelf playback response too large".into(),
+            ));
+        }
+        Ok(response)
+    }
+
+    fn playback_cleanup(&self, session_id: String) -> Arc<PlaybackCleanup> {
+        let client = self.client.clone();
+        let auth = self.session.clone();
+        let base = self.base_url.clone();
+        let runtime = tokio::runtime::Handle::current();
+        Arc::new(PlaybackCleanup::new(move || {
+            super::register_playback_cleanup(runtime.spawn(async move {
+                let Ok(mut url) = reqwest::Url::parse(&format!("{base}/api/session")) else {
+                    return;
+                };
+                let Ok(mut segments) = url.path_segments_mut() else {
+                    return;
+                };
+                segments.push(&session_id).push("close");
+                drop(segments);
+                let mut session = auth.lock().await;
+                let result = client
+                    .post(url.clone())
+                    .bearer_auth(session.access_token.expose_secret())
+                    .send()
+                    .await;
+                if result
+                    .as_ref()
+                    .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
+                    && refresh_auth(&client, &base, &mut session).await.is_ok()
+                {
+                    let _ = client
+                        .post(url)
+                        .bearer_auth(session.access_token.expose_secret())
+                        .send()
+                        .await;
+                }
+            }));
+        }))
+    }
+
+    fn playback_refresh(&self) -> Arc<PlaybackRefresh> {
+        let client = self.client.clone();
+        let auth = self.session.clone();
+        let base = self.base_url.clone();
+        Arc::new(move || {
+            let client = client.clone();
+            let auth = auth.clone();
+            let base = base.clone();
+            Box::pin(async move {
+                let mut session = auth.lock().await;
+                refresh_auth(&client, &base, &mut session).await.ok()?;
+                let token = HeaderValue::from_str(&format!(
+                    "Bearer {}",
+                    session.access_token.expose_secret()
+                ))
+                .ok()?;
+                let mut headers = HeaderMap::new();
+                headers.insert(AUTHORIZATION, token);
+                Some(headers)
+            })
+        })
+    }
+
+    async fn verify_direct_media(
+        &self,
+        url: &reqwest::Url,
+        mime: &str,
+    ) -> Result<HeaderMap, ProviderError> {
+        let mut session = self.session.lock().await;
+        let mut response = self
+            .client
+            .get(url.clone())
+            .bearer_auth(session.access_token.expose_secret())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            refresh_auth(&self.client, &self.base_url, &mut session).await?;
+            response = self
+                .client
+                .get(url.clone())
+                .bearer_auth(session.access_token.expose_secret())
+                .header(reqwest::header::RANGE, "bytes=0-0")
+                .send()
+                .await
+                .map_err(transport_error)?;
+        }
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound {
+                item_type: "part".into(),
+                id: "unavailable".into(),
+            });
+        }
+        check_status(&response)?;
+        let actual_mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        let valid_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("bytes 0-0/"))
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > 0);
+        if response.status() != StatusCode::PARTIAL_CONTENT
+            || actual_mime != Some(mime)
+            || !valid_range
+            || response
+                .headers()
+                .get(reqwest::header::ACCEPT_RANGES)
+                .and_then(|value| value.to_str().ok())
+                != Some("bytes")
+        {
+            return Err(ProviderError::UnsupportedCapability(
+                "Audiobookshelf direct response is incompatible".into(),
+            ));
+        }
+        let token =
+            HeaderValue::from_str(&format!("Bearer {}", session.access_token.expose_secret()))
+                .map_err(|_| ProviderError::Auth("Audiobookshelf token is invalid".into()))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, token);
+        Ok(headers)
     }
 
     async fn catalogue_page(
@@ -577,14 +744,14 @@ impl AudiobookshelfProvider {
         Ok(Self {
             client,
             base_url,
-            session: Mutex::new(AuthSession {
+            session: Arc::new(Mutex::new(AuthSession {
                 access_token: SecretString::new(login.user.access_token),
                 refresh_token: login
                     .user
                     .refresh_token
                     .filter(|token| !token.trim().is_empty())
                     .map(SecretString::new),
-            }),
+            })),
             library_id: None,
             library_role: None,
             // The validated v2.36.1 login contract does not expose a version.
@@ -725,12 +892,45 @@ impl<T> Pipe for T {}
 fn transport_error(error: reqwest::Error) -> ProviderError {
     ProviderError::Http {
         status: error.status().map(|status| status.as_u16()),
-        message: super::sanitize_secret_message(&error.to_string()),
+        message: "Audiobookshelf transport failed".into(),
     }
 }
 
-fn deserialization_error(error: reqwest::Error) -> ProviderError {
-    ProviderError::Deserialization(super::sanitize_secret_message(&error.to_string()))
+fn deserialization_error(_error: reqwest::Error) -> ProviderError {
+    ProviderError::Deserialization("invalid Audiobookshelf response".into())
+}
+
+async fn refresh_auth(
+    client: &Client,
+    base_url: &str,
+    session: &mut AuthSession,
+) -> Result<(), ProviderError> {
+    let refresh = session
+        .refresh_token
+        .as_ref()
+        .ok_or_else(|| ProviderError::Auth("Audiobookshelf authentication expired".into()))?;
+    let response = client
+        .post(format!("{base_url}/auth/refresh"))
+        .header("x-refresh-token", refresh.expose_secret())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    check_auth_status(&response)?;
+    let tokens: RefreshResponse = response.json().await.map_err(deserialization_error)?;
+    if tokens.user.access_token.trim().is_empty() {
+        return Err(ProviderError::Deserialization(
+            "Audiobookshelf refresh omitted access token".into(),
+        ));
+    }
+    session.access_token = SecretString::new(tokens.user.access_token);
+    if let Some(refresh) = tokens
+        .user
+        .refresh_token
+        .filter(|value| !value.trim().is_empty())
+    {
+        session.refresh_token = Some(SecretString::new(refresh));
+    }
+    Ok(())
 }
 
 fn deserialize_nonempty<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -901,6 +1101,44 @@ fn parse_opaque_id(kind: &str, id: &str) -> Result<(String, String, String), Pro
         _ => Err(ProviderError::NotFound {
             item_type: "album".into(),
             id: id.into(),
+        }),
+    }
+}
+
+fn parse_track_id(id: &str) -> Result<(String, String, String, String), ProviderError> {
+    let prefix = "abs-track-";
+    let encoded = id
+        .strip_prefix(prefix)
+        .ok_or_else(|| ProviderError::NotFound {
+            item_type: "part".into(),
+            id: "unavailable".into(),
+        })?;
+    let parts = encoded
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || part.len() % 2 != 0 {
+                return Err(());
+            }
+            (0..part.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&part[index..index + 2], 16).map_err(|_| ()))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|bytes| String::from_utf8(bytes).map_err(|_| ()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ProviderError::NotFound {
+            item_type: "part".into(),
+            id: "unavailable".into(),
+        })?;
+    match parts.as_slice() {
+        [library, item, media, file]
+            if !library.is_empty() && !item.is_empty() && !media.is_empty() && !file.is_empty() =>
+        {
+            Ok((library.clone(), item.clone(), media.clone(), file.clone()))
+        }
+        _ => Err(ProviderError::NotFound {
+            item_type: "part".into(),
+            id: "unavailable".into(),
         }),
     }
 }
@@ -1111,6 +1349,26 @@ impl MediaProvider for AudiobookshelfProvider {
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError> {
         self.catalogue_book(album_id).await
     }
+    async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
+        let library = self.audiobook_library_id()?;
+        let (encoded_library, item, media, _) = parse_track_id(song_id)?;
+        if encoded_library != library {
+            return Err(ProviderError::NotFound {
+                item_type: "part".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let album_id = opaque_id("album", &[library, &item, &media]);
+        self.catalogue_book(&album_id)
+            .await?
+            .tracks
+            .into_iter()
+            .find(|track| track.id == song_id)
+            .ok_or_else(|| ProviderError::NotFound {
+                item_type: "part".into(),
+                id: "unavailable".into(),
+            })
+    }
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
         Err(unsupported("list_playlists"))
     }
@@ -1126,6 +1384,131 @@ impl MediaProvider for AudiobookshelfProvider {
         _profile: Option<&TranscodeProfile>,
     ) -> Result<String, ProviderError> {
         Err(unsupported("download_url"))
+    }
+    async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
+        let library = self.audiobook_library_id()?;
+        let (encoded_library, item, _media, file) = parse_track_id(song_id)?;
+        if encoded_library != library {
+            return Err(ProviderError::NotFound {
+                item_type: "part".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let song = self.get_song(song_id).await?;
+        if song.provider_metadata.audio_file_id.as_deref() != Some(file.as_str()) {
+            return Err(ProviderError::NotFound {
+                item_type: "part".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let endpoint = format!("{}/play", item_endpoint(&self.base_url, &item)?);
+        let response = self
+            .protected_post(&endpoint, &serde_json::json!({"forceDirectPlay": true}))
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound {
+                item_type: "book".into(),
+                id: "unavailable".into(),
+            });
+        }
+        check_status(&response)?;
+        let value: serde_json::Value = bounded_json(response, "playback session").await?;
+        let session_id = value
+            .get("id")
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ProviderError::Deserialization(
+                    "Audiobookshelf playback omitted session identity".into(),
+                )
+            })?
+            .to_owned();
+        let cleanup = self.playback_cleanup(session_id.clone());
+        let playback: PlaySessionDto = serde_json::from_value(value).map_err(|_| {
+            ProviderError::Deserialization("invalid Audiobookshelf playback session".into())
+        })?;
+        if playback.server_version != "2.36.1" {
+            return Err(ProviderError::UnsupportedCapability(
+                "Audiobookshelf playback server version is unverified".into(),
+            ));
+        }
+        if playback.id != session_id
+            || playback.library_id != library
+            || playback.library_item_id != item
+            || playback.media_type != "book"
+        {
+            return Err(ProviderError::Deserialization(
+                "invalid Audiobookshelf playback scope".into(),
+            ));
+        }
+        if playback.play_method != 0 {
+            return Err(ProviderError::UnsupportedCapability(
+                "Audiobookshelf selected an unsupported playback method".into(),
+            ));
+        }
+        let mut matches = playback
+            .audio_tracks
+            .into_iter()
+            .filter(|track| track.ino.as_deref() == Some(file.as_str()));
+        let track = matches.next().ok_or_else(|| ProviderError::NotFound {
+            item_type: "part".into(),
+            id: "unavailable".into(),
+        })?;
+        if matches.next().is_some() {
+            return Err(ProviderError::Deserialization(
+                "duplicate Audiobookshelf part in playback session".into(),
+            ));
+        }
+        let (codec, container) = match (track.mime_type.as_str(), track.codec.as_deref()) {
+            ("audio/mpeg", Some("mp3")) => ("mp3", "mp3"),
+            ("audio/mp4", Some("aac")) => ("aac", "m4a"),
+            _ => {
+                return Err(ProviderError::UnsupportedCapability(
+                    "Audiobookshelf audio format is not verified".into(),
+                ));
+            }
+        };
+        if !track.content_url.starts_with('/') || track.content_url.starts_with("//") {
+            return Err(ProviderError::Deserialization(
+                "invalid Audiobookshelf media URL".into(),
+            ));
+        }
+        let base = reqwest::Url::parse(&self.base_url)
+            .map_err(|_| ProviderError::Deserialization("invalid Audiobookshelf origin".into()))?;
+        let url = base.join(&track.content_url).map_err(|_| {
+            ProviderError::Deserialization("invalid Audiobookshelf media URL".into())
+        })?;
+        let item_url = item_endpoint(&self.base_url, &item)?;
+        if url.origin() != base.origin()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.as_str().starts_with(&format!("{item_url}/"))
+        {
+            return Err(ProviderError::Deserialization(
+                "Audiobookshelf media URL left selected item".into(),
+            ));
+        }
+        let headers = self.verify_direct_media(&url, &track.mime_type).await?;
+        Ok(PlaybackDescription {
+            song,
+            representations: vec![PlaybackRepresentation {
+                codec: Some(codec.into()),
+                container: Some(container.into()),
+                bitrate_kbps: None,
+                sample_rate: None,
+                bit_depth: None,
+                provenance: PlaybackProvenance::Original,
+                seek_mechanism: None,
+                request: PlaybackRequest {
+                    url,
+                    headers,
+                    range_supported: true,
+                    cleanup: Some(cleanup),
+                    refresh: Some(self.playback_refresh()),
+                    expected_content_type: Some(track.mime_type),
+                },
+            }],
+        })
     }
     async fn cover_art_url(&self, _cover_art_id: &str) -> Result<String, ProviderError> {
         Err(unsupported("cover_art_url"))
@@ -1192,6 +1575,352 @@ mod tests {
 
     fn login_body() -> &'static str {
         r#"{"user":{"accessToken":"access-fixture","refreshToken":"refresh-fixture"}}"#
+    }
+
+    fn playback_book() -> &'static str {
+        r#"{"id":"item-1","libraryId":"book-id","mediaType":"book","media":{"id":"media-1","metadata":{"title":"Fixture"},"audioFiles":[{"ino":"ino-1","index":1,"duration":60}]}}"#
+    }
+
+    #[tokio::test]
+    async fn direct_part_uses_scoped_identity_and_closes_session_after_request_retirement() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let detail = server
+            .mock("GET", "/api/items/item-1")
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(playback_book())
+            .expect(1)
+            .create_async()
+            .await;
+        let play = server.mock("POST", "/api/items/item-1/play")
+            .match_header("authorization", "Bearer access-fixture")
+            .match_body(Matcher::PartialJson(serde_json::json!({"forceDirectPlay": true})))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"book-id","libraryItemId":"item-1","mediaType":"book","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/item-1/file/ino-1","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .expect(1).create_async().await;
+        let media = server
+            .mock("GET", "/api/items/item-1/file/ino-1")
+            .match_header("authorization", "Bearer access-fixture")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .with_header("content-type", "audio/mpeg")
+            .with_header("accept-ranges", "bytes")
+            .with_header("content-range", "bytes 0-0/100")
+            .with_body("x")
+            .expect(1)
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let id = opaque_id("track", &["book-id", "item-1", "media-1", "ino-1"]);
+        let description = provider.resolve_playback(&id).await.unwrap();
+        assert_eq!(description.song.id, id);
+        assert_eq!(description.representations.len(), 1);
+        assert_eq!(description.representations[0].codec.as_deref(), Some("mp3"));
+        assert!(description.representations[0].request.range_supported);
+        let debug = format!("{:?}", description.representations[0].request);
+        assert!(!debug.contains("session-secret"));
+        assert!(!debug.contains("access-fixture"));
+        drop(description);
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        detail.assert_async().await;
+        play.assert_async().await;
+        media.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn wrong_library_part_is_rejected_before_any_request() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let id = opaque_id("track", &["other-library", "item-1", "media-1", "ino-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hls_fallback_is_rejected_and_its_session_is_closed() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let _detail = server
+            .mock("GET", "/api/items/item-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(playback_book())
+            .create_async()
+            .await;
+        let _play = server.mock("POST", "/api/items/item-1/play")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"book-id","libraryItemId":"item-1","mediaType":"book","playMethod":2,"audioTracks":[{"contentUrl":"/api/session/session-secret/playlist.m3u8","mimeType":"application/vnd.apple.mpegurl"}]}"#)
+            .create_async().await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let id = opaque_id("track", &["book-id", "item-1", "media-1", "ino-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn foreign_media_url_is_rejected_before_any_authenticated_read() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let _detail = server
+            .mock("GET", "/api/items/item-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(playback_book())
+            .create_async()
+            .await;
+        let _play = server.mock("POST", "/api/items/item-1/play")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"book-id","libraryItemId":"item-1","mediaType":"book","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"https://foreign.invalid/steal","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .create_async().await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let id = opaque_id("track", &["book-id", "item-1", "media-1", "ino-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::Deserialization(_))
+        ));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn direct_media_refreshes_once_after_401_and_uses_new_bearer() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let old = server
+            .mock("GET", "/api/items/item-1/file/ino-1")
+            .match_header("authorization", "Bearer access-fixture")
+            .match_header("range", "bytes=0-0")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/auth/refresh")
+            .match_header("x-refresh-token", "refresh-fixture")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"new-access","refreshToken":"new-refresh"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let fresh = server
+            .mock("GET", "/api/items/item-1/file/ino-1")
+            .match_header("authorization", "Bearer new-access")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .with_header("content-type", "audio/mpeg")
+            .with_header("accept-ranges", "bytes")
+            .with_header("content-range", "bytes 0-0/100")
+            .with_body("x")
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let url =
+            reqwest::Url::parse(&format!("{}/api/items/item-1/file/ino-1", server.url())).unwrap();
+        let headers = provider
+            .verify_direct_media(&url, "audio/mpeg")
+            .await
+            .unwrap();
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer new-access");
+        old.assert_async().await;
+        refresh.assert_async().await;
+        fresh.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn session_close_refreshes_expired_access_once() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let old = server
+            .mock("POST", "/api/session/session-secret/close")
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/auth/refresh")
+            .match_header("x-refresh-token", "refresh-fixture")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"new-access"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .match_header("authorization", "Bearer new-access")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap();
+        drop(provider.playback_cleanup("session-secret".into()));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        old.assert_async().await;
+        refresh.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn vanished_media_is_retryable_without_admitting_a_different_part() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let _detail = server
+            .mock("GET", "/api/items/item-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(playback_book())
+            .create_async()
+            .await;
+        let _play = server.mock("POST", "/api/items/item-1/play")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"book-id","libraryItemId":"item-1","mediaType":"book","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/item-1/file/ino-1","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .create_async().await;
+        let _missing = server
+            .mock("GET", "/api/items/item-1/file/ino-1")
+            .match_header("range", "bytes=0-0")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let id = opaque_id("track", &["book-id", "item-1", "media-1", "ino-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::NotFound { .. })
+        ));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        close.assert_async().await;
     }
 
     #[test]

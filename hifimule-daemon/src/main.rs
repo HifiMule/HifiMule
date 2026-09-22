@@ -168,7 +168,9 @@ async fn finish_shutdown_with_playback(
         tokio::task::spawn_blocking(|| playback::audio::global().stop_and_join()).await;
     let playback = playback.clone();
     let joined = tokio::task::spawn_blocking(move || playback.stop_and_join()).await;
-    let succeeded = matches!(joined, Ok(Ok(()))) && matches!(audio_joined, Ok(Ok(())));
+    let cleanups_joined = providers::drain_playback_cleanups().await;
+    let succeeded =
+        matches!(joined, Ok(Ok(()))) && matches!(audio_joined, Ok(Ok(()))) && cleanups_joined;
     if !succeeded {
         operations.fail_playback_teardown();
     }

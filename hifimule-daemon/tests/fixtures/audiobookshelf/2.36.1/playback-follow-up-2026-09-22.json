@@ -1,0 +1,11 @@
+{
+  "observationDate": "2026-09-22",
+  "reportedServerVersion": "2.36.1",
+  "direct": {"status": 200, "playMethod": 0, "trackMimeType": "audio/mp4", "trackCodec": "aac", "closeStatus": 200},
+  "transcode": {"status": 200, "playMethod": 2, "trackMimeType": "application/vnd.apple.mpegurl", "trackCodec": null, "closeStatus": 200},
+  "forcedDirectWithUnsupportedMime": {"status": 200, "playMethod": 0},
+  "missingItemPlay": {"status": 404},
+  "multipart": {"audioFiles": 10, "directTracks": 10, "firstTrackMimeType": "audio/mpeg", "firstTrackCodec": "mp3", "firstTrackRangeStatus": 206, "firstTrackAcceptRanges": "bytes", "transcodeTracks": 1, "transcodeFirstFileIdentityPresent": false},
+  "unavailableAfterAdmission": {"refreshStatus": 200, "mediaRangeStatus": 404, "acceptRanges": null, "closeStatus": 200},
+  "incompatibleDelivery": "untested"
+}

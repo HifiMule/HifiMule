@@ -66,8 +66,7 @@ export class MediaCard {
         const isSelected = basketStore.has(itemId);
         if (isSelected) card.classList.add('is-selected');
 
-        // Audiobookshelf books are browse-only until Story 17.5. They must not
-        // accidentally enter the music basket or advertise playback controls.
+        // Audiobookshelf books and parts remain outside the music basket.
         const showSelection = isBrowseItem
             ? !['Book', 'BookPart'].includes((item as BrowseDisplayItem).type)
             : mode === 'items';
@@ -112,11 +111,12 @@ export class MediaCard {
             </div>
         `;
 
-        if (isBrowseItem && (item as BrowseDisplayItem).type === 'Audio') {
+        if (isBrowseItem && ['Audio', 'BookPart'].includes((item as BrowseDisplayItem).type)) {
             const audio = item as BrowseDisplayItem;
+            const isPart = audio.type === 'BookPart';
             const play = document.createElement('sl-icon-button') as any;
             play.name = 'play-fill';
-            play.label = t('playback.play_track', { title: itemName });
+            play.label = t(isPart ? 'library.books.play_part' : 'playback.play_track', { title: itemName });
             play.disabled = !audio.serverId;
             const playbackSource = audio.serverId
                 ? { serverId: audio.serverId, trackId: audio.id }
@@ -129,17 +129,19 @@ export class MediaCard {
                 catch (error) { showToast((error as Error).message, 'danger'); }
             });
             card.querySelector('.card-content')?.appendChild(play);
-            card.querySelector('.card-content')?.appendChild(
-                createTrackPreviewButton(audio.serverId, audio.id, itemName),
-            );
-            card.querySelector('.card-content')?.appendChild(
-                createTrackQueueButton(audio.serverId, audio.id, itemName),
-            );
+            if (!isPart) {
+                card.querySelector('.card-content')?.appendChild(
+                    createTrackPreviewButton(audio.serverId, audio.id, itemName),
+                );
+                card.querySelector('.card-content')?.appendChild(
+                    createTrackQueueButton(audio.serverId, audio.id, itemName),
+                );
+            }
         }
 
-        if (isBrowseItem && (item as BrowseDisplayItem).type === 'MusicAlbum') {
+        if (isBrowseItem && ['MusicAlbum', 'Book'].includes((item as BrowseDisplayItem).type)) {
             const album = item as BrowseDisplayItem;
-            const play = createAlbumPlayButton(album.id, album.serverId, itemName);
+            const play = createAlbumPlayButton(album.id, album.serverId, itemName, album.type === 'Book' ? 'book' : 'album');
             card.querySelector('.card-content')?.appendChild(play);
         }
 

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 
 pub mod audiobookshelf;
@@ -16,18 +17,86 @@ pub const SUBSONIC_PLAYLISTS_LIBRARY_ID: &str = "playlists";
 
 pub const MAX_PLAYBACK_REPRESENTATIONS: usize = 8;
 
-#[derive(Clone, PartialEq, Eq)]
+/// Private action tied to the last owner of an upstream playback request.
+/// No upstream identifier or credential is exposed through Debug or RPC.
+pub struct PlaybackCleanup(std::sync::Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>);
+
+pub type PlaybackRefresh = dyn Fn() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<reqwest::header::HeaderMap>> + Send>,
+    > + Send
+    + Sync;
+
+impl PlaybackCleanup {
+    pub fn new(action: impl FnOnce() + Send + 'static) -> Self {
+        Self(std::sync::Mutex::new(Some(Box::new(action))))
+    }
+}
+
+impl fmt::Debug for PlaybackCleanup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PlaybackCleanup([redacted])")
+    }
+}
+
+impl Drop for PlaybackCleanup {
+    fn drop(&mut self) {
+        if let Some(action) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            action();
+        }
+    }
+}
+
+static PLAYBACK_CLEANUPS: OnceLock<Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
+
+pub(crate) fn register_playback_cleanup(handle: tokio::task::JoinHandle<()>) {
+    let registry = PLAYBACK_CLEANUPS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut pending = registry.lock().unwrap_or_else(|error| error.into_inner());
+    pending.retain(|task| !task.is_finished());
+    pending.push(handle);
+}
+
+pub(crate) async fn drain_playback_cleanups() -> bool {
+    let Some(registry) = PLAYBACK_CLEANUPS.get() else {
+        return true;
+    };
+    let tasks = {
+        let mut pending = registry.lock().unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *pending)
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    for task in tasks {
+        if tokio::time::timeout_at(deadline, task).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(Clone)]
 pub struct PlaybackRequest {
     pub url: reqwest::Url,
     pub headers: reqwest::header::HeaderMap,
     pub range_supported: bool,
+    pub cleanup: Option<Arc<PlaybackCleanup>>,
+    pub refresh: Option<Arc<PlaybackRefresh>>,
+    pub expected_content_type: Option<String>,
 }
+
+impl PartialEq for PlaybackRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.url == other.url
+            && self.headers == other.headers
+            && self.range_supported == other.range_supported
+            && self.expected_content_type == other.expected_content_type
+    }
+}
+impl Eq for PlaybackRequest {}
 
 impl fmt::Debug for PlaybackRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlaybackRequest")
             .field("origin", &self.url.origin().ascii_serialization())
-            .field("path", &self.url.path())
+            .field("path", &"[redacted]")
             .field("headers", &"[redacted]")
             .field("range_supported", &self.range_supported)
             .finish()
@@ -1607,12 +1676,36 @@ mod tests {
                 .unwrap(),
             headers,
             range_supported: true,
+            cleanup: None,
+            refresh: None,
+            expected_content_type: None,
         };
         let debug = format!("{request:?}");
-        assert!(debug.contains("/stream/song"));
+        assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("very-secret"));
         assert!(!debug.contains("also-secret"));
         assert!(!debug.contains("token="));
+    }
+
+    #[test]
+    fn playback_cleanup_runs_once_after_last_request_owner_retires() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = count.clone();
+        let request = PlaybackRequest {
+            url: reqwest::Url::parse("https://music.example/private/session").unwrap(),
+            headers: reqwest::header::HeaderMap::new(),
+            range_supported: false,
+            cleanup: Some(Arc::new(PlaybackCleanup::new(move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))),
+            refresh: None,
+            expected_content_type: None,
+        };
+        let stale = request.clone();
+        drop(request);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(stale);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn representation(
@@ -1634,6 +1727,9 @@ mod tests {
                 url: reqwest::Url::parse(&format!("https://music.example/{codec}")).unwrap(),
                 headers: reqwest::header::HeaderMap::new(),
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
         }
     }

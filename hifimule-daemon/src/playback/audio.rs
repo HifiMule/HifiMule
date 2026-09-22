@@ -1573,7 +1573,7 @@ async fn fetch(request: &PlaybackRequest) -> Result<reqwest::Response, PlaybackP
                 anyhow::Error::new(error).context("build playback HTTP client"),
             )
         })?;
-    let response = tokio::time::timeout(
+    let mut response = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         client
             .get(request.url.clone())
@@ -1582,14 +1582,40 @@ async fn fetch(request: &PlaybackRequest) -> Result<reqwest::Response, PlaybackP
     )
     .await
     .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("playback preparation timeout")))?
-    .map_err(|error| {
-        PlaybackPipelineError::source(anyhow::Error::new(error).context("request playback source"))
+    .map_err(|_| {
+        PlaybackPipelineError::source(anyhow::anyhow!("request playback source failed"))
     })?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        && let Some(refresh) = &request.refresh
+        && let Some(headers) = refresh().await
+    {
+        response = client
+            .get(request.url.clone())
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|_| {
+                PlaybackPipelineError::source(anyhow::anyhow!("request playback source failed"))
+            })?;
+    }
     if !response.status().is_success() {
         return Err(PlaybackPipelineError::source(anyhow::anyhow!(
             "source unavailable ({})",
             response.status()
         )));
+    }
+    if let Some(expected) = request.expected_content_type.as_deref() {
+        let actual = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        if !actual.is_some_and(|actual| actual.eq_ignore_ascii_case(expected)) {
+            return Err(PlaybackPipelineError::unsupported(anyhow::anyhow!(
+                "provider changed the verified audio format"
+            )));
+        }
     }
     if response
         .headers()
@@ -3039,6 +3065,9 @@ mod tests {
             url: reqwest::Url::parse(url).unwrap(),
             headers: reqwest::header::HeaderMap::new(),
             range_supported: false,
+            cleanup: None,
+            refresh: None,
+            expected_content_type: None,
         }
     }
 
@@ -3359,6 +3388,13 @@ mod tests {
             .with_body(r#"{"error":"credential-must-not-escape"}"#)
             .create_async()
             .await;
+        let fallback = server
+            .mock("GET", "/fallback")
+            .with_status(200)
+            .with_header("content-type", "application/vnd.apple.mpegurl")
+            .with_body("#EXTM3U")
+            .create_async()
+            .await;
 
         assert!(
             fetch(&request(&format!("{}/redirect", server.url())))
@@ -3373,8 +3409,13 @@ mod tests {
             .to_string();
         assert!(error.contains("non-audio"));
         assert!(!error.contains("credential-must-not-escape"));
+        let mut qualified = request(&format!("{}/fallback", server.url()));
+        qualified.expected_content_type = Some("audio/mpeg".into());
+        let error = fetch(&qualified).await.unwrap_err();
+        assert_eq!(error.code(), "PLAYBACK_UNSUPPORTED");
         redirect.assert_async().await;
         document.assert_async().await;
+        fallback.assert_async().await;
     }
     #[test]
     fn review_runtime_qualification_enables_only_verified_media_duration() {

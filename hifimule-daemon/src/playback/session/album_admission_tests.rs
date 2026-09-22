@@ -487,6 +487,69 @@ fn gain_transport(s: &SessionSnapshot, action: ControlAction) -> ControlParams {
 }
 
 #[test]
+fn unavailable_book_part_keeps_order_and_retries_the_same_source() {
+    let owner = Owner::new();
+    let initial = owner.0.snapshot().unwrap();
+    owner
+        .0
+        .apply(ApplySessionParams {
+            schema_version: SCHEMA_VERSION,
+            instance_id: initial.instance_id,
+            session_id: initial.session_id,
+            command_id: Uuid::new_v4().to_string(),
+            expected_queue_revision: initial.queue_revision,
+            operation: SessionOperation::ReplaceQueue {
+                sources: vec![TrackSource {
+                    server_id: "other-selected-server".into(),
+                    track_id: "other-track".into(),
+                }],
+            },
+        })
+        .unwrap();
+    let reservation = resolve(&owner.0, request(&owner.0.snapshot().unwrap()));
+    let parts = (1..=3)
+        .map(|number| TrackSource {
+            server_id: "portable-abs-server".into(),
+            track_id: format!("abs-track-part-{number}"),
+        })
+        .collect::<Vec<_>>();
+    owner.0.commit_album(reservation, parts.clone()).unwrap();
+    let before = owner.0.snapshot().unwrap();
+    assert_eq!(before.current.as_ref().unwrap().source, parts[0]);
+    assert_eq!(
+        before
+            .occurrences
+            .iter()
+            .map(|item| &item.source)
+            .collect::<Vec<_>>(),
+        parts.iter().collect::<Vec<_>>()
+    );
+    owner.0.publish_event(
+        before.generation_id,
+        PlaybackEvent::Failed {
+            code: "SOURCE_UNAVAILABLE".into(),
+            retryable: true,
+        },
+    );
+    let failed = owner.0.snapshot().unwrap();
+    assert_eq!(failed.current.as_ref().unwrap().source, parts[0]);
+    assert_eq!(
+        failed
+            .occurrences
+            .iter()
+            .map(|item| &item.source)
+            .collect::<Vec<_>>(),
+        parts.iter().collect::<Vec<_>>()
+    );
+    let retried = owner
+        .0
+        .control_with_guard(gain_transport(&failed, ControlAction::Retry), None)
+        .unwrap();
+    assert_eq!(retried.current.as_ref().unwrap().source, parts[0]);
+    assert!(retried.resume_audio);
+}
+
+#[test]
 fn frozen_gain_survives_transport_seek_failures_and_restore_retry() {
     let owner = Owner::new();
     let reservation = resolve(&owner.0, request(&owner.0.snapshot().unwrap()));

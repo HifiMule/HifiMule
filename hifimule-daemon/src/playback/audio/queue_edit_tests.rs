@@ -154,6 +154,9 @@ fn description(url: &str) -> PlaybackDescription {
                 url: reqwest::Url::parse(url).unwrap(),
                 headers: reqwest::header::HeaderMap::new(),
                 range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
             },
         }],
     }

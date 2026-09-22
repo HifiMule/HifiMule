@@ -2,10 +2,10 @@ import { playbackPlayAlbum } from '../rpc';
 import { t } from '../i18n';
 import { showToast } from '../toast';
 
-export function createAlbumPlayButton(albumId: string, serverId: string | undefined, title: string): HTMLElement & { disabled: boolean } {
+export function createAlbumPlayButton(albumId: string, serverId: string | undefined, title: string, kind: 'album' | 'book' = 'album'): HTMLElement & { disabled: boolean } {
     const play = document.createElement('sl-icon-button') as HTMLElement & { name: string; label: string; disabled: boolean };
     play.name = 'play-fill';
-    play.label = t('playback.play_album', { title });
+    play.label = t(kind === 'book' ? 'library.books.play_book' : 'playback.play_album', { title });
     play.disabled = !serverId;
     const source = serverId ? { serverId, albumId } : null;
     play.addEventListener('mousedown', event => event.stopPropagation());
