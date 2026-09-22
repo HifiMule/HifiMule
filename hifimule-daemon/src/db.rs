@@ -620,7 +620,8 @@ impl Database {
         let existing_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM server_config
-                 WHERE lower(rtrim(trim(url), '/')) = ?1",
+                 WHERE lower(rtrim(trim(url), '/')) = ?1
+                   AND server_type != 'audiobookshelf'",
                 params![normalized],
                 |row| row.get(0),
             )
@@ -1893,6 +1894,42 @@ mod tests {
             db.get_server(&readded).unwrap().unwrap().server_id.unwrap(),
             portable_before,
             "portable identity is deterministic across remove/re-add"
+        );
+    }
+
+    #[test]
+    fn legacy_url_upsert_never_rewrites_an_audiobookshelf_scope() {
+        let db = Database::memory().unwrap();
+        let scoped = db
+            .upsert_audiobookshelf_server(
+                "https://abs.example.test",
+                "Alexis",
+                "lib_books",
+                AudiobookshelfLibraryRole::Audiobook,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let legacy = db
+            .upsert_server(
+                "https://abs.example.test/",
+                "jellyfin",
+                "Alexis",
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_ne!(legacy, scoped);
+        let scoped_row = db.get_server(&scoped).unwrap().unwrap();
+        assert_eq!(scoped_row.server_type, "audiobookshelf");
+        assert_eq!(scoped_row.provider_library_id.as_deref(), Some("lib_books"));
+        assert_eq!(
+            db.get_server(&legacy).unwrap().unwrap().server_type,
+            "jellyfin"
         );
     }
 

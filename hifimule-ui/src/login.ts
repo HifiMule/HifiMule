@@ -210,7 +210,10 @@ function bindLoginForm(
         lastDefaultName = nextName;
     };
 
+    let probeGeneration = 0;
     providerSelect?.addEventListener('sl-change', () => {
+        probeGeneration += 1;
+        if (probeTimer) clearTimeout(probeTimer);
         const provider = providerSelect.value;
         if (!isLoginProviderChoice(provider)) return;
         if (indicator) {
@@ -223,6 +226,7 @@ function bindLoginForm(
     });
 
     urlInput?.addEventListener('sl-input', () => {
+        probeGeneration += 1;
         if (probeTimer) clearTimeout(probeTimer);
         const url = urlInput.value.trim();
         if (providerSelect?.value !== 'auto') return;
@@ -231,9 +235,11 @@ function bindLoginForm(
             applyIdentityDefaults('unknown');
             return;
         }
+        const generation = probeGeneration;
         probeTimer = setTimeout(async () => {
             try {
                 const result = await rpcCall('server.probe', { url });
+                if (generation !== probeGeneration || providerSelect?.value !== 'auto') return;
                 const serverType = result?.serverType ?? null;
                 const badge = serverTypeBadge(serverType);
                 if (indicator) {
@@ -374,9 +380,14 @@ function renderAudiobookshelfPicker(
             delete picker.dataset.setupId;
             onLoginSuccess();
         } catch (caught) {
-            if (error) {
-                error.textContent = caught instanceof Error ? caught.message : t('login.authentication_failed');
-                error.style.display = 'block';
+            delete picker.dataset.setupId;
+            picker.hidden = true;
+            picker.innerHTML = '';
+            form.hidden = false;
+            const formError = root.querySelector('#login-error') as HTMLElement | null;
+            if (formError) {
+                formError.textContent = caught instanceof Error ? caught.message : t('login.authentication_failed');
+                formError.style.display = 'block';
             }
         } finally {
             commit.loading = false;

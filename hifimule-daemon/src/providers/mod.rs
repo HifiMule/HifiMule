@@ -636,42 +636,57 @@ pub async fn probe_url(url: &str) -> ServerType {
     // Requiring both success and the exact app marker avoids identifying generic
     // JSON endpoints as Audiobookshelf servers.
     let audiobookshelf_url = format!("{base}/status");
-    if let Ok(resp) = client.get(&audiobookshelf_url).send().await
-        && resp.status().is_success()
-        && let Ok(status) = resp.json::<serde_json::Value>().await
-        && status.get("app").and_then(|value| value.as_str()) == Some("audiobookshelf")
-    {
-        return ServerType::Audiobookshelf;
-    }
-
-    // Subsonic returns its JSON envelope even for unauthenticated requests
     let subsonic_url = format!("{}/rest/ping.view?v=1.16.1&c=hifimule-probe&f=json", base);
-    if let Ok(resp) = client.get(&subsonic_url).send().await
-        && let Ok(text) = resp.text().await
-        && text.contains("subsonic-response")
-    {
+    let jellyfin_url = format!("{}/System/Info/Public", base);
+
+    // Run all unauthenticated probes concurrently so adding a provider never
+    // adds another full timeout to existing provider detection.
+    let audiobookshelf = async {
+        let resp = client.get(&audiobookshelf_url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let status = resp.json::<serde_json::Value>().await.ok()?;
+        (status.get("app").and_then(|value| value.as_str()) == Some("audiobookshelf"))
+            .then_some(ServerType::Audiobookshelf)
+    };
+    let subsonic = async {
+        let text = client
+            .get(&subsonic_url)
+            .send()
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        if !text.contains("subsonic-response") {
+            return None;
+        }
         let open_subsonic = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|json| {
                 json.pointer("/subsonic-response/openSubsonic")
-                    .and_then(|v| v.as_bool())
+                    .and_then(|value| value.as_bool())
             })
             .unwrap_or(false);
-        return if open_subsonic {
+        Some(if open_subsonic {
             ServerType::OpenSubsonic
         } else {
             ServerType::Subsonic
-        };
-    }
-
-    // Jellyfin's public info endpoint requires no authentication
-    let jellyfin_url = format!("{}/System/Info/Public", base);
-    if let Ok(resp) = client.get(&jellyfin_url).send().await
-        && resp.status().is_success()
-        && let Ok(text) = resp.text().await
-        && (text.contains("\"ServerName\"") || text.contains("\"Version\""))
-    {
-        return ServerType::Jellyfin;
+        })
+    };
+    let jellyfin = async {
+        let resp = client.get(&jellyfin_url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let text = resp.text().await.ok()?;
+        (text.contains("\"ServerName\"") || text.contains("\"Version\""))
+            .then_some(ServerType::Jellyfin)
+    };
+    let (audiobookshelf, subsonic, jellyfin) = tokio::join!(audiobookshelf, subsonic, jellyfin);
+    if let Some(server_type) = audiobookshelf.or(subsonic).or(jellyfin) {
+        return server_type;
     }
 
     ServerType::Unknown

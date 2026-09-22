@@ -120,12 +120,25 @@ impl AppState {
         }
         #[cfg(test)]
         {
-            static TEST_SETUPS: OnceLock<
-                Arc<tokio::sync::Mutex<HashMap<String, PendingAudiobookshelfSetup>>>,
-            > = OnceLock::new();
-            TEST_SETUPS
-                .get_or_init(|| Arc::new(tokio::sync::Mutex::new(HashMap::new())))
-                .clone()
+            type SetupMap = Arc<tokio::sync::Mutex<HashMap<String, PendingAudiobookshelfSetup>>>;
+            type TestSetupEntry = (std::sync::Weak<crate::db::Database>, SetupMap);
+            static TEST_SETUPS: OnceLock<std::sync::Mutex<HashMap<usize, TestSetupEntry>>> =
+                OnceLock::new();
+            let state_key = Arc::as_ptr(&self.db) as usize;
+            let mut registry = TEST_SETUPS
+                .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+                .lock()
+                .expect("test setup registry lock");
+            if let Some((owner, setups)) = registry.get(&state_key)
+                && owner
+                    .upgrade()
+                    .is_some_and(|owner| Arc::ptr_eq(&owner, &self.db))
+            {
+                return setups.clone();
+            }
+            let setups = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            registry.insert(state_key, (Arc::downgrade(&self.db), setups.clone()));
+            setups
         }
     }
 }
@@ -418,7 +431,7 @@ pub async fn run_server(
             token,
             authenticate_local_request,
         ))
-        .with_state(state);
+        .with_state(state.clone());
 
     config
         .listener
@@ -443,6 +456,7 @@ pub async fn run_server(
         })
         .await
         .map_err(|error| error.to_string());
+    state.pending_audiobookshelf_setups().lock().await.clear();
     output_stop.store(true, AtomicOrdering::Release);
     let _ = output_dispatcher.await;
     result
@@ -2859,6 +2873,10 @@ async fn handle_audiobookshelf_commit(
             crate::providers::ProviderLibraryRole::Podcast => "Podcasts",
         }
     );
+    // Serializes scoped commits through the same lock used to publish the
+    // resulting provider, keeping the preflight row lookup and DB upsert one
+    // logical operation for concurrent commits of the same library.
+    let mut manager = state.server_manager.write().await;
     let prior_row = state
         .db
         .find_audiobookshelf_server(&pending.url, &pending.username, &library.id)
@@ -2924,13 +2942,11 @@ async fn handle_audiobookshelf_commit(
         }
         return Err(storage_error_to_rpc(error));
     }
-    {
-        let mut manager = state.server_manager.write().await;
-        manager.load_from_db(&state.db);
-        manager
-            .providers
-            .insert(local_id.clone(), Arc::new(provider));
-    }
+    manager.load_from_db(&state.db);
+    manager
+        .providers
+        .insert(local_id.clone(), Arc::new(provider));
+    drop(manager);
     *state.last_connection_check.lock().await = None;
     Ok(serde_json::json!({
         "ok": true,
@@ -3003,6 +3019,10 @@ async fn handle_server_reauthenticate(
         log_audiobookshelf_failure("server.reauthenticate", &error);
         audiobookshelf_error_to_rpc(error)
     })?;
+    // Take the publication lock before changing the durable credential. Once
+    // the save succeeds, cache publication is synchronous and cannot be
+    // cancelled at an await point.
+    let mut manager = state.server_manager.write().await;
     CredentialManager::save_server_credential(
         id,
         &crate::api::ServerCredentials {
@@ -3011,12 +3031,8 @@ async fn handle_server_reauthenticate(
         },
     )
     .map_err(storage_error_to_rpc)?;
-    state
-        .server_manager
-        .write()
-        .await
-        .providers
-        .insert(id.to_string(), Arc::new(provider));
+    manager.providers.insert(id.to_string(), Arc::new(provider));
+    drop(manager);
     *state.last_connection_check.lock().await = None;
     Ok(serde_json::json!({ "ok": true }))
 }

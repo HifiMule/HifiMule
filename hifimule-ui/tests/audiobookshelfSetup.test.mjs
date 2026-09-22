@@ -42,6 +42,8 @@ test('picker exposes one-library commit and no folder or collection controls', a
     assert.match(loginSource, /audiobookshelfCommit/);
     assert.doesNotMatch(loginSource, /name="(?:folder|collection|series)"/i);
     assert.doesNotMatch(loginSource, /type="checkbox"[^>]*(?:library|folder|collection|series)/i);
+    assert.match(loginSource, /generation !== probeGeneration \|\| providerSelect\?\.value !== 'auto'/);
+    assert.match(loginSource, /catch \(caught\)[\s\S]*form\.hidden = false/);
 });
 
 test('RPC logging is method-only and scoped re-auth sends id plus password', async () => {

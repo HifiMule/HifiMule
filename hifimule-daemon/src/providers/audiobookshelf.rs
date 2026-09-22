@@ -88,8 +88,6 @@ struct LoginRequest<'a> {
 #[serde(rename_all = "camelCase")]
 struct LoginResponse {
     user: TokenUser,
-    #[serde(default, alias = "server_version")]
-    server_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,12 +160,17 @@ impl AudiobookshelfProvider {
         let discovered = discovery
             .libraries
             .iter()
-            .find(|library| library.id == library_id)
-            .ok_or_else(|| {
-                ProviderError::StaleConfiguration(
-                    "configured Audiobookshelf library is missing".into(),
-                )
-            })?;
+            .find(|library| library.id == library_id);
+        if discovered.is_none() {
+            discovery
+                .provider
+                .validate_library_access(library_id)
+                .await?;
+            return Err(ProviderError::StaleConfiguration(
+                "configured Audiobookshelf library was omitted from discovery".into(),
+            ));
+        }
+        let discovered = discovered.expect("checked above");
         if discovered.role != role {
             return Err(ProviderError::StaleConfiguration(
                 "configured Audiobookshelf library role changed".into(),
@@ -227,10 +230,59 @@ impl AudiobookshelfProvider {
             }),
             library_id: None,
             library_role: None,
-            server_version: login
-                .server_version
-                .filter(|value| !value.trim().is_empty()),
+            // The validated v2.36.1 login contract does not expose a version.
+            server_version: None,
         })
+    }
+
+    async fn validate_library_access(&self, library_id: &str) -> Result<(), ProviderError> {
+        let endpoint = format!(
+            "{}/api/libraries/{}/items?page=0&limit=1",
+            self.base_url, library_id
+        );
+        let mut session = self.session.lock().await;
+        let mut response = self
+            .client
+            .get(&endpoint)
+            .bearer_auth(session.access_token.expose_secret())
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let refresh = session.refresh_token.as_ref().ok_or_else(|| {
+                ProviderError::Auth("Audiobookshelf authentication expired".into())
+            })?;
+            let refreshed = self
+                .client
+                .post(format!("{}/auth/refresh", self.base_url))
+                .header("x-refresh-token", refresh.expose_secret())
+                .send()
+                .await
+                .map_err(transport_error)?;
+            check_auth_status(&refreshed)?;
+            let tokens: RefreshResponse = refreshed.json().await.map_err(deserialization_error)?;
+            if tokens.user.access_token.trim().is_empty() {
+                return Err(ProviderError::Deserialization(
+                    "Audiobookshelf refresh omitted access token".into(),
+                ));
+            }
+            session.access_token = SecretString::new(tokens.user.access_token);
+            if let Some(refresh_token) = tokens
+                .user
+                .refresh_token
+                .filter(|token| !token.trim().is_empty())
+            {
+                session.refresh_token = Some(SecretString::new(refresh_token));
+            }
+            response = self
+                .client
+                .get(&endpoint)
+                .bearer_auth(session.access_token.expose_secret())
+                .send()
+                .await
+                .map_err(transport_error)?;
+        }
+        check_status(&response)
     }
 
     async fn fetch_libraries(&mut self) -> Result<Vec<DiscoveredLibrary>, ProviderError> {
@@ -335,11 +387,7 @@ fn check_status(response: &reqwest::Response) -> Result<(), ProviderError> {
             "configured Audiobookshelf library is missing".into(),
         )),
         StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited {
-            retry_after_seconds: response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse().ok()),
+            retry_after_seconds: retry_after_seconds(response),
         }),
         status => Err(ProviderError::Http {
             status: Some(status.as_u16()),
@@ -355,17 +403,27 @@ fn check_auth_status(response: &reqwest::Response) -> Result<(), ProviderError> 
             "Audiobookshelf authentication failed".into(),
         )),
         StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited {
-            retry_after_seconds: response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse().ok()),
+            retry_after_seconds: retry_after_seconds(response),
         }),
         status => Err(ProviderError::Http {
             status: Some(status.as_u16()),
             message: "Audiobookshelf authentication request failed".into(),
         }),
     }
+}
+
+fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
+    let value = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    if let Ok(seconds) = value.parse() {
+        return Some(seconds);
+    }
+    let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let remaining = deadline.timestamp() - chrono::Utc::now().timestamp();
+    Some(remaining.max(0) as u64)
 }
 
 fn unsupported(operation: &str) -> ProviderError {
@@ -458,7 +516,7 @@ mod tests {
     use mockito::{Matcher, Server};
 
     fn login_body() -> &'static str {
-        r#"{"user":{"accessToken":"access-fixture","refreshToken":"refresh-fixture"},"serverVersion":"2.36.1"}"#
+        r#"{"user":{"accessToken":"access-fixture","refreshToken":"refresh-fixture"}}"#
     }
 
     #[tokio::test]
@@ -492,7 +550,7 @@ mod tests {
         assert_eq!(discovered.libraries.len(), 2);
         assert_eq!(discovered.libraries[0].role, ProviderLibraryRole::Audiobook);
         assert_eq!(discovered.libraries[1].role, ProviderLibraryRole::Podcast);
-        assert_eq!(discovered.provider.server_version(), Some("2.36.1"));
+        assert_eq!(discovered.provider.server_version(), None);
         assert!(!format!("{:?}", discovered).contains("fixture-password"));
         assert!(!format!("{:?}", discovered).contains("access-fixture"));
         login.assert_async().await;
@@ -633,6 +691,73 @@ mod tests {
             }
         ));
         rate_limited.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rate_limit_accepts_http_date_retry_after() {
+        let retry_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let header = retry_at.to_rfc2822();
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(429)
+            .with_header("retry-after", &header)
+            .create_async()
+            .await;
+        let error = AudiobookshelfProvider::discover(&server.url(), "user", "password")
+            .await
+            .unwrap_err();
+        match error {
+            ProviderError::RateLimited {
+                retry_after_seconds: Some(seconds),
+            } => assert!((58..=60).contains(&seconds)),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_scope_distinguishes_forbidden_from_missing_library() {
+        for (status, expected_forbidden) in [(403, true), (404, false)] {
+            let mut server = Server::new_async().await;
+            server
+                .mock("POST", "/login")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(login_body())
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/api/libraries")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"libraries":[]}"#)
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/api/libraries/withheld/items")
+                .match_query(Matcher::AllOf(vec![
+                    Matcher::UrlEncoded("page".into(), "0".into()),
+                    Matcher::UrlEncoded("limit".into(), "1".into()),
+                ]))
+                .with_status(status)
+                .create_async()
+                .await;
+
+            let error = AudiobookshelfProvider::from_stored_config(
+                &server.url(),
+                "user",
+                "password",
+                "withheld",
+                ProviderLibraryRole::Podcast,
+            )
+            .await
+            .unwrap_err();
+            if expected_forbidden {
+                assert!(matches!(error, ProviderError::Forbidden));
+            } else {
+                assert!(matches!(error, ProviderError::StaleConfiguration(_)));
+            }
+        }
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ baseline_commit: a53cb96a78c07e2f8491214fa9163248bc9a0ef4
 
 # Story 17.2: Connect Audiobookshelf libraries as independent servers
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -16,7 +16,7 @@ so that Books and Podcasts libraries become independent HifiMule servers.
 
 ## Acceptance Criteria
 
-1. **Explicit provider choice and safe discovery.** The first-run and inline Add Server flows offer Audiobookshelf explicitly; Story 17.1 did not validate an unauthenticated detection endpoint, so `auto` probing must not guess Audiobookshelf. A successful daemon-side local username/password login against the validated Audiobookshelf v2.36.1 contract discovers the accessible libraries through `AudiobookshelfProvider::discover`, not the generic unscoped provider factory. Generic `server.connect` with `serverType: "audiobookshelf"` returns structured `LIBRARY_SELECTION_REQUIRED`; it cannot create an unscoped provider. No server row or vault entry is written until a library is selected and committed.
+1. **Provider choice and safe discovery.** The first-run and inline Add Server flows offer Audiobookshelf explicitly. Auto-detection may identify Audiobookshelf only from its unauthenticated base-relative `/status` response when that response succeeds and carries the exact `app: "audiobookshelf"` marker; detection must never authenticate, persist state, or construct an unscoped provider. A successful daemon-side local username/password login against the validated Audiobookshelf v2.36.1 contract discovers the accessible libraries through `AudiobookshelfProvider::discover`, not the generic unscoped provider factory. Generic `server.connect` with `serverType: "audiobookshelf"` returns structured `LIBRARY_SELECTION_REQUIRED`; it cannot create an unscoped provider. No server row or vault entry is written until a library is selected and committed.
 2. **One-library picker.** After authentication, the UI presents an accessible, keyboard-operable picker containing only safe display data and the role of each discovered library. Upstream `mediaType: "book"` is labeled Books and maps to persisted role `audiobook`; `mediaType: "podcast"` is labeled Podcasts and maps to persisted role `podcast`. The picker selects exactly one library per server creation. It contains no folder, collection, series, or remote-write controls.
 3. **Independent durable configuration.** Committing a selection creates one normal Server Hub entry and persists the normalized endpoint, `ServerType::Audiobookshelf`, username, immutable upstream library ID, immutable library role, display identity, server version only when returned by a validated response, machine-local server UUID, and portable server ID. Audiobookshelf-only fields are nullable for existing providers; an Audiobookshelf row is invalid unless both library ID and role are present. The multi-file DB/vault operation is synchronously compensated and crash-reconciled as specified below; it must not claim impossible cross-file transaction atomicity.
 4. **Multiple libraries and idempotent upsert.** Multiple Books and/or Podcasts libraries from the same endpoint/account coexist as separate server rows. Reconnecting the same normalized endpoint/account/library upserts that row without changing either its machine-local ID or frozen portable ID; selecting another library inserts a new row. Existing Jellyfin/Subsonic URL-upsert behavior remains unchanged. A saved library must never silently change role; a missing library or role mismatch is reported as stale configuration and leaves stored state unchanged.
@@ -32,7 +32,7 @@ so that Books and Podcasts libraries become independent HifiMule servers.
 
 - [x] **Implement the Audiobookshelf connection adapter from the validated contract** (AC: 1, 6, 7, 9)
   - [x] Add `hifimule-daemon/src/providers/audiobookshelf.rs` and register it in `providers/mod.rs`; reuse workspace `reqwest`, `serde`, Tokio, `thiserror`, and dev `mockito` rather than adding an SDK or HTTP-test dependency.
-  - [x] Add `ServerType::Audiobookshelf`, `ServerTypeHint::Audiobookshelf`, slug parsing, `ProviderLibraryRole`, the defaulted trait accessor, capability-safe defaults, and exhaustive enum matches. `AudiobookshelfProvider::discover` is the only unscoped entry; persisted-provider construction requires library ID + role. Keep `auto` probing unchanged.
+  - [x] Add `ServerType::Audiobookshelf`, `ServerTypeHint::Audiobookshelf`, slug parsing, `ProviderLibraryRole`, the defaulted trait accessor, capability-safe defaults, and exhaustive enum matches. `AudiobookshelfProvider::discover` is the only unscoped entry; persisted-provider construction requires library ID + role. Extend `auto` probing only with the exact unauthenticated Audiobookshelf `/status` marker defined by AC1.
   - [x] Make generic `server.connect` reject an Audiobookshelf hint without library setup using structured `LIBRARY_SELECTION_REQUIRED`; preserve its Jellyfin/Subsonic wire behavior.
   - [x] Implement local login, accessible-library discovery, refresh-once handling, and selected-library validation exactly against `docs/audiobookshelf-integration-contract.md` and the v2.36.1 fixtures. Do not add catalogue mapping or media operations.
   - [x] Keep provider access/refresh tokens and raw responses private; implement redacted `Debug`/errors and pass all external error text through the existing sanitizer before RPC/log use.
@@ -74,6 +74,20 @@ so that Books and Podcasts libraries become independent HifiMule servers.
   - [x] Add RPC/manager tests for no-write discovery, compensated commit failure and crash reconciliation, safe response shapes, lazy restart validation, local-ID-scoped re-auth, provider-cache isolation, remove/select behavior, and no secret/upstream-ID leakage.
   - [x] Without adding a UI test framework, extract pure setup/picker/redaction helpers and test them with the repository's existing Node `node:test` + TypeScript-transpile pattern. Cover provider selection, roles, setup expiry/cancel/failure preservation, multi-library cards, re-auth targeting, logging redaction, and absence of folder/collection controls; record a manual keyboard/focus check for the Shoelace dialog.
   - [x] Run `rtk npm run build:daemon -- test -p hifimule-daemon`, the targeted `node --test` UI files, `rtk npm run build:ui`, formatting, and `rtk git diff --check`. Report unavailable environment checks truthfully.
+
+### Review Findings
+
+- [x] [Review][Patch] HIGH — Accept Audiobookshelf auto-detection through the validated exact `/status` marker; AC1 updated by product decision [hifimule-daemon/src/providers/mod.rs:630]
+- [x] [Review][Patch] HIGH — Serialize or reconcile same-library commits so a concurrent upsert cannot return/publish a phantom local ID with an orphaned credential [hifimule-daemon/src/rpc.rs:2862]
+- [x] [Review][Patch] HIGH — Prevent legacy URL-only upsert from matching and rewriting an Audiobookshelf-scoped row while leaving its scope columns behind [hifimule-daemon/src/db.rs:620]
+- [x] [Review][Patch] HIGH — Do not persist the unvalidated synthetic `serverVersion` field from the login response; keep it `None` absent fixture-backed validated evidence [hifimule-daemon/src/providers/audiobookshelf.rs:89]
+- [x] [Review][Patch] HIGH — Validate a stored library through the scoped endpoint so revoked access remains distinguishable as 403 from a missing-library 404 [hifimule-daemon/src/providers/audiobookshelf.rs:161]
+- [x] [Review][Patch] MEDIUM — Make re-auth credential replacement and provider-cache publication compensating/consistent if publication is interrupted after the vault write [hifimule-daemon/src/rpc.rs:2994]
+- [x] [Review][Patch] MEDIUM — After a failed one-use commit, return the picker to discovery instead of presenting the consumed setup as retryable [hifimule-ui/src/login.ts:365]
+- [x] [Review][Patch] MEDIUM — Honor valid HTTP-date as well as delta-seconds forms of `Retry-After` [hifimule-daemon/src/providers/audiobookshelf.rs:337]
+- [x] [Review][Patch] MEDIUM — Isolate pending setup maps per test `AppState` to prevent parallel tests from consuming or exhausting one another's setups [hifimule-daemon/src/rpc.rs:112]
+- [x] [Review][Patch] LOW — Cancel or generation-guard in-flight auto probes so late results cannot overwrite an explicit provider selection's identity defaults [hifimule-ui/src/login.ts:210]
+- [x] [Review][Patch] LOW — Explicitly clear credential-bearing pending setups when daemon shutdown begins [hifimule-daemon/src/rpc.rs:164]
 
 ## Dev Notes
 
@@ -193,6 +207,7 @@ Story preparation and implementation: Codex (GPT-5).
 - 2026-09-22: Full daemon regression passed (1054 passed, 6 ignored) plus 5 contract tests; focused UI tests passed (4/4); touched Rust files passed `rustfmt --check`; `git diff --check` passed.
 - 2026-09-22: `rtk npm run build:ui` compiled and signed the macOS app, but the final DMG bundling script failed in the local packaging environment. A standalone browser focus check was attempted, but Vite cannot exercise the Tauri IPC login flow (`invoke` is unavailable); keyboard focus, radio semantics, single-choice commit, and forbidden-control absence are covered by the focused Node test and source inspection.
 - 2026-09-22: Repository-wide Clippy remains blocked by the pre-existing `unused_io_amount` error in `playback/audio/queue_edit_tests.rs:172`; repository-wide `cargo fmt --check` also reports pre-existing formatting differences in `playback/session.rs`. Neither file was changed by this story.
+- 2026-09-22: Code review resolved all findings. AC1 now accepts exact-marker Audiobookshelf auto-detection based on recorded live evidence; provider probes run concurrently to avoid legacy timeout regression. Hardened scoped commit/upsert/re-auth consistency, restart library classification, retry handling, pending setup isolation/teardown, and picker/probe UI recovery. Full daemon regression passed (1062 passed, 6 ignored), five contract tests passed, focused UI tests passed (5/5), UI production build passed, daemon check passed, and `git diff --check` passed.
 
 ### Completion Notes List
 
@@ -207,6 +222,7 @@ Story preparation and implementation: Codex (GPT-5).
 ### Change Log
 
 - 2026-09-22: Implemented Story 17.2 end to end and moved it to review.
+- 2026-09-22: Applied code-review fixes, accepted evidence-backed auto-detection in AC1, and completed the story.
 
 ### File List
 
