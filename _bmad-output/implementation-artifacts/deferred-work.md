@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Deferred from: Audiobookshelf connection fix review (2026-09-22)
+
+- **Canonical URL normalization lowercases reverse-proxy paths** (`hifimule-daemon/src/db.rs:68`) — the pre-existing `normalized_server_url` helper lowercases the entire URL instead of only the scheme/host. Audiobookshelf now inherits this behavior when persisting a prefixed endpoint, so an uncommon case-sensitive proxy path could work during discovery but fail after restart. Correcting it safely requires a cross-provider identity/migration decision because portable IDs and existing row matching already depend on the legacy normalization.
+
 ## Deferred from: reusable smoke workflow permissions review (2026-09-20)
 
 - **Reusable smoke jobs inherit all release signing secrets** (`.github/workflows/release.yml:363`, `.github/workflows/release.yml:374`) — both smoke callers use `secrets: inherit` even though the reusable smoke workflow only consumes `GITHUB_TOKEN`. Removing inherited Apple and Windows signing credentials would reduce exposure, but secret transport was pre-existing at baseline `7ed4b4ddbfe2db04fb84f164283cefb55bc40ba4` and is outside the approved permission-scope fix.

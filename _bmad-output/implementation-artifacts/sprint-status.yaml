@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-22  # Story 17.2 created and validated
+last_updated: 2026-09-22  # Story 17.2 implementation completed; ready for review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -224,7 +224,7 @@ development_status:
   # Epic 17 — Audiobookshelf Integration (sprint-change-proposal-2026-09-20-audiobookshelf)
   epic-17: in-progress
   17-1-validate-audiobookshelf-integration-contract: done
-  17-2-connect-audiobookshelf-libraries-as-independent-servers: ready-for-dev
+  17-2-connect-audiobookshelf-libraries-as-independent-servers: review
   17-3-map-audiobookshelf-books-faithfully-into-the-hifimule-catalog: backlog
   17-4-browse-and-search-an-audiobookshelf-audiobook-server: backlog
   17-5-directly-play-audiobookshelf-audiobooks-through-hifimule: backlog

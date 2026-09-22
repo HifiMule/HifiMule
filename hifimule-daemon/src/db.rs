@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -39,6 +39,28 @@ pub struct ServerConfig {
     /// the `rid:` derivation basis so `server_id` survives URL changes.
     #[serde(default)]
     pub server_reported_id: Option<String>,
+    /// Immutable upstream library scope for Audiobookshelf. Both fields are
+    /// NULL for existing providers and both are required for Audiobookshelf.
+    #[serde(default, skip_serializing)]
+    pub provider_library_id: Option<String>,
+    #[serde(default)]
+    pub provider_library_role: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudiobookshelfLibraryRole {
+    Audiobook,
+    Podcast,
+}
+
+impl AudiobookshelfLibraryRole {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Audiobook => "audiobook",
+            Self::Podcast => "podcast",
+        }
+    }
 }
 
 /// Canonical base URL used for identity derivation and upsert matching:
@@ -77,6 +99,27 @@ pub fn derive_server_id(
     hex
 }
 
+/// Audiobookshelf portable identity is scoped to one immutable upstream library.
+pub fn derive_audiobookshelf_server_id(
+    canonical_url: &str,
+    username: &str,
+    library_id: &str,
+    role: AudiobookshelfLibraryRole,
+) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let basis = format!(
+        "v2|audiobookshelf|url:{canonical_url}|user:{username}|library:{library_id}|role:{}",
+        role.slug()
+    );
+    let digest = Sha256::digest(basis.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    hex
+}
+
 /// The pre-2.11 derived composite server id (`type|normalized_url|username`).
 /// Retained only so legacy manifest/basket tags can be reconciled to the portable
 /// id rather than silently dropped (Story 2.13 AC6).
@@ -94,6 +137,7 @@ pub fn server_type_label(server_type: &str) -> &'static str {
         "jellyfin" => "Jellyfin",
         "openSubsonic" => "OpenSubsonic",
         "subsonic" => "Subsonic",
+        "audiobookshelf" => "Audiobookshelf",
         _ => "Server",
     }
 }
@@ -102,6 +146,7 @@ pub fn default_server_icon(server_type: &str) -> &'static str {
     match server_type {
         "jellyfin" => "collection-play",
         "openSubsonic" | "subsonic" => "music-note-list",
+        "audiobookshelf" => "book",
         _ => "hdd-network",
     }
 }
@@ -210,7 +255,9 @@ impl Database {
                 updated_at INTEGER NOT NULL,
                 selected INTEGER NOT NULL DEFAULT 0,
                 server_id TEXT,
-                server_reported_id TEXT
+                server_reported_id TEXT,
+                provider_library_id TEXT,
+                provider_library_role TEXT
             )",
             [],
         )
@@ -329,6 +376,26 @@ impl Database {
                 )
                 .map_err(|e| anyhow!("Failed to add server_reported_id column: {}", e))?;
             }
+            let has_library_id = conn
+                .prepare("SELECT provider_library_id FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_library_id {
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN provider_library_id TEXT",
+                    [],
+                )
+                .map_err(|e| anyhow!("Failed to add provider_library_id column: {}", e))?;
+            }
+            let has_library_role = conn
+                .prepare("SELECT provider_library_role FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_library_role {
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN provider_library_role TEXT",
+                    [],
+                )
+                .map_err(|e| anyhow!("Failed to add provider_library_role column: {}", e))?;
+            }
             Self::backfill_server_identity(conn)?;
             return Ok(());
         }
@@ -393,7 +460,9 @@ impl Database {
                 updated_at INTEGER NOT NULL,
                 selected INTEGER NOT NULL DEFAULT 0,
                 server_id TEXT,
-                server_reported_id TEXT
+                server_reported_id TEXT,
+                provider_library_id TEXT,
+                provider_library_role TEXT
             )",
             [],
         )
@@ -484,7 +553,7 @@ impl Database {
     }
 
     fn row_to_server_config(row: &rusqlite::Row) -> rusqlite::Result<ServerConfig> {
-        Ok(ServerConfig {
+        let config = ServerConfig {
             id: row.get(0)?,
             url: row.get(1)?,
             server_type: row.get(2)?,
@@ -496,7 +565,33 @@ impl Database {
             selected: row.get::<_, i64>(8)? != 0,
             server_id: row.get(9)?,
             server_reported_id: row.get(10)?,
-        })
+            provider_library_id: row.get(11)?,
+            provider_library_role: row.get(12)?,
+        };
+        let has_library_id = config
+            .provider_library_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+        let valid_role = config
+            .provider_library_role
+            .as_deref()
+            .is_some_and(|value| matches!(value, "audiobook" | "podcast"));
+        let valid_scope = if config.server_type == "audiobookshelf" {
+            has_library_id && valid_role
+        } else {
+            config.provider_library_id.is_none() && config.provider_library_role.is_none()
+        };
+        if !valid_scope {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid provider library scope",
+                )),
+            ));
+        }
+        Ok(config)
     }
 
     /// Inserts a server (or updates the existing one matching `url` by normalized
@@ -603,6 +698,144 @@ impl Database {
         Ok(id)
     }
 
+    /// Inserts or updates one Audiobookshelf library-scoped server. Matching is
+    /// `(canonical endpoint, case-preserved username, immutable library id)`;
+    /// unlike legacy providers, another library at the same URL is a new row.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_audiobookshelf_server(
+        &self,
+        url: &str,
+        username: &str,
+        library_id: &str,
+        role: AudiobookshelfLibraryRole,
+        server_version: Option<&str>,
+        name: Option<&str>,
+        icon: Option<&str>,
+    ) -> Result<String> {
+        self.upsert_audiobookshelf_server_with_id(
+            url,
+            username,
+            library_id,
+            role,
+            server_version,
+            name,
+            icon,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    pub fn find_audiobookshelf_server(
+        &self,
+        url: &str,
+        username: &str,
+        library_id: &str,
+    ) -> Result<Option<ServerConfig>> {
+        let conn = self.conn.lock().unwrap();
+        let normalized = normalized_server_url(url);
+        let mut stmt = conn.prepare(
+            "SELECT id, url, server_type, username, server_version, name, icon,
+                    updated_at, selected, server_id, server_reported_id,
+                    provider_library_id, provider_library_role
+             FROM server_config
+             WHERE server_type = 'audiobookshelf'
+               AND lower(rtrim(trim(url), '/')) = ?1
+               AND username = ?2 AND provider_library_id = ?3",
+        )?;
+        let mut rows = stmt.query(params![normalized, username, library_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_server_config(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_audiobookshelf_server_with_id(
+        &self,
+        url: &str,
+        username: &str,
+        library_id: &str,
+        role: AudiobookshelfLibraryRole,
+        server_version: Option<&str>,
+        name: Option<&str>,
+        icon: Option<&str>,
+        new_local_id: &str,
+    ) -> Result<String> {
+        if username.trim().is_empty() || library_id.is_empty() {
+            return Err(anyhow!("Audiobookshelf username and library are required"));
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction()?;
+        let normalized = normalized_server_url(url);
+        let existing: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT id, provider_library_role FROM server_config
+                 WHERE server_type = 'audiobookshelf'
+                   AND lower(rtrim(trim(url), '/')) = ?1
+                   AND username = ?2
+                   AND provider_library_id = ?3",
+                params![normalized, username, library_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| anyhow!("Failed to calculate timestamp: {}", e))?
+            .as_secs() as i64;
+        if let Some((id, persisted_role)) = existing {
+            if persisted_role != role.slug() {
+                return Err(anyhow!("Audiobookshelf library role cannot change"));
+            }
+            transaction.execute(
+                "UPDATE server_config SET url = ?2, server_version = ?3,
+                    name = COALESCE(?4, name), icon = COALESCE(?5, icon),
+                    updated_at = ?6 WHERE id = ?1",
+                params![id, normalized, server_version, name, icon, updated_at],
+            )?;
+            transaction.commit()?;
+            return Ok(id);
+        }
+
+        let id = new_local_id.to_string();
+        let portable_id = derive_audiobookshelf_server_id(&normalized, username, library_id, role);
+        let any_selected = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM server_config WHERE selected = 1)",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        let default_name = match role {
+            AudiobookshelfLibraryRole::Audiobook => "Audiobookshelf — Books",
+            AudiobookshelfLibraryRole::Podcast => "Audiobookshelf — Podcasts",
+        };
+        let default_icon = match role {
+            AudiobookshelfLibraryRole::Audiobook => "book",
+            AudiobookshelfLibraryRole::Podcast => "broadcast-pin",
+        };
+        transaction.execute(
+            "INSERT INTO server_config
+             (id, url, server_type, username, server_version, name, icon,
+              updated_at, selected, server_id, server_reported_id,
+              provider_library_id, provider_library_role)
+             VALUES (?1, ?2, 'audiobookshelf', ?3, ?4, ?5, ?6, ?7, ?8,
+                     ?9, NULL, ?10, ?11)",
+            params![
+                id,
+                normalized,
+                username,
+                server_version,
+                name.unwrap_or(default_name),
+                icon.unwrap_or(default_icon),
+                updated_at,
+                if any_selected { 0 } else { 1 },
+                portable_id,
+                library_id,
+                role.slug(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
     /// Builds the reconciliation remap `{ legacy-composite → portable, local-id →
     /// portable }` across all configured servers (Story 2.13). Used to rewrite
     /// device-manifest and basket `server_id` tags carrying a pre-2.11 composite or
@@ -657,7 +890,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role
              FROM server_config ORDER BY updated_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_server_config)?;
@@ -671,7 +904,7 @@ impl Database {
     pub fn get_server(&self, id: &str) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role
              FROM server_config WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -686,7 +919,7 @@ impl Database {
     pub fn get_server_config(&self) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role
              FROM server_config WHERE selected = 1 LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -1560,6 +1793,107 @@ mod tests {
         let url_before = derive_server_id("jellyfin", "http://old.example", "u", None);
         let url_after = derive_server_id("jellyfin", "http://new.example", "u", None);
         assert_ne!(url_before, url_after);
+    }
+
+    #[test]
+    fn audiobookshelf_portable_id_matches_normative_vector() {
+        assert_eq!(
+            derive_audiobookshelf_server_id(
+                "https://abs.example.test",
+                "Alexis",
+                "lib_books",
+                AudiobookshelfLibraryRole::Audiobook,
+            ),
+            "319282b9414017e2d8b92213415f590a31ca0293e04fcb2088701f82dc8a7945"
+        );
+    }
+
+    #[test]
+    fn audiobookshelf_scoped_upsert_keeps_libraries_independent_and_role_immutable() {
+        let db = Database::memory().unwrap();
+        let books = db
+            .upsert_audiobookshelf_server(
+                "https://abs.example.test/",
+                "Alexis",
+                "lib_books",
+                AudiobookshelfLibraryRole::Audiobook,
+                None,
+                Some("Fiction — Books"),
+                None,
+            )
+            .unwrap();
+        let podcasts = db
+            .upsert_audiobookshelf_server(
+                "https://abs.example.test",
+                "Alexis",
+                "lib_podcasts",
+                AudiobookshelfLibraryRole::Podcast,
+                None,
+                Some("Talks — Podcasts"),
+                None,
+            )
+            .unwrap();
+        assert_ne!(books, podcasts);
+        assert!(db.get_server(&books).unwrap().unwrap().selected);
+        assert!(!db.get_server(&podcasts).unwrap().unwrap().selected);
+        assert_ne!(
+            db.get_server(&books).unwrap().unwrap().server_id,
+            db.get_server(&podcasts).unwrap().unwrap().server_id
+        );
+        assert_eq!(db.list_servers().unwrap().len(), 2);
+
+        let same = db
+            .upsert_audiobookshelf_server(
+                "https://ABS.example.test",
+                "Alexis",
+                "lib_books",
+                AudiobookshelfLibraryRole::Audiobook,
+                None,
+                Some("Renamed"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(same, books);
+        assert_eq!(db.list_servers().unwrap().len(), 2);
+
+        let mismatch = db.upsert_audiobookshelf_server(
+            "https://abs.example.test",
+            "Alexis",
+            "lib_books",
+            AudiobookshelfLibraryRole::Podcast,
+            None,
+            None,
+            None,
+        );
+        assert!(mismatch.is_err());
+        assert_eq!(
+            db.get_server(&books)
+                .unwrap()
+                .unwrap()
+                .provider_library_role
+                .as_deref(),
+            Some("audiobook")
+        );
+
+        let portable_before = db.get_server(&books).unwrap().unwrap().server_id.unwrap();
+        db.remove_server(&books).unwrap();
+        let readded = db
+            .upsert_audiobookshelf_server(
+                "https://abs.example.test",
+                "Alexis",
+                "lib_books",
+                AudiobookshelfLibraryRole::Audiobook,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_ne!(readded, books, "machine-local id changes after removal");
+        assert_eq!(
+            db.get_server(&readded).unwrap().unwrap().server_id.unwrap(),
+            portable_before,
+            "portable identity is deterministic across remove/re-add"
+        );
     }
 
     #[test]

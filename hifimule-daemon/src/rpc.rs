@@ -13,6 +13,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use rand::RngCore;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -40,6 +42,8 @@ const ERR_CROSS_SERVER_CONFLICT: i32 = -7;
 /// Distinct from generic connection failures so the UI can scope a re-auth prompt.
 const ERR_UNAUTHORIZED: i32 = -8;
 const ERR_SYNC_CANCELLED: i32 = -9;
+const AUDIOBOOKSHELF_SETUP_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const MAX_PENDING_AUDIOBOOKSHELF_SETUPS: usize = 8;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
@@ -101,6 +105,51 @@ pub struct AppState {
     pub last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     pub state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
     pub playback: crate::playback::PlaybackSession,
+    #[cfg(not(test))]
+    pub pending_audiobookshelf_setups:
+        Arc<tokio::sync::Mutex<HashMap<String, PendingAudiobookshelfSetup>>>,
+}
+
+impl AppState {
+    fn pending_audiobookshelf_setups(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<HashMap<String, PendingAudiobookshelfSetup>>> {
+        #[cfg(not(test))]
+        {
+            self.pending_audiobookshelf_setups.clone()
+        }
+        #[cfg(test)]
+        {
+            static TEST_SETUPS: OnceLock<
+                Arc<tokio::sync::Mutex<HashMap<String, PendingAudiobookshelfSetup>>>,
+            > = OnceLock::new();
+            TEST_SETUPS
+                .get_or_init(|| Arc::new(tokio::sync::Mutex::new(HashMap::new())))
+                .clone()
+        }
+    }
+}
+
+pub(crate) struct PendingAudiobookshelfSetup {
+    created_at: std::time::Instant,
+    url: String,
+    username: String,
+    password: SecretString,
+    provider: crate::providers::audiobookshelf::AudiobookshelfProvider,
+    choices: HashMap<String, crate::providers::audiobookshelf::DiscoveredLibrary>,
+}
+
+impl std::fmt::Debug for PendingAudiobookshelfSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAudiobookshelfSetup")
+            .field("created_at", &self.created_at)
+            .field("url", &"[redacted-url]")
+            .field("username", &"[redacted]")
+            .field("password", &"[redacted]")
+            .field("provider", &"[redacted]")
+            .field("choice_count", &self.choices.len())
+            .finish()
+    }
 }
 
 static LIFECYCLE_IDENTITY: OnceLock<hifimule_lifecycle::OwnerDescriptor> = OnceLock::new();
@@ -238,6 +287,8 @@ pub async fn run_server(
         last_scrobbler_result,
         state_tx,
         playback,
+        #[cfg(not(test))]
+        pending_audiobookshelf_setups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
     // Startup (Story 2.11): migrate a legacy single-server vault to the UUID-keyed
     // multi-server vault (if needed), then load server rows into the manager.
@@ -441,6 +492,16 @@ async fn handler(
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
         "server.connect" => handle_server_connect(&state, payload.params).await,
+        "server.audiobookshelf.discover" => {
+            handle_audiobookshelf_discover(&state, payload.params).await
+        }
+        "server.audiobookshelf.commit" => {
+            handle_audiobookshelf_commit(&state, payload.params).await
+        }
+        "server.audiobookshelf.cancelSetup" => {
+            handle_audiobookshelf_cancel(&state, payload.params).await
+        }
+        "server.reauthenticate" => handle_server_reauthenticate(&state, payload.params).await,
         "server.logout" => handle_server_logout(&state).await,
         "server.list" => handle_server_list(&state).await,
         "server.select" => handle_server_select(&state, payload.params).await,
@@ -595,6 +656,9 @@ fn is_mutating_method(method: &str) -> bool {
     matches!(
         method,
         "server.connect"
+            | "server.audiobookshelf.commit"
+            | "server.audiobookshelf.cancelSetup"
+            | "server.reauthenticate"
             | "daemon.retryQuit"
             | "server.logout"
             | "server.select"
@@ -1525,6 +1589,26 @@ fn provider_error_to_rpc(error: ProviderError) -> JsonRpcError {
             message: format!("{item_type} not found: {id}"),
             data: None,
         },
+        ProviderError::Forbidden => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Provider permission denied".into(),
+            data: Some(serde_json::json!({ "errorCode": "PROVIDER_FORBIDDEN" })),
+        },
+        ProviderError::StaleConfiguration(_) => JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "Provider configuration is stale".into(),
+            data: Some(serde_json::json!({ "errorCode": "STALE_CONFIGURATION" })),
+        },
+        ProviderError::RateLimited {
+            retry_after_seconds,
+        } => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Provider rate limit reached".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "RATE_LIMITED",
+                "retryAfterSeconds": retry_after_seconds
+            })),
+        },
         _ => JsonRpcError {
             code: ERR_INTERNAL_ERROR,
             message: error.to_string(),
@@ -2353,6 +2437,16 @@ async fn handle_server_connect(
         data: None,
     })?;
     let server_type = params["serverType"].as_str().unwrap_or("auto");
+    if server_type == "audiobookshelf" {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Audiobookshelf requires library selection".to_string(),
+            data: Some(serde_json::json!({
+                "errorCode": "LIBRARY_SELECTION_REQUIRED",
+                "i18nKey": "error.audiobookshelf.library_selection_required"
+            })),
+        });
+    }
     let username = params["username"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing username".to_string(),
@@ -2477,6 +2571,15 @@ async fn handle_server_connect(
                     .map_err(storage_error_to_rpc)?;
             }
         }
+        crate::providers::ServerType::Audiobookshelf => {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Audiobookshelf requires library selection".to_string(),
+                data: Some(serde_json::json!({
+                    "errorCode": "LIBRARY_SELECTION_REQUIRED"
+                })),
+            });
+        }
         crate::providers::ServerType::Unknown => {}
     }
 
@@ -2499,9 +2602,429 @@ async fn handle_server_connect(
     }))
 }
 
+fn random_setup_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn purge_expired_setups(setups: &mut HashMap<String, PendingAudiobookshelfSetup>) {
+    setups.retain(|_, setup| setup.created_at.elapsed() < AUDIOBOOKSHELF_SETUP_TTL);
+}
+
+fn audiobookshelf_failure_log_line(method: &str, error: &ProviderError) -> String {
+    let (category, status) = match error {
+        ProviderError::Auth(_) => ("authentication", None),
+        ProviderError::Forbidden => ("forbidden", Some(403)),
+        ProviderError::StaleConfiguration(_) | ProviderError::NotFound { .. } => {
+            ("stale_configuration", Some(404))
+        }
+        ProviderError::RateLimited { .. } => ("rate_limited", Some(429)),
+        ProviderError::UnsupportedCapability(_) => ("unsupported", None),
+        ProviderError::Deserialization(_) => ("response_shape", None),
+        ProviderError::Http { status, .. } => (
+            if status.is_some() {
+                "http"
+            } else {
+                "transport"
+            },
+            *status,
+        ),
+        ProviderError::Other(_) => ("internal", None),
+    };
+    let status = status
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!("RPC {method} failed: provider=audiobookshelf category={category} status={status}")
+}
+
+fn log_audiobookshelf_failure(method: &str, error: &ProviderError) {
+    crate::daemon_log!("{}", audiobookshelf_failure_log_line(method, error));
+}
+
+fn audiobookshelf_error_to_rpc(error: ProviderError) -> JsonRpcError {
+    match error {
+        ProviderError::Auth(_) => JsonRpcError {
+            code: ERR_UNAUTHORIZED,
+            message: "Audiobookshelf authentication failed".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_AUTH_FAILED",
+                "i18nKey": "error.audiobookshelf.authentication"
+            })),
+        },
+        ProviderError::Forbidden => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Audiobookshelf library access is forbidden".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_LIBRARY_FORBIDDEN",
+                "i18nKey": "error.audiobookshelf.forbidden"
+            })),
+        },
+        ProviderError::StaleConfiguration(_) | ProviderError::NotFound { .. } => JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "Audiobookshelf library configuration is stale".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_LIBRARY_STALE",
+                "i18nKey": "error.audiobookshelf.stale"
+            })),
+        },
+        ProviderError::RateLimited {
+            retry_after_seconds,
+        } => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Audiobookshelf rate limit reached".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_RATE_LIMITED",
+                "i18nKey": "error.audiobookshelf.rate_limited",
+                "retryAfterSeconds": retry_after_seconds
+            })),
+        },
+        other => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: crate::providers::sanitize_secret_message(&other.to_string()),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_CONNECTION_FAILED",
+                "i18nKey": "error.audiobookshelf.connection"
+            })),
+        },
+    }
+}
+
+async fn handle_audiobookshelf_discover(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".into(),
+        data: None,
+    })?;
+    let url = params["url"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: hifimule_i18n::t("error.missing_url"),
+        data: None,
+    })?;
+    let username = params["username"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing username".into(),
+            data: None,
+        })?;
+    let password = params["password"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing password".into(),
+            data: None,
+        })?;
+    let discovery =
+        crate::providers::audiobookshelf::AudiobookshelfProvider::discover(url, username, password)
+            .await
+            .map_err(|error| {
+                log_audiobookshelf_failure("server.audiobookshelf.discover", &error);
+                audiobookshelf_error_to_rpc(error)
+            })?;
+    if discovery.libraries.is_empty() {
+        crate::daemon_log!(
+            "RPC server.audiobookshelf.discover failed: provider=audiobookshelf category=no_libraries status=none"
+        );
+        return Err(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "No accessible Audiobookshelf libraries".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_NO_LIBRARIES",
+                "i18nKey": "error.audiobookshelf.no_libraries"
+            })),
+        });
+    }
+
+    let setup_id = random_setup_id();
+    let mut choices = HashMap::new();
+    let mut safe_choices = Vec::with_capacity(discovery.libraries.len());
+    for library in discovery.libraries {
+        let choice_id = random_setup_id();
+        safe_choices.push(serde_json::json!({
+            "choiceId": choice_id,
+            "name": library.name,
+            "role": library.role.slug(),
+        }));
+        choices.insert(choice_id, library);
+    }
+    let pending = PendingAudiobookshelfSetup {
+        created_at: std::time::Instant::now(),
+        url: url.to_string(),
+        username: username.to_string(),
+        password: SecretString::new(password.to_string()),
+        provider: discovery.provider,
+        choices,
+    };
+    let pending_setups = state.pending_audiobookshelf_setups();
+    let mut setups = pending_setups.lock().await;
+    purge_expired_setups(&mut setups);
+    if setups.len() >= MAX_PENDING_AUDIOBOOKSHELF_SETUPS {
+        return Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Too many pending Audiobookshelf setups".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_SETUP_LIMIT",
+                "i18nKey": "error.audiobookshelf.setup_limit"
+            })),
+        });
+    }
+    setups.insert(setup_id.clone(), pending);
+    Ok(serde_json::json!({ "setupId": setup_id, "libraries": safe_choices }))
+}
+
+async fn handle_audiobookshelf_cancel(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let setup_id = params
+        .as_ref()
+        .and_then(|params| params["setupId"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing setupId".into(),
+            data: None,
+        })?;
+    let pending_setups = state.pending_audiobookshelf_setups();
+    let mut setups = pending_setups.lock().await;
+    purge_expired_setups(&mut setups);
+    setups.remove(setup_id);
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_audiobookshelf_commit(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".into(),
+        data: None,
+    })?;
+    let setup_id = params["setupId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing setupId".into(),
+        data: None,
+    })?;
+    let choice_id = params["choiceId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing choiceId".into(),
+        data: None,
+    })?;
+    let name = optional_server_name(&params)?;
+    let icon = optional_server_icon_for_connect(&params)?;
+
+    // Compare-and-remove while holding one lock: commit, replay, and cancel can
+    // have only one winner. Every commit attempt consumes the setup.
+    let pending = {
+        let pending_setups = state.pending_audiobookshelf_setups();
+        let mut setups = pending_setups.lock().await;
+        purge_expired_setups(&mut setups);
+        setups.remove(setup_id).ok_or(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "Audiobookshelf setup expired or was already used".into(),
+            data: Some(serde_json::json!({
+                "errorCode": "AUDIOBOOKSHELF_SETUP_EXPIRED",
+                "i18nKey": "error.audiobookshelf.setup_expired"
+            })),
+        })?
+    };
+    let library = pending.choices.get(choice_id).ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid Audiobookshelf library choice".into(),
+        data: Some(serde_json::json!({
+            "errorCode": "AUDIOBOOKSHELF_INVALID_CHOICE",
+            "i18nKey": "error.audiobookshelf.invalid_choice"
+        })),
+    })?;
+    let db_role = match library.role {
+        crate::providers::ProviderLibraryRole::Audiobook => {
+            crate::db::AudiobookshelfLibraryRole::Audiobook
+        }
+        crate::providers::ProviderLibraryRole::Podcast => {
+            crate::db::AudiobookshelfLibraryRole::Podcast
+        }
+    };
+    let default_name = format!(
+        "{} — {}",
+        library.name,
+        match library.role {
+            crate::providers::ProviderLibraryRole::Audiobook => "Books",
+            crate::providers::ProviderLibraryRole::Podcast => "Podcasts",
+        }
+    );
+    let prior_row = state
+        .db
+        .find_audiobookshelf_server(&pending.url, &pending.username, &library.id)
+        .map_err(storage_error_to_rpc)?;
+    if let Some(row) = &prior_row
+        && row.provider_library_role.as_deref() != Some(db_role.slug())
+    {
+        return Err(audiobookshelf_error_to_rpc(
+            ProviderError::StaleConfiguration("library role changed".into()),
+        ));
+    }
+    let local_id = prior_row
+        .as_ref()
+        .map(|row| row.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let prior_credential =
+        CredentialManager::find_server_credential(&local_id).map_err(storage_error_to_rpc)?;
+    let server_version = pending.provider.server_version().map(str::to_owned);
+    let provider = pending
+        .provider
+        .scope_to(library.id.clone(), library.role)
+        .map_err(audiobookshelf_error_to_rpc)?;
+    let portable_id = crate::db::derive_audiobookshelf_server_id(
+        &crate::db::normalized_server_url(&pending.url),
+        &pending.username,
+        &library.id,
+        db_role,
+    );
+    let new_credential = crate::api::ServerCredentials {
+        token_or_password: pending.password.expose_secret().to_string(),
+        user_id: None,
+    };
+    CredentialManager::save_server_credential(&local_id, &new_credential)
+        .map_err(storage_error_to_rpc)?;
+    let persisted = state.db.upsert_audiobookshelf_server_with_id(
+        &pending.url,
+        &pending.username,
+        &library.id,
+        db_role,
+        server_version.as_deref(),
+        if prior_row.is_some() {
+            name.as_deref()
+        } else {
+            name.as_deref().or(Some(default_name.as_str()))
+        },
+        icon.as_deref(),
+        &local_id,
+    );
+    if let Err(error) = persisted {
+        let compensation = match prior_credential {
+            Some(ref credential) => {
+                CredentialManager::save_server_credential(&local_id, credential)
+            }
+            None => CredentialManager::remove_server_credential(&local_id),
+        };
+        if compensation.is_err() {
+            crate::daemon_log!(
+                "RPC server.audiobookshelf.commit failed: provider=audiobookshelf category=credential_compensation status=none"
+            );
+            return Err(storage_error_to_rpc(
+                "Audiobookshelf commit and credential compensation failed",
+            ));
+        }
+        return Err(storage_error_to_rpc(error));
+    }
+    {
+        let mut manager = state.server_manager.write().await;
+        manager.load_from_db(&state.db);
+        manager
+            .providers
+            .insert(local_id.clone(), Arc::new(provider));
+    }
+    *state.last_connection_check.lock().await = None;
+    Ok(serde_json::json!({
+        "ok": true,
+        "localId": local_id,
+        "serverId": portable_id,
+        "serverType": "audiobookshelf",
+        "libraryRole": library.role.slug(),
+    }))
+}
+
+async fn handle_server_reauthenticate(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".into(),
+        data: None,
+    })?;
+    let id = params["id"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing id".into(),
+        data: None,
+    })?;
+    let password = params["password"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing password".into(),
+            data: None,
+        })?;
+    let row = state
+        .db
+        .get_server(id)
+        .map_err(storage_error_to_rpc)?
+        .ok_or(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "Server not found".into(),
+            data: None,
+        })?;
+    if row.server_type != "audiobookshelf" {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Scoped password-only re-authentication is for Audiobookshelf".into(),
+            data: None,
+        });
+    }
+    let library_id = row.provider_library_id.as_deref().ok_or_else(|| {
+        audiobookshelf_error_to_rpc(ProviderError::StaleConfiguration("missing library".into()))
+    })?;
+    let role = match row.provider_library_role.as_deref() {
+        Some("audiobook") => crate::providers::ProviderLibraryRole::Audiobook,
+        Some("podcast") => crate::providers::ProviderLibraryRole::Podcast,
+        _ => {
+            return Err(audiobookshelf_error_to_rpc(
+                ProviderError::StaleConfiguration("invalid library role".into()),
+            ));
+        }
+    };
+    let provider = crate::providers::audiobookshelf::AudiobookshelfProvider::from_stored_config(
+        &row.url,
+        &row.username,
+        password,
+        library_id,
+        role,
+    )
+    .await
+    .map_err(|error| {
+        log_audiobookshelf_failure("server.reauthenticate", &error);
+        audiobookshelf_error_to_rpc(error)
+    })?;
+    CredentialManager::save_server_credential(
+        id,
+        &crate::api::ServerCredentials {
+            token_or_password: password.to_string(),
+            user_id: None,
+        },
+    )
+    .map_err(storage_error_to_rpc)?;
+    state
+        .server_manager
+        .write()
+        .await
+        .providers
+        .insert(id.to_string(), Arc::new(provider));
+    *state.last_connection_check.lock().await = None;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 /// Full logout (UI "log out" / disconnect): removes ALL configured servers,
 /// clears the vault and config, and resets the in-memory manager.
 async fn handle_server_logout(state: &AppState) -> Result<Value, JsonRpcError> {
+    state.pending_audiobookshelf_setups().lock().await.clear();
     {
         let mut mgr = state.server_manager.write().await;
         *mgr = crate::server_manager::ServerManager::new();
@@ -2527,6 +3050,7 @@ fn server_row_to_json(config: &crate::db::ServerConfig) -> Value {
         "name": config.name,
         "icon": config.icon,
         "selected": config.selected,
+        "libraryRole": config.provider_library_role,
     })
 }
 
@@ -2725,6 +3249,7 @@ fn parse_server_type_hint(value: &str) -> Result<ServerTypeHint, JsonRpcError> {
         "auto" => Ok(ServerTypeHint::Auto),
         "jellyfin" => Ok(ServerTypeHint::Jellyfin),
         "subsonic" => Ok(ServerTypeHint::Subsonic),
+        "audiobookshelf" => Ok(ServerTypeHint::Audiobookshelf),
         _ => Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "Invalid serverType".to_string(),
@@ -2790,6 +3315,7 @@ fn selected_credentials_response(db: &crate::db::Database) -> Result<Option<Valu
         let user_id = match server.server_type.as_str() {
             "jellyfin" => credential.as_ref().and_then(|creds| creds.user_id.clone()),
             "subsonic" | "openSubsonic" => Some(server.username.clone()),
+            "audiobookshelf" => Some(server.username.clone()),
             other => {
                 return Err(storage_error_to_rpc(anyhow::anyhow!(
                     "Unsupported selected server type: {}",
@@ -2797,7 +3323,11 @@ fn selected_credentials_response(db: &crate::db::Database) -> Result<Option<Valu
                 )));
             }
         };
-        let token = credential.map(|creds| creds.token_or_password);
+        let token = if server.server_type == "audiobookshelf" {
+            None
+        } else {
+            credential.map(|creds| creds.token_or_password)
+        };
         return Ok(Some(serde_json::json!({
             "url": server.url,
             "token": token,
@@ -2939,6 +3469,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
                 "name": s.name,
                 "icon": s.icon,
                 "selected": s.selected,
+                "libraryRole": s.provider_library_role,
             })
         })
         .collect();
@@ -2960,6 +3491,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
             "username": config.username,
             "serverType": config.server_type,
             "serverVersion": config.server_version,
+            "libraryRole": config.provider_library_role,
         })
     });
 
@@ -8116,6 +8648,347 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audiobookshelf_generic_connect_requires_library_selection_without_writes() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let error = handle_server_connect(
+            &state,
+            Some(serde_json::json!({
+                "url": "https://abs.example.test",
+                "serverType": "audiobookshelf",
+                "username": "Alexis",
+                "password": "not-persisted"
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.data.unwrap()["errorCode"],
+            "LIBRARY_SELECTION_REQUIRED"
+        );
+        assert!(state.db.list_servers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn audiobookshelf_failure_logging_contains_only_safe_classification() {
+        let error = ProviderError::Http {
+            status: Some(502),
+            message: "https://private.example/albums user=alexis token=secret-token".into(),
+        };
+        let line = audiobookshelf_failure_log_line("server.audiobookshelf.discover", &error);
+        assert_eq!(
+            line,
+            "RPC server.audiobookshelf.discover failed: provider=audiobookshelf category=http status=502"
+        );
+        for secret in ["private.example", "alexis", "secret-token", "/albums"] {
+            assert!(!line.contains(secret));
+        }
+
+        let shape = audiobookshelf_failure_log_line(
+            "server.audiobookshelf.discover",
+            &ProviderError::Deserialization("raw-response-body".into()),
+        );
+        assert!(shape.contains("category=response_shape status=none"));
+        assert!(!shape.contains("raw-response-body"));
+    }
+
+    #[tokio::test]
+    async fn audiobookshelf_setup_is_one_use_and_hides_upstream_library_id() {
+        use mockito::{Matcher, Server};
+        let _credential_lock = crate::api::credential_test_lock();
+        let pending = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        pending.pending_audiobookshelf_setups().lock().await.clear();
+        let mut upstream = Server::new_async().await;
+        upstream
+            .mock("POST", "/login")
+            .match_header("x-return-tokens", "true")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "username": "Alexis",
+                "password": "fixture-password"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"user":{"accessToken":"fixture-access","refreshToken":"fixture-refresh"}}"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+        upstream
+            .mock("GET", "/api/libraries")
+            .match_header("authorization", "Bearer fixture-access")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"libraries":[{"id":"private-library-id","name":"Fiction","mediaType":"book"}]}"#)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let discovered = handle_audiobookshelf_discover(
+            &pending,
+            Some(serde_json::json!({
+                "url": upstream.url(),
+                "username": " Alexis ",
+                "password": "fixture-password"
+            })),
+        )
+        .await
+        .unwrap();
+        assert!(pending.db.list_servers().unwrap().is_empty());
+        assert!(!discovered.to_string().contains("private-library-id"));
+        assert!(!discovered.to_string().contains("fixture-password"));
+        let setup_id = discovered["setupId"].as_str().unwrap();
+        let choice_id = discovered["libraries"][0]["choiceId"].as_str().unwrap();
+        let committed = handle_audiobookshelf_commit(
+            &pending,
+            Some(serde_json::json!({
+                "setupId": setup_id,
+                "choiceId": choice_id
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(committed["libraryRole"], "audiobook");
+        assert!(!committed.to_string().contains("private-library-id"));
+        let local_id = committed["localId"].as_str().unwrap();
+        assert_eq!(pending.db.list_servers().unwrap().len(), 1);
+        assert_eq!(
+            CredentialManager::get_server_credential(local_id)
+                .unwrap()
+                .token_or_password,
+            "fixture-password"
+        );
+
+        // Simulate restart/lazy construction: evict the live provider and require
+        // a fresh local login plus exact library-role validation before caching.
+        pending
+            .server_manager
+            .write()
+            .await
+            .providers
+            .remove(local_id);
+        let restarted =
+            crate::server_manager::get_provider(&pending.server_manager, &pending.db, local_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            restarted.library_role(),
+            Some(crate::providers::ProviderLibraryRole::Audiobook)
+        );
+
+        upstream
+            .mock("POST", "/login")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "username": "Alexis",
+                "password": "new-password"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"new-access","refreshToken":"new-refresh"}}"#)
+            .create_async()
+            .await;
+        upstream
+            .mock("GET", "/api/libraries")
+            .match_header("authorization", "Bearer new-access")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"libraries":[{"id":"private-library-id","name":"Fiction","mediaType":"book"}]}"#)
+            .create_async()
+            .await;
+        let before = pending.db.get_server(local_id).unwrap().unwrap();
+        handle_server_reauthenticate(
+            &pending,
+            Some(serde_json::json!({ "id": local_id, "password": "new-password" })),
+        )
+        .await
+        .unwrap();
+        let after = pending.db.get_server(local_id).unwrap().unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.server_id, before.server_id);
+        assert_eq!(after.name, before.name);
+        assert_eq!(
+            CredentialManager::get_server_credential(local_id)
+                .unwrap()
+                .token_or_password,
+            "new-password"
+        );
+
+        let replay = handle_audiobookshelf_commit(
+            &pending,
+            Some(serde_json::json!({
+                "setupId": setup_id,
+                "choiceId": choice_id
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            replay.data.unwrap()["errorCode"],
+            "AUDIOBOOKSHELF_SETUP_EXPIRED"
+        );
+    }
+
+    #[tokio::test]
+    async fn audiobookshelf_setup_expiry_cancel_and_concurrent_consumers_have_one_winner() {
+        use mockito::Server;
+        let _credential_lock = crate::api::credential_test_lock();
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        state.pending_audiobookshelf_setups().lock().await.clear();
+        let mut upstream = Server::new_async().await;
+        upstream
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"fixture-access"}}"#)
+            .expect(3)
+            .create_async()
+            .await;
+        upstream
+            .mock("GET", "/api/libraries")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"libraries":[{"id":"private-id","name":"Fiction","mediaType":"book"}]}"#)
+            .expect(3)
+            .create_async()
+            .await;
+
+        let discover = || {
+            handle_audiobookshelf_discover(
+                &state,
+                Some(serde_json::json!({
+                    "url": upstream.url(), "username": "Alexis", "password": "fixture-password"
+                })),
+            )
+        };
+
+        let expired = discover().await.unwrap();
+        let expired_id = expired["setupId"].as_str().unwrap();
+        state
+            .pending_audiobookshelf_setups()
+            .lock()
+            .await
+            .get_mut(expired_id)
+            .unwrap()
+            .created_at = std::time::Instant::now()
+            .checked_sub(AUDIOBOOKSHELF_SETUP_TTL + std::time::Duration::from_secs(1))
+            .unwrap();
+        let error = handle_audiobookshelf_commit(
+            &state,
+            Some(serde_json::json!({
+                "setupId": expired_id,
+                "choiceId": expired["libraries"][0]["choiceId"]
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.data.unwrap()["errorCode"],
+            "AUDIOBOOKSHELF_SETUP_EXPIRED"
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                handle_audiobookshelf_cancel(
+                    &state,
+                    Some(serde_json::json!({ "setupId": expired_id })),
+                )
+                .await
+                .unwrap()["ok"],
+                true
+            );
+        }
+
+        let raced = discover().await.unwrap();
+        let raced_params = serde_json::json!({
+            "setupId": raced["setupId"],
+            "choiceId": raced["libraries"][0]["choiceId"]
+        });
+        let cancel_params = serde_json::json!({ "setupId": raced["setupId"] });
+        let (commit_result, cancel_result) = tokio::join!(
+            handle_audiobookshelf_commit(&state, Some(raced_params)),
+            handle_audiobookshelf_cancel(&state, Some(cancel_params))
+        );
+        assert_eq!(cancel_result.unwrap()["ok"], true);
+        if let Err(error) = commit_result {
+            assert_eq!(
+                error.data.unwrap()["errorCode"],
+                "AUDIOBOOKSHELF_SETUP_EXPIRED"
+            );
+            assert!(state.db.list_servers().unwrap().is_empty());
+        } else {
+            assert_eq!(state.db.list_servers().unwrap().len(), 1);
+        }
+
+        let concurrent = discover().await.unwrap();
+        let params = serde_json::json!({
+            "setupId": concurrent["setupId"],
+            "choiceId": concurrent["libraries"][0]["choiceId"]
+        });
+        let (first, second) = tokio::join!(
+            handle_audiobookshelf_commit(&state, Some(params.clone())),
+            handle_audiobookshelf_commit(&state, Some(params))
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let loser = first.err().or_else(|| second.err()).unwrap();
+        assert_eq!(
+            loser.data.unwrap()["errorCode"],
+            "AUDIOBOOKSHELF_SETUP_EXPIRED"
+        );
+    }
+
+    #[tokio::test]
+    async fn audiobookshelf_commit_compensates_vault_when_db_transaction_fails() {
+        use mockito::Server;
+        let _credential_lock = crate::api::credential_test_lock();
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        state.pending_audiobookshelf_setups().lock().await.clear();
+        let mut upstream = Server::new_async().await;
+        upstream
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"fixture-access"}}"#)
+            .create_async()
+            .await;
+        upstream
+            .mock("GET", "/api/libraries")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"libraries":[{"id":"private-id","name":"Fiction","mediaType":"book"}]}"#)
+            .create_async()
+            .await;
+        let setup = handle_audiobookshelf_discover(
+            &state,
+            Some(serde_json::json!({
+                "url": upstream.url(), "username": "Alexis", "password": "fixture-password"
+            })),
+        )
+        .await
+        .unwrap();
+        {
+            let conn = state.db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_audiobookshelf_insert
+                 BEFORE INSERT ON server_config
+                 WHEN NEW.server_type = 'audiobookshelf'
+                 BEGIN SELECT RAISE(ABORT, 'injected DB failure'); END;",
+            )
+            .unwrap();
+        }
+        let error = handle_audiobookshelf_commit(
+            &state,
+            Some(serde_json::json!({
+                "setupId": setup["setupId"],
+                "choiceId": setup["libraries"][0]["choiceId"]
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ERR_STORAGE_ERROR);
+        assert!(state.db.list_servers().unwrap().is_empty());
+        assert_eq!(CredentialManager::test_vault_entry_count(), 0);
+        assert!(state.server_manager.read().await.providers.is_empty());
+    }
+
+    #[tokio::test]
     async fn pending_destination_selection_accepts_the_serialized_camelcase_identity() {
         let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
         let dir = tempfile::tempdir().unwrap();
@@ -9052,6 +9925,8 @@ mod tests {
                 selected,
                 server_id: Some(server_id.to_string()),
                 server_reported_id: None,
+                provider_library_id: None,
+                provider_library_role: None,
             }
         }
         fn item(id: &str, server_id: Option<&str>) -> crate::device::BasketItem {

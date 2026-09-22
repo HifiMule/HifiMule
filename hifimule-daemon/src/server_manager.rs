@@ -30,6 +30,8 @@ pub struct ServerRecord {
     /// tagging and sync routing. Resolved back to `id` for provider lookup.
     pub server_id: Option<String>,
     pub server_reported_id: Option<String>,
+    pub provider_library_id: Option<String>,
+    pub provider_library_role: Option<String>,
 }
 
 impl From<ServerConfig> for ServerRecord {
@@ -45,6 +47,8 @@ impl From<ServerConfig> for ServerRecord {
             selected: c.selected,
             server_id: c.server_id,
             server_reported_id: c.server_reported_id,
+            provider_library_id: c.provider_library_id,
+            provider_library_role: c.provider_library_role,
         }
     }
 }
@@ -104,6 +108,8 @@ impl ServerManager {
             selected: true,
             server_id: Some(portable_id),
             server_reported_id: None,
+            provider_library_id: None,
+            provider_library_role: None,
         }];
         self.selected_server_id = Some(id.clone());
         self.providers.clear();
@@ -150,6 +156,32 @@ pub(crate) async fn connect_provider_for(
                 record.server_version.clone(),
             )
             .map_err(|e| ProviderError::Auth(e.to_string()))?;
+            Ok(Arc::new(provider) as Arc<dyn MediaProvider>)
+        }
+        "audiobookshelf" => {
+            let library_id = record.provider_library_id.as_deref().ok_or_else(|| {
+                ProviderError::StaleConfiguration(
+                    "missing Audiobookshelf library identifier".into(),
+                )
+            })?;
+            let role = match record.provider_library_role.as_deref() {
+                Some("audiobook") => crate::providers::ProviderLibraryRole::Audiobook,
+                Some("podcast") => crate::providers::ProviderLibraryRole::Podcast,
+                _ => {
+                    return Err(ProviderError::StaleConfiguration(
+                        "missing or invalid Audiobookshelf library role".into(),
+                    ));
+                }
+            };
+            let provider =
+                crate::providers::audiobookshelf::AudiobookshelfProvider::from_stored_config(
+                    &record.url,
+                    &record.username,
+                    &creds.token_or_password,
+                    library_id,
+                    role,
+                )
+                .await?;
             Ok(Arc::new(provider) as Arc<dyn MediaProvider>)
         }
         other => Err(ProviderError::UnsupportedCapability(format!(

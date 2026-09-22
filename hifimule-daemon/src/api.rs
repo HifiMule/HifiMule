@@ -1724,6 +1724,15 @@ pub(crate) fn credential_test_lock() -> std::sync::MutexGuard<'static, ()> {
 const VAULT_APP_SALT: &str = "hifimule.github.io/secrets/v1";
 
 impl CredentialManager {
+    #[cfg(test)]
+    pub(crate) fn test_vault_entry_count() -> usize {
+        TEST_VAULT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map_or(0, std::collections::HashMap::len)
+    }
+
     fn get_vault_path() -> Result<PathBuf> {
         Ok(crate::paths::get_app_data_dir()?.join("secrets.enc"))
     }
@@ -2865,6 +2874,8 @@ mod tests {
             selected: true,
             server_id: None,
             server_reported_id: None,
+            provider_library_id: None,
+            provider_library_role: None,
         }
     }
 

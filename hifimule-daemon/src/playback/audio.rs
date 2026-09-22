@@ -78,6 +78,15 @@ impl PlaybackPipelineError {
             ProviderError::NotFound { .. } => {
                 Self::source(anyhow::anyhow!("provider playback item was not found"))
             }
+            ProviderError::Forbidden => {
+                Self::source(anyhow::anyhow!("provider playback permission denied"))
+            }
+            ProviderError::StaleConfiguration(_) => {
+                Self::source(anyhow::anyhow!("provider configuration is stale"))
+            }
+            ProviderError::RateLimited { .. } => {
+                Self::source(anyhow::anyhow!("provider playback is rate limited"))
+            }
             ProviderError::Deserialization(_) => Self::source(anyhow::anyhow!(
                 "provider playback response deserialization failed"
             )),

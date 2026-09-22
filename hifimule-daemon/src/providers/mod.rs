@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub mod audiobookshelf;
 pub mod jellyfin;
 pub mod subsonic;
 
@@ -417,6 +418,12 @@ pub trait MediaProvider: Send + Sync {
 
     fn server_type(&self) -> ServerType;
 
+    /// Provider-neutral persisted library role. Existing music providers are
+    /// unscoped and therefore return `None`.
+    fn library_role(&self) -> Option<ProviderLibraryRole> {
+        None
+    }
+
     fn server_version(&self) -> Option<&str> {
         None
     }
@@ -445,6 +452,7 @@ pub enum ServerTypeHint {
     Auto,
     Jellyfin,
     Subsonic,
+    Audiobookshelf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,7 +460,24 @@ pub enum ServerType {
     Jellyfin,
     Subsonic,
     OpenSubsonic,
+    Audiobookshelf,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderLibraryRole {
+    Audiobook,
+    Podcast,
+}
+
+impl ProviderLibraryRole {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Audiobook => "audiobook",
+            Self::Podcast => "podcast",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -575,6 +600,15 @@ pub enum ProviderError {
     #[error("provider item not found: {item_type} {id}")]
     NotFound { item_type: String, id: String },
 
+    #[error("provider permission denied")]
+    Forbidden,
+
+    #[error("provider configuration is stale: {0}")]
+    StaleConfiguration(String),
+
+    #[error("provider rate limited")]
+    RateLimited { retry_after_seconds: Option<u64> },
+
     #[error("provider capability is unsupported: {0}")]
     UnsupportedCapability(String),
 
@@ -586,7 +620,8 @@ pub enum ProviderError {
 }
 
 /// Probes a server URL without credentials to detect its type.
-/// Uses Subsonic's unauthenticated ping envelope and Jellyfin's public info endpoint.
+/// Uses Audiobookshelf's status marker, Subsonic's unauthenticated ping envelope,
+/// and Jellyfin's public info endpoint.
 pub async fn probe_url(url: &str) -> ServerType {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -595,7 +630,19 @@ pub async fn probe_url(url: &str) -> ServerType {
         Ok(c) => c,
         Err(_) => return ServerType::Unknown,
     };
-    let base = url.trim_end_matches('/');
+    let base = url.trim().trim_end_matches('/');
+
+    // Audiobookshelf exposes a public status document at the configured base.
+    // Requiring both success and the exact app marker avoids identifying generic
+    // JSON endpoints as Audiobookshelf servers.
+    let audiobookshelf_url = format!("{base}/status");
+    if let Ok(resp) = client.get(&audiobookshelf_url).send().await
+        && resp.status().is_success()
+        && let Ok(status) = resp.json::<serde_json::Value>().await
+        && status.get("app").and_then(|value| value.as_str()) == Some("audiobookshelf")
+    {
+        return ServerType::Audiobookshelf;
+    }
 
     // Subsonic returns its JSON envelope even for unauthenticated requests
     let subsonic_url = format!("{}/rest/ping.view?v=1.16.1&c=hifimule-probe&f=json", base);
@@ -646,6 +693,9 @@ pub async fn connect(
         }
         ServerTypeHint::Jellyfin => connect_jellyfin(url, creds).await,
         ServerTypeHint::Subsonic => connect_subsonic(url, creds).await,
+        ServerTypeHint::Audiobookshelf => Err(ProviderError::UnsupportedCapability(
+            "LIBRARY_SELECTION_REQUIRED".to_string(),
+        )),
     }
 }
 
@@ -654,6 +704,7 @@ pub fn server_type_slug(server_type: ServerType) -> Option<&'static str> {
         ServerType::Jellyfin => Some("jellyfin"),
         ServerType::Subsonic => Some("subsonic"),
         ServerType::OpenSubsonic => Some("openSubsonic"),
+        ServerType::Audiobookshelf => Some("audiobookshelf"),
         ServerType::Unknown => None,
     }
 }
@@ -790,6 +841,59 @@ mod tests {
                 username: "alexis".to_string(),
                 password: "secret-password".to_string(),
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_detects_audiobookshelf_at_root_or_prefixed_base() {
+        for prefix in ["", "/audiobookshelf"] {
+            let mut server = Server::new_async().await;
+            let status = server
+                .mock("GET", format!("{prefix}/status").as_str())
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"app":"audiobookshelf","serverVersion":"2.36.1"}"#)
+                .expect(1)
+                .create_async()
+                .await;
+
+            assert_eq!(
+                probe_url(format!("{}{prefix}/", server.url()).as_str()).await,
+                ServerType::Audiobookshelf
+            );
+            status.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_requires_exact_audiobookshelf_status_marker_and_preserves_fallbacks() {
+        for (status_code, body) in [
+            (200, r#"{"app":"not-audiobookshelf"}"#),
+            (200, "not-json"),
+            (404, r#"{"app":"audiobookshelf"}"#),
+        ] {
+            let mut server = Server::new_async().await;
+            let status = server
+                .mock("GET", "/status")
+                .with_status(status_code)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                .expect(1)
+                .create_async()
+                .await;
+            let subsonic = server
+                .mock("GET", "/rest/ping.view")
+                .match_query(Matcher::Any)
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+                .expect(1)
+                .create_async()
+                .await;
+
+            assert_eq!(probe_url(&server.url()).await, ServerType::Subsonic);
+            status.assert_async().await;
+            subsonic.assert_async().await;
         }
     }
 

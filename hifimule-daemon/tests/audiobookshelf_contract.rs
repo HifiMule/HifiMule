@@ -304,6 +304,26 @@ fn delivery_and_book_progress_are_daemon_private_and_alias_only() {
     let expiry: Value = serde_json::from_str(AUTH_EXPIRY).unwrap();
     assert_eq!(expiry["accessExpiry"]["protectedRequestStatus"], 401);
     assert_eq!(expiry["refresh"]["postRefreshProtectedRequestStatus"], 200);
+    assert_eq!(
+        expiry["refresh"]["returns"],
+        serde_json::json!(["user.accessToken", "user.refreshToken"])
+    );
+    let refresh_contract: Value = serde_json::from_str(
+        FIXTURES
+            .iter()
+            .find(|(name, _)| *name == "auth-refresh-revocation.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(
+        refresh_contract["login"]["returns"],
+        serde_json::json!(["user.accessToken", "user.refreshToken"])
+    );
+    assert_eq!(
+        refresh_contract["refresh"]["returns"],
+        serde_json::json!(["user.accessToken", "user.refreshToken"])
+    );
 
     let rate_limit: Value = serde_json::from_str(AUTH_RATE_LIMIT).unwrap();
     assert_eq!(rate_limit["invalidLoginStatuses"][1], 429);

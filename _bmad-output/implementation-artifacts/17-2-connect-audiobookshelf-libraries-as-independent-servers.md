@@ -4,7 +4,7 @@ baseline_commit: a53cb96a78c07e2f8491214fa9163248bc9a0ef4
 
 # Story 17.2: Connect Audiobookshelf libraries as independent servers
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -30,50 +30,50 @@ so that Books and Podcasts libraries become independent HifiMule servers.
 
 ## Tasks / Subtasks
 
-- [ ] **Implement the Audiobookshelf connection adapter from the validated contract** (AC: 1, 6, 7, 9)
-  - [ ] Add `hifimule-daemon/src/providers/audiobookshelf.rs` and register it in `providers/mod.rs`; reuse workspace `reqwest`, `serde`, Tokio, `thiserror`, and dev `mockito` rather than adding an SDK or HTTP-test dependency.
-  - [ ] Add `ServerType::Audiobookshelf`, `ServerTypeHint::Audiobookshelf`, slug parsing, `ProviderLibraryRole`, the defaulted trait accessor, capability-safe defaults, and exhaustive enum matches. `AudiobookshelfProvider::discover` is the only unscoped entry; persisted-provider construction requires library ID + role. Keep `auto` probing unchanged.
-  - [ ] Make generic `server.connect` reject an Audiobookshelf hint without library setup using structured `LIBRARY_SELECTION_REQUIRED`; preserve its Jellyfin/Subsonic wire behavior.
-  - [ ] Implement local login, accessible-library discovery, refresh-once handling, and selected-library validation exactly against `docs/audiobookshelf-integration-contract.md` and the v2.36.1 fixtures. Do not add catalogue mapping or media operations.
-  - [ ] Keep provider access/refresh tokens and raw responses private; implement redacted `Debug`/errors and pass all external error text through the existing sanitizer before RPC/log use.
+- [x] **Implement the Audiobookshelf connection adapter from the validated contract** (AC: 1, 6, 7, 9)
+  - [x] Add `hifimule-daemon/src/providers/audiobookshelf.rs` and register it in `providers/mod.rs`; reuse workspace `reqwest`, `serde`, Tokio, `thiserror`, and dev `mockito` rather than adding an SDK or HTTP-test dependency.
+  - [x] Add `ServerType::Audiobookshelf`, `ServerTypeHint::Audiobookshelf`, slug parsing, `ProviderLibraryRole`, the defaulted trait accessor, capability-safe defaults, and exhaustive enum matches. `AudiobookshelfProvider::discover` is the only unscoped entry; persisted-provider construction requires library ID + role. Keep `auto` probing unchanged.
+  - [x] Make generic `server.connect` reject an Audiobookshelf hint without library setup using structured `LIBRARY_SELECTION_REQUIRED`; preserve its Jellyfin/Subsonic wire behavior.
+  - [x] Implement local login, accessible-library discovery, refresh-once handling, and selected-library validation exactly against `docs/audiobookshelf-integration-contract.md` and the v2.36.1 fixtures. Do not add catalogue mapping or media operations.
+  - [x] Keep provider access/refresh tokens and raw responses private; implement redacted `Debug`/errors and pass all external error text through the existing sanitizer before RPC/log use.
 
-- [ ] **Add a daemon-owned two-stage setup contract** (AC: 1, 2, 6, 7)
-  - [ ] Add `server.audiobookshelf.discover({ url, username, password }) -> { setupId, libraries: [{ choiceId, name, role }] }`. Store pending state in a dedicated `AppState` mutex/map. Generate 128-bit IDs from `OsRng`; use a five-minute TTL and maximum eight pending setups; purge expired entries on discover/commit/cancel.
-  - [ ] Pending objects are non-`Clone`, redacted in `Debug`, use `secrecy` where practical, and are dropped immediately on expiry/cancel/consume. Under one lock, `server.audiobookshelf.commit` compare-and-removes the setup before persistence, making it one-use under replay/concurrent calls. Any failed commit consumes the setup and requires discovery again.
-  - [ ] Add `server.audiobookshelf.cancelSetup({ setupId })`; cancel is idempotent, shutdown clears the map, and tests cover expiry, replay, concurrent commit, and commit-vs-cancel. Never place secrets or upstream IDs in `JsonRpcError.data`.
-  - [ ] Add `server.audiobookshelf.commit({ setupId, choiceId, name?, icon? })`; re-check discovered role and use the safe library name as the default display name. Implement synchronous compensation: snapshot any existing row, credential, and selection; precompute local/portable IDs; keep cache unpublished; write/replace the UUID vault entry first; perform the DB upsert in one SQLite transaction; then publish manager/cache/selection. If a synchronous step fails, restore the prior vault snapshot or remove the new entry, roll back DB, and leave cache/selection unchanged.
-  - [ ] On startup, treat a DB row with no vault credential as configured-but-reauth-required: list it, never provider-cache it, and surface scoped re-auth on use. Orphan vault entries are ignored and may be cleaned safely. This is crash reconciliation, not a claim of cross-file process-crash atomicity.
-  - [ ] Return structured, localizable error data for expired setup, empty accessible-library list, invalid choice, authentication failure, forbidden/missing library, rate limit, and sanitized connection failure.
-  - [ ] Register discover/commit/cancel and `server.reauthenticate` consistently in RPC dispatch and mutation classification; discovery does not persist app state but is credential-sensitive, while commit/cancel/reauth mutate daemon state.
+- [x] **Add a daemon-owned two-stage setup contract** (AC: 1, 2, 6, 7)
+  - [x] Add `server.audiobookshelf.discover({ url, username, password }) -> { setupId, libraries: [{ choiceId, name, role }] }`. Store pending state in a dedicated `AppState` mutex/map. Generate 128-bit IDs from `OsRng`; use a five-minute TTL and maximum eight pending setups; purge expired entries on discover/commit/cancel.
+  - [x] Pending objects are non-`Clone`, redacted in `Debug`, use `secrecy` where practical, and are dropped immediately on expiry/cancel/consume. Under one lock, `server.audiobookshelf.commit` compare-and-removes the setup before persistence, making it one-use under replay/concurrent calls. Any failed commit consumes the setup and requires discovery again.
+  - [x] Add `server.audiobookshelf.cancelSetup({ setupId })`; cancel is idempotent, shutdown clears the map, and tests cover expiry, replay, concurrent commit, and commit-vs-cancel. Never place secrets or upstream IDs in `JsonRpcError.data`.
+  - [x] Add `server.audiobookshelf.commit({ setupId, choiceId, name?, icon? })`; re-check discovered role and use the safe library name as the default display name. Implement synchronous compensation: snapshot any existing row, credential, and selection; precompute local/portable IDs; keep cache unpublished; write/replace the UUID vault entry first; perform the DB upsert in one SQLite transaction; then publish manager/cache/selection. If a synchronous step fails, restore the prior vault snapshot or remove the new entry, roll back DB, and leave cache/selection unchanged.
+  - [x] On startup, treat a DB row with no vault credential as configured-but-reauth-required: list it, never provider-cache it, and surface scoped re-auth on use. Orphan vault entries are ignored and may be cleaned safely. This is crash reconciliation, not a claim of cross-file process-crash atomicity.
+  - [x] Return structured, localizable error data for expired setup, empty accessible-library list, invalid choice, authentication failure, forbidden/missing library, rate limit, and sanitized connection failure.
+  - [x] Register discover/commit/cancel and `server.reauthenticate` consistently in RPC dispatch and mutation classification; discovery does not persist app state but is credential-sensitive, while commit/cancel/reauth mutate daemon state.
 
-- [ ] **Persist immutable library scope without breaking existing servers** (AC: 3–5)
-  - [ ] Extend `ServerConfig`/`ServerRecord` and the `server_config` table with nullable `provider_library_id` and `provider_library_role`; use an additive idempotent migration and update every SELECT/row mapper/test helper in lockstep.
-  - [ ] Define a typed `AudiobookshelfLibraryRole` (`audiobook`, `podcast`) and reject incomplete/unknown/mismatched Audiobookshelf configurations. Keep both fields `NULL` for Jellyfin/Subsonic.
-  - [ ] Refactor `upsert_server` (or add a scoped variant) so Audiobookshelf matches `(normalized endpoint, username, provider_library_id)` while legacy providers retain their existing URL-only rule. Freeze library ID and role after insert; a different library is never an update.
-  - [ ] Implement and test the normative `derive_audiobookshelf_server_id` basis/vector from AC5. Preserve all v1 inputs/outputs and freeze-on-update behavior; do not derive identity from library name or index.
-  - [ ] Update default label/icon helpers and server JSON mapping. Expose role and safe display name to the UI, but keep upstream library ID daemon-private. Store server version as `None` unless an already validated response supplies it; never infer `2.36.1` from payload shape.
-  - [ ] Test selection semantics: first server auto-selects; adding/upserting another while a server is selected preserves selection; reconnecting the selected row keeps selection.
+- [x] **Persist immutable library scope without breaking existing servers** (AC: 3–5)
+  - [x] Extend `ServerConfig`/`ServerRecord` and the `server_config` table with nullable `provider_library_id` and `provider_library_role`; use an additive idempotent migration and update every SELECT/row mapper/test helper in lockstep.
+  - [x] Define a typed `AudiobookshelfLibraryRole` (`audiobook`, `podcast`) and reject incomplete/unknown/mismatched Audiobookshelf configurations. Keep both fields `NULL` for Jellyfin/Subsonic.
+  - [x] Refactor `upsert_server` (or add a scoped variant) so Audiobookshelf matches `(normalized endpoint, username, provider_library_id)` while legacy providers retain their existing URL-only rule. Freeze library ID and role after insert; a different library is never an update.
+  - [x] Implement and test the normative `derive_audiobookshelf_server_id` basis/vector from AC5. Preserve all v1 inputs/outputs and freeze-on-update behavior; do not derive identity from library name or index.
+  - [x] Update default label/icon helpers and server JSON mapping. Expose role and safe display name to the UI, but keep upstream library ID daemon-private. Store server version as `None` unless an already validated response supplies it; never infer `2.36.1` from payload shape.
+  - [x] Test selection semantics: first server auto-selects; adding/upserting another while a server is selected preserves selection; reconnecting the selected row keeps selection.
 
-- [ ] **Integrate vault, restart, cache, and scoped re-authentication** (AC: 6–9)
-  - [ ] Store the local-auth password in the existing encrypted `ServerCredentials.token_or_password` entry keyed by local UUID. Do not alter `vault.rs`, re-key the vault, overload `user_id`, or persist JWTs.
-  - [ ] Extend `server_manager::connect_provider_for` to reconstruct an Audiobookshelf provider from the saved row/vault entry, authenticate lazily, and verify the exact library ID/role before caching it.
-  - [ ] Add `server.reauthenticate({ id, password })`. Use the saved username, library ID, and role; update only that vault entry after validation, evict/replace only that cached provider, and preserve identities and selection. A username/account change goes through new setup.
-  - [ ] Audit logout/remove/select/daemon-state paths and all `ServerType` matches so Audiobookshelf follows established local-ID cache/vault semantics without changing Jellyfin/Subsonic behavior.
+- [x] **Integrate vault, restart, cache, and scoped re-authentication** (AC: 6–9)
+  - [x] Store the local-auth password in the existing encrypted `ServerCredentials.token_or_password` entry keyed by local UUID. Do not alter `vault.rs`, re-key the vault, overload `user_id`, or persist JWTs.
+  - [x] Extend `server_manager::connect_provider_for` to reconstruct an Audiobookshelf provider from the saved row/vault entry, authenticate lazily, and verify the exact library ID/role before caching it.
+  - [x] Add `server.reauthenticate({ id, password })`. Use the saved username, library ID, and role; update only that vault entry after validation, evict/replace only that cached provider, and preserve identities and selection. A username/account change goes through new setup.
+  - [x] Audit logout/remove/select/daemon-state paths and all `ServerType` matches so Audiobookshelf follows established local-ID cache/vault semantics without changing Jellyfin/Subsonic behavior.
 
-- [ ] **Build the explicit provider and library-picker UX** (AC: 1, 2, 8, 10)
-  - [ ] Extend `login.ts` with a provider selector; preserve first-run, inline Add Server, and re-auth modes. Audiobookshelf submission enters discovery/picker instead of immediately calling generic `server.connect`.
-  - [ ] Render Books/Podcasts choices with role labels, loading/empty/error states, keyboard navigation, visible focus, cancel/back behavior, and one clear commit action. Do not render folder, collection, series, or multi-library checkboxes.
-  - [ ] Update re-auth callers to pass the affected local server ID and use the scoped RPC; URL-only re-auth is forbidden for Audiobookshelf because several rows may share that URL.
-  - [ ] Extend `rpc.ts`, `serverIdentity.ts`, and Server Hub summaries with the safe role contract. Add role-aware default labels/icons while retaining user rename/icon overrides.
-  - [ ] Stop logging sensitive RPC parameters: replace the current `console.log('RPC Call:', method, params)` behavior with method-only or explicit field-level redaction for every credential-bearing RPC.
-  - [ ] Add every visible string to `hifimule-i18n/catalog.json` for all existing locales and regenerate/update `hifimule-ui/src/i18n-catalog.d.ts` using the project convention.
+- [x] **Build the explicit provider and library-picker UX** (AC: 1, 2, 8, 10)
+  - [x] Extend `login.ts` with a provider selector; preserve first-run, inline Add Server, and re-auth modes. Audiobookshelf submission enters discovery/picker instead of immediately calling generic `server.connect`.
+  - [x] Render Books/Podcasts choices with role labels, loading/empty/error states, keyboard navigation, visible focus, cancel/back behavior, and one clear commit action. Do not render folder, collection, series, or multi-library checkboxes.
+  - [x] Update re-auth callers to pass the affected local server ID and use the scoped RPC; URL-only re-auth is forbidden for Audiobookshelf because several rows may share that URL.
+  - [x] Extend `rpc.ts`, `serverIdentity.ts`, and Server Hub summaries with the safe role contract. Add role-aware default labels/icons while retaining user rename/icon overrides.
+  - [x] Stop logging sensitive RPC parameters: replace the current `console.log('RPC Call:', method, params)` behavior with method-only or explicit field-level redaction for every credential-bearing RPC.
+  - [x] Add every visible string to `hifimule-i18n/catalog.json` for all existing locales and regenerate/update `hifimule-ui/src/i18n-catalog.d.ts` using the project convention.
 
-- [ ] **Add deterministic contract, persistence, RPC, and UI regression coverage** (AC: 1–11)
-  - [ ] Reuse the Story 17.1 v2.36.1 fixture corpus and `mockito` conventions to test login/Bearer shape, refresh exactly once, discovery mapping, 401/403/404/429/5xx classification, and redaction. Tests must be offline and must not turn an unobserved case into a pass.
-  - [ ] Add DB tests for additive migration; two same-endpoint libraries; same-library upsert; immutable role/library scope; distinct deterministic portable IDs; frozen IDs on update; remove/re-add stability; and unchanged Jellyfin/Subsonic v1 IDs.
-  - [ ] Add RPC/manager tests for no-write discovery, compensated commit failure and crash reconciliation, safe response shapes, lazy restart validation, local-ID-scoped re-auth, provider-cache isolation, remove/select behavior, and no secret/upstream-ID leakage.
-  - [ ] Without adding a UI test framework, extract pure setup/picker/redaction helpers and test them with the repository's existing Node `node:test` + TypeScript-transpile pattern. Cover provider selection, roles, setup expiry/cancel/failure preservation, multi-library cards, re-auth targeting, logging redaction, and absence of folder/collection controls; record a manual keyboard/focus check for the Shoelace dialog.
-  - [ ] Run `rtk npm run build:daemon -- test -p hifimule-daemon`, the targeted `node --test` UI files, `rtk npm run build:ui`, formatting, and `rtk git diff --check`. Report unavailable environment checks truthfully.
+- [x] **Add deterministic contract, persistence, RPC, and UI regression coverage** (AC: 1–11)
+  - [x] Reuse the Story 17.1 v2.36.1 fixture corpus and `mockito` conventions to test login/Bearer shape, refresh exactly once, discovery mapping, 401/403/404/429/5xx classification, and redaction. Tests must be offline and must not turn an unobserved case into a pass.
+  - [x] Add DB tests for additive migration; two same-endpoint libraries; same-library upsert; immutable role/library scope; distinct deterministic portable IDs; frozen IDs on update; remove/re-add stability; and unchanged Jellyfin/Subsonic v1 IDs.
+  - [x] Add RPC/manager tests for no-write discovery, compensated commit failure and crash reconciliation, safe response shapes, lazy restart validation, local-ID-scoped re-auth, provider-cache isolation, remove/select behavior, and no secret/upstream-ID leakage.
+  - [x] Without adding a UI test framework, extract pure setup/picker/redaction helpers and test them with the repository's existing Node `node:test` + TypeScript-transpile pattern. Cover provider selection, roles, setup expiry/cancel/failure preservation, multi-library cards, re-auth targeting, logging redaction, and absence of folder/collection controls; record a manual keyboard/focus check for the Shoelace dialog.
+  - [x] Run `rtk npm run build:daemon -- test -p hifimule-daemon`, the targeted `node --test` UI files, `rtk npm run build:ui`, formatting, and `rtk git diff --check`. Report unavailable environment checks truthfully.
 
 ## Dev Notes
 
@@ -177,17 +177,52 @@ so that Books and Podcasts libraries become independent HifiMule servers.
 
 ### Agent Model Used
 
-Story preparation: Codex.
+Story preparation and implementation: Codex (GPT-5).
+
+### Implementation Plan
+
+- Implement the validated v2.36.1 local-auth and library-discovery adapter behind `MediaProvider`, with tokens confined to daemon memory.
+- Add a one-use daemon-owned discover/commit/cancel setup protocol, transactional library-scoped persistence, vault compensation, lazy restart validation, and local-ID-scoped re-authentication.
+- Extend the existing login and Server Hub identity seams with an explicit provider choice and a single-library Shoelace radio picker, then verify provider, persistence, RPC, UI, and non-regression behavior.
 
 ### Debug Log References
 
 - 2026-09-22: Story preparation analyzed final Epic 17 requirements, PRD/architecture/UX amendments, completed Story 17.1 and its validated v2.36.1 contract, existing provider/server/vault/UI seams, recent git history, and official upstream release/API/authentication references.
+- 2026-09-22: Implemented the Audiobookshelf adapter, immutable library-scoped identity/persistence, two-stage RPC setup, synchronous vault compensation, lazy cache reconstruction, scoped re-authentication, explicit provider/picker UI, safe role metadata, and four-locale strings.
+- 2026-09-22: Added offline provider classification/refresh tests, DB identity and migration tests, RPC replay/expiry/concurrency/compensation/restart/re-auth tests, and Node setup/picker/redaction tests.
+- 2026-09-22: Full daemon regression passed (1054 passed, 6 ignored) plus 5 contract tests; focused UI tests passed (4/4); touched Rust files passed `rustfmt --check`; `git diff --check` passed.
+- 2026-09-22: `rtk npm run build:ui` compiled and signed the macOS app, but the final DMG bundling script failed in the local packaging environment. A standalone browser focus check was attempted, but Vite cannot exercise the Tauri IPC login flow (`invoke` is unavailable); keyboard focus, radio semantics, single-choice commit, and forbidden-control absence are covered by the focused Node test and source inspection.
+- 2026-09-22: Repository-wide Clippy remains blocked by the pre-existing `unused_io_amount` error in `playback/audio/queue_edit_tests.rs:172`; repository-wide `cargo fmt --check` also reports pre-existing formatting differences in `playback/session.rs`. Neither file was changed by this story.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Story 17.2 is limited to authenticated library discovery and durable independent server configuration; later Audiobookshelf catalogue, playback, progress, sync, Autofill, and collection behavior remain deferred to their owning stories.
+- Added Books and Podcasts library discovery through local username/password login, Bearer authorization, one refresh-at-most, sanitized error classification, and capability-safe unsupported media operations.
+- Added opaque one-use setup/choice IDs, five-minute expiry, bounded pending state, idempotent cancellation, concurrency-safe consumption, safe RPC shapes, and vault-first compensated commit behavior.
+- Added nullable immutable library scope, the normative v2 portable identity vector, independent same-endpoint library rows, stable same-library upsert, and unchanged legacy provider identity/upsert behavior.
+- Added password-only local-ID re-authentication and lazy post-restart authentication that validates the persisted library ID and role before caching.
+- Added an explicit provider selector, accessible single-library radio picker, role-aware identity/badges/icons, method-only RPC logging, and localized setup/error copy in all existing locales.
+
+### Change Log
+
+- 2026-09-22: Implemented Story 17.2 end to end and moved it to review.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/17-2-connect-audiobookshelf-libraries-as-independent-servers.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/api.rs`
+- `hifimule-daemon/src/db.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/server_manager.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/audiobookshelfSetup.ts`
+- `hifimule-ui/src/login.ts`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/serverIdentity.ts`
+- `hifimule-ui/tests/audiobookshelfSetup.test.mjs`

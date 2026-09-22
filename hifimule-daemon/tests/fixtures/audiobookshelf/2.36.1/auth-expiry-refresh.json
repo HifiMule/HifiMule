@@ -1,1 +1,1 @@
-{"accessExpiry":{"configuredSeconds":5,"protectedRequestStatus":401},"refresh":{"method":"POST","template":"/auth/refresh","status":200,"postRefreshProtectedRequestStatus":200},"tokens":"redacted"}
+{"accessExpiry":{"configuredSeconds":5,"protectedRequestStatus":401},"refresh":{"method":"POST","template":"/auth/refresh","status":200,"returns":["user.accessToken","user.refreshToken"],"postRefreshProtectedRequestStatus":200},"tokens":"redacted"}

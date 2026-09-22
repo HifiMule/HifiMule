@@ -353,7 +353,10 @@ function registerReauthHandler(): void {
             const { rpcCall } = await import('./rpc');
             const state = await rpcCall('get_daemon_state');
             const url: string | undefined = state?.currentServer?.url;
-            if (!url) {
+            const serverId: string | undefined = state?.currentServer?.localId;
+            const serverType: string | undefined = state?.currentServer?.serverType;
+            const username: string | undefined = state?.currentServer?.username;
+            if (!url || !serverId) {
                 reauthInFlight = false;
                 return;
             }
@@ -363,6 +366,9 @@ function registerReauthHandler(): void {
                 {
                     mode: 'reauth',
                     prefillUrl: url,
+                    serverId,
+                    serverType,
+                    prefillUsername: username,
                     onClose: () => { reauthInFlight = false; },
                 }
             );

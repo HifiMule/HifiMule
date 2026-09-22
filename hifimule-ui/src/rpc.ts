@@ -37,6 +37,13 @@ function getErrorMessage(error: unknown): string {
 }
 
 function localizeKnownRpcError(error: unknown): string | null {
+    if (error && typeof error === 'object') {
+        const data = (error as Record<string, unknown>).data;
+        if (data && typeof data === 'object') {
+            const key = (data as Record<string, unknown>).i18nKey;
+            if (typeof key === 'string' && key.trim()) return t(key);
+        }
+    }
     const message = rawErrorMessage(error);
     if (!message) return null;
 
@@ -95,7 +102,9 @@ function isBrowseMethod(method: string): boolean {
 }
 
 export async function rpcCall(method: string, params: any = {}): Promise<any> {
-    console.log(`RPC Call: ${method}`, params);
+    // Never log params: several RPCs carry passwords, tokens, opaque setup IDs,
+    // or future credential fields. Method-only logging is safe and useful.
+    console.log(`RPC Call: ${method}`);
     // Use Tauri invoke to proxy RPC calls through the Rust backend.
     // Direct fetch from the webview to http://localhost is blocked in release mode
     // because Tauri serves pages from https://tauri.localhost (mixed content).
@@ -128,6 +137,43 @@ export interface ServerSummary {
     name: string | null;
     icon: string | null;
     selected: boolean;
+    libraryRole?: 'audiobook' | 'podcast' | null;
+}
+
+export interface AudiobookshelfLibraryChoice {
+    choiceId: string;
+    name: string;
+    role: 'audiobook' | 'podcast';
+}
+
+export interface AudiobookshelfSetup {
+    setupId: string;
+    libraries: AudiobookshelfLibraryChoice[];
+}
+
+export async function audiobookshelfDiscover(params: {
+    url: string;
+    username: string;
+    password: string;
+}): Promise<AudiobookshelfSetup> {
+    return await rpcCall('server.audiobookshelf.discover', params) as AudiobookshelfSetup;
+}
+
+export async function audiobookshelfCommit(params: {
+    setupId: string;
+    choiceId: string;
+    name?: string;
+    icon?: string;
+}): Promise<void> {
+    await rpcCall('server.audiobookshelf.commit', params);
+}
+
+export async function audiobookshelfCancelSetup(setupId: string): Promise<void> {
+    await rpcCall('server.audiobookshelf.cancelSetup', { setupId });
+}
+
+export async function serverReauthenticate(id: string, password: string): Promise<void> {
+    await rpcCall('server.reauthenticate', { id, password });
 }
 
 /** Lists all configured servers (AC1/AC20). */
