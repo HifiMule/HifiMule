@@ -230,6 +230,8 @@ export interface BrowseAlbum {
     year: number | null;
     trackCount: number;
     coverArtId: string | null;
+    /** Additive public presentation hint; absent for legacy music providers. */
+    presentationCredits?: Array<{ name: string; role: 'author' | 'narrator' }>;
 }
 
 export interface BrowsePlaylist {
@@ -673,7 +675,7 @@ export async function fetchBrowseFavoriteItems(
 
 export async function fetchBrowseSearch(
     query: string,
-): Promise<{ tracks: BrowseTrack[] }> {
+): Promise<{ tracks: BrowseTrack[]; albums?: BrowseAlbum[]; possiblyTruncated?: boolean }> {
     return await rpcCall('browse.search', { query });
 }
 

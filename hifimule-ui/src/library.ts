@@ -224,14 +224,23 @@ function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
         id: a.id,
         serverId: a.serverId,
         name: a.name,
-        type: 'MusicAlbum' as const,
+        type: a.id.startsWith('abs-album-') ? 'Book' as const : 'MusicAlbum' as const,
         coverArtId: a.coverArtId,
-        subtitle: a.artistName,
+        subtitle: a.id.startsWith('abs-album-') ? bookCreditSubtitle(a) : a.artistName,
         year: a.year,
         childCount: a.trackCount,
         sizeBytes: 0,
         sizeTicks: 0,
     }));
+}
+
+function bookCreditSubtitle(book: BrowseAlbum): string {
+    const credits = book.presentationCredits ?? [];
+    const authors = credits.filter(c => c.role === 'author').map(c => c.name);
+    const narrators = credits.filter(c => c.role === 'narrator').map(c => c.name);
+    const authorText = authors.length ? `By ${authors.join(', ')}` : '';
+    const narratorText = narrators.length ? `Narrated by ${narrators.join(', ')}` : '';
+    return [authorText, narratorText].filter(Boolean).join(' · ');
 }
 
 function mapFavoriteAlbums(
@@ -339,9 +348,11 @@ function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
         id: t.id,
         serverId: t.serverId,
         name: t.title,
-        type: 'Audio' as const,
+        type: t.albumId?.startsWith('abs-album-') ? 'BookPart' as const : 'Audio' as const,
         coverArtId: t.coverArtId,
-        subtitle: t.artistName,
+        subtitle: t.albumId?.startsWith('abs-album-')
+            ? (tracks.length === 1 ? 'Complete book' : `Part ${t.trackNumber ?? ''}`.trim())
+            : t.artistName,
         sizeBytes: t.sizeBytes ?? 0,
         sizeTicks: t.duration * 10_000_000,
         childCount: 1,

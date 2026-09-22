@@ -249,6 +249,24 @@ pub trait MediaProvider: Send + Sync {
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError>;
 
+    /// Retrieves artwork through the provider boundary. Providers with authenticated
+    /// artwork (Audiobookshelf) override this so credentials never become a URL sent
+    /// to the UI; legacy providers retain their existing URL-based behavior.
+    async fn fetch_cover_art(
+        &self,
+        cover_art_id: &str,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = self.cover_art_url(cover_art_id).await?;
+        reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| ProviderError::Http {
+                status: error.status().map(|status| status.as_u16()),
+                message: sanitize_secret_message(&error.to_string()),
+            })
+    }
+
     async fn changes_since(&self, token: Option<&str>) -> Result<Vec<ChangeEvent>, ProviderError> {
         self.changes_since_with_context(token, &ProviderChangeContext::default())
             .await

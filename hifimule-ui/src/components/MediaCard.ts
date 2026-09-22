@@ -30,7 +30,7 @@ export interface BrowseDisplayItem {
     id: string;
     serverId?: string;
     name: string;
-    type: 'MusicArtist' | 'MusicAlbum' | 'Playlist' | 'Audio' | 'MusicGenre';
+    type: 'MusicArtist' | 'MusicAlbum' | 'Book' | 'BookPart' | 'Playlist' | 'Audio' | 'MusicGenre';
     basketId?: string;
     basketType?: string;
     coverArtId?: string | null;
@@ -66,7 +66,11 @@ export class MediaCard {
         const isSelected = basketStore.has(itemId);
         if (isSelected) card.classList.add('is-selected');
 
-        const showSelection = isBrowseItem ? true : mode === 'items';
+        // Audiobookshelf books are browse-only until Story 17.5. They must not
+        // accidentally enter the music basket or advertise playback controls.
+        const showSelection = isBrowseItem
+            ? !['Book', 'BookPart'].includes((item as BrowseDisplayItem).type)
+            : mode === 'items';
         const btnDisabled = !selectionAllowed;
 
         let subtitleHtml = '';

@@ -1466,12 +1466,26 @@ fn playback_tagged_albums(server_id: Option<&str>, albums: Vec<Album>) -> Vec<Va
     albums
         .into_iter()
         .map(|album| {
-            let mut value = serde_json::to_value(album).expect("Album serialization is infallible");
+            let mut value = serde_json::to_value(&album).expect("Album serialization is infallible");
             if let Some(server_id) = server_id {
                 value
                     .as_object_mut()
                     .expect("Album serializes as an object")
                     .insert("serverId".into(), Value::String(server_id.to_string()));
+            }
+            // Credits are intentionally reduced to public display names and roles.
+            // Provider identities, library scope, and cover references remain private.
+            let credits = album
+                .provider_metadata
+                .credits
+                .iter()
+                .map(|credit| serde_json::json!({ "name": credit.name, "role": credit.role }))
+                .collect::<Vec<_>>();
+            if !credits.is_empty() {
+                value
+                    .as_object_mut()
+                    .expect("Album serializes as an object")
+                    .insert("presentationCredits".into(), Value::Array(credits));
             }
             value
         })
@@ -2053,7 +2067,11 @@ async fn handle_browse_search(
         .search(&query)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "tracks": playback_tagged_tracks(server_id.as_deref(), result.songs) }))
+    Ok(serde_json::json!({
+        "tracks": playback_tagged_tracks(server_id.as_deref(), result.songs),
+        "albums": playback_tagged_albums(server_id.as_deref(), result.albums),
+        "possiblyTruncated": result.possibly_truncated,
+    }))
 }
 
 async fn handle_playlist_create(
@@ -7093,13 +7111,9 @@ async fn handle_proxy_image(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(provider) = active_non_jellyfin_provider(&state).await {
-        let image_url = match provider.cover_art_url(&id).await {
-            Ok(url) => url,
-            Err(_) => return http::StatusCode::NOT_FOUND.into_response(),
-        };
-        let response = match reqwest::Client::new().get(image_url).send().await {
+        let response = match provider.fetch_cover_art(&id).await {
             Ok(response) => response,
-            Err(_) => return http::StatusCode::BAD_GATEWAY.into_response(),
+            Err(_) => return http::StatusCode::NOT_FOUND.into_response(),
         };
         return proxy_http_image_response(response).await;
     }
@@ -15451,5 +15465,38 @@ mod tests {
         assert_eq!(first[0]["id"], second[0]["id"]);
         assert_eq!(first[0]["serverId"], "portable-a");
         assert_eq!(second[0]["serverId"], "portable-b");
+    }
+
+    #[test]
+    fn album_presentation_credits_are_additive_and_never_expose_provider_ids() {
+        let album = Album {
+            id: "abs-album-public".into(),
+            title: "Book".into(),
+            artist_id: None,
+            artist_name: Some("Primary author".into()),
+            year: None,
+            song_count: Some(1),
+            duration_seconds: None,
+            cover_art_id: Some("abs-cover-public".into()),
+            provider_metadata: crate::domain::models::ProviderItemMetadata {
+                identity: Some(crate::domain::models::ProviderIdentity {
+                    library_id: "private-library".into(),
+                    library_item_id: "private-item".into(),
+                    media_id: "private-media".into(),
+                }),
+                credits: vec![crate::domain::models::Credit {
+                    name: "Narrator".into(),
+                    provider_id: Some("private-person".into()),
+                    role: crate::domain::models::CreditRole::Narrator,
+                }],
+                ..Default::default()
+            },
+        };
+        let result = playback_tagged_albums(Some("portable"), vec![album]);
+        assert_eq!(result[0]["presentationCredits"][0]["name"], "Narrator");
+        assert_eq!(result[0]["presentationCredits"][0]["role"], "narrator");
+        assert!(result[0].get("providerId").is_none());
+        assert!(!result[0].to_string().contains("private-library"));
+        assert!(!result[0].to_string().contains("private-person"));
     }
 }

@@ -4,7 +4,7 @@ baseline_commit: 6025102
 
 # Story 17.4: Browse and search an Audiobookshelf audiobook server
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -24,32 +24,32 @@ so that I can choose books without confusing them with music or podcasts.
 
 ## Tasks / Subtasks
 
-- [ ] **Publish the narrowly scoped browse capability** (AC: 1, 6)
-  - [ ] In `hifimule-daemon/src/providers/audiobookshelf.rs`, enable only `BrowseMode::Albums` for the persisted Audiobook role; retain Podcast rejection and selected-library validation before network I/O.
-  - [ ] Do not add modes, playlists, changes-since, download, playback, progress, sync, or mutation support.
+- [x] **Publish the narrowly scoped browse capability** (AC: 1, 6)
+  - [x] In `hifimule-daemon/src/providers/audiobookshelf.rs`, enable only `BrowseMode::Albums` for the persisted Audiobook role; retain Podcast rejection and selected-library validation before network I/O.
+  - [x] Do not add modes, playlists, changes-since, download, playback, progress, sync, or mutation support.
 
-- [ ] **Add safe cover delivery behind the provider boundary** (AC: 5, 7)
-  - [ ] Add the smallest provider-neutral authenticated cover-fetch seam required by the existing daemon image path; do not expose token-bearing URLs or make UI HTTP requests to Audiobookshelf.
-  - [ ] Reuse the adapter's existing session mutex, Bearer injection, one-refresh-after-401, response bounds, status mapping, path encoding, and secret redaction.
-  - [ ] Keep the legacy Jellyfin/Subsonic route and output behavior compatible; only add routing/identification necessary for a selected Audiobookshelf server.
+- [x] **Add safe cover delivery behind the provider boundary** (AC: 5, 7)
+  - [x] Add the smallest provider-neutral authenticated cover-fetch seam required by the existing daemon image path; do not expose token-bearing URLs or make UI HTTP requests to Audiobookshelf.
+  - [x] Reuse the adapter's existing session mutex, Bearer injection, one-refresh-after-401, response bounds, status mapping, path encoding, and secret redaction.
+  - [x] Keep the legacy Jellyfin/Subsonic route and output behavior compatible; only add routing/identification necessary for a selected Audiobookshelf server.
 
-- [ ] **Extend RPC data without breaking current clients** (AC: 2–4, 7)
-  - [ ] Update `hifimule-daemon/src/rpc.rs` so `browse.search` can add albums/book hits while preserving existing `{ tracks }` semantics for current providers and callers.
-  - [ ] Carry only safe, public presentation data. Keep `ProviderItemMetadata`, raw identities, library IDs, cover references, headers, and credentials daemon-private.
-  - [ ] Map `NotFound`, `StaleConfiguration`, `Forbidden`, rate-limit, and sanitized server errors through the established RPC error convention; do not collapse stale configuration into an empty list.
+- [x] **Extend RPC data without breaking current clients** (AC: 2–4, 7)
+  - [x] Update `hifimule-daemon/src/rpc.rs` so `browse.search` can add albums/book hits while preserving existing `{ tracks }` semantics for current providers and callers.
+  - [x] Carry only safe, public presentation data. Keep `ProviderItemMetadata`, raw identities, library IDs, cover references, headers, and credentials daemon-private.
+  - [x] Map `NotFound`, `StaleConfiguration`, `Forbidden`, rate-limit, and sanitized server errors through the established RPC error convention; do not collapse stale configuration into an empty list.
 
-- [ ] **Make the capability-driven UI domain-appropriate** (AC: 2–4, 6)
-  - [ ] Update `hifimule-ui/src/rpc.ts` with additive browse/search DTOs and wrappers.
-  - [ ] Update `hifimule-ui/src/library.ts` and the smallest relevant card/row components to render an Audiobook server as Books and ordered playable parts as Part/Chapter labels. Preserve existing music terminology, card types, pagination, selection, focus, and virtualization for every non-Audiobookshelf server.
-  - [ ] Render author-first metadata and ordered additional author/narrator credits without fabricating identities or promoting narrators when an author is absent.
-  - [ ] Preserve existing status-state components and localized accessible labels. Add catalog keys/types for every new visible string across all locales; regenerate the typed catalog using the project convention.
-  - [ ] Gate/hide Audiobookshelf playback, preview, queue, and basket controls. In particular, avoid generic `MediaCard` album-play creation and legacy Jellyfin basket/size calls for ABS items.
+- [x] **Make the capability-driven UI domain-appropriate** (AC: 2–4, 6)
+  - [x] Update `hifimule-ui/src/rpc.ts` with additive browse/search DTOs and wrappers.
+  - [x] Update `hifimule-ui/src/library.ts` and the smallest relevant card/row components to render an Audiobook server as Books and ordered playable parts as Part/Chapter labels. Preserve existing music terminology, card types, pagination, selection, focus, and virtualization for every non-Audiobookshelf server.
+  - [x] Render author-first metadata and ordered additional author/narrator credits without fabricating identities or promoting narrators when an author is absent.
+  - [x] Preserve existing status-state components and localized accessible labels. Add catalog keys/types for every new visible string across all locales; regenerate the typed catalog using the project convention.
+  - [x] Gate/hide Audiobookshelf playback, preview, queue, and basket controls. In particular, avoid generic `MediaCard` album-play creation and legacy Jellyfin basket/size calls for ABS items.
 
-- [ ] **Prove the contract and regressions** (AC: 1–7)
-  - [ ] Add co-located Audiobookshelf `mockito` tests for capability/role, safe cover fetch/proxy, exact authentication behavior, refresh once, 403/404/429/5xx classification, bounded body handling, and secret redaction.
-  - [ ] Add Rust RPC tests alongside the existing album/browse tests for additive album search results and legacy tracks-only compatibility.
-  - [ ] Add Node UI tests using the established `hifimule-ui/tests/*.test.mjs` convention for vocabulary/hierarchy, state presentation, focus/accessibility, no-premature-action gating, and generic-provider regressions.
-  - [ ] Run `rtk cargo fmt --check`, focused provider/RPC/contract tests, `rtk cargo test -p hifimule-daemon`, applicable UI tests, UI type-check/build, and `rtk git diff --check`. Run strict Clippy where practical and report the existing baseline blocker truthfully if it remains.
+- [x] **Prove the contract and regressions** (AC: 1–7)
+  - [x] Add co-located Audiobookshelf `mockito` tests for capability/role, safe cover fetch/proxy, exact authentication behavior, refresh once, 403/404/429/5xx classification, bounded body handling, and secret redaction.
+  - [x] Add Rust RPC tests alongside the existing album/browse tests for additive album search results and legacy tracks-only compatibility.
+  - [x] Add Node UI tests using the established `hifimule-ui/tests/*.test.mjs` convention for vocabulary/hierarchy, state presentation, focus/accessibility, no-premature-action gating, and generic-provider regressions.
+  - [x] Run `rtk cargo fmt --check`, focused provider/RPC/contract tests, `rtk cargo test -p hifimule-daemon`, applicable UI tests, UI type-check/build, and `rtk git diff --check`. Run strict Clippy where practical and report the existing baseline blocker truthfully if it remains.
 
 ## Dev Notes
 
@@ -123,11 +123,28 @@ GPT-5 Codex
 ### Debug Log References
 
 - 2026-09-22: Ultimate context engine analysis completed — full Epic 17/PRD/architecture, Story 17.3 implementation and review learning, current provider/RPC/UI seams, Git history, fixtures, and current Audiobookshelf release/API documentation analyzed.
+- 2026-09-22: Began implementation. Added the Audiobook-only Albums capability gate, daemon-owned authenticated cover-fetch provider seam, additive `browse.search.albums` response, and browse-only Book card gating. Focused daemon capability test and UI production build pass; full daemon suite is not yet complete in this environment because its mock HTTP server cannot bind.
 
 ### Completion Notes List
 
 - Comprehensive developer guide created; scope explicitly gates direct playback, progress, podcasts, sync/Autofill, and series/collection work to their owning stories.
+- Implemented the persisted-role capability gate: Audiobook scope exposes only Albums, while Podcast and unscoped providers expose no browse modes. Verified with `audiobook_scope_publishes_only_album_browsing`.
+- Added authenticated, refresh-once Audiobookshelf cover delivery through the provider boundary; the daemon proxy now receives the response directly and the UI never receives credentials or an upstream URL.
+- Extended browse search additively with Books and truncation information, while retaining legacy tracks. Public display credits include only ordered names and roles; private provider IDs never serialize.
+- Added Books/Book Part presentation and gates that prevent audiobook cards and parts from exposing music playback or basket actions before Story 17.5.
+- Validation: full daemon suite (`1081 passed, 6 ignored`), Audiobookshelf contract tests (`5 passed`), focused UI tests (`3 passed`), UI build, and diff check passed. `cargo fmt --check` still reports only the pre-existing formatting drift in `hifimule-daemon/src/playback/session.rs`; it was not modified.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/17-4-browse-and-search-an-audiobookshelf-audiobook-server.md`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/tests/audiobookshelfBrowse.test.mjs`
+
+## Change Log
+
+- 2026-09-22: Implemented Audiobookshelf Books browsing, safe authenticated cover delivery, additive search presentation, and browse-only UI gates; marked ready for review.

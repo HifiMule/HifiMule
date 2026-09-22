@@ -4,8 +4,8 @@
 //! tokens, and upstream library identifiers stay daemon-side.
 
 use super::{
-    BrowseCapabilities, Capabilities, MediaProvider, ProviderChangeContext, ProviderError,
-    ProviderLibraryRole, ScrobbleRequest, ServerType, TranscodeProfile,
+    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, ProviderChangeContext,
+    ProviderError, ProviderLibraryRole, ScrobbleRequest, ServerType, TranscodeProfile,
 };
 use crate::domain::models::{
     Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChapterMarker, Credit,
@@ -942,7 +942,16 @@ fn cover_reference(library_id: &str, book: &BookDto) -> Option<String> {
         .cover_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
-        .map(|_| opaque_id("cover", &[library_id, &book.id]))
+        .map(|_| opaque_id("cover", &[library_id, &book.id, &book.media.id]))
+}
+
+fn audiobookshelf_browse_capabilities(role: Option<ProviderLibraryRole>) -> BrowseCapabilities {
+    match role {
+        Some(ProviderLibraryRole::Audiobook) => BrowseCapabilities {
+            list_modes: vec![BrowseMode::Albums],
+        },
+        _ => BrowseCapabilities::default(),
+    }
 }
 
 fn chapter_markers(chapters: &[ChapterDto]) -> Vec<ChapterMarker> {
@@ -1091,6 +1100,30 @@ impl MediaProvider for AudiobookshelfProvider {
     async fn cover_art_url(&self, _cover_art_id: &str) -> Result<String, ProviderError> {
         Err(unsupported("cover_art_url"))
     }
+    async fn fetch_cover_art(
+        &self,
+        cover_art_id: &str,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let library = self.audiobook_library_id()?;
+        let (encoded_library, item_id, _) = parse_opaque_id("cover", cover_art_id)?;
+        if encoded_library != library {
+            return Err(ProviderError::NotFound {
+                item_type: "cover".into(),
+                id: cover_art_id.into(),
+            });
+        }
+        let item = item_endpoint(&self.base_url, &item_id)?;
+        let endpoint = format!("{item}/cover");
+        let response = self.protected_get(&endpoint).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound {
+                item_type: "cover".into(),
+                id: cover_art_id.into(),
+            });
+        }
+        check_status(&response)?;
+        Ok(response)
+    }
     async fn changes_since_with_context(
         &self,
         _token: Option<&str>,
@@ -1116,7 +1149,7 @@ impl MediaProvider for AudiobookshelfProvider {
             supports_changes_since: false,
             supports_server_transcoding: false,
             supports_playlist_write: false,
-            browse: BrowseCapabilities::default(),
+            browse: audiobookshelf_browse_capabilities(self.library_role),
         }
     }
 }
@@ -1124,6 +1157,7 @@ impl MediaProvider for AudiobookshelfProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::BrowseMode;
     use mockito::{Matcher, Server};
 
     fn login_body() -> &'static str {
@@ -1178,6 +1212,66 @@ mod tests {
             endpoint,
             "https://example.test/api/items/..%2Fadmin%3Ftoken=leak"
         );
+    }
+
+    #[test]
+    fn audiobook_scope_publishes_only_album_browsing() {
+        assert_eq!(
+            audiobookshelf_browse_capabilities(Some(ProviderLibraryRole::Audiobook)).list_modes,
+            vec![BrowseMode::Albums]
+        );
+        assert!(
+            audiobookshelf_browse_capabilities(Some(ProviderLibraryRole::Podcast))
+                .list_modes
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cover_fetch_uses_bearer_auth_and_refreshes_once() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let _expired_cover = server
+            .mock("GET", "/api/items/book-1/cover")
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let _refresh = server
+            .mock("POST", "/auth/refresh")
+            .match_header("x-refresh-token", "refresh-fixture")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"refreshed"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _cover = server
+            .mock("GET", "/api/items/book-1/cover")
+            .match_header("authorization", "Bearer refreshed")
+            .with_status(200)
+            .with_header("content-type", "image/jpeg")
+            .with_body(vec![1_u8, 2, 3])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("books".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let cover = opaque_id("cover", &["books", "book-1", "media-1"]);
+        let response = provider.fetch_cover_art(&cover).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), &[1, 2, 3]);
     }
 
     #[test]
