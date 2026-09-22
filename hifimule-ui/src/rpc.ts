@@ -568,7 +568,7 @@ export async function fetchBrowseAlbums(
 
 export async function fetchBrowseAlbum(
     albumId: string,
-): Promise<{ album: BrowseAlbum; tracks: BrowseTrack[] }> {
+): Promise<{ album: BrowseAlbum; tracks: BrowseTrack[]; chapters?: Array<{ startSeconds: number; endSeconds: number }> }> {
     return await rpcCall('browse.getAlbum', { albumId });
 }
 

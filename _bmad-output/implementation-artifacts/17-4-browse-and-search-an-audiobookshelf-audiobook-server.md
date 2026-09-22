@@ -4,7 +4,7 @@ baseline_commit: 6025102
 
 # Story 17.4: Browse and search an Audiobookshelf audiobook server
 
-Status: review
+Status: done
 
 ## Story
 
@@ -138,13 +138,36 @@ GPT-5 Codex
 
 - `_bmad-output/implementation-artifacts/17-4-browse-and-search-an-audiobookshelf-audiobook-server.md`
 - `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/Cargo.toml`
+- `Cargo.lock`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/book-multipart.json`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/book-single-missing-credits.json`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/README.md`
 - `hifimule-daemon/src/providers/mod.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-ui/src/rpc.ts`
 - `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/styles.css`
 - `hifimule-ui/src/components/MediaCard.ts`
 - `hifimule-ui/tests/audiobookshelfBrowse.test.mjs`
+- `hifimule-i18n/catalog.json`
+- `scripts/tests/browse-mode-ui.test.mjs`
 
 ## Change Log
 
 - 2026-09-22: Implemented Audiobookshelf Books browsing, safe authenticated cover delivery, additive search presentation, and browse-only UI gates; marked ready for review.
+- 2026-09-22: Applied all nine code-review patches; full daemon suite and focused UI tests pass. Workspace-wide formatting remains blocked only by pre-existing playback/session.rs drift.
+- 2026-09-22: Fixed live Audiobookshelf catalogue parsing of string `publishedYear` values and added safe field-path diagnostics for any future response mismatch; daemon suite and contract tests pass.
+- 2026-09-22: Corrected book detail parsing to use `audioFiles[].ino` and numeric chapter IDs, then updated synthetic fixtures to match the documented wire shape. Full daemon and contract suites pass.
+
+### Review Findings
+
+- [x] [Review][Patch] Book cards cannot open their parts because navigation has no `Book` case [hifimule-ui/src/library.ts:2320]
+- [x] [Review][Patch] Book and BookPart list rows still expose a basket toggle and can add items [hifimule-ui/src/library.ts:1308]
+- [x] [Review][Patch] Search albums and truncation information are never consumed by the UI [hifimule-ui/src/rpc.ts:675]
+- [x] [Review][Patch] Book subtitles omit the primary author when only `artistName` supplies it [hifimule-ui/src/library.ts:250]
+- [x] [Review][Patch] Book detail drops chapter markers before they reach the UI [hifimule-daemon/src/rpc.rs:1788]
+- [x] [Review][Patch] Book mode, empty state, credit, and part labels need localized Book vocabulary [hifimule-ui/src/library.ts:255]
+- [x] [Review][Patch] Letter quick navigation calls an unsupported filter for larger book libraries [hifimule-ui/src/library.ts:597]
+- [x] [Review][Patch] Chunked Audiobookshelf covers bypass the declared-length limit and buffer without a cap [hifimule-daemon/src/rpc.rs:7182]
+- [x] [Review][Patch] Cover fetch errors collapse forbidden, rate-limit, and server failures into 404 [hifimule-daemon/src/rpc.rs:7120]

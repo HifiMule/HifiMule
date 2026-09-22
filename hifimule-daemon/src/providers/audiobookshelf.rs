@@ -170,7 +170,7 @@ struct BookMetadataDto {
     #[serde(default)]
     narrators: Vec<String>,
     #[serde(default)]
-    published_year: Option<u32>,
+    published_year: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,7 +182,7 @@ struct BookAuthorDto {
 #[derive(Debug, Deserialize)]
 struct AudioFileDto {
     #[serde(deserialize_with = "deserialize_nonempty")]
-    id: String,
+    ino: String,
     index: serde_json::Value,
     #[serde(default)]
     duration: Option<f64>,
@@ -190,8 +190,7 @@ struct AudioFileDto {
 
 #[derive(Debug, Deserialize)]
 struct ChapterDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
-    id: String,
+    id: serde_json::Value,
     start: f64,
     end: f64,
 }
@@ -291,7 +290,7 @@ impl AudiobookshelfProvider {
         );
         let response = self.protected_get(&endpoint).await?;
         check_status(&response)?;
-        let page: CataloguePageDto = bounded_json(response).await?;
+        let page: CataloguePageDto = bounded_json(response, "catalogue").await?;
         let total = u32::try_from(page.total).unwrap_or(u32::MAX);
         let albums = page
             .results
@@ -320,7 +319,7 @@ impl AudiobookshelfProvider {
             });
         }
         check_status(&response)?;
-        let book: BookDto = bounded_json(response).await?;
+        let book: BookDto = bounded_json(response, "book detail").await?;
         if book.media_type != "book"
             || book.library_id != library
             || book.id != item_id
@@ -352,14 +351,14 @@ impl AudiobookshelfProvider {
                             })
                             .collect(),
                         narrators: book.media.metadata.narrators.clone(),
-                        published_year: book.media.metadata.published_year,
+                        published_year: book.media.metadata.published_year.clone(),
                     },
                     audio_files: book
                         .media
                         .audio_files
                         .iter()
                         .map(|file| AudioFileDto {
-                            id: file.id.clone(),
+                            ino: file.ino.clone(),
                             index: file.index.clone(),
                             duration: file.duration,
                         })
@@ -391,17 +390,17 @@ impl AudiobookshelfProvider {
             numeric_index(&left.index)
                 .unwrap_or(u32::MAX)
                 .cmp(&numeric_index(&right.index).unwrap_or(u32::MAX))
-                .then_with(|| left.id.cmp(&right.id))
+                .then_with(|| left.ino.cmp(&right.ino))
         });
         let mut part_identities = Vec::new();
         let tracks = files
             .into_iter()
             .filter_map(|file| {
                 let index = numeric_index(&file.index)?;
-                let id = opaque_id("track", &[library, &book.id, &book.media.id, &file.id]);
+                let id = opaque_id("track", &[library, &book.id, &book.media.id, &file.ino]);
                 part_identities.push(ProviderPartIdentity {
                     public_id: id.clone(),
-                    audio_file_id: file.id.clone(),
+                    audio_file_id: file.ino.clone(),
                 });
                 Some(Song {
                     id,
@@ -434,7 +433,7 @@ impl AudiobookshelfProvider {
                             library_item_id: book.id.clone(),
                             media_id: book.media.id.clone(),
                         }),
-                        audio_file_id: Some(file.id.clone()),
+                        audio_file_id: Some(file.ino.clone()),
                         cover_reference: cover_reference.clone(),
                         credits: credits.clone(),
                         ..Default::default()
@@ -474,7 +473,7 @@ impl AudiobookshelfProvider {
             .append_pair("limit", &SEARCH_LIMIT.to_string());
         let response = self.protected_get(url.as_str()).await?;
         check_status(&response)?;
-        let results: BookSearchDto = bounded_json(response).await?;
+        let results: BookSearchDto = bounded_json(response, "book search").await?;
         let possibly_truncated = results.book.len() >= SEARCH_LIMIT as usize;
         let albums = results
             .book
@@ -747,6 +746,7 @@ where
 
 async fn bounded_json<T: DeserializeOwned>(
     mut response: reqwest::Response,
+    context: &'static str,
 ) -> Result<T, ProviderError> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
@@ -765,8 +765,26 @@ async fn bounded_json<T: DeserializeOwned>(
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body)
-        .map_err(|_| ProviderError::Deserialization("invalid Audiobookshelf response".into()))
+    let mut deserializer = serde_json::Deserializer::from_slice(&body);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        // A field path gives actionable diagnostics without retaining a response
+        // body, provider identity, endpoint, or parser value in logs or RPC.
+        let path = error.path().to_string();
+        let safe_path: String = path
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '[' | ']' | '_'))
+            .take(120)
+            .collect();
+        let safe_path = if safe_path.is_empty() {
+            "root"
+        } else {
+            &safe_path
+        };
+        eprintln!("Audiobookshelf {context} response rejected at {safe_path}");
+        ProviderError::Deserialization(format!(
+            "invalid Audiobookshelf {context} response at {safe_path}"
+        ))
+    })
 }
 
 fn item_endpoint(base_url: &str, item_id: &str) -> Result<String, ProviderError> {
@@ -958,6 +976,13 @@ fn chapter_markers(chapters: &[ChapterDto]) -> Vec<ChapterMarker> {
     chapters
         .iter()
         .filter_map(|chapter| {
+            let id = match &chapter.id {
+                serde_json::Value::Number(number) if number.as_u64().is_some() => {
+                    number.to_string()
+                }
+                serde_json::Value::String(id) if !id.trim().is_empty() => id.clone(),
+                _ => return None,
+            };
             let start_seconds = duration_seconds(Some(chapter.start));
             let end_seconds = duration_seconds(Some(chapter.end));
             (chapter.start.is_finite()
@@ -965,7 +990,7 @@ fn chapter_markers(chapters: &[ChapterDto]) -> Vec<ChapterMarker> {
                 && chapter.start >= 0.0
                 && chapter.end >= chapter.start)
                 .then_some(ChapterMarker {
-                    id: chapter.id.clone(),
+                    id,
                     start_seconds,
                     end_seconds,
                 })
@@ -1007,9 +1032,9 @@ fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
                     ProviderPartIdentity {
                         public_id: opaque_id(
                             "track",
-                            &[library_id, &book.id, &book.media.id, &file.id],
+                            &[library_id, &book.id, &book.media.id, &file.ino],
                         ),
-                        audio_file_id: file.id.clone(),
+                        audio_file_id: file.ino.clone(),
                     },
                 )
             })
@@ -1030,7 +1055,12 @@ fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
         title: book.media.metadata.title.unwrap_or_default(),
         artist_id: primary.and_then(|author| author.id.clone()),
         artist_name: primary.map(|author| author.name.clone()),
-        year: book.media.metadata.published_year,
+        year: book
+            .media
+            .metadata
+            .published_year
+            .as_deref()
+            .and_then(|year| year.parse().ok()),
         song_count,
         duration_seconds,
         cover_art_id: cover_art_id.clone(),
@@ -1184,7 +1214,7 @@ mod tests {
         assert_eq!(numeric_index(&serde_json::json!("10")), None);
         let chapter_dtos = vec![
             ChapterDto {
-                id: "keep".into(),
+                id: serde_json::json!(0),
                 start: 0.0,
                 end: 24.5,
             },
@@ -1198,7 +1228,7 @@ mod tests {
         assert_eq!(
             chapters,
             vec![ChapterMarker {
-                id: "keep".into(),
+                id: "0".into(),
                 start_seconds: 0,
                 end_seconds: 25
             }]
@@ -1313,8 +1343,7 @@ mod tests {
         for body in [
             r#"{"id":"","libraryId":"book-id","mediaType":"book","media":{"id":"media"}}"#,
             r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":""}}"#,
-            r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"id":"","index":1}]}}"#,
-            r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","chapters":[{"id":"","start":0,"end":1}]}}"#,
+            r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"ino":"","index":1}]}}"#,
         ] {
             let error = serde_json::from_str::<BookDto>(body).unwrap_err();
             assert!(error.to_string().contains("required identity is empty"));
@@ -1326,7 +1355,7 @@ mod tests {
         let error = book_album("book-id", serde_json::from_str(foreign).unwrap()).unwrap_err();
         assert!(matches!(error, ProviderError::Deserialization(_)));
 
-        let mixed_indices = r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"id":"b","index":2,"duration":20},{"id":"invalid","index":0,"duration":99},{"id":"a","index":2,"duration":10}]}}"#;
+        let mixed_indices = r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"ino":"b","index":2,"duration":20},{"ino":"invalid","index":0,"duration":99},{"ino":"a","index":2,"duration":10}]}}"#;
         let album = book_album("book-id", serde_json::from_str(mixed_indices).unwrap()).unwrap();
         assert_eq!(album.song_count, Some(2));
         assert_eq!(album.duration_seconds, Some(30));
@@ -1355,7 +1384,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("page".into(), "0".into()), Matcher::UrlEncoded("limit".into(), "2".into())]))
             .match_header("authorization", "Bearer access-fixture")
             .with_status(200).with_header("content-type", "application/json")
-            .with_body(r#"{"total":1,"results":[{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","coverPath":"present","metadata":{"title":"Book"}}}]}"#)
+            .with_body(r#"{"total":1,"results":[{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","coverPath":"present","metadata":{"title":"Book","publishedYear":"2008"}}}]}"#)
             .expect(1).create_async().await;
         let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
             .await
@@ -1365,6 +1394,7 @@ mod tests {
         let (albums, total) = provider.list_albums(None, None, 0, 2).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].year, Some(2008));
         assert!(
             provider
                 .list_albums(Some("other"), None, 0, 2)

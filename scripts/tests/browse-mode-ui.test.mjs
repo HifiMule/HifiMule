@@ -45,11 +45,11 @@ function harness(locale = 'en') {
   document.createElement = tag => new Element(tag);
   document.getElementById = id => id === 'browse-mode-bar' ? root : id === 'library-content' ? content : null;
   const exports = {};
-  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView };';
+  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks };';
   const source = ts.transpileModule(input, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   vm.runInNewContext(source, { exports, document, console, requestAnimationFrame: f => f(),
-    require: name => name === './i18n' ? {t:key=>catalog[locale][key] ?? key}
-      : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}}
+    require: name => name === './i18n' ? {t:(key,params={})=>(catalog[locale][key] ?? key).replace(/\{(\w+)\}/g,(_,name)=>String(params[name] ?? ''))}
+      : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[]}
       : name === './state/basket' ? {basketStore} : {},
     setTimeout, clearTimeout, window: {} });
   const {probe} = exports;
@@ -84,6 +84,24 @@ test('localized visible names, decorative icons and actual inner pressed states 
     }
     h.state.browseMode='favorites'; h.state.loading=true; await h.render();
     for(const b of h.buttons()){assert.equal(b.disabled,true);assert.equal(b.button.getAttribute('aria-pressed'),String(b.getAttribute('data-mode')==='favorites'));}
+  }
+});
+test('book scope uses localized mode and preserves primary author and part order', async () => {
+  for (const locale of ['en', 'fr', 'es', 'de']) {
+    const h = harness(locale);
+    h.state.isBookLibrary = true;
+    h.state.availableModes = ['albums'];
+    h.state.browseMode = 'albums';
+    await h.render();
+    assert.equal(h.buttons()[0].querySelector('span').textContent, catalog[locale]['library.books.mode']);
+    const [book] = h.mapAlbums([{id:'opaque',name:'Book',artistName:'Primary author',presentationCredits:[{name:'Narrator',role:'narrator'}],trackCount:2}]);
+    assert.equal(book.type, 'Book');
+    assert.match(book.subtitle, /Primary author/);
+    assert.match(book.subtitle, /Narrator/);
+    const parts = h.mapAlbumTracks([{id:'one',title:'File 1',trackNumber:null,duration:1},{id:'two',title:'File 2',trackNumber:null,duration:1}]);
+    assert.equal(parts[0].type, 'BookPart');
+    assert.match(parts[0].subtitle, /1/);
+    assert.match(parts[1].subtitle, /2/);
   }
 });
 test('removed focus falls back without taking focus from outside the bar', async () => {

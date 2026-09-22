@@ -1,1 +1,1 @@
-{"id":"book-item-single","libraryId":"book-id","mediaType":"book","media":{"id":"book-media-single","coverPath":null,"metadata":{"authors":[],"narrators":[]},"audioFiles":[{"id":"audio-file-single","index":1,"duration":60}],"chapters":[{"id":"chapter-single","start":0,"end":60}]}}
+{"id":"book-item-single","libraryId":"book-id","mediaType":"book","media":{"id":"book-media-single","coverPath":null,"metadata":{"authors":[],"narrators":[]},"audioFiles":[{"ino":"audio-file-single","index":1,"duration":60}],"chapters":[{"id":0,"start":0,"end":60}]}}

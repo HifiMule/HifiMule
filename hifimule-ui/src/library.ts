@@ -20,6 +20,8 @@ import {
     fetchBrowseRecentlyPlayed,
     fetchBrowseFavorites,
     fetchBrowseFavoriteItems,
+    fetchBrowseSearch,
+    serverList,
     getImageUrl,
     rpcCall,
     playbackPlayTrack,
@@ -41,6 +43,7 @@ export function setPlaylistWriteCapability(v: boolean): void {
 }
 
 function modeLabel(mode: BrowseMode): string {
+    if (mode === 'albums' && state.isBookLibrary) return t('library.books.mode');
     return t(`library.mode.${mode}`);
 }
 
@@ -57,7 +60,7 @@ interface AppState {
     loading: boolean;
     listLoading: boolean;
     scrollCache: Map<string, number>;
-    pageCache: Map<string, { items: BrowseDisplayItem[]; total: number }>;
+    pageCache: Map<string, { items: BrowseDisplayItem[]; total: number; chapters?: Array<{ startSeconds: number; endSeconds: number }> }>;
     artistViewTotal: number;
     albumViewTotal: number;
     activeLetter: string | null;
@@ -65,6 +68,10 @@ interface AppState {
     listViewMode: 'grid' | 'list';
     selectedIds: Set<string>;
     selectionAnchorIdx: number | null;
+    isBookLibrary: boolean;
+    bookSearchQuery: string;
+    bookSearchTruncated: boolean;
+    bookChapters: Array<{ startSeconds: number; endSeconds: number }>;
 }
 
 interface FavoriteTree {
@@ -92,6 +99,10 @@ let state: AppState = {
     listViewMode: 'grid',
     selectedIds: new Set(),
     selectionAnchorIdx: null,
+    isBookLibrary: false,
+    bookSearchQuery: '',
+    bookSearchTruncated: false,
+    bookChapters: [],
 };
 
 let _tracksBrowseView: TracksBrowseView | null = null;
@@ -136,6 +147,9 @@ export function clearNavigationCache() {
     state.activeLetter = null;
     state.parentId = undefined;
     state.favoriteTree = null;
+    state.bookSearchQuery = '';
+    state.bookSearchTruncated = false;
+    state.bookChapters = [];
     state.listLoading = false;
     // browseMode, availableModes, and listViewMode are intentionally preserved
     _tracksBrowseView?.destroy();
@@ -224,9 +238,9 @@ function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
         id: a.id,
         serverId: a.serverId,
         name: a.name,
-        type: a.id.startsWith('abs-album-') ? 'Book' as const : 'MusicAlbum' as const,
+        type: state.isBookLibrary ? 'Book' as const : 'MusicAlbum' as const,
         coverArtId: a.coverArtId,
-        subtitle: a.id.startsWith('abs-album-') ? bookCreditSubtitle(a) : a.artistName,
+        subtitle: state.isBookLibrary ? bookCreditSubtitle(a) : a.artistName,
         year: a.year,
         childCount: a.trackCount,
         sizeBytes: 0,
@@ -236,10 +250,11 @@ function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
 
 function bookCreditSubtitle(book: BrowseAlbum): string {
     const credits = book.presentationCredits ?? [];
-    const authors = credits.filter(c => c.role === 'author').map(c => c.name);
+    const authors = [book.artistName, ...credits.filter(c => c.role === 'author').map(c => c.name)]
+        .filter((name): name is string => !!name);
     const narrators = credits.filter(c => c.role === 'narrator').map(c => c.name);
-    const authorText = authors.length ? `By ${authors.join(', ')}` : '';
-    const narratorText = narrators.length ? `Narrated by ${narrators.join(', ')}` : '';
+    const authorText = authors.length ? t('library.books.by', { names: [...new Set(authors)].join(', ') }) : '';
+    const narratorText = narrators.length ? t('library.books.narrated_by', { names: narrators.join(', ') }) : '';
     return [authorText, narratorText].filter(Boolean).join(' · ');
 }
 
@@ -344,17 +359,17 @@ function mapFlatTracks(
 }
 
 function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
-    return tracks.map(t => ({
-        id: t.id,
-        serverId: t.serverId,
-        name: t.title,
-        type: t.albumId?.startsWith('abs-album-') ? 'BookPart' as const : 'Audio' as const,
-        coverArtId: t.coverArtId,
-        subtitle: t.albumId?.startsWith('abs-album-')
-            ? (tracks.length === 1 ? 'Complete book' : `Part ${t.trackNumber ?? ''}`.trim())
-            : t.artistName,
-        sizeBytes: t.sizeBytes ?? 0,
-        sizeTicks: t.duration * 10_000_000,
+    return tracks.map((track, index) => ({
+        id: track.id,
+        serverId: track.serverId,
+        name: track.title,
+        type: state.isBookLibrary ? 'BookPart' as const : 'Audio' as const,
+        coverArtId: track.coverArtId,
+        subtitle: state.isBookLibrary
+            ? (tracks.length === 1 ? t('library.books.complete') : t('library.books.part', { number: track.trackNumber ?? index + 1 }))
+            : track.artistName,
+        sizeBytes: track.sizeBytes ?? 0,
+        sizeTicks: track.duration * 10_000_000,
         childCount: 1,
     }));
 }
@@ -582,6 +597,7 @@ function renderQuickNav(): HTMLElement | null {
     const isArtists = state.browseMode === 'artists';
     const isAlbums = state.browseMode === 'albums';
     if (!isArtists && !isAlbums) return null;
+    if (isAlbums && state.isBookLibrary) return null;
 
     const viewTotal = isArtists ? state.artistViewTotal : state.albumViewTotal;
     if (viewTotal < 20) return null;
@@ -609,6 +625,99 @@ function renderQuickNav(): HTMLElement | null {
     return navBar;
 }
 
+function renderBookContext(container: HTMLElement): void {
+    if (!state.isBookLibrary || state.browseMode !== 'albums') return;
+    if (state.breadcrumbStack.length === 0) {
+        const form = document.createElement('form');
+        form.className = 'book-search';
+        form.setAttribute('role', 'search');
+        const input = document.createElement('sl-input') as any;
+        input.setAttribute('aria-label', t('library.books.search'));
+        input.placeholder = t('library.books.search');
+        input.value = state.bookSearchQuery;
+        const submit = document.createElement('sl-button') as any;
+        submit.type = 'submit';
+        submit.textContent = t('library.books.search_button');
+        form.append(input, submit);
+        if (state.bookSearchQuery) {
+            const clear = document.createElement('sl-button') as any;
+            clear.type = 'button';
+            clear.textContent = t('library.books.clear_search');
+            clear.addEventListener('click', () => { void clearBookSearch(); });
+            form.appendChild(clear);
+        }
+        form.addEventListener('submit', event => {
+            event.preventDefault();
+            void loadBookSearch(String(input.value ?? '').trim());
+        });
+        container.appendChild(form);
+        if (state.bookSearchTruncated) {
+            const note = document.createElement('p');
+            note.setAttribute('role', 'status');
+            note.textContent = t('library.books.search_truncated');
+            container.appendChild(note);
+        }
+    } else if (state.bookChapters.length > 0) {
+        const section = document.createElement('section');
+        section.setAttribute('aria-label', t('library.books.chapters'));
+        const heading = document.createElement('h3');
+        heading.textContent = t('library.books.chapters');
+        section.appendChild(heading);
+        const list = document.createElement('ol');
+        state.bookChapters.forEach((chapter, index) => {
+            const item = document.createElement('li');
+            item.textContent = t('library.books.chapter_interval', {
+                number: index + 1,
+                start: formatBookTime(chapter.startSeconds),
+                end: formatBookTime(chapter.endSeconds),
+            });
+            list.appendChild(item);
+        });
+        section.appendChild(list);
+        container.appendChild(section);
+    }
+}
+
+function formatBookTime(seconds: number): string {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remaining = Math.floor(seconds % 60);
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`
+        : `${minutes}:${String(remaining).padStart(2, '0')}`;
+}
+
+async function clearBookSearch(): Promise<void> {
+    state.bookSearchQuery = '';
+    state.bookSearchTruncated = false;
+    await loadAlbums(true);
+}
+
+async function loadBookSearch(query: string): Promise<void> {
+    if (!query) { await clearBookSearch(); return; }
+    const container = document.getElementById('library-content');
+    if (!container || state.loading) return;
+    state.loading = true;
+    showSpinner(container);
+    try {
+        const result = await fetchBrowseSearch(query);
+        state.bookSearchQuery = query;
+        state.bookSearchTruncated = result.possiblyTruncated ?? false;
+        state.items = mapAlbums(result.albums ?? []);
+        state.pagination.total = state.items.length;
+        state.pagination.startIndex = state.items.length;
+        renderCurrentView();
+        requestAnimationFrame(() => {
+            document.querySelector<HTMLElement>('#library-content .book-search sl-input')?.focus({ preventScroll: true });
+        });
+    } catch (error) {
+        renderError(error as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
 function renderGrid(items: BrowseDisplayItem[], onCurate?: (id: string, name: string) => void) {
     const container = document.getElementById('library-content');
     if (!container) return;
@@ -619,6 +728,7 @@ function renderGrid(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     if (state.breadcrumbStack.length > 0) {
         container.appendChild(createBreadcrumbs());
     }
+    renderBookContext(container);
 
     const quickNav = renderQuickNav();
     if (quickNav) container.appendChild(quickNav);
@@ -1198,7 +1308,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
         });
         row.appendChild(curateBtn);
     }
-    row.appendChild(toggleBtn);
+    if (item.type !== 'Book' && item.type !== 'BookPart') row.appendChild(toggleBtn);
     return row;
 }
 
@@ -1213,7 +1323,9 @@ function renderEmptyState(container: HTMLElement) {
     } else if (state.breadcrumbStack.length > 0) {
         message = t('library.empty.nested');
     } else {
-        message = t(`library.empty.${state.browseMode}`);
+        message = state.isBookLibrary && state.browseMode === 'albums'
+            ? t(state.bookSearchQuery ? 'library.books.no_matches' : 'library.books.empty')
+            : t(`library.empty.${state.browseMode}`);
     }
     const empty = document.createElement('div');
     empty.className = 'library-empty-state';
@@ -1235,6 +1347,7 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     teardownListScrollHandler();
     content.innerHTML = '';
     if (state.breadcrumbStack.length > 0) content.appendChild(createBreadcrumbs());
+    renderBookContext(content);
     const qn = renderQuickNav();
     if (qn) content.appendChild(qn);
     if (items.length === 0) {
@@ -1458,7 +1571,10 @@ async function loadModeRoot() {
 
     switch (state.browseMode) {
         case 'artists': await loadArtists(true); break;
-        case 'albums': await loadAlbums(true); break;
+        case 'albums':
+            if (state.isBookLibrary && state.bookSearchQuery) await loadBookSearch(state.bookSearchQuery);
+            else await loadAlbums(true);
+            break;
         case 'playlists': await loadPlaylists(); break;
         case 'tracks': loadTracksView(); break;
         case 'genres': await loadGenres(true); break;
@@ -2091,6 +2207,7 @@ async function loadAlbumTracks(albumId: string) {
         state.pagination.total = cached.total;
         state.pagination.startIndex = cached.total;
         state.artistViewTotal = 0;
+        state.bookChapters = cached.chapters ?? [];
         renderCurrentView();
         restoreScroll(key);
         return;
@@ -2105,11 +2222,12 @@ async function loadAlbumTracks(albumId: string) {
     try {
         const result = await fetchBrowseAlbum(albumId);
         const tracks = mapAlbumTracks(result.tracks);
+        state.bookChapters = state.isBookLibrary ? result.chapters ?? [] : [];
         state.items = tracks;
         state.pagination.total = tracks.length;
         state.pagination.startIndex = tracks.length;
         state.artistViewTotal = 0;
-        state.pageCache.set(key, { items: tracks, total: tracks.length });
+        state.pageCache.set(key, { items: tracks, total: tracks.length, chapters: state.bookChapters });
         renderCurrentView();
         restoreScroll(key);
     } catch (e) {
@@ -2202,6 +2320,8 @@ async function navigateToBrowseItem(item: BrowseDisplayItem) {
     switch (item.type) {
         case 'MusicArtist': await navigateToArtist(item.id, item.name); break;
         case 'MusicAlbum': await navigateToAlbum(item.id, item.name); break;
+        case 'Book': await navigateToAlbum(item.id, item.name); break;
+        case 'BookPart': break;
         case 'Playlist': await navigateToPlaylist(item.id, item.name); break;
         case 'MusicGenre': await navigateToGenre(item.id, item.name); break;
         case 'Audio': break; // leaf item — no drill-down
@@ -2379,6 +2499,9 @@ export async function initLibraryView() {
 
     try {
         const modesResult = await fetchBrowseModes();
+        const servers = await serverList();
+        const selected = servers.find(server => server.selected);
+        state.isBookLibrary = selected?.serverType === 'audiobookshelf' && selected.libraryRole === 'audiobook';
 
         state.availableModes = modesResult;
         const defaultMode: BrowseMode = modesResult.includes('artists')

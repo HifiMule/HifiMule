@@ -775,6 +775,19 @@ h2 {
   text-wrap: balance;
 }
 
+.book-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+
+.book-search sl-input {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
 /* Error and loading states. Shares the empty state's full-pane layout (centered,
    50vh, same gap and icon size) so a failed load and an empty one read as
    siblings — the only difference is the danger color and the wording. */

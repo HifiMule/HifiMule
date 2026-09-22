@@ -1466,7 +1466,8 @@ fn playback_tagged_albums(server_id: Option<&str>, albums: Vec<Album>) -> Vec<Va
     albums
         .into_iter()
         .map(|album| {
-            let mut value = serde_json::to_value(&album).expect("Album serialization is infallible");
+            let mut value =
+                serde_json::to_value(&album).expect("Album serialization is infallible");
             if let Some(server_id) = server_id {
                 value
                     .as_object_mut()
@@ -1787,9 +1788,17 @@ async fn handle_browse_get_album(
         .get_album(&album_id)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(
-        serde_json::json!({ "album": playback_tagged_album(server_id.as_deref(), result.album), "tracks": playback_tagged_tracks(server_id.as_deref(), result.tracks) }),
-    )
+    let chapters = result.provider_metadata.chapters.iter().map(|chapter| {
+        serde_json::json!({ "startSeconds": chapter.start_seconds, "endSeconds": chapter.end_seconds })
+    }).collect::<Vec<_>>();
+    let mut value = serde_json::json!({
+        "album": playback_tagged_album(server_id.as_deref(), result.album),
+        "tracks": playback_tagged_tracks(server_id.as_deref(), result.tracks),
+    });
+    if !chapters.is_empty() {
+        value["chapters"] = serde_json::json!(chapters);
+    }
+    Ok(value)
 }
 
 async fn handle_browse_list_playlists(state: &AppState) -> Result<Value, JsonRpcError> {
@@ -7111,10 +7120,37 @@ async fn handle_proxy_image(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(provider) = active_non_jellyfin_provider(&state).await {
+        let is_audiobookshelf = provider.server_type() == ServerType::Audiobookshelf;
         let response = match provider.fetch_cover_art(&id).await {
             Ok(response) => response,
-            Err(_) => return http::StatusCode::NOT_FOUND.into_response(),
+            Err(ProviderError::RateLimited {
+                retry_after_seconds,
+            }) => {
+                let mut response = http::StatusCode::TOO_MANY_REQUESTS.into_response();
+                if let Some(seconds) = retry_after_seconds {
+                    if let Ok(value) = http::HeaderValue::from_str(&seconds.to_string()) {
+                        response
+                            .headers_mut()
+                            .insert(http::header::RETRY_AFTER, value);
+                    }
+                }
+                return response;
+            }
+            Err(error) => {
+                return match error {
+                    ProviderError::NotFound { .. } | ProviderError::StaleConfiguration(_) => {
+                        http::StatusCode::NOT_FOUND
+                    }
+                    ProviderError::Forbidden => http::StatusCode::FORBIDDEN,
+                    ProviderError::Auth(_) => http::StatusCode::UNAUTHORIZED,
+                    _ => http::StatusCode::BAD_GATEWAY,
+                }
+                .into_response();
+            }
         };
+        if is_audiobookshelf {
+            return proxy_bounded_image_response(response, 16 * 1024 * 1024).await;
+        }
         return proxy_http_image_response(response).await;
     }
 
@@ -7144,6 +7180,44 @@ async fn proxy_http_image_response(resp: reqwest::Response) -> axum::response::R
             .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(_) => http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+async fn proxy_bounded_image_response(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> axum::response::Response {
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if !append_bounded_image_chunk(&mut body, &chunk, max_bytes) {
+                    return http::StatusCode::PAYLOAD_TOO_LARGE.into_response();
+                }
+            }
+            Ok(None) => break,
+            Err(_) => return http::StatusCode::BAD_GATEWAY.into_response(),
+        }
+    }
+    let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).cloned();
+    let mut builder = axum::response::Response::builder().status(http::StatusCode::OK);
+    if let Some(content_type) = content_type {
+        builder = builder.header(http::header::CONTENT_TYPE, content_type);
+    }
+    builder
+        .body(axum::body::Body::from(body))
+        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn append_bounded_image_chunk(body: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> bool {
+    if body
+        .len()
+        .checked_add(chunk.len())
+        .is_none_or(|len| len > max_bytes)
+    {
+        return false;
+    }
+    body.extend_from_slice(chunk);
+    true
 }
 
 async fn handle_scrobbler_get_last_result(state: &AppState) -> Result<Value, JsonRpcError> {
@@ -15498,5 +15572,14 @@ mod tests {
         assert!(result[0].get("providerId").is_none());
         assert!(!result[0].to_string().contains("private-library"));
         assert!(!result[0].to_string().contains("private-person"));
+    }
+
+    #[test]
+    fn authenticated_cover_chunks_stop_at_limit_without_retaining_overflow() {
+        let mut body = Vec::new();
+        assert!(append_bounded_image_chunk(&mut body, &[1, 2], 3));
+        assert!(append_bounded_image_chunk(&mut body, &[3], 3));
+        assert!(!append_bounded_image_chunk(&mut body, &[4], 3));
+        assert_eq!(body, &[1, 2, 3]);
     }
 }
