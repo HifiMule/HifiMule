@@ -2209,6 +2209,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: Some(size_bytes),
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         }
     }
 

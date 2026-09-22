@@ -977,6 +977,7 @@ pub(crate) fn album_from_item(item: JellyfinItem) -> Album {
             .cumulative_run_time_ticks
             .map(|ticks| u32::from(Seconds::from(JellyfinTicks(ticks)))),
         cover_art_id,
+        provider_metadata: Default::default(),
     }
 }
 
@@ -1044,6 +1045,7 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
             .and_then(|source| source.size)
             .and_then(|s| u64::try_from(s).ok()),
         album_loudness: Default::default(),
+        provider_metadata: Default::default(),
     }
 }
 

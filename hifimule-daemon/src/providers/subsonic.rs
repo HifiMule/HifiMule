@@ -1450,6 +1450,7 @@ fn album_from_dto(album: AlbumDto) -> Album {
         duration_seconds: non_negative_i64(album.duration)
             .map(|seconds| u32::from(Seconds(seconds))),
         cover_art_id: album.cover_art,
+        provider_metadata: Default::default(),
     }
 }
 
@@ -1464,6 +1465,7 @@ fn album_from_with_songs_dto(album: AlbumWithSongsDto) -> Album {
         duration_seconds: non_negative_i64(album.duration)
             .map(|seconds| u32::from(Seconds(seconds))),
         cover_art_id: album.cover_art,
+        provider_metadata: Default::default(),
     }
 }
 
@@ -1517,6 +1519,7 @@ fn song_from_dto(song: SongDto) -> Song {
         suffix: song.suffix,
         size_bytes: song.size,
         album_loudness,
+        provider_metadata: Default::default(),
     }
 }
 

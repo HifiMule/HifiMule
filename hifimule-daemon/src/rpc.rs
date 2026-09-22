@@ -14654,6 +14654,7 @@ mod tests {
                 suffix: Some("mp3".to_string()),
                 size_bytes: None,
                 album_loudness: Default::default(),
+                provider_metadata: Default::default(),
             })
             .collect::<Vec<_>>();
         let provider = FakeBrowseProvider::with_genre_tracks("rock", tracks);
@@ -14694,6 +14695,7 @@ mod tests {
             suffix: Some("flac".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         });
 
         let (items, playlist) =
@@ -14750,6 +14752,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         };
         let provider = FakeBrowseProvider::with_album_and_song(
             crate::domain::models::AlbumWithTracks {
@@ -14762,6 +14765,7 @@ mod tests {
                     song_count: Some(1),
                     duration_seconds: Some(319),
                     cover_art_id: Some("cover1".to_string()),
+                    provider_metadata: Default::default(),
                 },
                 tracks: vec![song.clone()],
                 provider_metadata: Default::default(),
@@ -14829,6 +14833,7 @@ mod tests {
             suffix: None,
             size_bytes: None,
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         }
     }
 
@@ -14999,6 +15004,7 @@ mod tests {
                         song_count: Some(tracks.len() as u32),
                         duration_seconds: None,
                         cover_art_id: None,
+                        provider_metadata: Default::default(),
                     },
                     tracks: tracks.clone(),
                     provider_metadata: Default::default(),
@@ -15162,6 +15168,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         };
         let provider = FakePlaylistProvider::with_song("playlist-42", song);
         state
@@ -15205,6 +15212,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         }
     }
 
@@ -15436,6 +15444,7 @@ mod tests {
             song_count: Some(2),
             duration_seconds: None,
             cover_art_id: None,
+            provider_metadata: Default::default(),
         };
         let first = playback_tagged_albums(Some("portable-a"), vec![album.clone()]);
         let second = playback_tagged_albums(Some("portable-b"), vec![album]);

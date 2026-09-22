@@ -102,6 +102,7 @@ mod tests {
             suffix: None,
             size_bytes: None,
             album_loudness: Default::default(),
+            provider_metadata: Default::default(),
         }
     }
 

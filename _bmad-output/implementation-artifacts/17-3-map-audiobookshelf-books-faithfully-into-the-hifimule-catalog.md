@@ -4,7 +4,7 @@ baseline_commit: 2cfe297
 
 # Story 17.3: Map Audiobookshelf books faithfully into the HifiMule catalog
 
-Status: review
+Status: done
 
 ## Story
 
@@ -55,7 +55,22 @@ so that I can find and play long-form audio naturally.
   - [x] Add co-located `mockito` adapter tests for exact method/path/query/Bearer shape, library scoping, refresh once, page totals/final page, bounded search, 401/403/404/429/500, and secret/error redaction.
   - [x] Add pure mapper tests for duplicate-title identity, deterministic IDs, numeric indices `1..10`, 10 files versus 24 chapters, chapter boundaries crossing part offsets, one file/one track, missing credits/art, multiple ordered credits, malformed indices/durations, and repeatability.
   - [x] Update all affected domain literals/mocks exhaustively and assert legacy serialized Jellyfin/Subsonic shapes remain compatible.
-  - [x] Run `rtk cargo fmt --check`, targeted Audiobookshelf/provider tests, `rtk cargo test -p hifimule-daemon`, `rtk cargo clippy -p hifimule-daemon --all-targets -- -D warnings` where the repository baseline permits, and `rtk git diff --check`. Report any environment-limited check truthfully.
+- [x] Run `rtk cargo fmt --check`, targeted Audiobookshelf/provider tests, `rtk cargo test -p hifimule-daemon`, `rtk cargo clippy -p hifimule-daemon --all-targets -- -D warnings` where the repository baseline permits, and `rtk git diff --check`. Report any environment-limited check truthfully.
+
+### Review Findings
+
+- [x] [Review][Patch] Enforce the persisted library scope when resolving global item-detail responses [hifimule-daemon/src/providers/audiobookshelf.rs:294]
+- [x] [Review][Patch] Encode or validate decoded item IDs before placing them in an authenticated URL path [hifimule-daemon/src/providers/audiobookshelf.rs:303]
+- [x] [Review][Patch] Preserve the actual audio-file count in detail album results instead of forcing `song_count` to zero [hifimule-daemon/src/providers/audiobookshelf.rs:318]
+- [x] [Review][Patch] Reject empty required book, media, audio-file, and chapter identities with sanitized deserialization errors [hifimule-daemon/src/providers/audiobookshelf.rs:138]
+- [x] [Review][Patch] Map cover availability from the validated `coverPath` field instead of advertising artwork for every book [hifimule-daemon/src/providers/audiobookshelf.rs:839]
+- [x] [Review][Patch] Retain typed credits and provider identity metadata for list and search results, not only detail results [hifimule-daemon/src/domain/models.rs:183]
+- [x] [Review][Patch] Enforce the response-size limit while streaming bodies with missing or chunked `Content-Length` [hifimule-daemon/src/providers/audiobookshelf.rs:250]
+- [x] [Review][Patch] Validate provider role and library scope before returning the `limit == 0` catalogue result [hifimule-daemon/src/providers/audiobookshelf.rs:264]
+- [x] [Review][Patch] Determine bounded-search truncation from the upstream book-category count before filtering malformed entries [hifimule-daemon/src/providers/audiobookshelf.rs:438]
+- [x] [Review][Patch] Treat an empty letter filter as no filter and reject only non-empty unsupported filters [hifimule-daemon/src/providers/audiobookshelf.rs:867]
+- [x] [Review][Patch] Map album duration and safe multipart labels from validated audio-file data instead of omitting duration and duplicating the book title [hifimule-daemon/src/providers/audiobookshelf.rs:353]
+- [x] [Review][Patch] Complete the AC11 runtime evidence matrix for sparse metadata, identity stability, credits, chapters, malformed and duplicate indices, deterministic remapping, and redaction [hifimule-daemon/src/providers/audiobookshelf.rs:934]
 
 ## Dev Notes
 
@@ -147,10 +162,13 @@ GPT-5 Codex
 - Story preparation analyzed the full Epic 17/PRD/architecture/UX scope, completed Story 17.2 and review fixes, current provider/domain/RPC code, v2.36.1 contract fixtures, recent commits, and current official upstream release/API sources.
 - Implemented scoped Audiobookshelf book catalogue pages, detail mapping, bounded Books-only search, stable opaque IDs, daemon-only identity/chapter/credit metadata, and refresh/error safeguards.
 - Validation: 1,078 daemon tests plus Audiobookshelf contract tests pass; `git diff --check` passes. Strict Clippy remains blocked by pre-existing daemon-wide warnings/errors.
+- Code review fixes applied: scoped detail identity validation, safe path-segment encoding, truthful sparse artwork/count/duration/part mapping, daemon-private album/track metadata, bounded streamed bodies, zero-limit role enforcement, bounded-search truncation, empty-filter handling, and expanded fixture/runtime regressions.
+- Review validation: all 25 Audiobookshelf provider tests pass; full daemon suite passes with 1,079 tests and 6 intentional ignores; all 5 Audiobookshelf contract tests pass; all targets compile; `git diff --check` passes. Strict Clippy remains blocked by pre-existing daemon-wide findings.
 
 ## Change Log
 
 - 2026-09-22: Implemented Audiobookshelf book catalogue mapping and runtime coverage; status moved to review.
+- 2026-09-22: Adversarial code review completed; 12 findings patched and story moved to done.
 
 ### File List
 

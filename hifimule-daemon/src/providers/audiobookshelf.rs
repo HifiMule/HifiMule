@@ -15,6 +15,7 @@ use crate::domain::models::{
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
@@ -133,18 +134,24 @@ struct BookSearchDto {
     book: Vec<BookDto>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    library_id: String,
     media_type: String,
     media: BookMediaDto,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookMediaDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
+    #[serde(default)]
+    cover_path: Option<String>,
     #[serde(default)]
     metadata: BookMetadataDto,
     #[serde(default)]
@@ -153,7 +160,7 @@ struct BookMediaDto {
     chapters: Vec<ChapterDto>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookMetadataDto {
     #[serde(default)]
@@ -166,22 +173,24 @@ struct BookMetadataDto {
     published_year: Option<u32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct BookAuthorDto {
     id: Option<String>,
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct AudioFileDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
     index: serde_json::Value,
     #[serde(default)]
     duration: Option<f64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ChapterDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
     start: f64,
     end: f64,
@@ -247,7 +256,10 @@ impl AudiobookshelfProvider {
                 .await
                 .map_err(transport_error)?;
         }
-        if response.content_length().is_some_and(|length| length > Self::MAX_RESPONSE_BYTES) {
+        if response
+            .content_length()
+            .is_some_and(|length| length > Self::MAX_RESPONSE_BYTES)
+        {
             return Err(ProviderError::Http {
                 status: Some(response.status().as_u16()),
                 message: "Audiobookshelf response exceeds configured limit".into(),
@@ -261,15 +273,15 @@ impl AudiobookshelfProvider {
         offset: u32,
         limit: u32,
     ) -> Result<(Vec<Album>, u32), ProviderError> {
+        let library = self.audiobook_library_id()?;
         if limit == 0 {
             return Ok((Vec::new(), 0));
         }
-        if offset % limit != 0 {
+        if !offset.is_multiple_of(limit) {
             return Err(ProviderError::UnsupportedCapability(
                 "Audiobookshelf catalogue requires page-aligned offsets".into(),
             ));
         }
-        let library = self.audiobook_library_id()?;
         let page = offset
             .checked_div(limit)
             .ok_or_else(|| ProviderError::Deserialization("invalid catalogue page".into()))?;
@@ -279,16 +291,15 @@ impl AudiobookshelfProvider {
         );
         let response = self.protected_get(&endpoint).await?;
         check_status(&response)?;
-        let page: CataloguePageDto = response.json().await.map_err(deserialization_error)?;
+        let page: CataloguePageDto = bounded_json(response).await?;
         let total = u32::try_from(page.total).unwrap_or(u32::MAX);
-        Ok((
-            page.results
-                .into_iter()
-                .filter(|book| book.media_type == "book")
-                .map(|book| book_album(library, book))
-                .collect(),
-            total,
-        ))
+        let albums = page
+            .results
+            .into_iter()
+            .filter(|book| book.media_type == "book")
+            .map(|book| book_album(library, book))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((albums, total))
     }
 
     async fn catalogue_book(&self, public_id: &str) -> Result<AlbumWithTracks, ProviderError> {
@@ -300,7 +311,7 @@ impl AudiobookshelfProvider {
                 id: public_id.into(),
             });
         }
-        let endpoint = format!("{}/api/items/{item_id}", self.base_url);
+        let endpoint = item_endpoint(&self.base_url, &item_id)?;
         let response = self.protected_get(&endpoint).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Err(ProviderError::NotFound {
@@ -309,8 +320,12 @@ impl AudiobookshelfProvider {
             });
         }
         check_status(&response)?;
-        let book: BookDto = response.json().await.map_err(deserialization_error)?;
-        if book.media_type != "book" || book.id != item_id || book.media.id != media_id {
+        let book: BookDto = bounded_json(response).await?;
+        if book.media_type != "book"
+            || book.library_id != library
+            || book.id != item_id
+            || book.media.id != media_id
+        {
             return Err(ProviderError::Deserialization(
                 "invalid Audiobookshelf book identity".into(),
             ));
@@ -319,9 +334,11 @@ impl AudiobookshelfProvider {
             library,
             BookDto {
                 id: book.id.clone(),
+                library_id: book.library_id.clone(),
                 media_type: book.media_type.clone(),
                 media: BookMediaDto {
                     id: book.media.id.clone(),
+                    cover_path: book.media.cover_path.clone(),
                     metadata: BookMetadataDto {
                         title: book.media.metadata.title.clone(),
                         authors: book
@@ -337,12 +354,21 @@ impl AudiobookshelfProvider {
                         narrators: book.media.metadata.narrators.clone(),
                         published_year: book.media.metadata.published_year,
                     },
-                    audio_files: Vec::new(),
+                    audio_files: book
+                        .media
+                        .audio_files
+                        .iter()
+                        .map(|file| AudioFileDto {
+                            id: file.id.clone(),
+                            index: file.index.clone(),
+                            duration: file.duration,
+                        })
+                        .collect(),
                     chapters: Vec::new(),
                 },
             },
-        );
-        let credits = book
+        )?;
+        let credits: Vec<Credit> = book
             .media
             .metadata
             .authors
@@ -358,6 +384,8 @@ impl AudiobookshelfProvider {
                 role: CreditRole::Narrator,
             }))
             .collect();
+        let cover_reference = cover_reference(library, &book);
+        let file_count = book.media.audio_files.len();
         let mut files = book.media.audio_files;
         files.sort_by(|left, right| {
             numeric_index(&left.index)
@@ -377,7 +405,7 @@ impl AudiobookshelfProvider {
                 });
                 Some(Song {
                     id,
-                    title: book.media.metadata.title.clone().unwrap_or_default(),
+                    title: part_title(book.media.metadata.title.as_deref(), index, file_count),
                     artist_id: book
                         .media
                         .metadata
@@ -391,7 +419,7 @@ impl AudiobookshelfProvider {
                     bitrate_kbps: None,
                     track_number: Some(index),
                     disc_number: None,
-                    cover_art_id: Some(opaque_id("cover", &[library, &book.id])),
+                    cover_art_id: cover_reference.clone(),
                     date_added: None,
                     last_played_at: None,
                     play_count: None,
@@ -400,6 +428,17 @@ impl AudiobookshelfProvider {
                     suffix: None,
                     size_bytes: None,
                     album_loudness: Default::default(),
+                    provider_metadata: ProviderItemMetadata {
+                        identity: Some(ProviderIdentity {
+                            library_id: library.into(),
+                            library_item_id: book.id.clone(),
+                            media_id: book.media.id.clone(),
+                        }),
+                        audio_file_id: Some(file.id.clone()),
+                        cover_reference: cover_reference.clone(),
+                        credits: credits.clone(),
+                        ..Default::default()
+                    },
                 })
             })
             .collect();
@@ -413,8 +452,8 @@ impl AudiobookshelfProvider {
                     media_id: book.media.id.clone(),
                 }),
                 audio_file_id: None,
-                chapters: chapter_markers(book.media.chapters),
-                cover_reference: Some(opaque_id("cover", &[library, &book.id])),
+                chapters: chapter_markers(&book.media.chapters),
+                cover_reference,
                 part_identities,
                 credits,
             },
@@ -435,14 +474,19 @@ impl AudiobookshelfProvider {
             .append_pair("limit", &SEARCH_LIMIT.to_string());
         let response = self.protected_get(url.as_str()).await?;
         check_status(&response)?;
-        let results: BookSearchDto = response.json().await.map_err(deserialization_error)?;
+        let results: BookSearchDto = bounded_json(response).await?;
+        let possibly_truncated = results.book.len() >= SEARCH_LIMIT as usize;
         let albums = results
-                .book
-                .into_iter()
-                .filter(|book| book.media_type == "book")
-                .map(|book| book_album(library, book))
-                .collect::<Vec<_>>();
-        Ok(SearchResult { possibly_truncated: albums.len() >= SEARCH_LIMIT as usize, albums, ..Default::default() })
+            .book
+            .into_iter()
+            .filter(|book| book.media_type == "book")
+            .map(|book| book_album(library, book))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SearchResult {
+            possibly_truncated,
+            albums,
+            ..Default::default()
+        })
     }
 
     pub async fn discover(
@@ -690,6 +734,56 @@ fn deserialization_error(error: reqwest::Error) -> ProviderError {
     ProviderError::Deserialization(super::sanitize_secret_message(&error.to_string()))
 }
 
+fn deserialize_nonempty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom("required identity is empty"));
+    }
+    Ok(value)
+}
+
+async fn bounded_json<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, ProviderError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| ProviderError::Http {
+                status: Some(response.status().as_u16()),
+                message: "Audiobookshelf response exceeds configured limit".into(),
+            })?;
+        if next_len > AudiobookshelfProvider::MAX_RESPONSE_BYTES as usize {
+            return Err(ProviderError::Http {
+                status: Some(response.status().as_u16()),
+                message: "Audiobookshelf response exceeds configured limit".into(),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|_| ProviderError::Deserialization("invalid Audiobookshelf response".into()))
+}
+
+fn item_endpoint(base_url: &str, item_id: &str) -> Result<String, ProviderError> {
+    let mut url =
+        reqwest::Url::parse(&format!("{base_url}/api/items")).map_err(|_| ProviderError::Http {
+            status: None,
+            message: "invalid Audiobookshelf URL".into(),
+        })?;
+    url.path_segments_mut()
+        .map_err(|_| ProviderError::Http {
+            status: None,
+            message: "invalid Audiobookshelf URL".into(),
+        })?
+        .push(item_id);
+    Ok(url.into())
+}
+
 fn check_status(response: &reqwest::Response) -> Result<(), ProviderError> {
     match response.status() {
         status if status.is_success() => Ok(()),
@@ -807,9 +901,53 @@ fn duration_seconds(value: Option<f64>) -> u32 {
         .unwrap_or_default()
 }
 
-fn chapter_markers(chapters: Vec<ChapterDto>) -> Vec<ChapterMarker> {
+fn validated_duration_seconds(value: Option<f64>) -> Option<u32> {
+    value
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round().min(u32::MAX as f64) as u32)
+}
+
+fn part_title(book_title: Option<&str>, index: u32, file_count: usize) -> String {
+    let title = book_title.unwrap_or_default();
+    if file_count <= 1 {
+        return title.to_string();
+    }
+    if title.is_empty() {
+        format!("Part {index}")
+    } else {
+        format!("{title} — Part {index}")
+    }
+}
+
+fn book_credits(book: &BookDto) -> Vec<Credit> {
+    book.media
+        .metadata
+        .authors
+        .iter()
+        .map(|author| Credit {
+            name: author.name.clone(),
+            provider_id: author.id.clone(),
+            role: CreditRole::Author,
+        })
+        .chain(book.media.metadata.narrators.iter().map(|name| Credit {
+            name: name.clone(),
+            provider_id: None,
+            role: CreditRole::Narrator,
+        }))
+        .collect()
+}
+
+fn cover_reference(library_id: &str, book: &BookDto) -> Option<String> {
+    book.media
+        .cover_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(|_| opaque_id("cover", &[library_id, &book.id]))
+}
+
+fn chapter_markers(chapters: &[ChapterDto]) -> Vec<ChapterMarker> {
     chapters
-        .into_iter()
+        .iter()
         .filter_map(|chapter| {
             let start_seconds = duration_seconds(Some(chapter.start));
             let end_seconds = duration_seconds(Some(chapter.end));
@@ -818,7 +956,7 @@ fn chapter_markers(chapters: Vec<ChapterDto>) -> Vec<ChapterMarker> {
                 && chapter.start >= 0.0
                 && chapter.end >= chapter.start)
                 .then_some(ChapterMarker {
-                    id: chapter.id,
+                    id: chapter.id.clone(),
                     start_seconds,
                     end_seconds,
                 })
@@ -826,18 +964,80 @@ fn chapter_markers(chapters: Vec<ChapterDto>) -> Vec<ChapterMarker> {
         .collect()
 }
 
-fn book_album(library_id: &str, book: BookDto) -> Album {
+fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
+    if book.library_id != library_id {
+        return Err(ProviderError::Deserialization(
+            "invalid Audiobookshelf library identity".into(),
+        ));
+    }
     let primary = book.media.metadata.authors.first();
-    Album {
+    let valid_files = book
+        .media
+        .audio_files
+        .iter()
+        .filter(|file| numeric_index(&file.index).is_some())
+        .collect::<Vec<_>>();
+    let duration_seconds = if valid_files.is_empty() {
+        None
+    } else {
+        valid_files.iter().try_fold(0u32, |total, file| {
+            total.checked_add(validated_duration_seconds(file.duration)?)
+        })
+    };
+    let song_count = u32::try_from(valid_files.len()).ok();
+    let cover_art_id = cover_reference(library_id, &book);
+    let credits = book_credits(&book);
+    let mut part_identities = book
+        .media
+        .audio_files
+        .iter()
+        .filter_map(|file| {
+            numeric_index(&file.index).map(|index| {
+                (
+                    index,
+                    ProviderPartIdentity {
+                        public_id: opaque_id(
+                            "track",
+                            &[library_id, &book.id, &book.media.id, &file.id],
+                        ),
+                        audio_file_id: file.id.clone(),
+                    },
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    part_identities.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.audio_file_id.cmp(&right.1.audio_file_id))
+    });
+    let part_identities = part_identities
+        .into_iter()
+        .map(|(_, identity)| identity)
+        .collect();
+    let chapters = chapter_markers(&book.media.chapters);
+    Ok(Album {
         id: opaque_id("album", &[library_id, &book.id, &book.media.id]),
         title: book.media.metadata.title.unwrap_or_default(),
         artist_id: primary.and_then(|author| author.id.clone()),
         artist_name: primary.map(|author| author.name.clone()),
         year: book.media.metadata.published_year,
-        song_count: u32::try_from(book.media.audio_files.len()).ok(),
-        duration_seconds: None,
-        cover_art_id: Some(opaque_id("cover", &[library_id, &book.id])),
-    }
+        song_count,
+        duration_seconds,
+        cover_art_id: cover_art_id.clone(),
+        provider_metadata: ProviderItemMetadata {
+            identity: Some(ProviderIdentity {
+                library_id: library_id.into(),
+                library_item_id: book.id,
+                media_id: book.media.id,
+            }),
+            cover_reference: cover_art_id,
+            credits,
+            part_identities,
+            chapters,
+            ..Default::default()
+        },
+    })
 }
 
 #[async_trait]
@@ -864,7 +1064,7 @@ impl MediaProvider for AudiobookshelfProvider {
         offset: u32,
         limit: u32,
     ) -> Result<(Vec<Album>, u32), ProviderError> {
-        if library_id.is_some() || letter.is_some() {
+        if library_id.is_some() || letter.is_some_and(|value| !value.is_empty()) {
             return Err(unsupported("list_albums filters"));
         }
         self.catalogue_page(offset, limit).await
@@ -948,7 +1148,7 @@ mod tests {
         assert_eq!(numeric_index(&serde_json::json!(10)), Some(10));
         assert_eq!(numeric_index(&serde_json::json!(0)), None);
         assert_eq!(numeric_index(&serde_json::json!("10")), None);
-        let chapters = chapter_markers(vec![
+        let chapter_dtos = vec![
             ChapterDto {
                 id: "keep".into(),
                 start: 0.0,
@@ -959,7 +1159,8 @@ mod tests {
                 start: 2.0,
                 end: 1.0,
             },
-        ]);
+        ];
+        let chapters = chapter_markers(&chapter_dtos);
         assert_eq!(
             chapters,
             vec![ChapterMarker {
@@ -967,6 +1168,82 @@ mod tests {
                 start_seconds: 0,
                 end_seconds: 25
             }]
+        );
+    }
+
+    #[test]
+    fn item_endpoint_encodes_untrusted_identity_as_one_path_segment() {
+        let endpoint = item_endpoint("https://example.test", "../admin?token=leak").unwrap();
+        assert_eq!(
+            endpoint,
+            "https://example.test/api/items/..%2Fadmin%3Ftoken=leak"
+        );
+    }
+
+    #[test]
+    fn fixture_mapping_is_stable_private_and_sparse_metadata_stays_absent() {
+        let multipart =
+            include_str!("../../tests/fixtures/audiobookshelf/2.36.1/book-multipart.json");
+        let first = book_album("book-id", serde_json::from_str(multipart).unwrap()).unwrap();
+        let second = book_album("book-id", serde_json::from_str(multipart).unwrap()).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.song_count, Some(10));
+        assert_eq!(first.duration_seconds, Some(600));
+        assert_eq!(first.provider_metadata.credits.len(), 4);
+        assert_eq!(
+            first
+                .provider_metadata
+                .identity
+                .as_ref()
+                .unwrap()
+                .library_id,
+            "book-id"
+        );
+        let wire = serde_json::to_value(&first).unwrap();
+        assert!(wire.get("providerMetadata").is_none());
+        assert!(!wire.to_string().contains("book-id"));
+
+        let sparse = include_str!(
+            "../../tests/fixtures/audiobookshelf/2.36.1/book-single-missing-credits.json"
+        );
+        let sparse = book_album("book-id", serde_json::from_str(sparse).unwrap()).unwrap();
+        assert_eq!(sparse.song_count, Some(1));
+        assert_eq!(sparse.duration_seconds, Some(60));
+        assert!(sparse.cover_art_id.is_none());
+        assert!(sparse.provider_metadata.cover_reference.is_none());
+        assert!(sparse.provider_metadata.credits.is_empty());
+    }
+
+    #[test]
+    fn malformed_or_cross_library_identities_are_rejected_safely() {
+        for body in [
+            r#"{"id":"","libraryId":"book-id","mediaType":"book","media":{"id":"media"}}"#,
+            r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":""}}"#,
+            r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"id":"","index":1}]}}"#,
+            r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","chapters":[{"id":"","start":0,"end":1}]}}"#,
+        ] {
+            let error = serde_json::from_str::<BookDto>(body).unwrap_err();
+            assert!(error.to_string().contains("required identity is empty"));
+            assert!(!error.to_string().contains("access-fixture"));
+        }
+
+        let foreign =
+            r#"{"id":"item","libraryId":"other","mediaType":"book","media":{"id":"media"}}"#;
+        let error = book_album("book-id", serde_json::from_str(foreign).unwrap()).unwrap_err();
+        assert!(matches!(error, ProviderError::Deserialization(_)));
+
+        let mixed_indices = r#"{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"id":"b","index":2,"duration":20},{"id":"invalid","index":0,"duration":99},{"id":"a","index":2,"duration":10}]}}"#;
+        let album = book_album("book-id", serde_json::from_str(mixed_indices).unwrap()).unwrap();
+        assert_eq!(album.song_count, Some(2));
+        assert_eq!(album.duration_seconds, Some(30));
+        assert_eq!(
+            album
+                .provider_metadata
+                .part_identities
+                .iter()
+                .map(|part| part.audio_file_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
         );
     }
 
@@ -984,7 +1261,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("page".into(), "0".into()), Matcher::UrlEncoded("limit".into(), "2".into())]))
             .match_header("authorization", "Bearer access-fixture")
             .with_status(200).with_header("content-type", "application/json")
-            .with_body(r#"{"total":1,"results":[{"id":"item","mediaType":"book","media":{"id":"media","metadata":{"title":"Book"}}}]}"#)
+            .with_body(r#"{"total":1,"results":[{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","coverPath":"present","metadata":{"title":"Book"}}}]}"#)
             .expect(1).create_async().await;
         let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
             .await
@@ -994,10 +1271,12 @@ mod tests {
         let (albums, total) = provider.list_albums(None, None, 0, 2).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(albums.len(), 1);
-        assert!(provider
-            .list_albums(Some("other"), None, 0, 2)
-            .await
-            .is_err());
+        assert!(
+            provider
+                .list_albums(Some("other"), None, 0, 2)
+                .await
+                .is_err()
+        );
         catalogue.assert_async().await;
     }
 
@@ -1020,6 +1299,14 @@ mod tests {
             provider.list_albums(None, None, 0, 0).await.unwrap(),
             (Vec::new(), 0)
         );
+        assert_eq!(
+            provider.list_albums(None, Some(""), 0, 0).await.unwrap(),
+            (Vec::new(), 0)
+        );
+        assert!(matches!(
+            provider.list_albums(None, Some("A"), 0, 0).await,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
         assert!(provider.list_albums(None, None, 1, 2).await.is_err());
     }
 
@@ -1040,30 +1327,100 @@ mod tests {
             .unwrap();
         let error = provider.list_albums(None, None, 0, 10).await.unwrap_err();
         assert!(matches!(error, ProviderError::UnsupportedCapability(_)));
+        let error = provider.list_albums(None, None, 0, 0).await.unwrap_err();
+        assert!(matches!(error, ProviderError::UnsupportedCapability(_)));
     }
 
     #[tokio::test]
     async fn catalogue_refreshes_once_after_401() {
         let mut server = Server::new_async().await;
-        server.mock("POST", "/login").with_status(200).with_header("content-type", "application/json").with_body(login_body()).create_async().await;
-        let expired = server.mock("GET", "/api/libraries/book-id/items").match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("page".into(), "0".into()), Matcher::UrlEncoded("limit".into(), "1".into())])).match_header("authorization", "Bearer access-fixture").with_status(401).expect(1).create_async().await;
-        let refresh = server.mock("POST", "/auth/refresh").match_header("x-refresh-token", "refresh-fixture").with_status(200).with_header("content-type", "application/json").with_body(r#"{"user":{"accessToken":"refreshed"}}"#).expect(1).create_async().await;
-        let retried = server.mock("GET", "/api/libraries/book-id/items").match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("page".into(), "0".into()), Matcher::UrlEncoded("limit".into(), "1".into())])).match_header("authorization", "Bearer refreshed").with_status(200).with_header("content-type", "application/json").with_body(r#"{"total":0,"results":[]}"#).expect(1).create_async().await;
-        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password").await.unwrap().scope_to("book-id".into(), ProviderLibraryRole::Audiobook).unwrap();
-        assert_eq!(provider.list_albums(None, None, 0, 1).await.unwrap(), (Vec::new(), 0));
-        expired.assert_async().await; refresh.assert_async().await; retried.assert_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let expired = server
+            .mock("GET", "/api/libraries/book-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "0".into()),
+                Matcher::UrlEncoded("limit".into(), "1".into()),
+            ]))
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/auth/refresh")
+            .match_header("x-refresh-token", "refresh-fixture")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"refreshed"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let retried = server
+            .mock("GET", "/api/libraries/book-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "0".into()),
+                Matcher::UrlEncoded("limit".into(), "1".into()),
+            ]))
+            .match_header("authorization", "Bearer refreshed")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"total":0,"results":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        assert_eq!(
+            provider.list_albums(None, None, 0, 1).await.unwrap(),
+            (Vec::new(), 0)
+        );
+        expired.assert_async().await;
+        refresh.assert_async().await;
+        retried.assert_async().await;
     }
 
     #[tokio::test]
     async fn empty_final_page_preserves_authoritative_total() {
         let mut server = Server::new_async().await;
-        server.mock("POST", "/login").with_status(200).with_header("content-type", "application/json").with_body(login_body()).create_async().await;
-        let page = server.mock("GET", "/api/libraries/book-id/items").match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("page".into(), "4".into()), Matcher::UrlEncoded("limit".into(), "3".into())])).with_status(200).with_header("content-type", "application/json").with_body(r#"{"total":13,"results":[]}"#).expect(1).create_async().await;
-        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password").await.unwrap().scope_to("book-id".into(), ProviderLibraryRole::Audiobook).unwrap();
-        assert_eq!(provider.list_albums(None, None, 12, 3).await.unwrap(), (Vec::new(), 13));
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let page = server
+            .mock("GET", "/api/libraries/book-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "4".into()),
+                Matcher::UrlEncoded("limit".into(), "3".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"total":13,"results":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        assert_eq!(
+            provider.list_albums(None, None, 12, 3).await.unwrap(),
+            (Vec::new(), 13)
+        );
         page.assert_async().await;
     }
-
 
     #[tokio::test]
     async fn search_is_single_bounded_books_request() {
@@ -1079,7 +1436,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("q".into(), "needle".into()), Matcher::UrlEncoded("limit".into(), "50".into())]))
             .match_header("authorization", "Bearer access-fixture")
             .with_status(200).with_header("content-type", "application/json")
-            .with_body(r#"{"book":[{"id":"item","mediaType":"book","media":{"id":"media","metadata":{"title":"Result"}}}],"authors":[{"name":"not-an-album"}]}"#)
+            .with_body(r#"{"book":[{"id":"item","libraryId":"book-id","mediaType":"book","media":{"id":"media","coverPath":"present","metadata":{"title":"Result"}}}],"authors":[{"name":"not-an-album"}]}"#)
             .expect(1).create_async().await;
         let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
             .await
@@ -1090,6 +1447,83 @@ mod tests {
         assert_eq!(result.albums.len(), 1);
         assert!(result.songs.is_empty());
         search.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn search_truncation_uses_upstream_category_count_before_filtering() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let books = (0..50)
+            .map(|index| {
+                let media_type = if index == 49 { "podcast" } else { "book" };
+                format!(
+                    r#"{{"id":"item-{index}","libraryId":"book-id","mediaType":"{media_type}","media":{{"id":"media-{index}"}}}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        server
+            .mock("GET", "/api/libraries/book-id/search")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("q".into(), "needle".into()),
+                Matcher::UrlEncoded("limit".into(), "50".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(r#"{{"book":[{books}]}}"#))
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let result = provider.search("needle").await.unwrap();
+        assert_eq!(result.albums.len(), 49);
+        assert!(result.possibly_truncated);
+    }
+
+    #[tokio::test]
+    async fn chunked_catalogue_body_is_bounded_without_content_length() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/libraries/book-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "0".into()),
+                Matcher::UrlEncoded("limit".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_chunked_body(|writer| {
+                let chunk = vec![b'x'; 1024 * 1024];
+                for _ in 0..17 {
+                    writer.write_all(&chunk)?;
+                }
+                Ok(())
+            })
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let error = provider.list_albums(None, None, 0, 1).await.unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Http { message, .. } if message.contains("exceeds configured limit"))
+        );
     }
 
     #[tokio::test]
@@ -1154,8 +1588,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.tracks.len(), 10);
+        assert_eq!(result.album.song_count, Some(10));
+        assert_eq!(result.album.duration_seconds, Some(600));
         assert_eq!(result.tracks.first().unwrap().track_number, Some(1));
         assert_eq!(result.tracks.last().unwrap().track_number, Some(10));
+        assert_eq!(result.tracks.first().unwrap().title, "Part 1");
+        assert_eq!(
+            result
+                .tracks
+                .first()
+                .unwrap()
+                .provider_metadata
+                .audio_file_id
+                .as_deref(),
+            Some("audio-file-1")
+        );
         assert_eq!(result.provider_metadata.chapters.len(), 24);
         assert_eq!(result.provider_metadata.part_identities.len(), 10);
         assert_eq!(result.provider_metadata.credits.len(), 4);
@@ -1165,6 +1612,61 @@ mod tests {
             CreditRole::Narrator
         );
         detail.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_album_preserves_sparse_cover_and_rejects_foreign_library_detail() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let sparse = server
+            .mock("GET", "/api/items/book-item-single")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../../tests/fixtures/audiobookshelf/2.36.1/book-single-missing-credits.json"
+            ))
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let result = provider
+            .get_album(&opaque_id(
+                "album",
+                &["book-id", "book-item-single", "book-media-single"],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.album.song_count, Some(1));
+        assert!(result.album.cover_art_id.is_none());
+        assert!(result.tracks[0].cover_art_id.is_none());
+        assert!(result.provider_metadata.credits.is_empty());
+        sparse.assert_async().await;
+
+        let foreign = server
+            .mock("GET", "/api/items/foreign-item")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"foreign-item","libraryId":"other-library","mediaType":"book","media":{"id":"foreign-media"}}"#)
+            .create_async()
+            .await;
+        let error = provider
+            .get_album(&opaque_id(
+                "album",
+                &["book-id", "foreign-item", "foreign-media"],
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::Deserialization(_)));
+        foreign.assert_async().await;
     }
 
     #[tokio::test]

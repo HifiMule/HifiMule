@@ -225,7 +225,7 @@ development_status:
   epic-17: in-progress
   17-1-validate-audiobookshelf-integration-contract: done
   17-2-connect-audiobookshelf-libraries-as-independent-servers: done
-  17-3-map-audiobookshelf-books-faithfully-into-the-hifimule-catalog: review
+  17-3-map-audiobookshelf-books-faithfully-into-the-hifimule-catalog: done
   17-4-browse-and-search-an-audiobookshelf-audiobook-server: backlog
   17-5-directly-play-audiobookshelf-audiobooks-through-hifimule: backlog
   17-6-preserve-audiobookshelf-listening-continuity-safely: backlog

@@ -87,6 +87,8 @@ pub struct Song {
     pub size_bytes: Option<u64>,
     #[serde(skip)]
     pub album_loudness: AlbumLoudnessEvidence,
+    #[serde(skip, default)]
+    pub provider_metadata: ProviderItemMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +104,8 @@ pub struct Album {
     pub song_count: Option<u32>,
     pub duration_seconds: Option<u32>,
     pub cover_art_id: Option<String>,
+    #[serde(skip, default)]
+    pub provider_metadata: ProviderItemMetadata,
 }
 
 /// A source-ordered contributor that does not replace the primary artist.
@@ -324,15 +328,18 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: AlbumLoudnessEvidence::Absent,
+            provider_metadata: Default::default(),
         };
 
         assert_eq!(song.id, "9f86d081884c7d659a2feaa0c55ad015");
         assert_eq!(song.artist_id.as_deref(), Some("artist-md5-id"));
         assert_eq!(song.album_id.as_deref(), Some("album-md5-id"));
-        assert!(serde_json::to_value(&song)
-            .unwrap()
-            .get("albumLoudness")
-            .is_none());
+        assert!(
+            serde_json::to_value(&song)
+                .unwrap()
+                .get("albumLoudness")
+                .is_none()
+        );
     }
 
     #[test]
@@ -346,6 +353,7 @@ mod tests {
             song_count: None,
             duration_seconds: None,
             cover_art_id: Some("cover-456".to_string()),
+            provider_metadata: Default::default(),
         };
 
         assert_eq!(album.id, "album-123");
@@ -360,6 +368,11 @@ mod tests {
         });
         let mapped: AlbumWithTracks = serde_json::from_value(value).unwrap();
         assert_eq!(mapped.provider_metadata, ProviderItemMetadata::default());
-        assert!(serde_json::to_value(mapped).unwrap().get("providerMetadata").is_none());
+        assert!(
+            serde_json::to_value(mapped)
+                .unwrap()
+                .get("providerMetadata")
+                .is_none()
+        );
     }
 }

@@ -206,6 +206,7 @@ mod tests {
             suffix: Some(suffix.into()),
             size_bytes: None,
             album_loudness: gain,
+            provider_metadata: Default::default(),
         }
     }
 
@@ -220,6 +221,7 @@ mod tests {
                 song_count: Some(rows.len() as u32),
                 duration_seconds: None,
                 cover_art_id: None,
+                provider_metadata: Default::default(),
             },
             tracks: rows,
             provider_metadata: Default::default(),
