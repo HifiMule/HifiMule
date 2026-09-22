@@ -4,7 +4,7 @@ baseline_commit: 7d5aefbcf0cb0cf7fa8eb00e3babe1bfa5f8220e
 
 # Story 17.5: Directly play Audiobookshelf audiobooks through HifiMule
 
-Status: review
+Status: done
 
 ## Story
 
@@ -23,6 +23,13 @@ so that Audiobookshelf delivers immediate listening value without device synchro
 7. **Regression evidence.** Offline provider/fixture, daemon playback/RPC, and UI tests prove multi-part order, single-file play, part admission, source routing, direct and transcode selection, incompatible/unavailable error, session cleanup and redaction, cancellation, and existing music-provider behavior. Completion claims distinguish offline fixture checks from installed playback evidence.
 
 ## Tasks / Subtasks
+
+### Review Findings
+
+- [x] [Review][Patch] Reject malformed non-ASCII track IDs without panicking [hifimule-daemon/src/providers/audiobookshelf.rs:1123] — Hex decoding now rejects non-ASCII input before byte slicing.
+- [x] [Review][Patch] Verify playback-session close outcomes [hifimule-daemon/src/providers/audiobookshelf.rs:321] — Failed close responses and transport errors now make shutdown cleanup report failure.
+- [x] [Review][Patch] Drain cleanup tasks registered during shutdown [hifimule-daemon/src/providers/mod.rs:64] — Shutdown loops over newly registered cleanup tasks until the registry is empty or its deadline expires.
+- [x] [Review][Patch] Recover session cleanup from oversized playback responses [hifimule-daemon/src/providers/audiobookshelf.rs:1415] — The verified response's leading session ID is captured before bounded body reading completes, so oversized responses still close the created session.
 
 - [x] **Close the delivery evidence gap** (AC: 3, 5, 7)
   - [x] Probe unavailable/incompatible delivery and any needed multipart/seek behavior on the pinned v2.36.1 controlled deployment. Add redacted, versioned evidence to `docs/audiobookshelf-integration-contract.md` and the fixture manifest; retain `untested` where unobserved. Never infer success from `delivery-unavailable.json`.

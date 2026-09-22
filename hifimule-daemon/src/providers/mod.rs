@@ -47,29 +47,46 @@ impl Drop for PlaybackCleanup {
 }
 
 static PLAYBACK_CLEANUPS: OnceLock<Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
+static PLAYBACK_CLEANUP_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-pub(crate) fn register_playback_cleanup(handle: tokio::task::JoinHandle<()>) {
+pub(crate) fn register_playback_cleanup(handle: tokio::task::JoinHandle<bool>) {
+    let monitored = tokio::spawn(async move {
+        if !matches!(handle.await, Ok(true)) {
+            PLAYBACK_CLEANUP_FAILED.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
     let registry = PLAYBACK_CLEANUPS.get_or_init(|| Mutex::new(Vec::new()));
     let mut pending = registry.lock().unwrap_or_else(|error| error.into_inner());
     pending.retain(|task| !task.is_finished());
-    pending.push(handle);
+    pending.push(monitored);
 }
 
 pub(crate) async fn drain_playback_cleanups() -> bool {
     let Some(registry) = PLAYBACK_CLEANUPS.get() else {
         return true;
     };
-    let tasks = {
-        let mut pending = registry.lock().unwrap_or_else(|error| error.into_inner());
-        std::mem::take(&mut *pending)
-    };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    for task in tasks {
-        if tokio::time::timeout_at(deadline, task).await.is_err() {
+    let mut succeeded = true;
+    loop {
+        let tasks = {
+            let mut pending = registry.lock().unwrap_or_else(|error| error.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        if tasks.is_empty() {
+            let failed = PLAYBACK_CLEANUP_FAILED.swap(false, std::sync::atomic::Ordering::AcqRel);
+            return succeeded && !failed;
+        }
+        for task in tasks {
+            match tokio::time::timeout_at(deadline, task).await {
+                Ok(Ok(())) => {}
+                _ => succeeded = false,
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
             return false;
         }
     }
-    true
 }
 
 #[derive(Clone)]
@@ -1706,6 +1723,21 @@ mod tests {
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
         drop(stale);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_waits_for_cleanup_registered_while_draining() {
+        let (release_first, first) = tokio::sync::oneshot::channel::<()>();
+        register_playback_cleanup(tokio::spawn(async move { first.await.is_ok() }));
+        let drain = tokio::spawn(drain_playback_cleanups());
+        tokio::task::yield_now().await;
+        let (release_second, second) = tokio::sync::oneshot::channel::<()>();
+        register_playback_cleanup(tokio::spawn(async move { second.await.is_ok() }));
+        release_first.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+        release_second.send(()).unwrap();
+        assert!(drain.await.unwrap());
     }
 
     fn representation(

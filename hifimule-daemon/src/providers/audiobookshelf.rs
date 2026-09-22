@@ -298,15 +298,54 @@ impl AudiobookshelfProvider {
                 .await
                 .map_err(transport_error)?;
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > Self::MAX_RESPONSE_BYTES)
-        {
-            return Err(ProviderError::Deserialization(
-                "Audiobookshelf playback response too large".into(),
-            ));
-        }
         Ok(response)
+    }
+
+    async fn read_playback_session(
+        &self,
+        mut response: reqwest::Response,
+    ) -> Result<(serde_json::Value, Arc<PlaybackCleanup>), ProviderError> {
+        let mut body = Vec::new();
+        let mut cleanup = None;
+        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+            if body.len().saturating_add(chunk.len()) > Self::MAX_RESPONSE_BYTES as usize {
+                let remaining = (Self::MAX_RESPONSE_BYTES as usize).saturating_sub(body.len());
+                body.extend_from_slice(&chunk[..remaining]);
+                if cleanup.is_none() {
+                    let _cleanup =
+                        playback_session_id_prefix(&body).map(|id| self.playback_cleanup(id));
+                }
+                return Err(ProviderError::Deserialization(
+                    "Audiobookshelf playback response too large".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+            if cleanup.is_none() {
+                cleanup = playback_session_id_prefix(&body).map(|id| self.playback_cleanup(id));
+            }
+        }
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+            ProviderError::Deserialization("invalid Audiobookshelf playback session".into())
+        })?;
+        let session_id = value
+            .get("id")
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ProviderError::Deserialization(
+                    "Audiobookshelf playback omitted session identity".into(),
+                )
+            })?;
+        if let Some(cleanup) = cleanup {
+            if playback_session_id_prefix(&body).as_deref() != Some(session_id) {
+                return Err(ProviderError::Deserialization(
+                    "invalid Audiobookshelf playback session identity".into(),
+                ));
+            }
+            return Ok((value, cleanup));
+        }
+        let cleanup = self.playback_cleanup(session_id.to_owned());
+        Ok((value, cleanup))
     }
 
     fn playback_cleanup(&self, session_id: String) -> Arc<PlaybackCleanup> {
@@ -317,15 +356,15 @@ impl AudiobookshelfProvider {
         Arc::new(PlaybackCleanup::new(move || {
             super::register_playback_cleanup(runtime.spawn(async move {
                 let Ok(mut url) = reqwest::Url::parse(&format!("{base}/api/session")) else {
-                    return;
+                    return false;
                 };
                 let Ok(mut segments) = url.path_segments_mut() else {
-                    return;
+                    return false;
                 };
                 segments.push(&session_id).push("close");
                 drop(segments);
                 let mut session = auth.lock().await;
-                let result = client
+                let mut result = client
                     .post(url.clone())
                     .bearer_auth(session.access_token.expose_secret())
                     .send()
@@ -333,14 +372,17 @@ impl AudiobookshelfProvider {
                 if result
                     .as_ref()
                     .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
-                    && refresh_auth(&client, &base, &mut session).await.is_ok()
                 {
-                    let _ = client
+                    if refresh_auth(&client, &base, &mut session).await.is_err() {
+                        return false;
+                    }
+                    result = client
                         .post(url)
                         .bearer_auth(session.access_token.expose_secret())
                         .send()
                         .await;
                 }
+                result.is_ok_and(|response| response.status().is_success())
             }));
         }))
     }
@@ -944,6 +986,53 @@ where
     Ok(value)
 }
 
+// The pinned playback response starts with its session ID. Capture that field
+// before reading the remaining body so even a rejected oversized response can
+// retire a session that the server has already created.
+fn playback_session_id_prefix(body: &[u8]) -> Option<String> {
+    fn quoted(bytes: &[u8], offset: &mut usize) -> Option<String> {
+        let start = *offset;
+        if bytes.get(*offset) != Some(&b'"') {
+            return None;
+        }
+        *offset += 1;
+        let mut escaped = false;
+        while let Some(&byte) = bytes.get(*offset) {
+            *offset += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return serde_json::from_slice(&bytes[start..*offset]).ok();
+            }
+        }
+        None
+    }
+    fn whitespace(bytes: &[u8], offset: &mut usize) {
+        while bytes.get(*offset).is_some_and(u8::is_ascii_whitespace) {
+            *offset += 1;
+        }
+    }
+    let mut offset = 0;
+    whitespace(body, &mut offset);
+    if body.get(offset) != Some(&b'{') {
+        return None;
+    }
+    offset += 1;
+    whitespace(body, &mut offset);
+    if quoted(body, &mut offset)?.as_str() != "id" {
+        return None;
+    }
+    whitespace(body, &mut offset);
+    if body.get(offset) != Some(&b':') {
+        return None;
+    }
+    offset += 1;
+    whitespace(body, &mut offset);
+    quoted(body, &mut offset).filter(|id| !id.is_empty())
+}
+
 async fn bounded_json<T: DeserializeOwned>(
     mut response: reqwest::Response,
     context: &'static str,
@@ -1082,7 +1171,7 @@ fn parse_opaque_id(kind: &str, id: &str) -> Result<(String, String, String), Pro
         })?
         .split('.')
         .map(|encoded| {
-            if encoded.len() % 2 != 0 {
+            if !encoded.is_ascii() || encoded.len() % 2 != 0 {
                 return Err(());
             }
             (0..encoded.len())
@@ -1116,7 +1205,7 @@ fn parse_track_id(id: &str) -> Result<(String, String, String, String), Provider
     let parts = encoded
         .split('.')
         .map(|part| {
-            if part.is_empty() || part.len() % 2 != 0 {
+            if part.is_empty() || !part.is_ascii() || part.len() % 2 != 0 {
                 return Err(());
             }
             (0..part.len())
@@ -1412,7 +1501,7 @@ impl MediaProvider for AudiobookshelfProvider {
             });
         }
         check_status(&response)?;
-        let value: serde_json::Value = bounded_json(response, "playback session").await?;
+        let (value, cleanup) = self.read_playback_session(response).await?;
         let session_id = value
             .get("id")
             .and_then(|id| id.as_str())
@@ -1423,7 +1512,6 @@ impl MediaProvider for AudiobookshelfProvider {
                 )
             })?
             .to_owned();
-        let cleanup = self.playback_cleanup(session_id.clone());
         let playback: PlaySessionDto = serde_json::from_value(value).map_err(|_| {
             ProviderError::Deserialization("invalid Audiobookshelf playback session".into())
         })?;
@@ -1579,6 +1667,91 @@ mod tests {
 
     fn playback_book() -> &'static str {
         r#"{"id":"item-1","libraryId":"book-id","mediaType":"book","media":{"id":"media-1","metadata":{"title":"Fixture"},"audioFiles":[{"ino":"ino-1","index":1,"duration":60}]}}"#
+    }
+
+    #[test]
+    fn malformed_unicode_identity_is_rejected_without_panicking() {
+        assert!(parse_track_id("abs-track-aéz.00.00.00").is_err());
+        assert!(parse_opaque_id("album", "abs-album-aéz.00.00").is_err());
+    }
+
+    #[test]
+    fn playback_prefix_only_accepts_the_first_json_id() {
+        assert_eq!(
+            playback_session_id_prefix(br#" { "id": "session-secret", "tracks": ["#),
+            Some("session-secret".into())
+        );
+        assert_eq!(playback_session_id_prefix(br#"{"other":1,"id":"x"}"#), None);
+    }
+
+    #[tokio::test]
+    async fn oversized_playback_body_closes_captured_session() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let body = format!(
+            "{{\"id\":\"session-secret\",\"padding\":\"{}\"}}",
+            "x".repeat(AudiobookshelfProvider::MAX_RESPONSE_BYTES as usize)
+        );
+        let _play = server
+            .mock("POST", "/api/items/item-1/play")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap();
+        let response = provider
+            .protected_post(
+                &format!("{}/api/items/item-1/play", server.url()),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(provider.read_playback_session(response).await.is_err());
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rejected_session_close_is_reported_by_shutdown_drain() {
+        let mut server = Server::new_async().await;
+        let _login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "fixture", "fixture")
+            .await
+            .unwrap();
+        drop(provider.playback_cleanup("session-secret".into()));
+        assert!(!crate::providers::drain_playback_cleanups().await);
+        close.assert_async().await;
     }
 
     #[tokio::test]
