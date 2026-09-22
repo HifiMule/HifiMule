@@ -104,6 +104,55 @@ pub struct Album {
     pub cover_art_id: Option<String>,
 }
 
+/// A source-ordered contributor that does not replace the primary artist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Credit {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    pub role: CreditRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CreditRole {
+    Author,
+    Narrator,
+}
+
+/// Private stable identity and logical timing markers retained by a provider.
+/// It is not serialized into RPC payloads or persisted as an authenticated URL.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderItemMetadata {
+    pub identity: Option<ProviderIdentity>,
+    pub audio_file_id: Option<String>,
+    pub chapters: Vec<ChapterMarker>,
+    pub cover_reference: Option<String>,
+    pub part_identities: Vec<ProviderPartIdentity>,
+    pub credits: Vec<Credit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderPartIdentity {
+    pub public_id: String,
+    pub audio_file_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderIdentity {
+    pub library_id: String,
+    pub library_item_id: String,
+    pub media_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterMarker {
+    pub id: String,
+    pub start_seconds: u32,
+    pub end_seconds: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Artist {
@@ -135,6 +184,8 @@ pub struct ArtistWithAlbums {
 pub struct AlbumWithTracks {
     pub album: Album,
     pub tracks: Vec<Song>,
+    #[serde(skip, default)]
+    pub provider_metadata: ProviderItemMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +200,8 @@ pub struct SearchResult {
     pub albums: Vec<Album>,
     pub songs: Vec<Song>,
     pub playlists: Vec<Playlist>,
+    #[serde(skip, default)]
+    pub possibly_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,12 +329,10 @@ mod tests {
         assert_eq!(song.id, "9f86d081884c7d659a2feaa0c55ad015");
         assert_eq!(song.artist_id.as_deref(), Some("artist-md5-id"));
         assert_eq!(song.album_id.as_deref(), Some("album-md5-id"));
-        assert!(
-            serde_json::to_value(&song)
-                .unwrap()
-                .get("albumLoudness")
-                .is_none()
-        );
+        assert!(serde_json::to_value(&song)
+            .unwrap()
+            .get("albumLoudness")
+            .is_none());
     }
 
     #[test]
@@ -299,5 +350,16 @@ mod tests {
 
         assert_eq!(album.id, "album-123");
         assert_eq!(album.cover_art_id.as_deref(), Some("cover-456"));
+    }
+
+    #[test]
+    fn album_with_tracks_provider_metadata_is_not_on_the_wire() {
+        let value = serde_json::json!({
+            "album": {"id":"album","name":"Album"},
+            "tracks": []
+        });
+        let mapped: AlbumWithTracks = serde_json::from_value(value).unwrap();
+        assert_eq!(mapped.provider_metadata, ProviderItemMetadata::default());
+        assert!(serde_json::to_value(mapped).unwrap().get("providerMetadata").is_none());
     }
 }

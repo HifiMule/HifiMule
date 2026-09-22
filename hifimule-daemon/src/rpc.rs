@@ -14764,6 +14764,7 @@ mod tests {
                     cover_art_id: Some("cover1".to_string()),
                 },
                 tracks: vec![song.clone()],
+                provider_metadata: Default::default(),
             },
             song,
         );
@@ -15000,6 +15001,7 @@ mod tests {
                         cover_art_id: None,
                     },
                     tracks: tracks.clone(),
+                    provider_metadata: Default::default(),
                 }),
                 None => Err(ProviderError::UnsupportedCapability(
                     "no albums".to_string(),

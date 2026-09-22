@@ -4,7 +4,7 @@ baseline_commit: 2cfe297
 
 # Story 17.3: Map Audiobookshelf books faithfully into the HifiMule catalog
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -28,34 +28,34 @@ so that I can find and play long-form audio naturally.
 
 ## Tasks / Subtasks
 
-- [ ] **Establish the provider-neutral catalogue metadata contract** (AC: 2–6)
-  - [ ] Add typed credit and provider-identity/chapter metadata in `hifimule-daemon/src/domain/models.rs` (or an equally provider-neutral domain seam). Use additive `serde(default)` and omit empty wire fields where appropriate so existing Jellyfin/Subsonic payloads remain compatible.
-  - [ ] Keep raw Audiobookshelf identity metadata daemon-only with `#[serde(skip, default)]` or an equivalent non-wire carrier. Do not use an untyped `serde_json::Value` map or Audiobookshelf-specific fields directly on generic RPC DTOs.
-  - [ ] Preserve the existing primary `artist_id`/`artist_name` contract; add ordered typed secondary/additional credits rather than concatenating authors/narrators into one string.
-  - [ ] Define deterministic opaque album/track ID encoding and round-trip parsing helpers with delimiter-safe input handling and fixed vectors. Do not hash away fields that later playback/progress must recover unless the typed metadata retains the exact tuple.
+- [x] **Establish the provider-neutral catalogue metadata contract** (AC: 2–6)
+  - [x] Add typed credit and provider-identity/chapter metadata in `hifimule-daemon/src/domain/models.rs` (or an equally provider-neutral domain seam). Use additive `serde(default)` and omit empty wire fields where appropriate so existing Jellyfin/Subsonic payloads remain compatible.
+  - [x] Keep raw Audiobookshelf identity metadata daemon-only with `#[serde(skip, default)]` or an equivalent non-wire carrier. Do not use an untyped `serde_json::Value` map or Audiobookshelf-specific fields directly on generic RPC DTOs.
+  - [x] Preserve the existing primary `artist_id`/`artist_name` contract; add ordered typed secondary/additional credits rather than concatenating authors/narrators into one string.
+  - [x] Define deterministic opaque album/track ID encoding and round-trip parsing helpers with delimiter-safe input handling and fixed vectors. Do not hash away fields that later playback/progress must recover unless the typed metadata retains the exact tuple.
 
-- [ ] **Extend the scoped Audiobookshelf adapter with catalogue DTOs and mapping** (AC: 1–5, 7)
-  - [ ] In `hifimule-daemon/src/providers/audiobookshelf.rs`, add private DTOs for the validated catalogue page, book summary/detail, metadata, author, narrator, audio-file, and chapter fields. Reject a non-Audiobook role before network I/O.
-  - [ ] Factor the existing authenticated request path so protected GETs share Bearer injection, exactly-one refresh after 401, status classification, response-size/time bounds, and sanitized deserialization errors. Preserve the Story 17.2 session mutex and secret-redaction invariants.
-  - [ ] Implement `list_albums` from the selected library only, with checked offset/page conversion and authoritative totals. Do not forward the unvalidated `letter` filter in a way that falsifies paging; reject a non-empty unsupported filter or document a provider-neutral no-filter call path for Story 17.4.
-  - [ ] Implement `get_album` through the scoped item-detail endpoint and map `audioFiles` by numeric index. Attach ordered chapter boundaries as metadata without manufacturing a 1:1 chapter/file relation.
-  - [ ] Keep `get_song` unsupported unless it can be implemented entirely from the same validated detail contract without enabling playback. `download_url`, `resolve_playback`, and `cover_art_url` remain unsupported.
+- [x] **Extend the scoped Audiobookshelf adapter with catalogue DTOs and mapping** (AC: 1–5, 7)
+  - [x] In `hifimule-daemon/src/providers/audiobookshelf.rs`, add private DTOs for the validated catalogue page, book summary/detail, metadata, author, narrator, audio-file, and chapter fields. Reject a non-Audiobook role before network I/O.
+  - [x] Factor the existing authenticated request path so protected GETs share Bearer injection, exactly-one refresh after 401, status classification, response-size/time bounds, and sanitized deserialization errors. Preserve the Story 17.2 session mutex and secret-redaction invariants.
+  - [x] Implement `list_albums` from the selected library only, with checked offset/page conversion and authoritative totals. Do not forward the unvalidated `letter` filter in a way that falsifies paging; reject a non-empty unsupported filter or document a provider-neutral no-filter call path for Story 17.4.
+  - [x] Implement `get_album` through the scoped item-detail endpoint and map `audioFiles` by numeric index. Attach ordered chapter boundaries as metadata without manufacturing a 1:1 chapter/file relation.
+  - [x] Keep `get_song` unsupported unless it can be implemented entirely from the same validated detail contract without enabling playback. `download_url`, `resolve_playback`, and `cover_art_url` remain unsupported.
 
-- [ ] **Implement bounded Books search without prematurely changing UX** (AC: 8, 10)
-  - [ ] Issue one request to `/api/libraries/{library}/search` with a fixed documented maximum and map only the `book` category into albums.
-  - [ ] Represent “possibly truncated” internally/testably when the category reaches the bound; never loop `page`, merge repeated first pages, or expose a false complete-total claim.
-  - [ ] Leave `hifimule-daemon/src/rpc.rs` search and image-proxy response shapes unchanged in this story unless an additive provider-neutral field is strictly required. Story 17.4 owns book-search RPC/UI presentation.
+- [x] **Implement bounded Books search without prematurely changing UX** (AC: 8, 10)
+  - [x] Issue one request to `/api/libraries/{library}/search` with a fixed documented maximum and map only the `book` category into albums.
+  - [x] Represent “possibly truncated” internally/testably when the category reaches the bound; never loop `page`, merge repeated first pages, or expose a false complete-total claim.
+  - [x] Leave `hifimule-daemon/src/rpc.rs` search and image-proxy response shapes unchanged in this story unless an additive provider-neutral field is strictly required. Story 17.4 owns book-search RPC/UI presentation.
 
-- [ ] **Use normal missing-item conventions without inventing delta support** (AC: 9)
-  - [ ] Distinguish item-detail 404 (`NotFound`) from scoped-library 404 (`StaleConfiguration`) and retain 403/429/5xx behavior from Story 17.2.
-  - [ ] Keep `supports_changes_since == false` and `changes_since_with_context` unsupported. Do not infer deletions from a partial page or add a polling cache inside the provider.
+- [x] **Use normal missing-item conventions without inventing delta support** (AC: 9)
+  - [x] Distinguish item-detail 404 (`NotFound`) from scoped-library 404 (`StaleConfiguration`) and retain 403/429/5xx behavior from Story 17.2.
+  - [x] Keep `supports_changes_since == false` and `changes_since_with_context` unsupported. Do not infer deletions from a partial page or add a polling cache inside the provider.
 
-- [ ] **Create runtime-quality fixtures and regression tests** (AC: 1–11)
-  - [ ] Add only synthetic, redacted fixture content grounded in the pinned v2.36.1 observation/source. Do not rewrite a summary fixture to imply fields were observed when they were not; update the manifest/README provenance honestly for any additions.
-  - [ ] Add co-located `mockito` adapter tests for exact method/path/query/Bearer shape, library scoping, refresh once, page totals/final page, bounded search, 401/403/404/429/500, and secret/error redaction.
-  - [ ] Add pure mapper tests for duplicate-title identity, deterministic IDs, numeric indices `1..10`, 10 files versus 24 chapters, chapter boundaries crossing part offsets, one file/one track, missing credits/art, multiple ordered credits, malformed indices/durations, and repeatability.
-  - [ ] Update all affected domain literals/mocks exhaustively and assert legacy serialized Jellyfin/Subsonic shapes remain compatible.
-  - [ ] Run `rtk cargo fmt --check`, targeted Audiobookshelf/provider tests, `rtk cargo test -p hifimule-daemon`, `rtk cargo clippy -p hifimule-daemon --all-targets -- -D warnings` where the repository baseline permits, and `rtk git diff --check`. Report any environment-limited check truthfully.
+- [x] **Create runtime-quality fixtures and regression tests** (AC: 1–11)
+  - [x] Add only synthetic, redacted fixture content grounded in the pinned v2.36.1 observation/source. Do not rewrite a summary fixture to imply fields were observed when they were not; update the manifest/README provenance honestly for any additions.
+  - [x] Add co-located `mockito` adapter tests for exact method/path/query/Bearer shape, library scoping, refresh once, page totals/final page, bounded search, 401/403/404/429/500, and secret/error redaction.
+  - [x] Add pure mapper tests for duplicate-title identity, deterministic IDs, numeric indices `1..10`, 10 files versus 24 chapters, chapter boundaries crossing part offsets, one file/one track, missing credits/art, multiple ordered credits, malformed indices/durations, and repeatability.
+  - [x] Update all affected domain literals/mocks exhaustively and assert legacy serialized Jellyfin/Subsonic shapes remain compatible.
+  - [x] Run `rtk cargo fmt --check`, targeted Audiobookshelf/provider tests, `rtk cargo test -p hifimule-daemon`, `rtk cargo clippy -p hifimule-daemon --all-targets -- -D warnings` where the repository baseline permits, and `rtk git diff --check`. Report any environment-limited check truthfully.
 
 ## Dev Notes
 
@@ -138,12 +138,27 @@ GPT-5 Codex
 
 ### Debug Log References
 
+- 2026-09-22: Added a provider-neutral typed credit/identity/chapter metadata vocabulary. The existing public `Album`/`Song` wire structs remain unchanged while the compatible ownership seam is finalized; no task is marked complete.
+- 2026-09-22: Implemented and tested scoped authenticated catalogue pages, opaque identity encoding, detail 404 mapping, numeric multipart ordering, bounded Books-only search, and pagination edge cases. Full daemon regression suite passes (1,075 tests); strict Clippy remains blocked by pre-existing daemon-wide findings.
+
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Story preparation analyzed the full Epic 17/PRD/architecture/UX scope, completed Story 17.2 and review fixes, current provider/domain/RPC code, v2.36.1 contract fixtures, recent commits, and current official upstream release/API sources.
+- Implemented scoped Audiobookshelf book catalogue pages, detail mapping, bounded Books-only search, stable opaque IDs, daemon-only identity/chapter/credit metadata, and refresh/error safeguards.
+- Validation: 1,078 daemon tests plus Audiobookshelf contract tests pass; `git diff --check` passes. Strict Clippy remains blocked by pre-existing daemon-wide warnings/errors.
+
+## Change Log
+
+- 2026-09-22: Implemented Audiobookshelf book catalogue mapping and runtime coverage; status moved to review.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/17-3-map-audiobookshelf-books-faithfully-into-the-hifimule-catalog.md`
-
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/playback/loudness.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/album_tests.rs`

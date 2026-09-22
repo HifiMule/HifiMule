@@ -30,6 +30,7 @@ impl MediaProvider for AlbumProvider {
             album: serde_json::from_value(json!({"id": id, "name": "Album", "trackCount": 1}))
                 .unwrap(),
             tracks: vec![track],
+            provider_metadata: Default::default(),
         })
     }
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {

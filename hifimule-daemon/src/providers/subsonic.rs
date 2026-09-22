@@ -350,6 +350,7 @@ impl MediaProvider for SubsonicProvider {
         Ok(AlbumWithTracks {
             album: album_from_with_songs_dto(album.album),
             tracks,
+            provider_metadata: Default::default(),
         })
     }
 
@@ -480,6 +481,7 @@ impl MediaProvider for SubsonicProvider {
             albums: result.album.into_iter().map(album_from_dto).collect(),
             songs: result.song.into_iter().map(song_from_dto).collect(),
             playlists: result.playlist.into_iter().map(playlist_from_dto).collect(),
+            possibly_truncated: false,
         })
     }
 
@@ -824,6 +826,7 @@ impl MediaProvider for SubsonicProvider {
             albums,
             songs,
             playlists: vec![],
+            possibly_truncated: false,
         })
     }
 

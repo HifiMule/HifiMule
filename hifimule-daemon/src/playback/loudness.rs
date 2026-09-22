@@ -222,6 +222,7 @@ mod tests {
                 cover_art_id: None,
             },
             tracks: rows,
+            provider_metadata: Default::default(),
         }
     }
 

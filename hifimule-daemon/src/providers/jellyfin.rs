@@ -254,6 +254,7 @@ impl MediaProvider for JellyfinProvider {
         Ok(AlbumWithTracks {
             album: album_from_item(album),
             tracks,
+            provider_metadata: Default::default(),
         })
     }
 
