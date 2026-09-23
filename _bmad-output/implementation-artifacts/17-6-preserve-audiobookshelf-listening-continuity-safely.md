@@ -3,7 +3,7 @@ baseline_commit: afcc2d8ab57bec43654fa8dab762c8db6ac12572
 ---
 # Story 17.6: Preserve Audiobookshelf listening continuity safely
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -36,6 +36,13 @@ so that I can move safely between HifiMule and Audiobookshelf.
 - [x] **Verify contract and regression behavior** (AC: 1–7)
   - [x] Add fixture-backed `mockito` provider tests for 200/404/401-refresh/403/429/5xx, malformed DTOs, duplicate writes, redaction, and no speculative 409 conflict handling. Add mapping property/boundary tests for single and multipart books, invalid durations, chapters, and changed file IDs.
   - [x] Add playback/persistence race tests for admission replacement, explicit seek versus late resume, paused/buffering/preview exclusion, committed seek, intermediate/final natural completion, skip/failure, restart, and stale async writes. Run relevant daemon, UI, type-check/build, format/lint, and diff checks; record any pre-existing drift separately.
+
+### Review Findings
+
+- [ ] [Review][Patch] Fast replacement can discard a final position or natural completion before the reporter writes it [hifimule-daemon/src/playback/book_progress.rs:251]
+- [x] [Review][Patch] Stop can discard the final valid position, including short sessions [hifimule-daemon/src/playback/book_progress.rs:316]
+- [x] [Review][Patch] Optional progress lookups can exhaust direct playback admission time [hifimule-daemon/src/rpc.rs:1068]
+- [x] [Review][Patch] Rejected progress writes lack a scoped recovery explanation [hifimule-daemon/src/playback/book_progress.rs:452]
 
 ## Dev Notes
 
@@ -71,6 +78,9 @@ so that I can move safely between HifiMule and Audiobookshelf.
 GPT-6 Codex
 
 ### Completion Notes List
+
+- Review follow-up: bounded optional progress admission lookups; retained the last qualified position across Stop for a final report; surfaced rejected writes through the scoped refresh notice. A fast occurrence replacement can still remove the outgoing binding before the asynchronous reporter writes its final position, so the story remains in progress.
+- Review follow-up verification: `cargo fmt --all -- --check` and `git diff --check` passed. Daemon compilation was blocked on this Windows host because the FFmpeg native runtime is absent and `npm` is unavailable for the documented build wrapper; WSL access was denied.
 
 - Added a daemon-private Audiobookshelf whole-book progress capability with bounded authenticated GET/PATCH, strict identity and timing checks, sanitized failures, and one token refresh.
 - Added a durable player occurrence binding and version 7 playback migration. Queue changes invalidate the mapping; natural part completion carries it transactionally to the next real file.

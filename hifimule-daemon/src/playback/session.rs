@@ -2868,7 +2868,11 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
             .db
             .load_book_continuity(&i.session.session_id, &occurrence.occurrence_id)
         {
-            Ok(Some(record)) if record.mapping_valid => None,
+            Ok(Some(record)) if record.mapping_valid => {
+                i.db.book_report_state(&record)
+                    .ok()
+                    .and_then(|(_, failed)| failed.then(|| "refresh".into()))
+            }
             Ok(Some(_)) => Some("relink".into()),
             _ => Some("refresh".into()),
         }
@@ -3140,6 +3144,8 @@ fn control_inner(
             i.playback.status = PlaybackStatus::Paused;
         }
         ControlAction::Resume => {
+            let _ =
+                i.db.clear_book_stop_flush(&i.session.session_id, &p.occurrence_id);
             if matches!(
                 i.playback.status,
                 PlaybackStatus::Completed | PlaybackStatus::Error
@@ -3227,6 +3233,35 @@ fn control_inner(
             committed_snapshot = Some(commit_terminal(i, terminal, generation_serial, false)?);
         }
         ControlAction::Stop => {
+            let qualified_active = i.session.state == TransportState::Playing
+                && i.playback.status == PlaybackStatus::Active;
+            let completed_naturally = i.playback.status == PlaybackStatus::Completed
+                && i.session
+                    .current_occurrence_id
+                    .as_deref()
+                    .is_some_and(|current_id| {
+                        i.db.book_attempt_outcome(&i.session.session_id, current_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|(outcome, _)| outcome == "naturalCompletion")
+                    });
+            if i.preview.is_none()
+                && (qualified_active || completed_naturally)
+                && i.playback.pending_seek.is_none()
+                && let Some(current_id) = i.session.current_occurrence_id.as_deref()
+                && let Ok(Some(current)) =
+                    i.db.playback_occurrence(&i.session.session_id, current_id)
+                && i.playback
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.source == current.source)
+            {
+                let position = super::audio::global()
+                    .captured_position(&i.generation_id)
+                    .unwrap_or(i.session.position_ms);
+                let _ =
+                    i.db.mark_book_stop_flush(&i.session.session_id, current_id, position);
+            }
             let preserve_return_position = i.preview_return_pending;
             i.preview_return_pending = false;
             i.pending_terminal = None;

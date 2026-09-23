@@ -1071,10 +1071,19 @@ async fn handle_playback_apply_session(
                             // Explicit Part start keeps its requested beginning. The
                             // remote read qualifies later write-back but never seeks it.
                             if let Some(occurrence) = occurrence.as_ref()
-                                && let Ok(Some(timing)) =
-                                    provider.book_timing_for_track(&source.track_id).await
-                                && let Ok(remote) =
-                                    provider.read_book_progress(&timing.identity).await
+                                && let Ok(Some((timing, remote))) =
+                                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                                        let timing = provider
+                                            .book_timing_for_track(&source.track_id)
+                                            .await
+                                            .ok()??;
+                                        let remote = provider
+                                            .read_book_progress(&timing.identity)
+                                            .await
+                                            .ok()?;
+                                        Some((timing, remote))
+                                    })
+                                    .await
                             {
                                 use crate::playback::book_progress::{
                                     BookMap, BookOccurrenceRecord, BookPart,
@@ -1202,7 +1211,12 @@ async fn handle_playback_play_album(
     )
     .await
     {
-        if let Ok(Some(timing)) = provider.book_timing(&p.source.album_id).await {
+        if let Ok(Ok(Some(timing))) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            provider.book_timing(&p.source.album_id),
+        )
+        .await
+        {
             use crate::playback::book_progress::{BookResumeDecision, decide_resume};
             let album_matches = album.provider_metadata.identity.as_ref() == Some(&timing.identity)
                 && album.tracks.len() == timing.parts.len()
@@ -1211,7 +1225,12 @@ async fn handle_playback_play_album(
                         && track.provider_metadata.audio_file_id.as_deref()
                             == Some(part.audio_file_id.as_str())
                 });
-            if album_matches && let Ok(remote) = provider.read_book_progress(&timing.identity).await
+            if album_matches
+                && let Ok(Ok(remote)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    provider.read_book_progress(&timing.identity),
+                )
+                .await
             {
                 match decide_resume(&timing, remote) {
                     BookResumeDecision::Beginning => reservation.book_timing = Some(timing),

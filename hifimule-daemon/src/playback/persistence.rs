@@ -129,11 +129,23 @@ impl Database {
             CREATE TABLE IF NOT EXISTS playback_audition (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, position_ms INTEGER NOT NULL CHECK(position_ms>=0), transport_state TEXT NOT NULL, saved_main_occurrence_id TEXT, saved_main_position_ms INTEGER NOT NULL CHECK(saved_main_position_ms>=0), saved_main_intent TEXT NOT NULL, resume_inhibited INTEGER NOT NULL CHECK(resume_inhibited IN (0,1)), contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)));
             CREATE TABLE IF NOT EXISTS playback_audition_outcomes (outcome_id INTEGER PRIMARY KEY AUTOINCREMENT, audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT NOT NULL CHECK(disposition IN ('naturalCompletion','stopped','returned','replaced','superseded','technicalFailure','interrupted')), terminal_position_ms INTEGER NOT NULL CHECK(terminal_position_ms>=0), duration_ms INTEGER CHECK(duration_ms>=0), failure_code TEXT, contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)), fully_heard INTEGER NOT NULL CHECK(fully_heard IN (0,1)));
             CREATE INDEX IF NOT EXISTS playback_audition_outcomes_page ON playback_audition_outcomes(outcome_id);
-            CREATE TABLE IF NOT EXISTS playback_book_continuity (session_id TEXT NOT NULL, occurrence_id TEXT PRIMARY KEY, server_id TEXT NOT NULL, track_id TEXT NOT NULL, library_id TEXT NOT NULL, item_id TEXT NOT NULL, media_id TEXT NOT NULL, audio_file_id TEXT NOT NULL, part_offset_ms INTEGER NOT NULL CHECK(part_offset_ms>=0), duration_ms INTEGER NOT NULL CHECK(duration_ms>0), whole_ms INTEGER NOT NULL CHECK(whole_ms>=0), mapping_valid INTEGER NOT NULL CHECK(mapping_valid IN (0,1)));
+            CREATE TABLE IF NOT EXISTS playback_book_continuity (session_id TEXT NOT NULL, occurrence_id TEXT PRIMARY KEY, server_id TEXT NOT NULL, track_id TEXT NOT NULL, library_id TEXT NOT NULL, item_id TEXT NOT NULL, media_id TEXT NOT NULL, audio_file_id TEXT NOT NULL, part_offset_ms INTEGER NOT NULL CHECK(part_offset_ms>=0), duration_ms INTEGER NOT NULL CHECK(duration_ms>0), whole_ms INTEGER NOT NULL CHECK(whole_ms>=0), mapping_valid INTEGER NOT NULL CHECK(mapping_valid IN (0,1)), stop_flush INTEGER NOT NULL DEFAULT 0, report_failed INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS playback_book_mapping (session_id TEXT PRIMARY KEY, queue_revision INTEGER NOT NULL, timing_json TEXT NOT NULL);
             CREATE TRIGGER IF NOT EXISTS playback_book_mapping_queue AFTER UPDATE OF session_id,queue_revision ON playback_sessions BEGIN DELETE FROM playback_book_mapping WHERE session_id<>NEW.session_id OR queue_revision<>NEW.queue_revision; END;
             CREATE TRIGGER IF NOT EXISTS playback_book_continuity_current AFTER UPDATE OF current_occurrence_id,session_id ON playback_sessions BEGIN DELETE FROM playback_book_continuity WHERE session_id<>NEW.session_id OR occurrence_id<>COALESCE(NEW.current_occurrence_id,''); END;
             CREATE TRIGGER IF NOT EXISTS playback_book_continuity_occurrence AFTER DELETE ON playback_occurrences BEGIN DELETE FROM playback_book_continuity WHERE occurrence_id=OLD.occurrence_id; END;")?;
+        let book_columns = {
+            let mut statement = tx.prepare("PRAGMA table_info(playback_book_continuity)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if !book_columns.iter().any(|name| name == "stop_flush") {
+            tx.execute("ALTER TABLE playback_book_continuity ADD COLUMN stop_flush INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        if !book_columns.iter().any(|name| name == "report_failed") {
+            tx.execute("ALTER TABLE playback_book_continuity ADD COLUMN report_failed INTEGER NOT NULL DEFAULT 0", [])?;
+        }
         if version != Some(PERSISTENCE_VERSION) {
             let has_outcome = {
                 let mut statement = tx.prepare("PRAGMA table_info(playback_occurrences)")?;
@@ -1154,7 +1166,7 @@ impl Database {
         if changed != 1 {
             return Err(anyhow!("PERSISTENCE_FAILED"));
         }
-        tx.execute("UPDATE playback_book_continuity SET whole_ms=CASE WHEN part_offset_ms+?1<=duration_ms THEN part_offset_ms+?1 ELSE whole_ms END, mapping_valid=CASE WHEN part_offset_ms+?1<=duration_ms THEN mapping_valid ELSE 0 END WHERE session_id=?2 AND occurrence_id=(SELECT current_occurrence_id FROM playback_sessions WHERE singleton_id=1)", params![position_ms as i64, session_id])?;
+        tx.execute("UPDATE playback_book_continuity SET whole_ms=CASE WHEN part_offset_ms+?1<=duration_ms THEN part_offset_ms+?1 ELSE whole_ms END, mapping_valid=CASE WHEN part_offset_ms+?1<=duration_ms THEN mapping_valid ELSE 0 END WHERE session_id=?2 AND occurrence_id=(SELECT current_occurrence_id FROM playback_sessions WHERE singleton_id=1) AND stop_flush=0", params![position_ms as i64, session_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -1241,6 +1253,56 @@ impl Database {
             params![session_id, occurrence_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)),
         ).optional().map_err(Into::into)
+    }
+
+    pub(crate) fn mark_book_stop_flush(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+        position_ms: u64,
+    ) -> Result<()> {
+        let position = i64::try_from(position_ms)?;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE playback_book_continuity SET whole_ms=part_offset_ms+?3,stop_flush=1 WHERE session_id=?1 AND occurrence_id=?2 AND mapping_valid=1 AND part_offset_ms+?3<=duration_ms",
+            params![session_id, occurrence_id, position],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn book_report_state(&self, record: &BookOccurrenceRecord) -> Result<(bool, bool)> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT stop_flush,report_failed FROM playback_book_continuity WHERE session_id=?1 AND occurrence_id=?2",
+            params![record.session_id, record.occurrence_id],
+            |row| Ok((row.get::<_, i64>(0)? == 1, row.get::<_, i64>(1)? == 1)),
+        ).map_err(Into::into)
+    }
+
+    pub(crate) fn clear_book_stop_flush(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE playback_book_continuity SET stop_flush=0 WHERE session_id=?1 AND occurrence_id=?2",
+            params![session_id, occurrence_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_book_report_failed(
+        &self,
+        record: &BookOccurrenceRecord,
+        failed: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE playback_book_continuity SET report_failed=?3 WHERE session_id=?1 AND occurrence_id=?2 AND mapping_valid=1",
+            params![record.session_id, record.occurrence_id, i64::from(failed)],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn invalidate_book_continuity(&self, record: &BookOccurrenceRecord) -> Result<()> {
@@ -2002,6 +2064,21 @@ mod tests {
                 .whole_ms,
             12_000
         );
+        db.mark_book_stop_flush(&session, &occurrence, 2_500)
+            .unwrap();
+        assert!(db.book_report_state(&record).unwrap().0);
+        db.checkpoint_playback_position(&session, 2, 0).unwrap();
+        assert_eq!(
+            db.load_book_continuity(&session, &occurrence)
+                .unwrap()
+                .unwrap()
+                .whole_ms,
+            12_500
+        );
+        db.set_book_report_failed(&record, true).unwrap();
+        assert!(db.book_report_state(&record).unwrap().1);
+        db.clear_book_stop_flush(&session, &occurrence).unwrap();
+        assert!(!db.book_report_state(&record).unwrap().0);
         db.conn
             .lock()
             .unwrap()

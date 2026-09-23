@@ -315,19 +315,13 @@ pub(crate) async fn run_reporter(
             terminal = true;
         } else if snapshot.playback.status == PlaybackStatus::Stopped
             && snapshot.playback.pending_seek.is_none()
-            && last_sent
-                .as_ref()
-                .is_some_and(|(occurrence, _, _, _)| occurrence == &record.occurrence_id)
+            && db.book_report_state(&record).is_ok_and(|(flush, _)| flush)
         {
-            progress = record
-                .part_offset_ms
-                .checked_add(snapshot.position_ms)
-                .filter(|whole| *whole <= record.duration_ms)
-                .map(|current_ms| BookProgress {
-                    current_ms,
-                    duration_ms: record.duration_ms,
-                    is_finished: false,
-                });
+            progress = Some(BookProgress {
+                current_ms: record.whole_ms,
+                duration_ms: record.duration_ms,
+                is_finished: false,
+            });
             terminal = true;
         }
         let Some(mut progress) = progress else {
@@ -381,7 +375,15 @@ pub(crate) async fn run_reporter(
             continue;
         }
         if terminal
-            && snapshot.playback.status == PlaybackStatus::Completed
+            && matches!(
+                snapshot.playback.status,
+                PlaybackStatus::Completed | PlaybackStatus::Stopped
+            )
+            && db
+                .book_attempt_outcome(&record.session_id, &record.occurrence_id)
+                .ok()
+                .flatten()
+                .is_some_and(|(outcome, _)| outcome == "naturalCompletion")
             && map.final_file(&record.audio_file_id)
             && map.part(&record.track_id).is_some_and(|(part, _)| {
                 progress.current_ms >= map.duration_ms().saturating_sub(1_000)
@@ -429,6 +431,7 @@ pub(crate) async fn run_reporter(
         }
         match provider.write_book_progress(&timing, progress).await {
             Ok(()) => {
+                let _ = db.set_book_report_failed(&record, false);
                 let owner = playback.clone();
                 if tokio::task::spawn_blocking(move || owner.snapshot())
                     .await
@@ -449,7 +452,10 @@ pub(crate) async fn run_reporter(
                 let _ = db.invalidate_book_continuity(&record);
                 retry_after = Instant::now() + Duration::from_secs(60);
             }
-            Err(_) => retry_after = Instant::now() + Duration::from_secs(30),
+            Err(_) => {
+                let _ = db.set_book_report_failed(&record, true);
+                retry_after = Instant::now() + Duration::from_secs(30);
+            }
         }
     }
 }
