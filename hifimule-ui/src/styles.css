@@ -2081,6 +2081,43 @@ h2 {
   width: 100%;
 }
 
+.podcast-show-row,
+.podcast-episode-row {
+  margin: 0.75rem 0;
+  padding: 1rem;
+  border: 1px solid var(--sl-color-neutral-700);
+  border-radius: var(--sl-border-radius-medium);
+}
+
+.podcast-show-row img {
+  float: left;
+  width: 80px;
+  height: 80px;
+  margin: 0 1rem 0.5rem 0;
+  border-radius: var(--sl-border-radius-small);
+  object-fit: cover;
+}
+
+.podcast-show-row::after {
+  content: '';
+  display: block;
+  clear: both;
+}
+
+.podcast-show-row p,
+.podcast-episode-row p {
+  color: var(--ink-dim);
+}
+
+.podcast-episode-row h3 {
+  margin: 0.25rem 0;
+}
+
+.podcast-show-row button,
+.podcast-episode-row button {
+  cursor: pointer;
+}
+
 .media-list-row {
   position: absolute;
   left: 0;

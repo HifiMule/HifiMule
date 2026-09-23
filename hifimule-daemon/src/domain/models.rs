@@ -193,6 +193,54 @@ pub struct AlbumWithTracks {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastShow {
+    #[serde(rename = "type")]
+    pub item_type: PodcastEntityType,
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub cover_art_id: Option<String>,
+    pub episode_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastEpisode {
+    #[serde(rename = "type")]
+    pub item_type: PodcastEntityType,
+    pub id: String,
+    pub show_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub duration_seconds: Option<u32>,
+    pub published_at: Option<String>,
+    pub cover_art_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PodcastEntityType {
+    Show,
+    Episode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastShowDetail {
+    pub show: PodcastShow,
+    pub episodes: Vec<PodcastEpisode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastSearchResult {
+    pub shows: Vec<PodcastShow>,
+    pub episodes: Vec<PodcastEpisode>,
+    pub possibly_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistWithTracks {
     pub playlist: Playlist,
     pub tracks: Vec<Song>,

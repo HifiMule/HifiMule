@@ -212,7 +212,27 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 
 // --- Provider-neutral browse types ---
 
-export type BrowseMode = "artists" | "albums" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
+export type BrowseMode = "artists" | "albums" | "podcasts" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
+
+export interface PodcastShow {
+    type: 'show';
+    id: string;
+    title: string;
+    description: string | null;
+    coverArtId: string | null;
+    episodeCount: number | null;
+}
+
+export interface PodcastEpisode {
+    type: 'episode';
+    id: string;
+    showId: string;
+    title: string;
+    description: string | null;
+    durationSeconds: number | null;
+    publishedAt: string | null;
+    coverArtId: string | null;
+}
 
 export interface BrowseArtist {
     id: string;
@@ -472,6 +492,15 @@ export async function playbackPlayTrack(serverId: string, trackId: string): Prom
     });
 }
 
+export async function playbackPlayEpisode(serverId: string, episodeId: string): Promise<void> {
+    const current = await playbackGetSession();
+    await rpcCall('playback.playEpisode', {
+        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+        commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
+        serverId, episodeId,
+    });
+}
+
 export async function playbackPreviewTrack(serverId: string, trackId: string): Promise<void> {
     const current = await playbackGetSession();
     await rpcCall('playback.previewTrack', {
@@ -571,6 +600,22 @@ export async function fetchBrowseAlbum(
     albumId: string,
 ): Promise<{ album: BrowseAlbum; tracks: BrowseTrack[]; chapters?: Array<{ startSeconds: number; endSeconds: number }> }> {
     return await rpcCall('browse.getAlbum', { albumId });
+}
+
+export async function fetchPodcastShows(startIndex = 0, limit = 50): Promise<{ shows: PodcastShow[]; total: number }> {
+    return rpcCall('browse.listPodcastShows', { startIndex, limit });
+}
+
+export async function fetchPodcastShow(showId: string, startIndex = 0, limit = 50): Promise<{ show: PodcastShow; episodes: PodcastEpisode[]; total: number }> {
+    return rpcCall('browse.getPodcastShow', { showId, startIndex, limit });
+}
+
+export async function fetchPodcastEpisode(episodeId: string): Promise<{ episode: PodcastEpisode }> {
+    return rpcCall('browse.getPodcastEpisode', { episodeId });
+}
+
+export async function searchPodcasts(query: string): Promise<{ shows: PodcastShow[]; episodes: PodcastEpisode[]; possiblyTruncated: boolean }> {
+    return rpcCall('browse.search', { query });
 }
 
 export async function fetchBrowsePlaylists(): Promise<{ playlists: BrowsePlaylist[] }> {

@@ -9,7 +9,8 @@ use super::{
 };
 use crate::domain::models::{
     Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChapterMarker, Credit,
-    CreditRole, Library, Playlist, PlaylistWithTracks, ProviderIdentity, ProviderItemMetadata,
+    CreditRole, Library, Playlist, PlaylistWithTracks, PodcastEntityType, PodcastEpisode,
+    PodcastSearchResult, PodcastShow, PodcastShowDetail, ProviderIdentity, ProviderItemMetadata,
     ProviderPartIdentity, SearchResult, Song,
 };
 use async_trait::async_trait;
@@ -136,6 +137,97 @@ struct BookSearchDto {
     book: Vec<BookDto>,
 }
 
+#[derive(Deserialize)]
+struct PodcastPageDto {
+    total: u64,
+    #[serde(default)]
+    results: Vec<PodcastDto>,
+}
+
+#[derive(Deserialize)]
+struct PodcastSearchDto {
+    #[serde(default)]
+    podcast: Vec<PodcastSearchHit>,
+    #[serde(default)]
+    episodes: Vec<PodcastEpisodeHit>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PodcastSearchHit {
+    Wrapped {
+        #[serde(rename = "libraryItem")]
+        library_item: PodcastDto,
+    },
+    Item(PodcastDto),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodcastEpisodeHit {
+    library_item: PodcastDto,
+    episode: PodcastEpisodeDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodcastDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    id: String,
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    library_id: String,
+    media_type: String,
+    media: PodcastMediaDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodcastMediaDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    id: String,
+    #[serde(default)]
+    cover_path: Option<String>,
+    #[serde(default)]
+    metadata: PodcastMetadataDto,
+    #[serde(default)]
+    episodes: Vec<PodcastEpisodeDto>,
+    #[serde(default)]
+    num_episodes: Option<u32>,
+}
+
+#[derive(Default, Deserialize)]
+struct PodcastMetadataDto {
+    title: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodcastEpisodeDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    pub_date: Option<String>,
+    #[serde(default)]
+    published_at: Option<i64>,
+    #[serde(default)]
+    audio_file: Option<PodcastAudioFileDto>,
+}
+
+#[derive(Clone, Deserialize)]
+struct PodcastAudioFileDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    ino: String,
+    #[serde(default)]
+    duration: Option<f64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookDto {
@@ -205,6 +297,8 @@ struct PlaySessionDto {
     library_id: String,
     library_item_id: String,
     media_type: String,
+    #[serde(default)]
+    episode_id: Option<String>,
     play_method: u8,
     audio_tracks: Vec<PlayTrackDto>,
 }
@@ -251,6 +345,220 @@ impl AudiobookshelfProvider {
                 "missing Audiobookshelf library scope".into(),
             )),
         }
+    }
+
+    fn podcast_library_id(&self) -> Result<&str, ProviderError> {
+        match (self.library_id.as_deref(), self.library_role) {
+            (Some(id), Some(ProviderLibraryRole::Podcast)) => Ok(id),
+            (_, Some(ProviderLibraryRole::Audiobook)) => Err(unsupported("podcast catalogue")),
+            _ => Err(ProviderError::StaleConfiguration(
+                "missing Audiobookshelf library scope".into(),
+            )),
+        }
+    }
+
+    async fn podcast_detail(&self, public_id: &str) -> Result<PodcastDto, ProviderError> {
+        let library = self.podcast_library_id()?;
+        let (encoded_library, item, media) = parse_opaque_id("show", public_id)?;
+        if encoded_library != library || item.is_empty() || media.is_empty() {
+            return Err(ProviderError::NotFound {
+                item_type: "show".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let response = self
+            .protected_get(&item_endpoint(&self.base_url, &item)?)
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound {
+                item_type: "show".into(),
+                id: "unavailable".into(),
+            });
+        }
+        check_status(&response)?;
+        let show: PodcastDto = bounded_json(response, "podcast detail").await?;
+        if show.media_type != "podcast"
+            || show.library_id != library
+            || show.id != item
+            || show.media.id != media
+        {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf podcast identity changed".into(),
+            ));
+        }
+        let mut episodes = std::collections::HashSet::new();
+        if !show
+            .media
+            .episodes
+            .iter()
+            .all(|episode| episodes.insert(&episode.id))
+        {
+            return Err(ProviderError::Deserialization(
+                "duplicate Audiobookshelf episode identity".into(),
+            ));
+        }
+        Ok(show)
+    }
+
+    async fn podcast_episode_detail(
+        &self,
+        id: &str,
+    ) -> Result<(PodcastDto, PodcastEpisodeDto), ProviderError> {
+        let (library, item, media, episode) = parse_episode_id(id)?;
+        if library != self.podcast_library_id()? {
+            return Err(ProviderError::NotFound {
+                item_type: "episode".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let show = self
+            .podcast_detail(&opaque_id("show", &[&library, &item, &media]))
+            .await?;
+        let matched = show
+            .media
+            .episodes
+            .iter()
+            .find(|candidate| candidate.id == episode)
+            .cloned()
+            .ok_or_else(|| ProviderError::NotFound {
+                item_type: "episode".into(),
+                id: "unavailable".into(),
+            })?;
+        Ok((show, matched))
+    }
+
+    async fn resolve_podcast_playback(
+        &self,
+        id: &str,
+    ) -> Result<PlaybackDescription, ProviderError> {
+        let (library, item_id, media_id, episode_id) = parse_episode_id(id)?;
+        let (item, episode) = self.podcast_episode_detail(id).await?;
+        let audio_file = episode.audio_file.as_ref().ok_or_else(|| {
+            ProviderError::UnsupportedCapability(
+                "Audiobookshelf episode has no direct audio file".into(),
+            )
+        })?;
+        let show = podcast_show(&library, &item)?;
+        let episode_public = podcast_episode(&show, &library, &item, &episode);
+        let mut endpoint =
+            reqwest::Url::parse(&item_endpoint(&self.base_url, &item_id)?).map_err(|_| {
+                ProviderError::Deserialization("invalid Audiobookshelf episode URL".into())
+            })?;
+        endpoint
+            .path_segments_mut()
+            .map_err(|_| {
+                ProviderError::Deserialization("invalid Audiobookshelf episode URL".into())
+            })?
+            .push("play")
+            .push(&episode_id);
+        let response = self
+            .protected_post(
+                endpoint.as_str(),
+                &serde_json::json!({"forceDirectPlay": true}),
+            )
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound {
+                item_type: "episode".into(),
+                id: "unavailable".into(),
+            });
+        }
+        check_status(&response)?;
+        let (value, cleanup) = self.read_playback_session(response).await?;
+        let session: PlaySessionDto = serde_json::from_value(value).map_err(|_| {
+            ProviderError::Deserialization("invalid Audiobookshelf episode playback session".into())
+        })?;
+        if session.server_version != "2.36.1" || session.play_method != 0 {
+            return Err(ProviderError::UnsupportedCapability(
+                "Audiobookshelf episode playback method is unverified".into(),
+            ));
+        }
+        if session.library_id != library
+            || session.library_item_id != item_id
+            || session.media_type != "podcast"
+            || session.episode_id.as_deref() != Some(&episode_id)
+        {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf episode playback identity changed".into(),
+            ));
+        }
+        let verified = self
+            .podcast_detail(&opaque_id("show", &[&library, &item_id, &media_id]))
+            .await?;
+        if !verified.media.episodes.iter().any(|candidate| {
+            candidate.id == episode_id
+                && candidate
+                    .audio_file
+                    .as_ref()
+                    .is_some_and(|file| file.ino == audio_file.ino)
+        }) {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf episode media changed during playback admission".into(),
+            ));
+        }
+        let mut matches = session
+            .audio_tracks
+            .into_iter()
+            .filter(|track| track.ino.as_deref() == Some(&audio_file.ino));
+        let track = matches.next().ok_or_else(|| ProviderError::NotFound {
+            item_type: "episode".into(),
+            id: "unavailable".into(),
+        })?;
+        if matches.next().is_some() {
+            return Err(ProviderError::Deserialization(
+                "duplicate Audiobookshelf episode audio".into(),
+            ));
+        }
+        let (codec, container) = match (track.mime_type.as_str(), track.codec.as_deref()) {
+            ("audio/mpeg", Some("mp3")) => ("mp3", "mp3"),
+            ("audio/mp4", Some("aac")) => ("aac", "m4a"),
+            _ => {
+                return Err(ProviderError::UnsupportedCapability(
+                    "Audiobookshelf episode format is unverified".into(),
+                ));
+            }
+        };
+        if !track.content_url.starts_with('/') || track.content_url.starts_with("//") {
+            return Err(ProviderError::Deserialization(
+                "invalid Audiobookshelf episode media URL".into(),
+            ));
+        }
+        let base = reqwest::Url::parse(&self.base_url)
+            .map_err(|_| ProviderError::Deserialization("invalid Audiobookshelf origin".into()))?;
+        let url = base.join(&track.content_url).map_err(|_| {
+            ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
+        })?;
+        let item_url = item_endpoint(&self.base_url, &item_id)?;
+        if url.origin() != base.origin()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.as_str().starts_with(&format!("{item_url}/"))
+        {
+            return Err(ProviderError::Deserialization(
+                "Audiobookshelf episode media URL left selected show".into(),
+            ));
+        }
+        let headers = self.verify_direct_media(&url, &track.mime_type).await?;
+        Ok(PlaybackDescription {
+            song: podcast_episode_song(&episode_public),
+            representations: vec![PlaybackRepresentation {
+                codec: Some(codec.into()),
+                container: Some(container.into()),
+                bitrate_kbps: None,
+                sample_rate: None,
+                bit_depth: None,
+                provenance: PlaybackProvenance::Original,
+                seek_mechanism: None,
+                request: PlaybackRequest {
+                    url,
+                    headers,
+                    range_supported: true,
+                    cleanup: Some(cleanup),
+                    refresh: Some(self.playback_refresh()),
+                    expected_content_type: Some(track.mime_type),
+                },
+            }],
+        })
     }
 
     async fn protected_get(&self, endpoint: &str) -> Result<reqwest::Response, ProviderError> {
@@ -1264,9 +1572,20 @@ fn parse_opaque_id(kind: &str, id: &str) -> Result<(String, String, String), Pro
 }
 
 fn parse_track_id(id: &str) -> Result<(String, String, String, String), ProviderError> {
-    let prefix = "abs-track-";
+    parse_four_part_id("track", id)
+}
+
+fn parse_episode_id(id: &str) -> Result<(String, String, String, String), ProviderError> {
+    parse_four_part_id("episode", id)
+}
+
+fn parse_four_part_id(
+    kind: &str,
+    id: &str,
+) -> Result<(String, String, String, String), ProviderError> {
+    let prefix = format!("abs-{kind}-");
     let encoded = id
-        .strip_prefix(prefix)
+        .strip_prefix(&prefix)
         .ok_or_else(|| ProviderError::NotFound {
             item_type: "part".into(),
             id: "unavailable".into(),
@@ -1366,10 +1685,103 @@ fn cover_reference(library_id: &str, book: &BookDto) -> Option<String> {
         .map(|_| opaque_id("cover", &[library_id, &book.id, &book.media.id]))
 }
 
+fn podcast_show(library: &str, item: &PodcastDto) -> Result<PodcastShow, ProviderError> {
+    if item.media_type != "podcast" || item.library_id != library {
+        return Err(ProviderError::StaleConfiguration(
+            "Audiobookshelf podcast library role changed".into(),
+        ));
+    }
+    Ok(PodcastShow {
+        item_type: PodcastEntityType::Show,
+        id: opaque_id("show", &[library, &item.id, &item.media.id]),
+        title: item
+            .media
+            .metadata
+            .title
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Untitled show".into()),
+        description: item.media.metadata.description.clone(),
+        cover_art_id: item
+            .media
+            .cover_path
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|_| opaque_id("podcast-cover", &[library, &item.id, &item.media.id])),
+        episode_count: item.media.num_episodes.or_else(|| {
+            (!item.media.episodes.is_empty()).then_some(item.media.episodes.len() as u32)
+        }),
+    })
+}
+
+fn podcast_episode(
+    show: &PodcastShow,
+    library: &str,
+    item: &PodcastDto,
+    episode: &PodcastEpisodeDto,
+) -> PodcastEpisode {
+    PodcastEpisode {
+        item_type: PodcastEntityType::Episode,
+        id: opaque_id("episode", &[library, &item.id, &item.media.id, &episode.id]),
+        show_id: show.id.clone(),
+        title: episode
+            .title
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Untitled episode".into()),
+        description: episode.description.clone(),
+        duration_seconds: episode
+            .duration
+            .or_else(|| episode.audio_file.as_ref().and_then(|file| file.duration))
+            .and_then(|value| {
+                if value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 {
+                    Some(value.round() as u32)
+                } else {
+                    None
+                }
+            }),
+        published_at: episode.pub_date.clone().or_else(|| {
+            episode
+                .published_at
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                .map(|date| date.to_rfc3339())
+        }),
+        cover_art_id: show.cover_art_id.clone(),
+    }
+}
+
+fn podcast_episode_song(episode: &PodcastEpisode) -> Song {
+    Song {
+        id: episode.id.clone(),
+        title: episode.title.clone(),
+        artist_id: None,
+        artist_name: None,
+        album_id: None,
+        album_title: None,
+        duration_seconds: episode.duration_seconds.unwrap_or(0),
+        bitrate_kbps: None,
+        track_number: None,
+        disc_number: None,
+        cover_art_id: episode.cover_art_id.clone(),
+        date_added: episode.published_at.clone(),
+        last_played_at: None,
+        play_count: None,
+        is_favorite: None,
+        content_type: None,
+        suffix: None,
+        size_bytes: None,
+        album_loudness: Default::default(),
+        provider_metadata: Default::default(),
+    }
+}
+
 fn audiobookshelf_browse_capabilities(role: Option<ProviderLibraryRole>) -> BrowseCapabilities {
     match role {
         Some(ProviderLibraryRole::Audiobook) => BrowseCapabilities {
             list_modes: vec![BrowseMode::Albums],
+        },
+        Some(ProviderLibraryRole::Podcast) => BrowseCapabilities {
+            list_modes: vec![BrowseMode::Podcasts],
         },
         _ => BrowseCapabilities::default(),
     }
@@ -1484,6 +1896,121 @@ fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
 
 #[async_trait]
 impl MediaProvider for AudiobookshelfProvider {
+    async fn list_podcast_shows(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<PodcastShow>, u32), ProviderError> {
+        let library = self.podcast_library_id()?;
+        if limit == 0 || limit > 100 || !offset.is_multiple_of(limit) {
+            return Err(ProviderError::UnsupportedCapability(
+                "invalid podcast page".into(),
+            ));
+        }
+        let endpoint = format!(
+            "{}/api/libraries/{library}/items?page={}&limit={limit}",
+            self.base_url,
+            offset / limit
+        );
+        let response = self.protected_get(&endpoint).await?;
+        check_status(&response)?;
+        let page: PodcastPageDto = bounded_json(response, "podcast page").await?;
+        let shows = page
+            .results
+            .iter()
+            .map(|item| podcast_show(library, item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((shows, u32::try_from(page.total).unwrap_or(u32::MAX)))
+    }
+
+    async fn get_podcast_show(&self, id: &str) -> Result<PodcastShowDetail, ProviderError> {
+        let item = self.podcast_detail(id).await?;
+        let library = self.podcast_library_id()?;
+        let show = podcast_show(library, &item)?;
+        let mut episodes = item
+            .media
+            .episodes
+            .iter()
+            .map(|episode| podcast_episode(&show, library, &item, episode))
+            .collect::<Vec<_>>();
+        episodes.sort_by(|a, b| {
+            b.published_at
+                .cmp(&a.published_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(PodcastShowDetail { show, episodes })
+    }
+
+    async fn get_podcast_episode(&self, id: &str) -> Result<PodcastEpisode, ProviderError> {
+        let (library, item, media, episode) = parse_episode_id(id)?;
+        if library != self.podcast_library_id()? {
+            return Err(ProviderError::NotFound {
+                item_type: "episode".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let show_id = opaque_id("show", &[&library, &item, &media]);
+        self.get_podcast_show(&show_id)
+            .await?
+            .episodes
+            .into_iter()
+            .find(|candidate| {
+                candidate.id == id
+                    && candidate.id == opaque_id("episode", &[&library, &item, &media, &episode])
+            })
+            .ok_or_else(|| ProviderError::NotFound {
+                item_type: "episode".into(),
+                id: "unavailable".into(),
+            })
+    }
+
+    async fn search_podcasts(&self, query: &str) -> Result<PodcastSearchResult, ProviderError> {
+        let library = self.podcast_library_id()?;
+        if query.trim().is_empty() {
+            return Ok(PodcastSearchResult::default());
+        }
+        let mut url =
+            reqwest::Url::parse(&format!("{}/api/libraries/{library}/search", self.base_url))
+                .map_err(|_| {
+                    ProviderError::Deserialization("invalid Audiobookshelf search URL".into())
+                })?;
+        const LIMIT: usize = 50;
+        url.query_pairs_mut()
+            .append_pair("q", query)
+            .append_pair("limit", "50");
+        let response = self.protected_get(url.as_str()).await?;
+        check_status(&response)?;
+        let hits: PodcastSearchDto = bounded_json(response, "podcast search").await?;
+        let possibly_truncated = hits.podcast.len() >= LIMIT || hits.episodes.len() >= LIMIT;
+        let shows = hits
+            .podcast
+            .iter()
+            .take(LIMIT)
+            .map(|hit| match hit {
+                PodcastSearchHit::Wrapped { library_item } => podcast_show(library, library_item),
+                PodcastSearchHit::Item(item) => podcast_show(library, item),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let episodes = hits
+            .episodes
+            .iter()
+            .take(LIMIT)
+            .map(|hit| {
+                let show = podcast_show(library, &hit.library_item)?;
+                Ok::<PodcastEpisode, ProviderError>(podcast_episode(
+                    &show,
+                    library,
+                    &hit.library_item,
+                    &hit.episode,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PodcastSearchResult {
+            shows,
+            episodes,
+            possibly_truncated,
+        })
+    }
     async fn book_timing_for_track(
         &self,
         track_id: &str,
@@ -1689,6 +2216,10 @@ impl MediaProvider for AudiobookshelfProvider {
         self.catalogue_book(album_id).await
     }
     async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
+        if self.library_role == Some(ProviderLibraryRole::Podcast) {
+            let episode = self.get_podcast_episode(song_id).await?;
+            return Ok(podcast_episode_song(&episode));
+        }
         let library = self.audiobook_library_id()?;
         let (encoded_library, item, media, _) = parse_track_id(song_id)?;
         if encoded_library != library {
@@ -1725,6 +2256,9 @@ impl MediaProvider for AudiobookshelfProvider {
         Err(unsupported("download_url"))
     }
     async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
+        if self.library_role == Some(ProviderLibraryRole::Podcast) {
+            return self.resolve_podcast_playback(song_id).await;
+        }
         let library = self.audiobook_library_id()?;
         let (encoded_library, item, _media, file) = parse_track_id(song_id)?;
         if encoded_library != library {
@@ -1855,13 +2389,36 @@ impl MediaProvider for AudiobookshelfProvider {
         &self,
         cover_art_id: &str,
     ) -> Result<reqwest::Response, ProviderError> {
-        let library = self.audiobook_library_id()?;
-        let (encoded_library, item_id, _) = parse_opaque_id("cover", cover_art_id)?;
+        let (library, kind) = match self.library_role {
+            Some(ProviderLibraryRole::Audiobook) => (self.audiobook_library_id()?, "cover"),
+            Some(ProviderLibraryRole::Podcast) => (self.podcast_library_id()?, "podcast-cover"),
+            None => {
+                return Err(ProviderError::StaleConfiguration(
+                    "missing Audiobookshelf library scope".into(),
+                ));
+            }
+        };
+        let (encoded_library, item_id, media_id) = parse_opaque_id(kind, cover_art_id)?;
         if encoded_library != library {
             return Err(ProviderError::NotFound {
                 item_type: "cover".into(),
                 id: cover_art_id.into(),
             });
+        }
+        if self.library_role == Some(ProviderLibraryRole::Podcast) {
+            let show_id = opaque_id("show", &[library, &item_id, &media_id]);
+            let show = self.podcast_detail(&show_id).await?;
+            if show
+                .media
+                .cover_path
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(ProviderError::NotFound {
+                    item_type: "cover".into(),
+                    id: "unavailable".into(),
+                });
+            }
         }
         let item = item_endpoint(&self.base_url, &item_id)?;
         let endpoint = format!("{item}/cover");
@@ -2617,10 +3174,9 @@ mod tests {
             audiobookshelf_browse_capabilities(Some(ProviderLibraryRole::Audiobook)).list_modes,
             vec![BrowseMode::Albums]
         );
-        assert!(
-            audiobookshelf_browse_capabilities(Some(ProviderLibraryRole::Podcast))
-                .list_modes
-                .is_empty()
+        assert_eq!(
+            audiobookshelf_browse_capabilities(Some(ProviderLibraryRole::Podcast)).list_modes,
+            vec![BrowseMode::Podcasts]
         );
     }
 
@@ -3399,6 +3955,510 @@ mod tests {
                 assert!(matches!(error, ProviderError::StaleConfiguration(_)));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn podcast_catalogue_keeps_show_and_episode_identity_separate() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/libraries/pod-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "0".into()),
+                Matcher::UrlEncoded("limit".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../../tests/fixtures/audiobookshelf/synthetic/podcast-page.json"
+            ))
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/items/show-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../../tests/fixtures/audiobookshelf/synthetic/podcast-show.json"
+            ))
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let (shows, total) = provider.list_podcast_shows(0, 1).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(shows[0].title, "Talks");
+        let detail = provider.get_podcast_show(&shows[0].id).await.unwrap();
+        assert_eq!(detail.episodes.len(), 2);
+        assert_ne!(detail.episodes[0].id, detail.episodes[1].id);
+        assert_eq!(detail.episodes[0].show_id, shows[0].id);
+        assert!(provider.get_album(&shows[0].id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn podcast_detail_rejects_cross_library_malformed_and_replaced_media() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let replaced = server.mock("GET", "/api/items/show-1")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"replacement","episodes":[]}}"#)
+            .expect(1).create_async().await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        assert!(
+            provider
+                .get_podcast_show("abs-show-malformed")
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .get_podcast_show(&opaque_id("show", &["other", "show-1", "media-1"]))
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .get_podcast_episode(&opaque_id(
+                    "episode",
+                    &["other", "show-1", "media-1", "ep-1"]
+                ))
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            provider
+                .get_podcast_show(&opaque_id("show", &["pod-id", "show-1", "media-1"]))
+                .await,
+            Err(ProviderError::StaleConfiguration(_))
+        ));
+        replaced.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_playback_requires_matching_episode_session() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/items/show-1").with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":"ep-1","title":"First","duration":20,"audioFile":{"ino":"ino-1"}}]}}"#)
+            .create_async().await;
+        let play = server.mock("POST", "/api/items/show-1/play/ep-1")
+            .match_body(Matcher::PartialJson(serde_json::json!({"forceDirectPlay": true})))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"pod-id","libraryItemId":"show-1","episodeId":"wrong-episode","mediaType":"podcast","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/show-1/file/ino-1","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .expect(1).create_async().await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let id = opaque_id("episode", &["pod-id", "show-1", "media-1", "ep-1"]);
+        assert!(provider.resolve_playback(&id).await.is_err());
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        play.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_direct_mp3_uses_episode_scoped_endpoint_and_closes_session() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/items/show-1").with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":"ep-1","title":"First","duration":20,"audioFile":{"ino":"ino-1"}}]}}"#)
+            .create_async().await;
+        let play = server.mock("POST", "/api/items/show-1/play/ep-1")
+            .match_body(Matcher::PartialJson(serde_json::json!({"forceDirectPlay": true})))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"pod-id","libraryItemId":"show-1","episodeId":"ep-1","mediaType":"podcast","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/show-1/file/ino-1","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .expect(1).create_async().await;
+        let media = server
+            .mock("GET", "/api/items/show-1/file/ino-1")
+            .match_header("authorization", "Bearer access-fixture")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .with_header("content-type", "audio/mpeg")
+            .with_header("accept-ranges", "bytes")
+            .with_header("content-range", "bytes 0-0/100")
+            .with_body("x")
+            .expect(1)
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let id = opaque_id("episode", &["pod-id", "show-1", "media-1", "ep-1"]);
+        let description = provider.resolve_playback(&id).await.unwrap();
+        assert_eq!(description.song.id, id);
+        assert_eq!(description.representations[0].codec.as_deref(), Some("mp3"));
+        assert!(description.song.album_id.is_none());
+        drop(description);
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        play.assert_async().await;
+        media.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_media_read_404_retires_session() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/items/show-1").with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":"ep-1","title":"First","audioFile":{"ino":"ino-1"}}]}}"#)
+            .create_async().await;
+        server.mock("POST", "/api/items/show-1/play/ep-1")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"pod-id","libraryItemId":"show-1","episodeId":"ep-1","mediaType":"podcast","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/show-1/file/ino-1","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .create_async().await;
+        let media = server
+            .mock("GET", "/api/items/show-1/file/ino-1")
+            .match_header("range", "bytes=0-0")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let id = opaque_id("episode", &["pod-id", "show-1", "media-1", "ep-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::NotFound { .. })
+        ));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        media.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_rejects_transcoded_session_before_media_read() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/items/show-1").with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","episodes":[{"id":"ep-1","audioFile":{"ino":"ino-1"}}]}}"#)
+            .create_async().await;
+        server.mock("POST", "/api/items/show-1/play/ep-1").with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"pod-id","libraryItemId":"show-1","episodeId":"ep-1","mediaType":"podcast","playMethod":2,"audioTracks":[{"contentUrl":"/api/session/session-secret/playlist.m3u8","mimeType":"application/vnd.apple.mpegurl"}]}"#)
+            .create_async().await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let id = opaque_id("episode", &["pod-id", "show-1", "media-1", "ep-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_replacement_during_admission_closes_session() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let original = server.mock("GET", "/api/items/show-1")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","episodes":[{"id":"ep-1","audioFile":{"ino":"ino-1"}}]}}"#)
+            .expect(1).create_async().await;
+        server.mock("POST", "/api/items/show-1/play/ep-1").with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"pod-id","libraryItemId":"show-1","episodeId":"ep-1","mediaType":"podcast","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/show-1/file/ino-1","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .create_async().await;
+        let replaced = server.mock("GET", "/api/items/show-1")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-2","episodes":[{"id":"ep-1","audioFile":{"ino":"ino-2"}}]}}"#)
+            .expect(1).create_async().await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let id = opaque_id("episode", &["pod-id", "show-1", "media-1", "ep-1"]);
+        assert!(matches!(
+            provider.resolve_playback(&id).await,
+            Err(ProviderError::StaleConfiguration(_))
+        ));
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        original.assert_async().await;
+        replaced.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_search_uses_one_bounded_limit_without_page_and_reports_truncation() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let hits = (0..50).map(|index| format!(r#"{{"libraryItem":{{"id":"show-{index}","libraryId":"pod-id","mediaType":"podcast","media":{{"id":"media-{index}","metadata":{{"title":"Talks"}}}}}}}}"#)).collect::<Vec<_>>().join(",");
+        let search = server
+            .mock("GET", "/api/libraries/pod-id/search")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("q".into(), "talk".into()),
+                Matcher::UrlEncoded("limit".into(), "50".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(r#"{{"podcast":[{hits}],"episodes":[]}}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let result = provider.search_podcasts("talk").await.unwrap();
+        assert_eq!(result.shows.len(), 50);
+        assert!(result.possibly_truncated);
+        assert!(result.episodes.is_empty());
+        search.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_search_maps_episode_identity_without_album_alias() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/libraries/pod-id/search")
+            .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("q".into(), "first".into()), Matcher::UrlEncoded("limit".into(), "50".into())]))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"podcast":[],"episodes":[{"libraryItem":{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"}}},"episode":{"id":"episode-1","title":"First","publishedAt":1767225600000}}]}"#)
+            .create_async().await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let result = provider.search_podcasts("first").await.unwrap();
+        assert!(result.shows.is_empty());
+        assert_eq!(result.episodes.len(), 1);
+        assert_eq!(
+            result.episodes[0].show_id,
+            opaque_id("show", &["pod-id", "show-1", "media-1"])
+        );
+        assert_eq!(
+            result.episodes[0].id,
+            opaque_id("episode", &["pod-id", "show-1", "media-1", "episode-1"])
+        );
+        assert!(result.episodes[0].published_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn podcast_list_classifies_permission_missing_rate_limit_and_server_failure() {
+        for status in [403, 404, 429, 500] {
+            let mut server = Server::new_async().await;
+            server
+                .mock("POST", "/login")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(login_body())
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/api/libraries/pod-id/items")
+                .match_query(Matcher::AllOf(vec![
+                    Matcher::UrlEncoded("page".into(), "0".into()),
+                    Matcher::UrlEncoded("limit".into(), "1".into()),
+                ]))
+                .with_status(status)
+                .with_body("private-provider-body")
+                .create_async()
+                .await;
+            let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+                .await
+                .unwrap()
+                .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+                .unwrap();
+            let error = provider.list_podcast_shows(0, 1).await.unwrap_err();
+            assert!(!format!("{error:?}").contains("private-provider-body"));
+            match status {
+                403 => assert!(matches!(error, ProviderError::Forbidden), "{error:?}"),
+                404 => assert!(matches!(error, ProviderError::StaleConfiguration(_))),
+                429 => assert!(matches!(error, ProviderError::RateLimited { .. })),
+                500 => assert!(matches!(
+                    error,
+                    ProviderError::Http {
+                        status: Some(500),
+                        ..
+                    }
+                )),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_list_refreshes_once_after_401_without_exposing_tokens() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let expired = server
+            .mock("GET", "/api/libraries/pod-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "0".into()),
+                Matcher::UrlEncoded("limit".into(), "1".into()),
+            ]))
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/auth/refresh")
+            .match_header("x-refresh-token", "refresh-fixture")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"access-refreshed"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let page = server
+            .mock("GET", "/api/libraries/pod-id/items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("page".into(), "0".into()),
+                Matcher::UrlEncoded("limit".into(), "1".into()),
+            ]))
+            .match_header("authorization", "Bearer access-refreshed")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"total":0,"results":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        assert_eq!(provider.list_podcast_shows(0, 1).await.unwrap().1, 0);
+        assert!(!format!("{provider:?}").contains("access-refreshed"));
+        expired.assert_async().await;
+        refresh.assert_async().await;
+        page.assert_async().await;
     }
 
     #[tokio::test]

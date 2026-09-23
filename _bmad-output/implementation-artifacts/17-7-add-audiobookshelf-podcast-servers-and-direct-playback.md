@@ -1,6 +1,9 @@
+---
+baseline_commit: 93e62f65e0a855e6515f135224fc892dd986df5b
+---
 # Story 17.7: Add Audiobookshelf podcast servers and direct playback
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -18,18 +21,18 @@ so that podcasts work without being forced into audiobook or album semantics.
 
 ## Tasks / Subtasks
 
-- [ ] **Add a distinct podcast domain and browse contract** (AC: 1–3)
-  - [ ] Define show and episode DTOs and typed browse/search capabilities in `domain/models.rs`, `providers/mod.rs`, and the browse RPC without reusing `Album`, `Song`, or book-oriented UI terminology as a public podcast model. Preserve existing provider defaults and wire compatibility.
-  - [ ] Route selected podcast servers through role-scoped listing, show detail and episode lookup in `providers/audiobookshelf.rs`. Validate library, item, media and episode IDs on every detail request; use opaque public IDs and daemon-private upstream metadata. Handle empty and removed episodes and deterministic display order without treating order as identity.
-  - [ ] Add bounded podcast show and episode search. Preserve the upstream `possiblyTruncated` signal when a category reaches the request limit; never page the search endpoint by changing `page`.
-- [ ] **Build podcast presentation** (AC: 2–3)
-  - [ ] Extend `hifimule-ui/src/rpc.ts`, `library.ts` and relevant browse components with Show/Episode rows, show detail, accessible states, and direct play controls. Use localization in `hifimule-i18n/catalog.json`. Keep podcast results out of album/book search, favorites, basket and device sync until their own contracts exist.
-- [ ] **Admit direct episode playback safely** (AC: 4–5)
-  - [ ] Extend `MediaProvider` and the existing `playback.playTrack`/serialized session path only as needed for typed episode admission. Use `POST /api/items/{item}/play/{episode}` and verify session scope and requested episode before handing a byte stream to the decoder.
-  - [ ] Reuse the established Audiobookshelf direct media verification, private auth refresh, session cleanup, and failure classification. Explicitly reject HLS/transcode and unverified formats; do not call book timing/progress for podcast occurrences.
-- [ ] **Verify isolation and regressions** (AC: 1–5)
-  - [ ] Add synthetic fixture-backed provider tests for list/detail/search, malformed or cross-role IDs, changed media/episode, 401/403/404/429/5xx, truncation and sanitized errors; playback tests for valid episode sessions, mismatched response, media-read 404, cleanup, replacement and stop races.
-  - [ ] Add RPC/UI tests for show and episode presentation, accessible states and isolation from Books/Music. Run relevant daemon/UI tests, type-check/build, formatting/lint and diff checks; report environment blockers separately.
+- [x] **Add a distinct podcast domain and browse contract** (AC: 1–3)
+  - [x] Define show and episode DTOs and typed browse/search capabilities in `domain/models.rs`, `providers/mod.rs`, and the browse RPC without reusing `Album`, `Song`, or book-oriented UI terminology as a public podcast model. Preserve existing provider defaults and wire compatibility.
+  - [x] Route selected podcast servers through role-scoped listing, show detail and episode lookup in `providers/audiobookshelf.rs`. Validate library, item, media and episode IDs on every detail request; use opaque public IDs and daemon-private upstream metadata. Handle empty and removed episodes and deterministic display order without treating order as identity.
+  - [x] Add bounded podcast show and episode search. Preserve the upstream `possiblyTruncated` signal when a category reaches the request limit; never page the search endpoint by changing `page`.
+- [x] **Build podcast presentation** (AC: 2–3)
+  - [x] Extend `hifimule-ui/src/rpc.ts`, `library.ts` and relevant browse components with Show/Episode rows, show detail, accessible states, and direct play controls. Use localization in `hifimule-i18n/catalog.json`. Keep podcast results out of album/book search, favorites, basket and device sync until their own contracts exist.
+- [x] **Admit direct episode playback safely** (AC: 4–5)
+  - [x] Extend `MediaProvider` and the existing `playback.playTrack`/serialized session path only as needed for typed episode admission. Use `POST /api/items/{item}/play/{episode}` and verify session scope and requested episode before handing a byte stream to the decoder.
+  - [x] Reuse the established Audiobookshelf direct media verification, private auth refresh, session cleanup, and failure classification. Explicitly reject HLS/transcode and unverified formats; do not call book timing/progress for podcast occurrences.
+- [x] **Verify isolation and regressions** (AC: 1–5)
+  - [x] Add synthetic fixture-backed provider tests for list/detail/search, malformed or cross-role IDs, changed media/episode, 401/403/404/429/5xx, truncation and sanitized errors; playback tests for valid episode sessions, mismatched response, media-read 404, cleanup, replacement and stop races.
+  - [x] Add RPC/UI tests for show and episode presentation, accessible states and isolation from Books/Music. Run relevant daemon/UI tests, type-check/build, formatting/lint and diff checks; report environment blockers separately.
 
 ## Dev Notes
 
@@ -64,9 +67,37 @@ so that podcasts work without being forced into audiobook or album semantics.
 
 GPT-6 Codex
 
+### Implementation Plan
+
+- Keep the existing persisted library scope and Audiobookshelf book adapter intact. Add a role-checked podcast branch with separate show and episode contracts, opaque tuple IDs, and bounded browse/search RPC responses.
+- Route typed episode requests through the serialized playback owner. Verify detail before and after session creation, match the session's library, item, episode and audio file, then reuse the direct media range and cleanup guards.
+- Present podcasts in a dedicated browse mode with localized Show/Episode states and controls. Keep podcast items outside music curation and sync surfaces.
+
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented scoped show/episode listing, detail, search, artwork and typed RPC models. Search uses one v2.36.1 `limit=50` request and reports possible truncation when either category reaches the cap.
+- Implemented episode-scoped direct playback with session/media identity checks, direct MP3/AAC range qualification, private refresh and session cleanup. Podcast starts bypass whole-book progress binding; the existing playback owner retains generation, seek and output fencing.
+- Added synthetic podcast fixtures, provider/RPC/UI tests for identity, role isolation, pagination, error classification, localization, direct playback, cleanup and replacement during admission. Existing playback owner regression tests cover replacement and stop behavior.
+- Offline verification: daemon suite 1,119 passed, 6 ignored; Audiobookshelf contract suite 5 passed; UI browse tests 13 passed; TypeScript check and Vite build passed; `cargo fmt --check`, standard Clippy and `git diff --check` passed. No installed-app or controlled-server playback was exercised in this story.
+- `cargo clippy --all-targets` remains blocked by an existing test-only lint error in `playback/audio/queue_edit_tests.rs:175` (`read amount is not handled`); standard daemon Clippy passed with existing warnings.
 
 ### File List
 
+- `_bmad-output/implementation-artifacts/17-7-add-audiobookshelf-podcast-servers-and-direct-playback.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/synthetic/podcast-page.json`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/synthetic/podcast-show.json`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/browse-mode-ui.test.mjs`
+
+### Change Log
+
+- 2026-09-23: Added role-scoped Audiobookshelf podcast browsing, typed episode playback, localized presentation and offline regression coverage.

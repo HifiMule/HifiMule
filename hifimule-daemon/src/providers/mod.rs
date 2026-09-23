@@ -1,6 +1,7 @@
 use crate::domain::models::{
     Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, Genre, Library, Playlist,
-    PlaylistWithTracks, SearchResult, Song,
+    PlaylistWithTracks, PodcastEpisode, PodcastSearchResult, PodcastShow, PodcastShowDetail,
+    SearchResult, Song,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -309,6 +310,34 @@ pub struct ProviderChangeMetadata {
 
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
+    async fn list_podcast_shows(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<(Vec<PodcastShow>, u32), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "podcast shows unavailable".into(),
+        ))
+    }
+
+    async fn get_podcast_show(&self, _id: &str) -> Result<PodcastShowDetail, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "podcast show unavailable".into(),
+        ))
+    }
+
+    async fn get_podcast_episode(&self, _id: &str) -> Result<PodcastEpisode, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "podcast episode unavailable".into(),
+        ))
+    }
+
+    async fn search_podcasts(&self, _query: &str) -> Result<PodcastSearchResult, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "podcast search unavailable".into(),
+        ))
+    }
+
     async fn book_timing(&self, _album_id: &str) -> Result<Option<BookTiming>, ProviderError> {
         Ok(None)
     }
@@ -638,6 +667,7 @@ impl ProviderLibraryRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BrowseMode {
+    Podcasts,
     Artists,
     Albums,
     Playlists,

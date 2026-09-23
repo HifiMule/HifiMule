@@ -45,18 +45,22 @@ function harness(locale = 'en') {
   document.createElement = tag => new Element(tag);
   document.getElementById = id => id === 'browse-mode-bar' ? root : id === 'library-content' ? content : null;
   const exports = {};
-  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks };';
+  const played = [];
+  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks, loadPodcastView, openPodcastShow, renderPodcastError };';
   const source = ts.transpileModule(input, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   vm.runInNewContext(source, { exports, document, console, requestAnimationFrame: f => f(),
     require: name => name === './i18n' ? {t:(key,params={})=>(catalog[locale][key] ?? key).replace(/\{(\w+)\}/g,(_,name)=>String(params[name] ?? ''))}
-      : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[]}
+      : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[],
+        fetchPodcastShows: async()=>({shows:[{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1}],total:1}),
+        fetchPodcastShow: async()=>({show:{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1},episodes:[{id:'episode-opaque',showId:'show-opaque',title:'First',description:null,durationSeconds:60,publishedAt:'2026-01-01',coverArtId:null}],total:1}),
+        playbackPlayEpisode: async(serverId,episodeId)=>played.push([serverId,episodeId])}
       : name === './state/basket' ? {basketStore} : {},
     setTimeout, clearTimeout, window: {} });
   const {probe} = exports;
   probe.state.availableModes = [...allModes];
   const render = async () => { probe.renderModeBar(); await Promise.resolve(); await Promise.resolve(); };
   const buttons = () => root.querySelectorAll('sl-button[data-mode]');
-  return { ...probe, render, root, content, buttons, document, Element, audit,
+  return { ...probe, render, root, content, buttons, document, Element, audit, played,
     setModesResult(value) { modesResult = value; },
     setModesError(value) { modesError = value; },
   };
@@ -176,4 +180,45 @@ test('loading retains the focused mode with disabled semantics and rejects activ
 test('detached controls cannot issue unsupported navigation after source changes', async () => {
   const h=harness();await h.render();const removed=h.buttons()[1];h.state.availableModes=['artists'];await h.render();
   await removed.click();assert.equal(h.state.browseMode,'artists');
+});
+
+test('podcast view presents shows and episodes with a typed play action', async () => {
+  const h = harness('en');
+  h.state.browseMode = 'podcasts';
+  h.state.podcastServerId = 'server-opaque';
+  await h.loadPodcastView();
+  const walk = node => [node, ...node.children.flatMap(walk)];
+  let labels = walk(h.content).map(node => node.textContent).filter(Boolean);
+  assert.ok(labels.includes('Talks'));
+  assert.ok(!labels.includes('Book'));
+  const show = walk(h.content).find(node => node.tagName === 'button' && node.textContent === 'Talks');
+  assert.ok(show);
+  await show.click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  labels = walk(h.content).map(node => node.textContent).filter(Boolean);
+  assert.ok(labels.includes('First'));
+  const play = walk(h.content).find(node => node.tagName === 'button' && node.textContent === catalog.en['library.podcast.play']);
+  assert.ok(play);
+  await play.click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(h.played, [['server-opaque','episode-opaque']]);
+});
+
+test('podcast stale and permission states use localized accessible error text', () => {
+  const h = harness('fr');
+  const walk = node => [node, ...node.children.flatMap(walk)];
+  h.renderPodcastError({code:-4,data:{errorCode:'STALE_CONFIGURATION'}});
+  assert.ok(walk(h.content).some(node => node.textContent === catalog.fr['library.podcast.stale']));
+  h.renderPodcastError({data:{errorCode:'PROVIDER_FORBIDDEN'}});
+  assert.ok(walk(h.content).some(node => node.textContent === catalog.fr['library.podcast.permission']));
+});
+
+test('podcast browse mode has localized label in every shipped language', async () => {
+  for (const locale of ['en','fr','es','de']) {
+    const h = harness(locale);
+    h.state.availableModes = ['podcasts'];
+    h.state.browseMode = 'podcasts';
+    await h.render();
+    assert.equal(h.buttons()[0].querySelector('span').textContent, catalog[locale]['library.mode.podcasts']);
+  }
 });

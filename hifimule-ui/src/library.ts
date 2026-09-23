@@ -6,6 +6,12 @@ import {
     BrowsePlaylist,
     BrowseTrack,
     BrowseGenre,
+    PodcastShow,
+    PodcastEpisode,
+    fetchPodcastShows,
+    fetchPodcastShow,
+    searchPodcasts,
+    playbackPlayEpisode,
     fetchBrowseModes,
     fetchBrowseArtists,
     fetchBrowseArtist,
@@ -72,6 +78,7 @@ interface AppState {
     bookSearchQuery: string;
     bookSearchTruncated: boolean;
     bookChapters: Array<{ startSeconds: number; endSeconds: number }>;
+    podcastServerId: string | null;
 }
 
 interface FavoriteTree {
@@ -103,6 +110,7 @@ let state: AppState = {
     bookSearchQuery: '',
     bookSearchTruncated: false,
     bookChapters: [],
+    podcastServerId: null,
 };
 
 let _tracksBrowseView: TracksBrowseView | null = null;
@@ -150,6 +158,7 @@ export function clearNavigationCache() {
     state.bookSearchQuery = '';
     state.bookSearchTruncated = false;
     state.bookChapters = [];
+    state.podcastServerId = null;
     state.listLoading = false;
     // browseMode, availableModes, and listViewMode are intentionally preserved
     _tracksBrowseView?.destroy();
@@ -470,6 +479,7 @@ function favoriteTracksForAlbum(tree: FavoriteTree, albumId: string): BrowseTrac
 const browseModeIcons: Record<BrowseMode, string> = {
     artists: 'mic',
     albums: 'disc',
+    podcasts: 'broadcast',
     playlists: 'collection-play',
     tracks: 'music-note',
     genres: 'tags',
@@ -1540,6 +1550,7 @@ async function switchMode(mode: BrowseMode) {
     if (mode === state.browseMode || state.loading || !state.availableModes.includes(mode)) return;
 
     clearSelection();
+    if (state.browseMode === 'podcasts') ++podcastRequest;
     saveScroll();
     // Leaving Tracks mode: tear down the view's basket subscription and scroll
     // handlers. The instance is kept (not nulled) so re-entry can remount and
@@ -1578,6 +1589,7 @@ async function loadModeRoot() {
             if (state.isBookLibrary && state.bookSearchQuery) await loadBookSearch(state.bookSearchQuery);
             else await loadAlbums(true);
             break;
+        case 'podcasts': await loadPodcastView(); break;
         case 'playlists': await loadPlaylists(); break;
         case 'tracks': loadTracksView(); break;
         case 'genres': await loadGenres(true); break;
@@ -1603,6 +1615,180 @@ function loadTracksView(): void {
     } else {
         _tracksBrowseView = new TracksBrowseView(container, _supportsPlaylistWrite);
         _tracksBrowseView.load();
+    }
+}
+
+let podcastRequest = 0;
+let podcastShows: PodcastShow[] = [];
+let podcastTotal = 0;
+let podcastNextOffset = 0;
+let podcastQuery = '';
+let podcastEpisodes: PodcastEpisode[] = [];
+let podcastEpisodeNextOffset = 0;
+let podcastCurrentShow: string | null = null;
+
+function podcastButton(label: string, action: () => void): HTMLButtonElement {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', action);
+    return button;
+}
+
+function podcastStatus(container: HTMLElement, label: string): void {
+    const status = document.createElement('p');
+    status.setAttribute('role', 'status');
+    status.textContent = label;
+    container.append(status);
+}
+
+function renderPodcastError(error: unknown): void {
+    const value = error as { code?: number; data?: { errorCode?: string } } | null;
+    const code = value?.data?.errorCode;
+    const key = code === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
+        : code === 'STALE_CONFIGURATION' || value?.code === -4 ? 'library.podcast.stale'
+        : 'library.podcast.unavailable';
+    renderError(new Error(t(key)));
+}
+
+function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'podcast-episode-row';
+    const type = document.createElement('p');
+    type.textContent = t('library.podcast.episode');
+    row.append(type);
+    const heading = document.createElement('h3');
+    heading.textContent = episode.title;
+    row.append(heading);
+    const metadata = document.createElement('p');
+    const duration = episode.durationSeconds === null ? '' : `${Math.floor(episode.durationSeconds / 60)} min`;
+    metadata.textContent = [episode.publishedAt, duration].filter(Boolean).join(' · ');
+    row.append(metadata);
+    if (episode.description) {
+        const description = document.createElement('p');
+        description.textContent = episode.description;
+        row.append(description);
+    }
+    row.append(podcastButton(t('library.podcast.play'), () => {
+        if (!state.podcastServerId) return;
+        void playbackPlayEpisode(state.podcastServerId, episode.id)
+            .catch(error => {
+                const value = error as { code?: number; data?: { errorCode?: string } };
+                const key = value?.data?.errorCode === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
+                    : value?.code === -4 ? 'library.podcast.stale' : 'library.podcast.unavailable';
+                showToast(t(key), 'danger', ERROR_TOAST_DURATION);
+            });
+    }));
+    return row;
+}
+
+function podcastShowRow(show: PodcastShow): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'podcast-show-row';
+    const type = document.createElement('p');
+    type.textContent = t('library.podcast.show');
+    row.append(type);
+    if (show.coverArtId) {
+        const image = document.createElement('img');
+        image.alt = '';
+        image.loading = 'lazy';
+        image.width = 80;
+        image.height = 80;
+        row.append(image);
+        void getImageUrl(show.coverArtId, 160).then(url => {
+            if (row.isConnected) image.src = url;
+        }).catch(() => { image.remove(); });
+    }
+    row.append(podcastButton(show.title, () => { void openPodcastShow(show.id); }));
+    if (show.description) {
+        const description = document.createElement('p');
+        description.textContent = show.description;
+        row.append(description);
+    }
+    return row;
+}
+
+function podcastSearchForm(container: HTMLElement): void {
+    const form = document.createElement('form');
+    form.setAttribute('role', 'search');
+    const label = document.createElement('label');
+    label.textContent = t('library.podcast.search');
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.maxLength = 256;
+    input.value = podcastQuery;
+    label.append(input);
+    form.append(label);
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.textContent = t('library.podcast.search_button');
+    form.append(submit);
+    form.addEventListener('submit', event => {
+        event.preventDefault();
+        podcastQuery = input.value.trim();
+        void loadPodcastView();
+    });
+    container.append(form);
+}
+
+async function openPodcastShow(showId: string, append = false): Promise<void> {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    if (append && podcastCurrentShow !== showId) return;
+    const request = ++podcastRequest;
+    container.replaceChildren();
+    podcastStatus(container, t('library.podcast.show') + '…');
+    try {
+        const detail = await fetchPodcastShow(showId, append ? podcastEpisodeNextOffset : 0, 50);
+        if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
+        podcastCurrentShow = showId;
+        podcastEpisodes = append ? [...podcastEpisodes, ...detail.episodes] : detail.episodes;
+        podcastEpisodeNextOffset = (append ? podcastEpisodeNextOffset : 0) + 50;
+        container.replaceChildren();
+        container.append(podcastButton(t('library.podcast.back'), () => { void loadPodcastView(); }));
+        const title = document.createElement('h2');
+        title.textContent = detail.show.title;
+        container.append(title);
+        if (podcastEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
+        for (const episode of podcastEpisodes) container.append(podcastEpisodeRow(episode));
+        if (podcastEpisodeNextOffset < detail.total) container.append(podcastButton(t('library.podcast.load_more'), () => { void openPodcastShow(showId, true); }));
+    } catch (error) {
+        if (request === podcastRequest) renderPodcastError(error);
+    }
+}
+
+async function loadPodcastView(append = false): Promise<void> {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    const request = ++podcastRequest;
+    podcastCurrentShow = null;
+    container.replaceChildren();
+    podcastSearchForm(container);
+    podcastStatus(container, t('library.podcast.show') + '…');
+    try {
+        if (podcastQuery) {
+            const result = await searchPodcasts(podcastQuery);
+            if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
+            container.replaceChildren();
+            podcastSearchForm(container);
+            if (result.shows.length === 0 && result.episodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
+            for (const show of result.shows) container.append(podcastShowRow(show));
+            for (const episode of result.episodes) container.append(podcastEpisodeRow(episode));
+            if (result.possiblyTruncated) podcastStatus(container, t('library.podcast.truncated'));
+            return;
+        }
+        const page = await fetchPodcastShows(append ? podcastNextOffset : 0, 50);
+        if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
+        podcastShows = append ? [...podcastShows, ...page.shows] : page.shows;
+        podcastTotal = page.total;
+        podcastNextOffset = (append ? podcastNextOffset : 0) + 50;
+        container.replaceChildren();
+        podcastSearchForm(container);
+        if (podcastShows.length === 0) podcastStatus(container, t('library.podcast.empty'));
+        for (const show of podcastShows) container.append(podcastShowRow(show));
+        if (podcastNextOffset < podcastTotal) container.append(podcastButton(t('library.podcast.load_more'), () => { void loadPodcastView(true); }));
+    } catch (error) {
+        if (request === podcastRequest) renderPodcastError(error);
     }
 }
 
@@ -2505,6 +2691,16 @@ export async function initLibraryView() {
         const servers = await serverList();
         const selected = servers.find(server => server.selected);
         state.isBookLibrary = selected?.serverType === 'audiobookshelf' && selected.libraryRole === 'audiobook';
+        state.podcastServerId = selected?.serverType === 'audiobookshelf' && selected.libraryRole === 'podcast'
+            ? (selected.serverId ?? null) : null;
+        ++podcastRequest;
+        podcastShows = [];
+        podcastTotal = 0;
+        podcastNextOffset = 0;
+        podcastQuery = '';
+        podcastEpisodes = [];
+        podcastEpisodeNextOffset = 0;
+        podcastCurrentShow = null;
 
         state.availableModes = modesResult;
         const defaultMode: BrowseMode = modesResult.includes('artists')

@@ -1,0 +1,1 @@
+{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":"ep-2","title":"Later","duration":30,"pubDate":"2026-01-02","audioFile":{"ino":"ino-2"}},{"id":"ep-1","title":"Earlier","duration":20,"pubDate":"2026-01-01","audioFile":{"ino":"ino-1"}}]}}
