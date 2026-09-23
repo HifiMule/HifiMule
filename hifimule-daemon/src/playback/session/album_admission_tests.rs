@@ -39,6 +39,86 @@ fn sources(count: usize) -> Vec<TrackSource> {
         .collect()
 }
 
+#[test]
+fn book_admission_selects_real_part_and_offset_without_reordering_album() {
+    let owner = Owner::new();
+    let initial = owner.0.snapshot().unwrap();
+    let mut reservation = resolve(&owner.0, request(&initial));
+    reservation.book_start = Some((1, 2_500));
+    let committed = owner.0.commit_album(reservation, sources(3)).unwrap();
+    assert_eq!(
+        committed.current.as_ref().unwrap().source.track_id,
+        "track-1"
+    );
+    assert_eq!(committed.position_ms, 2_500);
+    assert_eq!(
+        committed
+            .occurrences
+            .iter()
+            .map(|item| item.source.track_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["track-0", "track-1", "track-2"]
+    );
+}
+
+#[test]
+fn natural_book_part_completion_carries_verified_mapping_to_successor() {
+    let owner = Owner::new();
+    let initial = owner.0.snapshot().unwrap();
+    let mut reservation = resolve(&owner.0, request(&initial));
+    reservation.book_timing = Some(crate::providers::BookTiming {
+        identity: crate::domain::models::ProviderIdentity {
+            library_id: "library".into(),
+            library_item_id: "item".into(),
+            media_id: "media".into(),
+        },
+        parts: vec![
+            crate::providers::BookPartTiming {
+                track_id: "track-0".into(),
+                audio_file_id: "file-0".into(),
+                duration_ms: 1_000,
+            },
+            crate::providers::BookPartTiming {
+                track_id: "track-1".into(),
+                audio_file_id: "file-1".into(),
+                duration_ms: 2_000,
+            },
+        ],
+    });
+    let committed = owner.0.commit_album(reservation, sources(2)).unwrap();
+    let db = owner.0.inner.lock().unwrap().db.clone();
+    let first = committed.current.as_ref().unwrap();
+    assert!(
+        db.load_book_continuity(&committed.session_id, &first.occurrence_id)
+            .unwrap()
+            .is_some()
+    );
+    owner.0.publish_event(
+        committed.generation_id,
+        PlaybackEvent::Completed { position_ms: 1_000 },
+    );
+    let second = committed.occurrences[1].occurrence_id.clone();
+    for _ in 0..50 {
+        if owner
+            .0
+            .snapshot()
+            .unwrap()
+            .current
+            .as_ref()
+            .is_some_and(|item| item.occurrence_id == second)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let carried = db
+        .load_book_continuity(&committed.session_id, &second)
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.audio_file_id, "file-1");
+    assert_eq!(carried.part_offset_ms, 1_000);
+}
+
 fn resolve(owner: &PlaybackSession, params: PlayAlbumParams) -> AlbumReservation {
     match owner.reserve_album(params, None).unwrap() {
         AlbumAdmission::Resolve(reservation) => reservation,
@@ -917,7 +997,7 @@ fn legacy_v3_album_restores_and_allows_new_album_without_resetting_gain_or_queue
                 .unwrap()
                 .query_row("SELECT version FROM playback_schema", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 6);
+            assert_eq!(version, crate::playback::persistence::PERSISTENCE_VERSION);
             // Re-reading does not guess formats or change the frozen policy.
             assert_eq!(
                 db.load_playback_session()

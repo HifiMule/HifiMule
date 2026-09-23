@@ -102,6 +102,9 @@ pub struct SessionSnapshot {
     pub state: TransportState,
     pub current: Option<Occurrence>,
     pub main_current: Option<Occurrence>,
+    /// Recoverable book progress explanation; never carries upstream identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity_status: Option<String>,
     pub position_ms: u64,
     pub checkpointed_position_ms: u64,
     pub persistence: Status,

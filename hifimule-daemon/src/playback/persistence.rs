@@ -1,12 +1,87 @@
+use super::book_progress::{BookMap, BookOccurrenceRecord, BookPart};
 use super::model::{
     AuditionOutcome, Occurrence, PersistedAudition, PersistedSession, PlaybackAttempt,
     SourceAvailability, TrackSource, TransportState,
 };
 use crate::db::Database;
+use crate::domain::models::ProviderIdentity;
+use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 6;
+pub const PERSISTENCE_VERSION: i64 = 7;
+
+fn planned_book_successor(
+    tx: &rusqlite::Transaction<'_>,
+    session: &PersistedSession,
+    departed_occurrence_id: &str,
+    outcome: &str,
+) -> Result<Option<BookOccurrenceRecord>> {
+    if outcome != "naturalCompletion" {
+        return Ok(None);
+    }
+    let Some(next_id) = session
+        .current_occurrence_id
+        .as_deref()
+        .filter(|id| *id != departed_occurrence_id)
+    else {
+        return Ok(None);
+    };
+    let previous: Option<(String, String, String, String, String)> = tx.query_row(
+        "SELECT c.server_id,c.library_id,c.item_id,c.media_id,m.timing_json FROM playback_book_continuity c JOIN playback_book_mapping m ON m.session_id=c.session_id WHERE c.session_id=?1 AND c.occurrence_id=?2 AND c.mapping_valid=1 AND m.queue_revision=?3",
+        params![session.session_id, departed_occurrence_id, session.queue_revision as i64],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional()?;
+    let Some((server_id, library_id, item_id, media_id, timing_json)) = previous else {
+        return Ok(None);
+    };
+    let Ok(timing) = serde_json::from_str::<BookTiming>(&timing_json) else {
+        return Ok(None);
+    };
+    if timing.identity.library_id != library_id
+        || timing.identity.library_item_id != item_id
+        || timing.identity.media_id != media_id
+    {
+        return Ok(None);
+    }
+    let next: Option<(String, String)> = tx.query_row(
+        "SELECT server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+        params![session.session_id, next_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let Some((next_server, track_id)) = next else {
+        return Ok(None);
+    };
+    if next_server != server_id {
+        return Ok(None);
+    }
+    let Some(map) = BookMap::new(
+        timing
+            .parts
+            .iter()
+            .map(|part| BookPart::new(&part.track_id, &part.audio_file_id, part.duration_ms))
+            .collect(),
+    ) else {
+        return Ok(None);
+    };
+    let Some((part, offset)) = map.part(&track_id) else {
+        return Ok(None);
+    };
+    if map.duration_ms() > i64::MAX as u64 {
+        return Ok(None);
+    }
+    Ok(Some(BookOccurrenceRecord {
+        session_id: session.session_id.clone(),
+        occurrence_id: next_id.into(),
+        server_id,
+        track_id,
+        identity: timing.identity,
+        audio_file_id: part.file_id.clone(),
+        part_offset_ms: offset,
+        duration_ms: map.duration_ms(),
+        whole_ms: offset,
+        mapping_valid: true,
+    }))
+}
 
 impl Database {
     pub fn has_portable_server(&self, server_id: &str) -> Result<bool> {
@@ -53,7 +128,12 @@ impl Database {
             CREATE INDEX IF NOT EXISTS playback_attempts_occurrence ON playback_attempts(session_id,occurrence_id,attempt_seq);
             CREATE TABLE IF NOT EXISTS playback_audition (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, position_ms INTEGER NOT NULL CHECK(position_ms>=0), transport_state TEXT NOT NULL, saved_main_occurrence_id TEXT, saved_main_position_ms INTEGER NOT NULL CHECK(saved_main_position_ms>=0), saved_main_intent TEXT NOT NULL, resume_inhibited INTEGER NOT NULL CHECK(resume_inhibited IN (0,1)), contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)));
             CREATE TABLE IF NOT EXISTS playback_audition_outcomes (outcome_id INTEGER PRIMARY KEY AUTOINCREMENT, audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT NOT NULL CHECK(disposition IN ('naturalCompletion','stopped','returned','replaced','superseded','technicalFailure','interrupted')), terminal_position_ms INTEGER NOT NULL CHECK(terminal_position_ms>=0), duration_ms INTEGER CHECK(duration_ms>=0), failure_code TEXT, contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)), fully_heard INTEGER NOT NULL CHECK(fully_heard IN (0,1)));
-            CREATE INDEX IF NOT EXISTS playback_audition_outcomes_page ON playback_audition_outcomes(outcome_id);")?;
+            CREATE INDEX IF NOT EXISTS playback_audition_outcomes_page ON playback_audition_outcomes(outcome_id);
+            CREATE TABLE IF NOT EXISTS playback_book_continuity (session_id TEXT NOT NULL, occurrence_id TEXT PRIMARY KEY, server_id TEXT NOT NULL, track_id TEXT NOT NULL, library_id TEXT NOT NULL, item_id TEXT NOT NULL, media_id TEXT NOT NULL, audio_file_id TEXT NOT NULL, part_offset_ms INTEGER NOT NULL CHECK(part_offset_ms>=0), duration_ms INTEGER NOT NULL CHECK(duration_ms>0), whole_ms INTEGER NOT NULL CHECK(whole_ms>=0), mapping_valid INTEGER NOT NULL CHECK(mapping_valid IN (0,1)));
+            CREATE TABLE IF NOT EXISTS playback_book_mapping (session_id TEXT PRIMARY KEY, queue_revision INTEGER NOT NULL, timing_json TEXT NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS playback_book_mapping_queue AFTER UPDATE OF session_id,queue_revision ON playback_sessions BEGIN DELETE FROM playback_book_mapping WHERE session_id<>NEW.session_id OR queue_revision<>NEW.queue_revision; END;
+            CREATE TRIGGER IF NOT EXISTS playback_book_continuity_current AFTER UPDATE OF current_occurrence_id,session_id ON playback_sessions BEGIN DELETE FROM playback_book_continuity WHERE session_id<>NEW.session_id OR occurrence_id<>COALESCE(NEW.current_occurrence_id,''); END;
+            CREATE TRIGGER IF NOT EXISTS playback_book_continuity_occurrence AFTER DELETE ON playback_occurrences BEGIN DELETE FROM playback_book_continuity WHERE occurrence_id=OLD.occurrence_id; END;")?;
         if version != Some(PERSISTENCE_VERSION) {
             let has_outcome = {
                 let mut statement = tx.prepare("PRAGMA table_info(playback_occurrences)")?;
@@ -152,7 +232,7 @@ impl Database {
                 [],
             )?;
         }
-        if version != Some(PERSISTENCE_VERSION) {
+        if version.unwrap_or(0) < 6 {
             migrate_current_policy(&tx)?;
             migrate_playback_attempts(&tx)?;
         }
@@ -852,6 +932,7 @@ impl Database {
         }
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
+        let book_successor = planned_book_successor(&tx, session, departed_occurrence_id, outcome)?;
         let terminal_position = i64::try_from(terminal_position_ms)?;
         let changed = tx.execute(
             "UPDATE playback_attempts SET disposition=?1,failure_code=?4,terminal_position_ms=?5 WHERE attempt_id=(SELECT active_attempt_id FROM playback_sessions WHERE singleton_id=1 AND session_id=?2) AND session_id=?2 AND occurrence_id=?3 AND disposition IS NULL",
@@ -865,6 +946,12 @@ impl Database {
             params![outcome, session.session_id, departed_occurrence_id, failure_code],
         )?;
         update_session(&tx, session)?;
+        if let Some(record) = book_successor {
+            tx.execute(
+                "INSERT INTO playback_book_continuity(session_id,occurrence_id,server_id,track_id,library_id,item_id,media_id,audio_file_id,part_offset_ms,duration_ms,whole_ms,mapping_valid) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1)",
+                params![record.session_id,record.occurrence_id,record.server_id,record.track_id,record.identity.library_id,record.identity.library_item_id,record.identity.media_id,record.audio_file_id,record.part_offset_ms as i64,record.duration_ms as i64,record.whole_ms as i64],
+            )?;
+        }
         tx.execute(
             "UPDATE playback_sessions SET active_attempt_id=NULL WHERE singleton_id=1 AND session_id=?1",
             [&session.session_id],
@@ -1061,11 +1148,104 @@ impl Database {
         sequence: u64,
         position_ms: u64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let changed=conn.execute("UPDATE playback_sessions SET checkpoint_sequence=?1,position_ms=?2 WHERE singleton_id=1 AND session_id=?3 AND checkpoint_sequence<=?1",params![sequence as i64,position_ms as i64,session_id])?;
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let changed=tx.execute("UPDATE playback_sessions SET checkpoint_sequence=?1,position_ms=?2 WHERE singleton_id=1 AND session_id=?3 AND checkpoint_sequence<=?1",params![sequence as i64,position_ms as i64,session_id])?;
         if changed != 1 {
             return Err(anyhow!("PERSISTENCE_FAILED"));
         }
+        tx.execute("UPDATE playback_book_continuity SET whole_ms=CASE WHEN part_offset_ms+?1<=duration_ms THEN part_offset_ms+?1 ELSE whole_ms END, mapping_valid=CASE WHEN part_offset_ms+?1<=duration_ms THEN mapping_valid ELSE 0 END WHERE session_id=?2 AND occurrence_id=(SELECT current_occurrence_id FROM playback_sessions WHERE singleton_id=1)", params![position_ms as i64, session_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn save_book_continuity(&self, record: &BookOccurrenceRecord) -> Result<()> {
+        self.save_book_continuity_with_timing(record, None)
+    }
+
+    pub(crate) fn save_book_continuity_with_timing(
+        &self,
+        record: &BookOccurrenceRecord,
+        timing: Option<&BookTiming>,
+    ) -> Result<()> {
+        if record.duration_ms == 0
+            || record.whole_ms > record.duration_ms
+            || record.part_offset_ms > record.whole_ms
+            || [record.duration_ms, record.whole_ms, record.part_offset_ms]
+                .iter()
+                .any(|v| *v > i64::MAX as u64)
+            || record.audio_file_id.is_empty()
+        {
+            return Err(anyhow!("invalid book continuity"));
+        }
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let changed = tx.execute("INSERT INTO playback_book_continuity(session_id,occurrence_id,server_id,track_id,library_id,item_id,media_id,audio_file_id,part_offset_ms,duration_ms,whole_ms,mapping_valid) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12 WHERE EXISTS(SELECT 1 FROM playback_sessions s JOIN playback_occurrences o ON o.session_id=s.session_id AND o.occurrence_id=s.current_occurrence_id WHERE s.singleton_id=1 AND s.session_id=?1 AND o.occurrence_id=?2 AND o.server_id=?3 AND o.track_id=?4) ON CONFLICT(occurrence_id) DO NOTHING", params![record.session_id, record.occurrence_id, record.server_id, record.track_id, record.identity.library_id, record.identity.library_item_id, record.identity.media_id, record.audio_file_id, record.part_offset_ms as i64, record.duration_ms as i64, record.whole_ms as i64, i64::from(record.mapping_valid)])?;
+        if changed != 1 {
+            return Err(anyhow!("stale book occurrence"));
+        }
+        if let Some(timing) = timing {
+            let map = super::book_progress::BookMap::new(
+                timing
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        super::book_progress::BookPart::new(
+                            &part.track_id,
+                            &part.audio_file_id,
+                            part.duration_ms,
+                        )
+                    })
+                    .collect(),
+            )
+            .ok_or_else(|| anyhow!("invalid book mapping"))?;
+            let (part, offset) = map
+                .part(&record.track_id)
+                .ok_or_else(|| anyhow!("invalid book part"))?;
+            if timing.identity != record.identity
+                || part.file_id != record.audio_file_id
+                || offset != record.part_offset_ms
+                || map.duration_ms() != record.duration_ms
+            {
+                return Err(anyhow!("invalid book mapping"));
+            }
+            let timing_json = serde_json::to_string(timing)?;
+            tx.execute("INSERT INTO playback_book_mapping(session_id,queue_revision,timing_json) SELECT session_id,queue_revision,?2 FROM playback_sessions WHERE singleton_id=1 AND session_id=?1 ON CONFLICT(session_id) DO NOTHING", params![record.session_id, timing_json])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn load_book_continuity(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+    ) -> Result<Option<BookOccurrenceRecord>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row("SELECT c.session_id,c.occurrence_id,c.server_id,c.track_id,c.library_id,c.item_id,c.media_id,c.audio_file_id,c.part_offset_ms,c.duration_ms,c.whole_ms,c.mapping_valid FROM playback_book_continuity c JOIN playback_sessions s ON s.session_id=c.session_id AND s.current_occurrence_id=c.occurrence_id WHERE s.singleton_id=1 AND c.session_id=?1 AND c.occurrence_id=?2", params![session_id, occurrence_id], |r| Ok(BookOccurrenceRecord {
+            session_id: r.get(0)?, occurrence_id: r.get(1)?, server_id: r.get(2)?, track_id: r.get(3)?,
+            identity: ProviderIdentity { library_id: r.get(4)?, library_item_id: r.get(5)?, media_id: r.get(6)? },
+            audio_file_id: r.get(7)?, part_offset_ms: r.get::<_, i64>(8)? as u64, duration_ms: r.get::<_, i64>(9)? as u64,
+            whole_ms: r.get::<_, i64>(10)? as u64, mapping_valid: r.get::<_, i64>(11)? == 1,
+        })).optional().map_err(Into::into)
+    }
+
+    pub(crate) fn book_attempt_outcome(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+    ) -> Result<Option<(String, u64)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT disposition,terminal_position_ms FROM playback_attempts WHERE session_id=?1 AND occurrence_id=?2 AND disposition IS NOT NULL AND terminal_position_ms IS NOT NULL ORDER BY attempt_seq DESC LIMIT 1",
+            params![session_id, occurrence_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)),
+        ).optional().map_err(Into::into)
+    }
+
+    pub(crate) fn invalidate_book_continuity(&self, record: &BookOccurrenceRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("UPDATE playback_book_continuity SET mapping_valid=0 WHERE session_id=?1 AND occurrence_id=?2 AND server_id=?3 AND track_id=?4 AND library_id=?5 AND item_id=?6 AND media_id=?7 AND audio_file_id=?8", params![record.session_id,record.occurrence_id,record.server_id,record.track_id,record.identity.library_id,record.identity.library_item_id,record.identity.media_id,record.audio_file_id])?;
         Ok(())
     }
 
@@ -1787,6 +1967,57 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn book_continuity_is_checkpointed_and_invalidated_with_occurrence_transition() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let session = Uuid::new_v4().to_string();
+        let occurrence = Uuid::new_v4().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms) VALUES(1,?1,0,0,'playing',?2,0)", params![session,occurrence]).unwrap();
+            conn.execute("INSERT INTO playback_occurrences(session_id,occurrence_id,ordinal,server_id,track_id) VALUES(?1,?2,0,'server','track')", params![session,occurrence]).unwrap();
+        }
+        let record = crate::playback::book_progress::BookOccurrenceRecord {
+            session_id: session.clone(),
+            occurrence_id: occurrence.clone(),
+            server_id: "server".into(),
+            track_id: "track".into(),
+            identity: crate::domain::models::ProviderIdentity {
+                library_id: "library".into(),
+                library_item_id: "item".into(),
+                media_id: "media".into(),
+            },
+            audio_file_id: "file".into(),
+            part_offset_ms: 10_000,
+            duration_ms: 50_000,
+            whole_ms: 10_000,
+            mapping_valid: true,
+        };
+        db.save_book_continuity(&record).unwrap();
+        db.checkpoint_playback_position(&session, 1, 2_000).unwrap();
+        assert_eq!(
+            db.load_book_continuity(&session, &occurrence)
+                .unwrap()
+                .unwrap()
+                .whole_ms,
+            12_000
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE playback_sessions SET current_occurrence_id=NULL WHERE singleton_id=1",
+                [],
+            )
+            .unwrap();
+        assert!(
+            db.load_book_continuity(&session, &occurrence)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn v5_migration_preserves_legacy_outcomes_and_opens_only_the_current_attempt() {
         let db = Database::memory().unwrap();
         let session_id = Uuid::new_v4().to_string();
@@ -1804,7 +2035,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 6);
+        assert_eq!(PERSISTENCE_VERSION, 7);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);

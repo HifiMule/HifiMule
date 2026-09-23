@@ -1,6 +1,9 @@
+---
+baseline_commit: afcc2d8ab57bec43654fa8dab762c8db6ac12572
+---
 # Story 17.6: Preserve Audiobookshelf listening continuity safely
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -20,19 +23,19 @@ so that I can move safely between HifiMule and Audiobookshelf.
 
 ## Tasks / Subtasks
 
-- [ ] **Define a private continuity contract and persistence** (AC: 1, 3, 7)
-  - [ ] Add the narrow provider capability/DTO for reading and writing a book's whole-item progress. Keep raw upstream IDs and auth behind the daemon provider boundary. Reuse the existing `ProviderIdentity`, opaque album/track IDs, and playback source-server routing.
-  - [ ] Persist the item identity, active part identity, cumulative offset, and mapping validity with the player-owned occurrence, using existing SQLite migration and checkpoint patterns. Invalidate on server/library/media/file changes; do not persist credentials or temporary playback-session data.
-- [ ] **Resume on playback admission** (AC: 2, 3, 6)
-  - [ ] Implement bounded `GET /api/me/progress/{libraryItem}` via the existing authenticated Audiobookshelf client, validate returned identity/shape and finite nonnegative time, and classify absent progress versus actual failures.
-  - [ ] Resolve current book detail and real file durations/order, then map remote whole-book time to the correct file/local time. Apply only while the initiating playback generation and user intent are still current; preserve explicit part selection, seeks, and local restart behavior.
-- [ ] **Report proven playback and completion** (AC: 1, 3–6)
-  - [ ] Use daemon playback owner events and committed positions to schedule serialized, coalesced `PATCH /api/me/progress/{libraryItem}` writes with `currentTime`, validated `duration`, and `isFinished`. Fence each queued/in-flight operation to its occurrence and stable identity; do not let a delayed write overwrite newer progress from this session.
-  - [ ] Convert local file position to whole-book time using the proven mapping. Handle file advancement, pause/stop/replacement, restart, seek, and final natural completion; keep network work outside owner locks and bound shutdown flushing.
-  - [ ] Show a scoped, localized recoverable explanation for unprovable identity or rejected progress, without exposing raw upstream identifiers. Preserve Book/Part controls and all existing music UI.
-- [ ] **Verify contract and regression behavior** (AC: 1–7)
-  - [ ] Add fixture-backed `mockito` provider tests for 200/404/401-refresh/403/429/5xx, malformed DTOs, duplicate writes, redaction, and no speculative 409 conflict handling. Add mapping property/boundary tests for single and multipart books, invalid durations, chapters, and changed file IDs.
-  - [ ] Add playback/persistence race tests for admission replacement, explicit seek versus late resume, paused/buffering/preview exclusion, committed seek, intermediate/final natural completion, skip/failure, restart, and stale async writes. Run relevant daemon, UI, type-check/build, format/lint, and diff checks; record any pre-existing drift separately.
+- [x] **Define a private continuity contract and persistence** (AC: 1, 3, 7)
+  - [x] Add the narrow provider capability/DTO for reading and writing a book's whole-item progress. Keep raw upstream IDs and auth behind the daemon provider boundary. Reuse the existing `ProviderIdentity`, opaque album/track IDs, and playback source-server routing.
+  - [x] Persist the item identity, active part identity, cumulative offset, and mapping validity with the player-owned occurrence, using existing SQLite migration and checkpoint patterns. Invalidate on server/library/media/file changes; do not persist credentials or temporary playback-session data.
+- [x] **Resume on playback admission** (AC: 2, 3, 6)
+  - [x] Implement bounded `GET /api/me/progress/{libraryItem}` via the existing authenticated Audiobookshelf client, validate returned identity/shape and finite nonnegative time, and classify absent progress versus actual failures.
+  - [x] Resolve current book detail and real file durations/order, then map remote whole-book time to the correct file/local time. Apply only while the initiating playback generation and user intent are still current; preserve explicit part selection, seeks, and local restart behavior.
+- [x] **Report proven playback and completion** (AC: 1, 3–6)
+  - [x] Use daemon playback owner events and committed positions to schedule serialized, coalesced `PATCH /api/me/progress/{libraryItem}` writes with `currentTime`, validated `duration`, and `isFinished`. Fence each queued/in-flight operation to its occurrence and stable identity; do not let a delayed write overwrite newer progress from this session.
+  - [x] Convert local file position to whole-book time using the proven mapping. Handle file advancement, pause/stop/replacement, restart, seek, and final natural completion; keep network work outside owner locks and bound shutdown flushing.
+  - [x] Show a scoped, localized recoverable explanation for unprovable identity or rejected progress, without exposing raw upstream identifiers. Preserve Book/Part controls and all existing music UI.
+- [x] **Verify contract and regression behavior** (AC: 1–7)
+  - [x] Add fixture-backed `mockito` provider tests for 200/404/401-refresh/403/429/5xx, malformed DTOs, duplicate writes, redaction, and no speculative 409 conflict handling. Add mapping property/boundary tests for single and multipart books, invalid durations, chapters, and changed file IDs.
+  - [x] Add playback/persistence race tests for admission replacement, explicit seek versus late resume, paused/buffering/preview exclusion, committed seek, intermediate/final natural completion, skip/failure, restart, and stale async writes. Run relevant daemon, UI, type-check/build, format/lint, and diff checks; record any pre-existing drift separately.
 
 ## Dev Notes
 
@@ -69,9 +72,33 @@ GPT-6 Codex
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Story prepared for implementation; progress bridge and remote write-back are not claimed complete.
+- Added a daemon-private Audiobookshelf whole-book progress capability with bounded authenticated GET/PATCH, strict identity and timing checks, sanitized failures, and one token refresh.
+- Added a durable player occurrence binding and version 7 playback migration. Queue changes invalidate the mapping; natural part completion carries it transactionally to the next real file.
+- Admission resolves remote progress before audio starts. Explicit part play keeps the requested part start. A serialized player reporter uses committed positions, checks the current generation and mapping before writes, and marks completion only after a natural final-file finish.
+- Added a scoped, localized recovery notice for refresh/re-link cases without exposing upstream identifiers.
+- Offline evidence: daemon 1,106 passed, 6 ignored; Audiobookshelf contract 5 passed; UI 19 passed; i18n 7 passed; TypeScript check, Vite build, rustfmt, daemon binary Clippy, and git diff check passed. All-target Clippy remains red on the pre-existing `unused_io_amount` deny in `playback/audio/queue_edit_tests.rs`; `-D warnings` exposes 130 baseline lint errors across the repository. Installed-app and controlled-server playback were not exercised.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/17-6-preserve-audiobookshelf-listening-continuity-safely.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/book_progress.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/album_admission.rs`
+- `hifimule-daemon/src/playback/session/album_admission_tests.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/tests/audiobookshelfBrowse.test.mjs`
+
+## Change Log
+
+- 2026-09-23: Implemented private Audiobookshelf listening continuity, durable occurrence mapping, safe resume and write-back, localized recovery guidance, and offline verification.

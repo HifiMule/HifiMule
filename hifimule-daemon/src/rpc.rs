@@ -310,6 +310,12 @@ pub async fn run_server(
         eprintln!("[Startup] Vault migration failed: {}", e);
     }
     state.server_manager.write().await.load_from_db(&state.db);
+    let _book_reporter = tokio::spawn(crate::playback::book_progress::run_reporter(
+        state.playback.clone(),
+        state.db.clone(),
+        state.server_manager.clone(),
+        config.shutdown.clone(),
+    ));
     native_bridge
         .publish(crate::playback::native::start_ingress(playback_commands))
         .map_err(|_| "native playback ingress was initialized twice".to_string())?;
@@ -1044,6 +1050,12 @@ async fn handle_playback_apply_session(
         let manager = state.server_manager.clone();
         let db = state.db.clone();
         let generation = result.generation_id.clone();
+        let occurrence = result
+            .assigned_occurrences
+            .iter()
+            .find(|item| item.source == source)
+            .cloned();
+        let session_id = result.session_id.clone();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             let resolved =
@@ -1055,7 +1067,57 @@ async fn handle_playback_apply_session(
                     )
                     .await
                     {
-                        Ok(provider) => provider.resolve_playback(&source.track_id).await,
+                        Ok(provider) => {
+                            // Explicit Part start keeps its requested beginning. The
+                            // remote read qualifies later write-back but never seeks it.
+                            if let Some(occurrence) = occurrence.as_ref()
+                                && let Ok(Some(timing)) =
+                                    provider.book_timing_for_track(&source.track_id).await
+                                && let Ok(remote) =
+                                    provider.read_book_progress(&timing.identity).await
+                            {
+                                use crate::playback::book_progress::{
+                                    BookMap, BookOccurrenceRecord, BookPart,
+                                };
+                                let map = BookMap::new(
+                                    timing
+                                        .parts
+                                        .iter()
+                                        .map(|part| {
+                                            BookPart::new(
+                                                &part.track_id,
+                                                &part.audio_file_id,
+                                                part.duration_ms,
+                                            )
+                                        })
+                                        .collect(),
+                                );
+                                if let Some(map) = map
+                                    && remote.as_ref().is_none_or(|progress| {
+                                        progress.duration_ms.abs_diff(map.duration_ms()) <= 1_000
+                                            && progress.current_ms <= map.duration_ms()
+                                    })
+                                    && let Some((part, offset)) = map.part(&source.track_id)
+                                {
+                                    let _ = db.save_book_continuity_with_timing(
+                                        &BookOccurrenceRecord {
+                                            session_id: session_id.clone(),
+                                            occurrence_id: occurrence.occurrence_id.clone(),
+                                            server_id: source.server_id.clone(),
+                                            track_id: source.track_id.clone(),
+                                            identity: timing.identity.clone(),
+                                            audio_file_id: part.file_id.clone(),
+                                            part_offset_ms: offset,
+                                            duration_ms: map.duration_ms(),
+                                            whole_ms: offset,
+                                            mapping_valid: true,
+                                        },
+                                        Some(&timing),
+                                    );
+                                }
+                            }
+                            provider.resolve_playback(&source.track_id).await
+                        }
                         Err(error) => Err(error),
                     }
                 })
@@ -1126,11 +1188,45 @@ async fn handle_playback_play_album(
             .await
             .map_err(playback_task_error)?
             .map_err(playback_error)?;
-    let reservation = match admission {
+    let mut reservation = match admission {
         AlbumAdmission::Replay(snapshot) => return Ok(serde_json::json!({"data":snapshot})),
         AlbumAdmission::Resolve(reservation) => reservation,
     };
     let album = resolve_playback_album(state, &p.source, &reservation).await?;
+    // The provider owns upstream identity and progress. Resolve it while the
+    // album reservation is pending, before any file can become audible.
+    if let Ok(provider) = crate::server_manager::get_provider_by_server_id(
+        &state.server_manager,
+        &state.db,
+        &p.source.server_id,
+    )
+    .await
+    {
+        if let Ok(Some(timing)) = provider.book_timing(&p.source.album_id).await {
+            use crate::playback::book_progress::{BookResumeDecision, decide_resume};
+            let album_matches = album.provider_metadata.identity.as_ref() == Some(&timing.identity)
+                && album.tracks.len() == timing.parts.len()
+                && album.tracks.iter().zip(&timing.parts).all(|(track, part)| {
+                    track.id == part.track_id
+                        && track.provider_metadata.audio_file_id.as_deref()
+                            == Some(part.audio_file_id.as_str())
+                });
+            if album_matches && let Ok(remote) = provider.read_book_progress(&timing.identity).await
+            {
+                match decide_resume(&timing, remote) {
+                    BookResumeDecision::Beginning => reservation.book_timing = Some(timing),
+                    BookResumeDecision::At {
+                        part_index,
+                        local_ms,
+                    } => {
+                        reservation.book_start = Some((part_index, local_ms));
+                        reservation.book_timing = Some(timing);
+                    }
+                    BookResumeDecision::Unavailable => {}
+                }
+            }
+        }
+    }
     let plan = prepare_album(album, &p.source).map_err(|error| {
         let code = match error {
             AlbumValidationError::Empty => "ALBUM_EMPTY",

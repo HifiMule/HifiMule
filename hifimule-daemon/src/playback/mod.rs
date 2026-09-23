@@ -1,5 +1,6 @@
 pub mod album;
 pub mod audio;
+pub(crate) mod book_progress;
 pub mod commands;
 pub mod config;
 mod continuity;

@@ -2012,7 +2012,7 @@ fn apply_inner(
     p: &ApplySessionParams,
     generation_serial: &AtomicU64,
 ) -> PResult<ApplyResult> {
-    apply_inner_with_album_context(i, p, generation_serial, None)
+    apply_inner_with_album_context(i, p, generation_serial, None, None)
 }
 
 fn apply_inner_with_album_context(
@@ -2020,6 +2020,7 @@ fn apply_inner_with_album_context(
     p: &ApplySessionParams,
     generation_serial: &AtomicU64,
     album_context: Option<super::model::FrozenAlbumContext>,
+    album_start: Option<(usize, u64)>,
 ) -> PResult<ApplyResult> {
     require_schema(p.schema_version)?;
     if Uuid::parse_str(&p.command_id).is_err() {
@@ -2111,9 +2112,22 @@ fn apply_inner_with_album_context(
                 QueueKind::Manual
             };
             decorate_availability(&i.db, &mut assigned)?;
-            next_session.current_occurrence_id = assigned.first().map(|o| o.occurrence_id.clone());
-            set_current_policy(&mut next_session, assigned.first());
-            next_session.position_ms = 0;
+            let (start_index, start_position_ms) =
+                if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
+                    album_start.unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                };
+            if start_index >= assigned.len() && !assigned.is_empty() {
+                return Err(PlaybackError::invalid(
+                    "ALBUM_INVALID",
+                    "album start is invalid",
+                ));
+            }
+            let start = assigned.get(start_index);
+            next_session.current_occurrence_id = start.map(|o| o.occurrence_id.clone());
+            set_current_policy(&mut next_session, start);
+            next_session.position_ms = start_position_ms;
             next_session.queue_revision = next_session
                 .queue_revision
                 .checked_add(1)
@@ -2846,6 +2860,19 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         .as_ref()
         .map(|preview| preview.occurrence.clone())
         .or_else(|| main_current.clone());
+    let continuity_status = main_current.as_ref().and_then(|occurrence| {
+        if !occurrence.source.track_id.starts_with("abs-track-") {
+            return None;
+        }
+        match i
+            .db
+            .load_book_continuity(&i.session.session_id, &occurrence.occurrence_id)
+        {
+            Ok(Some(record)) if record.mapping_valid => None,
+            Ok(Some(_)) => Some("relink".into()),
+            _ => Some("refresh".into()),
+        }
+    });
     Ok(SessionSnapshot {
         resume_audio: false,
         resume_epoch: i.control_epoch.load(Ordering::Acquire),
@@ -2886,6 +2913,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         state: active_state(i),
         current: current.clone(),
         main_current,
+        continuity_status,
         position_ms: active_position(i),
         checkpointed_position_ms: if i.preview.is_some() {
             active_position(i)
@@ -5385,14 +5413,14 @@ mod tests {
         let shutdown = std::thread::spawn(move || shutdown_session.shutdown_checkpoint());
         let deadline = Instant::now() + Duration::from_secs(1);
         while !playback.fenced.load(Ordering::Acquire) {
-            assert!(Instant::now() < deadline, "shutdown did not fence playback ingress");
+            assert!(
+                Instant::now() < deadline,
+                "shutdown did not fence playback ingress"
+            );
             std::thread::yield_now();
         }
         drop(resume_tx);
-        assert_eq!(
-            dequeued.recv().unwrap().unwrap_err().code,
-            "DAEMON_STOPPED"
-        );
+        assert_eq!(dequeued.recv().unwrap().unwrap_err().code, "DAEMON_STOPPED");
         shutdown.join().unwrap().unwrap();
         for reply in queued {
             assert_eq!(reply.recv().unwrap().unwrap_err().code, "DAEMON_STOPPED");

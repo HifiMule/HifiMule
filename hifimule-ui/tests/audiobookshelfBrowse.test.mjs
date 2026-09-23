@@ -6,6 +6,7 @@ const library = readFileSync(new URL('../src/library.ts', import.meta.url), 'utf
 const card = readFileSync(new URL('../src/components/MediaCard.ts', import.meta.url), 'utf8');
 const rpc = readFileSync(new URL('../src/rpc.ts', import.meta.url), 'utf8');
 const albumPlay = readFileSync(new URL('../src/components/AlbumPlayButton.ts', import.meta.url), 'utf8');
+const playbackControls = readFileSync(new URL('../src/components/PlaybackControls.ts', import.meta.url), 'utf8');
 const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
 
 test('Audiobookshelf albums retain ordered public credit presentation', () => {
@@ -32,4 +33,14 @@ test('Audiobookshelf books and parts use the existing playback routes without mu
 test('browse search response remains tracks-compatible while admitting books', () => {
     assert.match(rpc, /tracks: BrowseTrack\[\]; albums\?: BrowseAlbum\[\]/);
     assert.match(rpc, /possiblyTruncated/);
+});
+
+test('book progress recovery guidance stays scoped and localized', () => {
+    assert.match(rpc, /continuityStatus\?: 'refresh' \| 'relink' \| null/);
+    assert.match(playbackControls, /snapshot\.mode === 'main' && snapshot\.current && snapshot\.continuityStatus/);
+    assert.match(playbackControls, /playback\.book_progress\.\$\{snapshot\.continuityStatus\}/);
+    for (const locale of Object.values(catalog)) {
+        assert.ok(locale['playback.book_progress.refresh']);
+        assert.ok(locale['playback.book_progress.relink']);
+    }
 });

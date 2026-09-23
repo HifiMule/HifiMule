@@ -724,6 +724,7 @@ mod tests {
 
     fn snapshot(status: PlaybackStatus, state: TransportState) -> SessionSnapshot {
         SessionSnapshot {
+            continuity_status: None,
             back_audio: false,
             back_epoch: 0,
             back_audible: false,

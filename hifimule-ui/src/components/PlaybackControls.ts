@@ -264,7 +264,9 @@ export class PlaybackControls {
             ? t('playback.status.preview', { status: transportStatus })
             : transportStatus;
         this.setText(this.status, this.fresh() ? statusText : t(`playback.connection.${playbackStore.connection()}`));
-        this.setText(this.error, this.commandError);
+        const continuityNotice = snapshot.mode === 'main' && snapshot.current && snapshot.continuityStatus
+            ? t(`playback.book_progress.${snapshot.continuityStatus}`) : '';
+        this.setText(this.error, [this.commandError, continuityNotice].filter(Boolean).join(' '));
         this.statusPopup = !this.fresh() || !snapshot.current || sourceUnavailable || outputUnavailable
             || snapshot.mode === 'preview' || Boolean(snapshot.output?.error || snapshot.playback.error)
             || ['loading', 'buffering'].includes(snapshot.playback.status);

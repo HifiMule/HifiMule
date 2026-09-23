@@ -280,6 +280,7 @@ export interface PlaybackSessionSnapshot {
     nextCursor: string | null;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
     mainCurrent: { occurrenceId: string; ordinal: number; source: { serverId: string; trackId: string }; availability: 'unknown' | 'notConfigured' } | null;
+    continuityStatus?: 'refresh' | 'relink' | null;
     playback: { status: PlaybackStatus; canGoNext: boolean; canGoBack: boolean; backUnavailableReason?: string | null; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
         seek: { available: boolean; reason?: string | null; mechanism?: string | null; decodedLandingToleranceMs?: number | null };
         pendingSeek?: { operationId: string; requestedPositionMs: number; priorCommittedPositionMs: number } | null;

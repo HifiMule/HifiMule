@@ -2,10 +2,10 @@
 //! Authentication, playback sessions, tokens, and upstream identifiers stay daemon-side.
 
 use super::{
-    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, PlaybackCleanup,
-    PlaybackDescription, PlaybackProvenance, PlaybackRefresh, PlaybackRepresentation,
-    PlaybackRequest, ProviderChangeContext, ProviderError, ProviderLibraryRole, ScrobbleRequest,
-    ServerType, TranscodeProfile,
+    BookPartTiming, BookProgress, BookTiming, BrowseCapabilities, BrowseMode, Capabilities,
+    MediaProvider, PlaybackCleanup, PlaybackDescription, PlaybackProvenance, PlaybackRefresh,
+    PlaybackRepresentation, PlaybackRequest, ProviderChangeContext, ProviderError,
+    ProviderLibraryRole, ScrobbleRequest, ServerType, TranscodeProfile,
 };
 use crate::domain::models::{
     Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChapterMarker, Credit,
@@ -218,6 +218,17 @@ struct PlayTrackDto {
     codec: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BookProgressDto {
+    library_item_id: String,
+    #[serde(default)]
+    media_id: Option<String>,
+    current_time: f64,
+    duration: f64,
+    is_finished: bool,
+}
+
 impl AudiobookshelfProvider {
     const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
     fn client() -> Result<Client, ProviderError> {
@@ -299,6 +310,64 @@ impl AudiobookshelfProvider {
                 .map_err(transport_error)?;
         }
         Ok(response)
+    }
+
+    async fn protected_patch(
+        &self,
+        endpoint: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let mut session = self.session.lock().await;
+        let mut response = self
+            .client
+            .patch(endpoint)
+            .bearer_auth(session.access_token.expose_secret())
+            .json(body)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            refresh_auth(&self.client, &self.base_url, &mut session).await?;
+            response = self
+                .client
+                .patch(endpoint)
+                .bearer_auth(session.access_token.expose_secret())
+                .json(body)
+                .send()
+                .await
+                .map_err(transport_error)?;
+        }
+        Ok(response)
+    }
+
+    fn verify_book_identity(&self, identity: &ProviderIdentity) -> Result<(), ProviderError> {
+        if self.audiobook_library_id()? != identity.library_id
+            || identity.library_item_id.is_empty()
+            || identity.media_id.is_empty()
+        {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book identity changed; re-link the library".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn progress_endpoint(&self, identity: &ProviderIdentity) -> Result<String, ProviderError> {
+        self.verify_book_identity(identity)?;
+        let mut url =
+            reqwest::Url::parse(&format!("{}/api/me/progress", self.base_url)).map_err(|_| {
+                ProviderError::Http {
+                    status: None,
+                    message: "invalid Audiobookshelf URL".into(),
+                }
+            })?;
+        url.path_segments_mut()
+            .map_err(|_| ProviderError::Http {
+                status: None,
+                message: "invalid Audiobookshelf URL".into(),
+            })?
+            .push(&identity.library_item_id);
+        Ok(url.into())
     }
 
     async fn read_playback_session(
@@ -1246,6 +1315,13 @@ fn duration_seconds(value: Option<f64>) -> u32 {
         .unwrap_or_default()
 }
 
+fn seconds_to_millis(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 || value > (i64::MAX as f64) / 1000.0 {
+        return None;
+    }
+    Some((value * 1000.0).round() as u64)
+}
+
 fn validated_duration_seconds(value: Option<f64>) -> Option<u32> {
     value
         .filter(|value| value.is_finite() && *value >= 0.0)
@@ -1408,6 +1484,180 @@ fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
 
 #[async_trait]
 impl MediaProvider for AudiobookshelfProvider {
+    async fn book_timing_for_track(
+        &self,
+        track_id: &str,
+    ) -> Result<Option<BookTiming>, ProviderError> {
+        let (library, item, media, file) = parse_track_id(track_id)?;
+        if library != self.audiobook_library_id()? {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book library changed; re-link the library".into(),
+            ));
+        }
+        let album = opaque_id("album", &[&library, &item, &media]);
+        let timing = self.book_timing(&album).await?;
+        if timing.as_ref().is_some_and(|timing| {
+            !timing
+                .parts
+                .iter()
+                .any(|part| part.audio_file_id == file && part.track_id == track_id)
+        }) {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book file changed; refresh the library".into(),
+            ));
+        }
+        Ok(timing)
+    }
+    async fn book_timing(&self, album_id: &str) -> Result<Option<BookTiming>, ProviderError> {
+        let library = self.audiobook_library_id()?;
+        let (encoded_library, item_id, media_id) = parse_opaque_id("album", album_id)?;
+        if encoded_library != library {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book library changed; re-link the library".into(),
+            ));
+        }
+        let endpoint = item_endpoint(&self.base_url, &item_id)?;
+        let response = self.protected_get(&endpoint).await?;
+        check_status(&response)?;
+        let book: BookDto = bounded_json(response, "book detail").await?;
+        if book.id != item_id
+            || book.library_id != library
+            || book.media.id != media_id
+            || book.media_type != "book"
+        {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book identity changed; refresh the library".into(),
+            ));
+        }
+        let mut files = book.media.audio_files;
+        files.sort_by(|a, b| {
+            numeric_index(&a.index)
+                .unwrap_or(u32::MAX)
+                .cmp(&numeric_index(&b.index).unwrap_or(u32::MAX))
+                .then_with(|| a.ino.cmp(&b.ino))
+        });
+        let mut seen_index = std::collections::HashSet::new();
+        let mut seen_file = std::collections::HashSet::new();
+        let mut parts = Vec::with_capacity(files.len());
+        for file in files {
+            let Some(index) = numeric_index(&file.index) else {
+                return Ok(None);
+            };
+            let Some(duration_ms) = file.duration.and_then(seconds_to_millis).filter(|v| *v > 0)
+            else {
+                return Ok(None);
+            };
+            if !seen_index.insert(index) || !seen_file.insert(file.ino.clone()) {
+                return Ok(None);
+            }
+            parts.push(BookPartTiming {
+                track_id: opaque_id("track", &[library, &item_id, &media_id, &file.ino]),
+                audio_file_id: file.ino,
+                duration_ms,
+            });
+        }
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(BookTiming {
+            identity: ProviderIdentity {
+                library_id: library.into(),
+                library_item_id: item_id,
+                media_id,
+            },
+            parts,
+        }))
+    }
+
+    async fn read_book_progress(
+        &self,
+        identity: &ProviderIdentity,
+    ) -> Result<Option<BookProgress>, ProviderError> {
+        let endpoint = self.progress_endpoint(identity)?;
+        let response = self.protected_get(&endpoint).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        check_status(&response)?;
+        let progress: BookProgressDto = bounded_json(response, "book progress").await?;
+        if progress.library_item_id != identity.library_item_id
+            || progress
+                .media_id
+                .as_deref()
+                .is_some_and(|media| media != identity.media_id)
+        {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book progress identity changed; refresh the library".into(),
+            ));
+        }
+        let current_ms = seconds_to_millis(progress.current_time).ok_or_else(|| {
+            ProviderError::Deserialization("invalid Audiobookshelf book progress time".into())
+        })?;
+        let duration_ms = seconds_to_millis(progress.duration)
+            .filter(|duration| *duration > 0 && current_ms <= *duration)
+            .ok_or_else(|| {
+                ProviderError::Deserialization(
+                    "invalid Audiobookshelf book progress duration".into(),
+                )
+            })?;
+        Ok(Some(BookProgress {
+            current_ms,
+            duration_ms,
+            is_finished: progress.is_finished,
+        }))
+    }
+
+    async fn write_book_progress(
+        &self,
+        expected: &BookTiming,
+        progress: BookProgress,
+    ) -> Result<(), ProviderError> {
+        if progress.duration_ms == 0 || progress.current_ms > progress.duration_ms {
+            return Err(ProviderError::Deserialization(
+                "invalid Audiobookshelf book progress position".into(),
+            ));
+        }
+        let identity = &expected.identity;
+        let album_id = opaque_id(
+            "album",
+            &[
+                &identity.library_id,
+                &identity.library_item_id,
+                &identity.media_id,
+            ],
+        );
+        let timing = self.book_timing(&album_id).await?.ok_or_else(|| {
+            ProviderError::StaleConfiguration(
+                "Audiobookshelf book timing changed; refresh the library".into(),
+            )
+        })?;
+        let total = timing
+            .parts
+            .iter()
+            .try_fold(0u64, |sum, part| sum.checked_add(part.duration_ms))
+            .ok_or_else(|| {
+                ProviderError::StaleConfiguration(
+                    "Audiobookshelf book timing changed; refresh the library".into(),
+                )
+            })?;
+        if timing != *expected || total != progress.duration_ms {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf book identity changed; refresh the library".into(),
+            ));
+        }
+        let endpoint = self.progress_endpoint(identity)?;
+        let response = self
+            .protected_patch(
+                &endpoint,
+                &serde_json::json!({
+                    "currentTime": progress.current_ms as f64 / 1000.0,
+                    "duration": progress.duration_ms as f64 / 1000.0,
+                    "isFinished": progress.is_finished,
+                }),
+            )
+            .await?;
+        check_status(&response)
+    }
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {
         Err(unsupported("list_libraries"))
     }
@@ -1660,6 +1910,221 @@ mod tests {
     use super::*;
     use crate::providers::BrowseMode;
     use mockito::{Matcher, Server};
+
+    #[tokio::test]
+    async fn book_progress_reads_and_writes_scoped_whole_item_position() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let read = server.mock("GET", "/api/me/progress/book-item")
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"libraryItemId":"book-item","currentTime":33.25,"duration":100,"isFinished":false}"#)
+            .expect(1).create_async().await;
+        let detail = server.mock("GET", "/api/items/book-item")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"book-item","libraryId":"book-id","mediaType":"book","media":{"id":"media","audioFiles":[{"ino":"part","index":1,"duration":100}]}}"#)
+            .expect(2).create_async().await;
+        let write = server
+            .mock("PATCH", "/api/me/progress/book-item")
+            .match_header("authorization", "Bearer access-fixture")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "currentTime": 33.25, "duration": 100.0, "isFinished": false
+            })))
+            .with_status(200)
+            .expect(2)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let identity = ProviderIdentity {
+            library_id: "book-id".into(),
+            library_item_id: "book-item".into(),
+            media_id: "media".into(),
+        };
+        let progress = provider
+            .read_book_progress(&identity)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.current_ms, 33_250);
+        assert_eq!(progress.duration_ms, 100_000);
+        let timing = BookTiming {
+            identity: identity.clone(),
+            parts: vec![BookPartTiming {
+                track_id: opaque_id("track", &["book-id", "book-item", "media", "part"]),
+                audio_file_id: "part".into(),
+                duration_ms: 100_000,
+            }],
+        };
+        provider
+            .write_book_progress(&timing, progress)
+            .await
+            .unwrap();
+        provider
+            .write_book_progress(&timing, progress)
+            .await
+            .unwrap();
+        read.assert_async().await;
+        detail.assert_async().await;
+        write.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn book_progress_absence_denial_and_failures_are_distinct_and_redacted() {
+        for status in [404, 403, 429, 500] {
+            let mut server = Server::new_async().await;
+            server
+                .mock("POST", "/login")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(login_body())
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/api/me/progress/secret-item")
+                .with_status(status)
+                .with_body("secret-upstream-body")
+                .create_async()
+                .await;
+            let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+                .await
+                .unwrap()
+                .scope_to("library".into(), ProviderLibraryRole::Audiobook)
+                .unwrap();
+            let identity = ProviderIdentity {
+                library_id: "library".into(),
+                library_item_id: "secret-item".into(),
+                media_id: "media".into(),
+            };
+            let result = provider.read_book_progress(&identity).await;
+            match status {
+                404 => assert_eq!(result.as_ref().unwrap(), &None),
+                403 => assert!(matches!(&result, Err(ProviderError::Forbidden))),
+                429 => assert!(matches!(&result, Err(ProviderError::RateLimited { .. }))),
+                _ => assert!(matches!(
+                    &result,
+                    Err(ProviderError::Http {
+                        status: Some(500),
+                        ..
+                    })
+                )),
+            }
+            assert!(!format!("{result:?}").contains("secret-upstream-body"));
+            assert!(!format!("{result:?}").contains("secret-item"));
+        }
+    }
+
+    #[tokio::test]
+    async fn book_progress_refreshes_once_and_rejects_malformed_time() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/me/progress/item")
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/auth/refresh")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"access-refreshed"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/me/progress/item")
+            .match_header("authorization", "Bearer access-refreshed")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"libraryItemId":"item","currentTime":-3,"duration":100,"isFinished":false}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("library".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let identity = ProviderIdentity {
+            library_id: "library".into(),
+            library_item_id: "item".into(),
+            media_id: "media".into(),
+        };
+        assert!(matches!(
+            provider.read_book_progress(&identity).await,
+            Err(ProviderError::Deserialization(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn changed_book_file_blocks_progress_patch() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/items/item")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"item","libraryId":"library","mediaType":"book","media":{"id":"media","audioFiles":[{"ino":"replacement","index":1,"duration":100}]}}"#)
+            .create_async().await;
+        let patch = server
+            .mock("PATCH", "/api/me/progress/item")
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("library".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let expected = BookTiming {
+            identity: ProviderIdentity {
+                library_id: "library".into(),
+                library_item_id: "item".into(),
+                media_id: "media".into(),
+            },
+            parts: vec![BookPartTiming {
+                track_id: opaque_id("track", &["library", "item", "media", "original"]),
+                audio_file_id: "original".into(),
+                duration_ms: 100_000,
+            }],
+        };
+        let error = provider
+            .write_book_progress(
+                &expected,
+                BookProgress {
+                    current_ms: 50_000,
+                    duration_ms: 100_000,
+                    is_finished: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::StaleConfiguration(_)));
+        patch.assert_async().await;
+    }
 
     fn login_body() -> &'static str {
         r#"{"user":{"accessToken":"access-fixture","refreshToken":"refresh-fixture"}}"#

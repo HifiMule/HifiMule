@@ -160,6 +160,28 @@ pub struct PlaybackDescription {
     pub representations: Vec<PlaybackRepresentation>,
 }
 
+/// Daemon-private book progress. Times are integer milliseconds at this
+/// boundary; the Audiobookshelf adapter alone converts to whole-book seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookProgress {
+    pub current_ms: u64,
+    pub duration_ms: u64,
+    pub is_finished: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookPartTiming {
+    pub track_id: String,
+    pub audio_file_id: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookTiming {
+    pub identity: crate::domain::models::ProviderIdentity,
+    pub parts: Vec<BookPartTiming>,
+}
+
 pub(crate) fn select_playback_representation(
     mut representations: Vec<PlaybackRepresentation>,
 ) -> Result<PlaybackRepresentation, ProviderError> {
@@ -287,6 +309,35 @@ pub struct ProviderChangeMetadata {
 
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
+    async fn book_timing(&self, _album_id: &str) -> Result<Option<BookTiming>, ProviderError> {
+        Ok(None)
+    }
+
+    async fn book_timing_for_track(
+        &self,
+        _track_id: &str,
+    ) -> Result<Option<BookTiming>, ProviderError> {
+        Ok(None)
+    }
+
+    async fn read_book_progress(
+        &self,
+        _identity: &crate::domain::models::ProviderIdentity,
+    ) -> Result<Option<BookProgress>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "book progress unavailable".into(),
+        ))
+    }
+
+    async fn write_book_progress(
+        &self,
+        _expected: &BookTiming,
+        _progress: BookProgress,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "book progress unavailable".into(),
+        ))
+    }
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
 
     async fn list_artists(

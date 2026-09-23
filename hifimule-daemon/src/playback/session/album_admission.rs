@@ -36,6 +36,8 @@ pub(crate) struct AlbumReservation {
     pub(crate) deadline: Instant,
     cancelled: Arc<AtomicBool>,
     superseded: Arc<AtomicBool>,
+    pub(crate) book_start: Option<(usize, u64)>,
+    pub(crate) book_timing: Option<crate::providers::BookTiming>,
 }
 
 impl AlbumReservation {
@@ -249,6 +251,8 @@ pub(super) fn reserve(
         deadline,
         cancelled,
         superseded,
+        book_start: None,
+        book_timing: None,
     }))
 }
 
@@ -273,6 +277,8 @@ pub(super) fn commit(
             PlaybackError::conflict("GENERATION_CONFLICT", "album admission is stale")
         });
     }
+    let album_start = reservation.book_start;
+    let book_timing = reservation.book_timing.clone();
     let pending = i.album.pending.take().unwrap();
     let p = &pending.params;
     let membership_digest = super::super::model::album_membership_digest(&sources);
@@ -295,11 +301,47 @@ pub(super) fn commit(
         },
         serial,
         Some(album_context),
+        album_start,
     )?;
     // The assigned rows were validated/decorated before the transaction. Build
     // the response without additional fallible DB reads after successful commit.
     let count = result.assigned_occurrences.len();
-    let current = result.assigned_occurrences.first().cloned();
+    let current = result
+        .assigned_occurrences
+        .iter()
+        .find(|occurrence| {
+            i.session.current_occurrence_id.as_deref() == Some(&occurrence.occurrence_id)
+        })
+        .cloned();
+    if let (Some(timing), Some(current)) = (book_timing, current.as_ref()) {
+        use super::super::book_progress::{BookMap, BookOccurrenceRecord, BookPart};
+        let map = BookMap::new(
+            timing
+                .parts
+                .iter()
+                .map(|part| BookPart::new(&part.track_id, &part.audio_file_id, part.duration_ms))
+                .collect(),
+        );
+        if let Some(map) = map
+            && let Some((part, offset)) = map.part(&current.source.track_id)
+            && let Some(whole_ms) = offset.checked_add(i.session.position_ms)
+        {
+            let record = BookOccurrenceRecord {
+                session_id: i.session.session_id.clone(),
+                occurrence_id: current.occurrence_id.clone(),
+                server_id: current.source.server_id.clone(),
+                track_id: current.source.track_id.clone(),
+                identity: timing.identity.clone(),
+                audio_file_id: part.file_id.clone(),
+                part_offset_ms: offset,
+                duration_ms: map.duration_ms(),
+                whole_ms,
+                mapping_valid: true,
+            };
+            let _ =
+                i.db.save_book_continuity_with_timing(&record, Some(&timing));
+        }
+    }
     let rows: Vec<_> = result
         .assigned_occurrences
         .into_iter()
@@ -350,6 +392,7 @@ pub(super) fn commit(
         state: i.session.state,
         current: current.clone(),
         main_current: current,
+        continuity_status: None,
         position_ms: i.session.position_ms,
         checkpointed_position_ms: i.checkpointed_position_ms,
         persistence: i.persistence.clone(),

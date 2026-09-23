@@ -143,7 +143,7 @@ pub struct ProviderPartIdentity {
     pub audio_file_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderIdentity {
     pub library_id: String,
     pub library_item_id: String,
