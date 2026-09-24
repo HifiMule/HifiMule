@@ -11,6 +11,9 @@ function harness(locale = 'en') {
   let content;
   let modesResult = [...allModes];
   let modesError = null;
+  let podcastShowsError = null;
+  let podcastEpisodesError = null;
+  let podcastShowFetches = 0;
   const basketStore = {
     addEventListener() {},
     removeEventListener(type, handler) { audit.push(`remove:basket:${handler.name || 'handler'}`); },
@@ -51,8 +54,8 @@ function harness(locale = 'en') {
   vm.runInNewContext(source, { exports, document, console, requestAnimationFrame: f => f(),
     require: name => name === './i18n' ? {t:(key,params={})=>(catalog[locale][key] ?? key).replace(/\{(\w+)\}/g,(_,name)=>String(params[name] ?? ''))}
       : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[],
-        fetchPodcastShows: async()=>({shows:[{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1}],total:1}),
-        fetchPodcastShow: async()=>({show:{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1},episodes:[{id:'episode-opaque',showId:'show-opaque',title:'First',description:null,durationSeconds:60,publishedAt:'2026-01-01',coverArtId:null}],total:1}),
+        fetchPodcastShows: async()=>{if(podcastShowsError)throw podcastShowsError;return {shows:[{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1}],total:51};},
+        fetchPodcastShow: async()=>{podcastShowFetches++;if(podcastEpisodesError)throw podcastEpisodesError;return {show:{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:60},episodes:Array.from({length:60},(_,i)=>({id:i===0?'episode-opaque':`episode-${i}`,showId:'show-opaque',title:i===0?'First':`Episode ${i}`,description:null,durationSeconds:60,publishedAt:'2026-01-01',coverArtId:null})),total:60,possiblyTruncated:true};},
         playbackPlayEpisode: async(serverId,episodeId)=>played.push([serverId,episodeId])}
       : name === './state/basket' ? {basketStore} : {},
     setTimeout, clearTimeout, window: {} });
@@ -63,6 +66,9 @@ function harness(locale = 'en') {
   return { ...probe, render, root, content, buttons, document, Element, audit, played,
     setModesResult(value) { modesResult = value; },
     setModesError(value) { modesError = value; },
+    setPodcastShowsError(value) { podcastShowsError = value; },
+    setPodcastEpisodesError(value) { podcastEpisodesError = value; },
+    getPodcastShowFetches() { return podcastShowFetches; },
   };
 }
 test('capability reconciliation preserves order, supported nodes, focus and single handlers', async () => {
@@ -211,6 +217,26 @@ test('podcast stale and permission states use localized accessible error text', 
   assert.ok(walk(h.content).some(node => node.textContent === catalog.fr['library.podcast.stale']));
   h.renderPodcastError({data:{errorCode:'PROVIDER_FORBIDDEN'}});
   assert.ok(walk(h.content).some(node => node.textContent === catalog.fr['library.podcast.permission']));
+});
+
+test('failed show Load more preserves rows and episode pages stay local', async () => {
+  const h = harness('en');
+  const walk = node => [node, ...node.children.flatMap(walk)];
+  h.state.browseMode = 'podcasts';
+  await h.loadPodcastView();
+  h.setPodcastShowsError(new Error('offline'));
+  await h.loadPodcastView(true);
+  assert.ok(walk(h.content).some(node => node.textContent === 'Talks'));
+  assert.ok(walk(h.content).some(node => node.textContent === catalog.en['library.podcast.unavailable']));
+  h.setPodcastShowsError(null);
+  await h.openPodcastShow('show-opaque');
+  h.setPodcastEpisodesError(new Error('offline'));
+  await h.openPodcastShow('show-opaque', true);
+  assert.ok(walk(h.content).some(node => node.textContent === 'First'));
+  assert.ok(walk(h.content).some(node => node.textContent === 'Episode 59'));
+  assert.ok(walk(h.content).some(node => node.textContent === catalog.en['library.podcast.back']));
+  assert.ok(walk(h.content).some(node => node.textContent === catalog.en['library.podcast.truncated']));
+  assert.equal(h.getPodcastShowFetches(), 1);
 });
 
 test('podcast browse mode has localized label in every shipped language', async () => {

@@ -195,6 +195,89 @@ struct PodcastMediaDto {
     num_episodes: Option<u32>,
 }
 
+const MAX_PODCAST_BROWSE_EPISODES: usize = 5_000;
+const MAX_PODCAST_DETAIL_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodcastBrowseDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    id: String,
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    library_id: String,
+    media_type: String,
+    media: PodcastBrowseMediaDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodcastBrowseMediaDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    id: String,
+    #[serde(default)]
+    cover_path: Option<String>,
+    #[serde(default)]
+    metadata: PodcastMetadataDto,
+    #[serde(default)]
+    episodes: BoundedPodcastEpisodes,
+    #[serde(default)]
+    num_episodes: Option<u32>,
+}
+
+#[derive(Default)]
+struct BoundedPodcastEpisodes {
+    episodes: Vec<PodcastEpisodeDto>,
+    possibly_truncated: bool,
+}
+
+impl<'de> Deserialize<'de> for BoundedPodcastEpisodes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EpisodeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EpisodeVisitor {
+            type Value = BoundedPodcastEpisodes;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an array of podcast episodes")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut newest = std::collections::BTreeMap::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut count = 0usize;
+                while let Some(episode) = sequence.next_element::<PodcastEpisodeDto>()? {
+                    if !seen.insert(episode.id.clone()) {
+                        return Err(serde::de::Error::custom(
+                            "duplicate podcast episode identity",
+                        ));
+                    }
+                    count = count.saturating_add(1);
+                    let published = episode
+                        .pub_date
+                        .as_deref()
+                        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+                        .map(|date| date.timestamp_millis())
+                        .or(episode.published_at)
+                        .unwrap_or(i64::MIN);
+                    newest.insert((published, std::cmp::Reverse(episode.id.clone())), episode);
+                    if newest.len() > MAX_PODCAST_BROWSE_EPISODES {
+                        newest.pop_first();
+                    }
+                }
+                Ok(BoundedPodcastEpisodes {
+                    episodes: newest.into_values().rev().collect(),
+                    possibly_truncated: count > MAX_PODCAST_BROWSE_EPISODES,
+                })
+            }
+        }
+
+        deserializer.deserialize_seq(EpisodeVisitor)
+    }
+}
+
 #[derive(Default, Deserialize)]
 struct PodcastMetadataDto {
     title: Option<String>,
@@ -376,7 +459,12 @@ impl AudiobookshelfProvider {
             });
         }
         check_status(&response)?;
-        let show: PodcastDto = bounded_json(response, "podcast detail").await?;
+        let show: PodcastDto = bounded_json_with_limit(
+            response,
+            "podcast detail",
+            MAX_PODCAST_DETAIL_RESPONSE_BYTES,
+        )
+        .await?;
         if show.media_type != "podcast"
             || show.library_id != library
             || show.id != item
@@ -398,6 +486,61 @@ impl AudiobookshelfProvider {
             ));
         }
         Ok(show)
+    }
+
+    async fn podcast_browse_detail(
+        &self,
+        public_id: &str,
+    ) -> Result<(PodcastDto, bool), ProviderError> {
+        let library = self.podcast_library_id()?;
+        let (encoded_library, item, media) = parse_opaque_id("show", public_id)?;
+        if encoded_library != library {
+            return Err(ProviderError::NotFound {
+                item_type: "show".into(),
+                id: "unavailable".into(),
+            });
+        }
+        let response = self
+            .protected_get(&item_endpoint(&self.base_url, &item)?)
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound {
+                item_type: "show".into(),
+                id: "unavailable".into(),
+            });
+        }
+        check_status(&response)?;
+        let browse: PodcastBrowseDto = bounded_json_with_limit(
+            response,
+            "podcast browse detail",
+            MAX_PODCAST_DETAIL_RESPONSE_BYTES,
+        )
+        .await?;
+        if browse.media_type != "podcast"
+            || browse.library_id != library
+            || browse.id != item
+            || browse.media.id != media
+        {
+            return Err(ProviderError::StaleConfiguration(
+                "Audiobookshelf podcast identity changed".into(),
+            ));
+        }
+        let possibly_truncated = browse.media.episodes.possibly_truncated;
+        Ok((
+            PodcastDto {
+                id: browse.id,
+                library_id: browse.library_id,
+                media_type: browse.media_type,
+                media: PodcastMediaDto {
+                    id: browse.media.id,
+                    cover_path: browse.media.cover_path,
+                    metadata: browse.media.metadata,
+                    episodes: browse.media.episodes.episodes,
+                    num_episodes: browse.media.num_episodes,
+                },
+            },
+            possibly_truncated,
+        ))
     }
 
     async fn podcast_episode_detail(
@@ -529,10 +672,20 @@ impl AudiobookshelfProvider {
             ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
         })?;
         let item_url = item_endpoint(&self.base_url, &item_id)?;
+        let mut expected_file = reqwest::Url::parse(&item_url).map_err(|_| {
+            ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
+        })?;
+        expected_file
+            .path_segments_mut()
+            .map_err(|_| {
+                ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
+            })?
+            .push("file")
+            .push(&audio_file.ino);
         if url.origin() != base.origin()
             || url.query().is_some()
             || url.fragment().is_some()
-            || !url.as_str().starts_with(&format!("{item_url}/"))
+            || url != expected_file
         {
             return Err(ProviderError::Deserialization(
                 "Audiobookshelf episode media URL left selected show".into(),
@@ -1411,8 +1564,21 @@ fn playback_session_id_prefix(body: &[u8]) -> Option<String> {
 }
 
 async fn bounded_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    context: &'static str,
+) -> Result<T, ProviderError> {
+    bounded_json_with_limit(
+        response,
+        context,
+        AudiobookshelfProvider::MAX_RESPONSE_BYTES as usize,
+    )
+    .await
+}
+
+async fn bounded_json_with_limit<T: DeserializeOwned>(
     mut response: reqwest::Response,
     context: &'static str,
+    max_response_bytes: usize,
 ) -> Result<T, ProviderError> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
@@ -1423,7 +1589,7 @@ async fn bounded_json<T: DeserializeOwned>(
                 status: Some(response.status().as_u16()),
                 message: "Audiobookshelf response exceeds configured limit".into(),
             })?;
-        if next_len > AudiobookshelfProvider::MAX_RESPONSE_BYTES as usize {
+        if next_len > max_response_bytes {
             return Err(ProviderError::Http {
                 status: Some(response.status().as_u16()),
                 message: "Audiobookshelf response exceeds configured limit".into(),
@@ -1924,44 +2090,31 @@ impl MediaProvider for AudiobookshelfProvider {
     }
 
     async fn get_podcast_show(&self, id: &str) -> Result<PodcastShowDetail, ProviderError> {
-        let item = self.podcast_detail(id).await?;
+        let (item, possibly_truncated) = self.podcast_browse_detail(id).await?;
         let library = self.podcast_library_id()?;
         let show = podcast_show(library, &item)?;
-        let mut episodes = item
+        let episodes = item
             .media
             .episodes
             .iter()
             .map(|episode| podcast_episode(&show, library, &item, episode))
             .collect::<Vec<_>>();
-        episodes.sort_by(|a, b| {
-            b.published_at
-                .cmp(&a.published_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(PodcastShowDetail { show, episodes })
+        Ok(PodcastShowDetail {
+            show,
+            episodes,
+            possibly_truncated,
+        })
     }
 
     async fn get_podcast_episode(&self, id: &str) -> Result<PodcastEpisode, ProviderError> {
-        let (library, item, media, episode) = parse_episode_id(id)?;
-        if library != self.podcast_library_id()? {
-            return Err(ProviderError::NotFound {
-                item_type: "episode".into(),
-                id: "unavailable".into(),
-            });
-        }
-        let show_id = opaque_id("show", &[&library, &item, &media]);
-        self.get_podcast_show(&show_id)
-            .await?
-            .episodes
-            .into_iter()
-            .find(|candidate| {
-                candidate.id == id
-                    && candidate.id == opaque_id("episode", &[&library, &item, &media, &episode])
-            })
-            .ok_or_else(|| ProviderError::NotFound {
-                item_type: "episode".into(),
-                id: "unavailable".into(),
-            })
+        let (item, episode) = self.podcast_episode_detail(id).await?;
+        let show = podcast_show(self.podcast_library_id()?, &item)?;
+        Ok(podcast_episode(
+            &show,
+            self.podcast_library_id()?,
+            &item,
+            &episode,
+        ))
     }
 
     async fn search_podcasts(&self, query: &str) -> Result<PodcastSearchResult, ProviderError> {
@@ -2217,8 +2370,7 @@ impl MediaProvider for AudiobookshelfProvider {
     }
     async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
         if self.library_role == Some(ProviderLibraryRole::Podcast) {
-            let episode = self.get_podcast_episode(song_id).await?;
-            return Ok(podcast_episode_song(&episode));
+            return Err(unsupported("podcast episode as song"));
         }
         let library = self.audiobook_library_id()?;
         let (encoded_library, item, media, _) = parse_track_id(song_id)?;
@@ -2238,6 +2390,13 @@ impl MediaProvider for AudiobookshelfProvider {
                 item_type: "part".into(),
                 id: "unavailable".into(),
             })
+    }
+    async fn get_playback_display_song(&self, id: &str) -> Result<Song, ProviderError> {
+        if self.library_role == Some(ProviderLibraryRole::Podcast) {
+            let episode = self.get_podcast_episode(id).await?;
+            return Ok(podcast_episode_song(&episode));
+        }
+        self.get_song(id).await
     }
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
         Err(unsupported("list_playlists"))
@@ -3958,6 +4117,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_browse_catalog_keeps_newest_episodes_and_reports_truncation() {
+        let episodes = (0..=MAX_PODCAST_BROWSE_EPISODES)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("episode-{index}"),
+                    "title": format!("Episode {index}"),
+                    "publishedAt": index as i64,
+                })
+            })
+            .collect::<Vec<_>>();
+        let bounded: BoundedPodcastEpisodes =
+            serde_json::from_value(serde_json::Value::Array(episodes)).unwrap();
+        assert!(bounded.possibly_truncated);
+        assert_eq!(bounded.episodes.len(), MAX_PODCAST_BROWSE_EPISODES);
+        assert_eq!(bounded.episodes[0].id, "episode-5000");
+        assert!(
+            !bounded
+                .episodes
+                .iter()
+                .any(|episode| episode.id == "episode-0")
+        );
+    }
+
+    #[tokio::test]
     async fn podcast_catalogue_keeps_show_and_episode_identity_separate() {
         let mut server = Server::new_async().await;
         server
@@ -4002,6 +4185,15 @@ mod tests {
         assert_ne!(detail.episodes[0].id, detail.episodes[1].id);
         assert_eq!(detail.episodes[0].show_id, shows[0].id);
         assert!(provider.get_album(&shows[0].id).await.is_err());
+        assert!(provider.get_song(&detail.episodes[0].id).await.is_err());
+        assert_eq!(
+            provider
+                .get_playback_display_song(&detail.episodes[0].id)
+                .await
+                .unwrap()
+                .title,
+            detail.episodes[0].title
+        );
     }
 
     #[tokio::test]
@@ -4091,6 +4283,45 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         play.assert_async().await;
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_rejects_a_different_file_url_with_matching_ino() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/items/show-1").with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":"ep-1","audioFile":{"ino":"ino-1"}}]}}"#)
+            .create_async().await;
+        server.mock("POST", "/api/items/show-1/play/ep-1")
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"id":"session-secret","serverVersion":"2.36.1","libraryId":"pod-id","libraryItemId":"show-1","episodeId":"ep-1","mediaType":"podcast","playMethod":0,"audioTracks":[{"ino":"ino-1","contentUrl":"/api/items/show-1/file/other-ino","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+            .create_async().await;
+        let close = server
+            .mock("POST", "/api/session/session-secret/close")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let id = opaque_id("episode", &["pod-id", "show-1", "media-1", "ep-1"]);
+        assert!(provider.resolve_playback(&id).await.is_err());
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         close.assert_async().await;
     }
 

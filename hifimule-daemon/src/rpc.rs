@@ -945,7 +945,7 @@ async fn handle_playback_describe_occurrences(
                 match crate::server_manager::get_provider_by_server_id(&manager, &db, &server_id)
                     .await
                 {
-                    Ok(provider) => match provider.get_song(&track_id).await {
+                    Ok(provider) => match provider.get_playback_display_song(&track_id).await {
                         Ok(song) => (Some(song), OccurrenceDisplayStatus::Available),
                         Err(_) => (None, OccurrenceDisplayStatus::TrackUnavailable),
                     },
@@ -1032,6 +1032,15 @@ async fn handle_playback_apply_session(
     params: Option<Value>,
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
+    handle_playback_apply_session_inner(state, params, mutation_guard, false).await
+}
+
+async fn handle_playback_apply_session_inner(
+    state: &AppState,
+    params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+    allow_podcast_episode: bool,
+) -> Result<Value, JsonRpcError> {
     let p = serde_json::from_value::<crate::playback::model::ApplySessionParams>(
         params.unwrap_or(Value::Null),
     )
@@ -1040,6 +1049,36 @@ async fn handle_playback_apply_session(
         message: "Invalid playback.applySession parameters".into(),
         data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
     })?;
+    let added_sources: Vec<_> = match &p.operation {
+        crate::playback::model::SessionOperation::PlayTrack { source } => vec![source],
+        crate::playback::model::SessionOperation::ReplaceQueue { sources }
+        | crate::playback::model::SessionOperation::AppendQueue { sources }
+        | crate::playback::model::SessionOperation::PlayAlbum { sources } => {
+            sources.iter().collect()
+        }
+        _ => Vec::new(),
+    };
+    for source in added_sources {
+        if !source.track_id.starts_with("abs-episode-") {
+            continue;
+        }
+        let provider = crate::server_manager::get_provider_by_server_id(
+            &state.server_manager,
+            &state.db,
+            &source.server_id,
+        )
+        .await
+        .map_err(provider_error_to_rpc)?;
+        if provider.library_role() == Some(crate::providers::ProviderLibraryRole::Podcast)
+            && !allow_podcast_episode
+        {
+            return Err(JsonRpcError {
+                code: ERR_UNSUPPORTED_CAPABILITY,
+                message: "Use playback.playEpisode for podcast episodes".into(),
+                data: None,
+            });
+        }
+    }
     let source = match &p.operation {
         crate::playback::model::SessionOperation::PlayTrack { source } => Some(source.clone()),
         crate::playback::model::SessionOperation::PlayAlbum { sources } => sources.first().cloned(),
@@ -1241,7 +1280,7 @@ async fn handle_playback_play_episode(
             "type": "playTrack", "source": { "serverId": server_id, "trackId": episode_id }
         }),
     );
-    handle_playback_apply_session(state, Some(payload), mutation_guard).await
+    handle_playback_apply_session_inner(state, Some(payload), mutation_guard, true).await
 }
 
 async fn handle_playback_play_album(
@@ -2052,7 +2091,7 @@ async fn handle_browse_get_podcast_show(
         .as_ref()
         .and_then(|p| p["limit"].as_u64())
         .unwrap_or(50);
-    if offset > u32::MAX as u64 || !(1..=100).contains(&limit) {
+    if offset > u32::MAX as u64 || !(1..=5_000).contains(&limit) {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "Invalid episode page".into(),
@@ -2071,7 +2110,9 @@ async fn handle_browse_get_podcast_show(
         .skip(offset as usize)
         .take(limit as usize)
         .collect::<Vec<_>>();
-    Ok(serde_json::json!({ "show": detail.show, "episodes": episodes, "total": total }))
+    Ok(
+        serde_json::json!({ "show": detail.show, "episodes": episodes, "total": total, "possiblyTruncated": detail.possibly_truncated }),
+    )
 }
 
 async fn handle_browse_get_podcast_episode(
@@ -14856,6 +14897,7 @@ mod tests {
                     published_at: None,
                     cover_art_id: None,
                 }],
+                possibly_truncated: true,
             })
         }
         async fn search_podcasts(
@@ -15153,6 +15195,7 @@ mod tests {
         assert_eq!(detail["episodes"][0]["title"], "First");
         assert_eq!(detail["episodes"][0]["type"], "episode");
         assert_eq!(detail["episodes"][0]["showId"], "show-opaque");
+        assert_eq!(detail["possiblyTruncated"], true);
         assert!(detail.get("tracks").is_none());
         let search = handle_browse_search(&state, Some(json!({"query":"Talks"})))
             .await

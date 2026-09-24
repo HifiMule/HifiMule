@@ -1624,8 +1624,11 @@ let podcastTotal = 0;
 let podcastNextOffset = 0;
 let podcastQuery = '';
 let podcastEpisodes: PodcastEpisode[] = [];
+let podcastEpisodeCatalog: PodcastEpisode[] = [];
 let podcastEpisodeNextOffset = 0;
 let podcastCurrentShow: string | null = null;
+let podcastCurrentShowTitle = '';
+let podcastCatalogTruncated = false;
 
 function podcastButton(label: string, action: () => void): HTMLButtonElement {
     const button = document.createElement('button');
@@ -1642,13 +1645,18 @@ function podcastStatus(container: HTMLElement, label: string): void {
     container.append(status);
 }
 
-function renderPodcastError(error: unknown): void {
+function renderPodcastError(error: unknown, preserve = false): void {
     const value = error as { code?: number; data?: { errorCode?: string } } | null;
     const code = value?.data?.errorCode;
     const key = code === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
         : code === 'STALE_CONFIGURATION' || value?.code === -4 ? 'library.podcast.stale'
         : 'library.podcast.unavailable';
-    renderError(new Error(t(key)));
+    if (preserve) {
+        const container = document.getElementById('library-content');
+        if (container) podcastStatus(container, t(key));
+    } else {
+        renderError(new Error(t(key)));
+    }
 }
 
 function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
@@ -1736,24 +1744,34 @@ async function openPodcastShow(showId: string, append = false): Promise<void> {
     if (!container) return;
     if (append && podcastCurrentShow !== showId) return;
     const request = ++podcastRequest;
-    container.replaceChildren();
-    podcastStatus(container, t('library.podcast.show') + '…');
+    if (!append) {
+        container.replaceChildren();
+        podcastStatus(container, t('library.podcast.show') + '…');
+    }
     try {
-        const detail = await fetchPodcastShow(showId, append ? podcastEpisodeNextOffset : 0, 50);
+        if (!append) {
+            const detail = await fetchPodcastShow(showId, 0, 5_000);
+            if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
+            podcastCurrentShow = showId;
+            podcastCurrentShowTitle = detail.show.title;
+            podcastEpisodeCatalog = detail.episodes;
+            podcastCatalogTruncated = detail.possiblyTruncated;
+            podcastEpisodeNextOffset = 0;
+        }
         if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
-        podcastCurrentShow = showId;
-        podcastEpisodes = append ? [...podcastEpisodes, ...detail.episodes] : detail.episodes;
-        podcastEpisodeNextOffset = (append ? podcastEpisodeNextOffset : 0) + 50;
+        podcastEpisodeNextOffset = Math.min(podcastEpisodeNextOffset + 50, podcastEpisodeCatalog.length);
+        podcastEpisodes = podcastEpisodeCatalog.slice(0, podcastEpisodeNextOffset);
         container.replaceChildren();
         container.append(podcastButton(t('library.podcast.back'), () => { void loadPodcastView(); }));
         const title = document.createElement('h2');
-        title.textContent = detail.show.title;
+        title.textContent = podcastCurrentShowTitle;
         container.append(title);
         if (podcastEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
         for (const episode of podcastEpisodes) container.append(podcastEpisodeRow(episode));
-        if (podcastEpisodeNextOffset < detail.total) container.append(podcastButton(t('library.podcast.load_more'), () => { void openPodcastShow(showId, true); }));
+        if (podcastEpisodeNextOffset < podcastEpisodeCatalog.length) container.append(podcastButton(t('library.podcast.load_more'), () => { void openPodcastShow(showId, true); }));
+        if (podcastCatalogTruncated) podcastStatus(container, t('library.podcast.truncated'));
     } catch (error) {
-        if (request === podcastRequest) renderPodcastError(error);
+        if (request === podcastRequest) renderPodcastError(error, append);
     }
 }
 
@@ -1762,9 +1780,11 @@ async function loadPodcastView(append = false): Promise<void> {
     if (!container) return;
     const request = ++podcastRequest;
     podcastCurrentShow = null;
-    container.replaceChildren();
-    podcastSearchForm(container);
-    podcastStatus(container, t('library.podcast.show') + '…');
+    if (!append) {
+        container.replaceChildren();
+        podcastSearchForm(container);
+        podcastStatus(container, t('library.podcast.show') + '…');
+    }
     try {
         if (podcastQuery) {
             const result = await searchPodcasts(podcastQuery);
@@ -1788,7 +1808,7 @@ async function loadPodcastView(append = false): Promise<void> {
         for (const show of podcastShows) container.append(podcastShowRow(show));
         if (podcastNextOffset < podcastTotal) container.append(podcastButton(t('library.podcast.load_more'), () => { void loadPodcastView(true); }));
     } catch (error) {
-        if (request === podcastRequest) renderPodcastError(error);
+        if (request === podcastRequest) renderPodcastError(error, append);
     }
 }
 

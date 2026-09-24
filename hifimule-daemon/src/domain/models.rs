@@ -230,6 +230,8 @@ pub enum PodcastEntityType {
 pub struct PodcastShowDetail {
     pub show: PodcastShow,
     pub episodes: Vec<PodcastEpisode>,
+    #[serde(default)]
+    pub possibly_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

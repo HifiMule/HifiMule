@@ -332,6 +332,10 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn get_playback_display_song(&self, id: &str) -> Result<Song, ProviderError> {
+        self.get_song(id).await
+    }
+
     async fn search_podcasts(&self, _query: &str) -> Result<PodcastSearchResult, ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "podcast search unavailable".into(),

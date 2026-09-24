@@ -3,7 +3,7 @@ baseline_commit: 93e62f65e0a855e6515f135224fc892dd986df5b
 ---
 # Story 17.7: Add Audiobookshelf podcast servers and direct playback
 
-Status: review
+Status: done
 
 ## Story
 
@@ -101,3 +101,11 @@ GPT-6 Codex
 ### Change Log
 
 - 2026-09-23: Added role-scoped Audiobookshelf podcast browsing, typed episode playback, localized presentation and offline regression coverage.
+- 2026-09-24: Review fixes restricted generic song admission, bound direct media to the selected file path, and preserved loaded rows on pagination errors. Large-show browsing now retains the newest 5,000 episodes from a bounded 128 MiB detail response, reports truncation, and pages the local snapshot without repeated upstream fetches. The v2.36.1 server has no per-show episode paging route. Focused podcast provider/RPC tests (16), UI tests (14), daemon check, TypeScript check, formatting and diff checks passed; installed-app and controlled-server playback remain untested.
+
+### Review Findings
+
+- [x] [Review][Patch] Keep podcast episodes out of generic song admission: generic song lookup now rejects podcast IDs, queue display uses a dedicated internal path, and generic session additions reject episode sources (AC 2). [hifimule-daemon/src/providers/audiobookshelf.rs:2219]
+- [x] [Review][Patch] Bind episode playback bytes to the selected media: admission now requires the session content URL to equal the selected episode audio file endpoint, in addition to the existing identity and direct media checks (AC 4). [hifimule-daemon/src/providers/audiobookshelf.rs:531]
+- [x] [Review][Patch] Preserve loaded podcast rows when Load more fails: append requests retain prior rows and navigation, and show a localized status on error (AC 3). [hifimule-ui/src/library.ts:1739]
+- [x] [Review][Patch] Bound episode detail work for large shows: the provider retains the newest 5,000 episodes while parsing a bounded 128 MiB detail response, the RPC reports `possiblyTruncated`, and the UI pages its local catalog without repeated upstream requests (AC 3). Responses beyond the safety cap remain unavailable. [hifimule-daemon/src/providers/audiobookshelf.rs:2090]
