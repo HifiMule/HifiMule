@@ -14,6 +14,7 @@ function harness(locale = 'en') {
   let podcastShowsError = null;
   let podcastEpisodesError = null;
   let podcastShowFetches = 0;
+  let parsedDescription = null;
   const basketStore = {
     addEventListener() {},
     removeEventListener(type, handler) { audit.push(`remove:basket:${handler.name || 'handler'}`); },
@@ -23,6 +24,9 @@ function harness(locale = 'en') {
     children = []; attributes = {}; listeners = {}; className = ''; textContent = ''; hidden = false;
     updateComplete = Promise.resolve(); scrolls = 0; dataset = {};
     constructor(tag) { this.tagName = tag; if (tag === 'sl-button') { this.button = new Element('button'); this.shadowRoot = { querySelector: () => this.button }; } }
+    get nodeType() { return this.tagName === '#text' ? 3 : 1; }
+    get localName() { return this.tagName; }
+    get childNodes() { return this.children; }
     get isConnected() { return this === root || !!this.parentElement?.isConnected; }
     get firstElementChild() { return this.children[0] ?? null; }
     get nextElementSibling() { const a = this.parentElement?.children ?? []; return a[a.indexOf(this)+1] ?? null; }
@@ -47,12 +51,15 @@ function harness(locale = 'en') {
   const root = new Element('div');
   content = new Element('div');
   document.createElement = tag => new Element(tag);
+  document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   document.getElementById = id => id === 'browse-mode-bar' ? root : id === 'library-content' ? content : null;
   const exports = {};
   const played = [];
-  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks, loadPodcastView, openPodcastShow, renderPodcastError };';
+  const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks, loadPodcastView, openPodcastShow, renderPodcastError, podcastDescription, podcastEpisodeRow, podcastShowRow };';
   const source = ts.transpileModule(input, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
-  vm.runInNewContext(source, { exports, document, console, requestAnimationFrame: f => f(),
+  vm.runInNewContext(source, { exports, document, console, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+    DOMParser: class { parseFromString() { return { body: { childNodes: parsedDescription?.children ?? [] } }; } },
+    requestAnimationFrame: f => f(),
     require: name => name === './i18n' ? {t:(key,params={})=>(catalog[locale][key] ?? key).replace(/\{(\w+)\}/g,(_,name)=>String(params[name] ?? ''))}
       : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[],
         fetchPodcastShows: async()=>{if(podcastShowsError)throw podcastShowsError;return {shows:[{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1}],total:51};},
@@ -70,8 +77,50 @@ function harness(locale = 'en') {
     setPodcastShowsError(value) { podcastShowsError = value; },
     setPodcastEpisodesError(value) { podcastEpisodesError = value; },
     getPodcastShowFetches() { return podcastShowFetches; },
+    setParsedDescription(value) { parsedDescription = value; },
   };
 }
+test('podcast description keeps formatting and safe links without executable markup', () => {
+  const h = harness();
+  const source = new h.Element('div');
+  const paragraph = new h.Element('p');
+  paragraph.append(h.document.createTextNode('Hello '));
+  const strong = new h.Element('strong');
+  strong.append(h.document.createTextNode('listeners'));
+  paragraph.append(strong);
+  const link = new h.Element('a');
+  link.setAttribute('href', 'https://example.com/episode');
+  link.setAttribute('onclick', 'alert(1)');
+  link.append(h.document.createTextNode('Episode notes'));
+  const unsafeLink = new h.Element('a');
+  unsafeLink.setAttribute('href', 'javascript:alert(1)');
+  unsafeLink.append(h.document.createTextNode('unsafe link text'));
+  const script = new h.Element('script');
+  script.append(h.document.createTextNode('alert(1)'));
+  source.append(paragraph, link, unsafeLink, script, h.document.createTextNode('\nPlain text'));
+  h.setParsedDescription(source);
+  const result = h.podcastDescription('<p>server supplied HTML</p>');
+  const walk = node => [node, ...node.children.flatMap(walk)];
+  const nodes = walk(result);
+  assert.ok(nodes.some(node => node.tagName === 'p'));
+  assert.ok(nodes.some(node => node.tagName === 'strong'));
+  const links = nodes.filter(node => node.tagName === 'a');
+  assert.equal(links.length, 1);
+  assert.equal(links[0].href, 'https://example.com/episode');
+  assert.equal(links[0].rel, 'noopener noreferrer');
+  assert.equal(links[0].getAttribute('onclick'), null);
+  assert.ok(nodes.some(node => node.textContent === 'unsafe link text'));
+  assert.ok(nodes.some(node => node.textContent === '\nPlain text'));
+  assert.ok(!nodes.some(node => node.tagName === 'script' || node.textContent === 'alert(1)'));
+  const episode = h.podcastEpisodeRow({id:'episode',title:'Episode',description:'<p>server supplied HTML</p>',durationSeconds:null,publishedAt:null});
+  const show = h.podcastShowRow({id:'show',title:'Show',description:'<p>server supplied HTML</p>',coverArtId:null});
+  for (const row of [episode, show]) {
+    assert.ok(walk(row).some(node => node.className === 'podcast-description'));
+    assert.ok(walk(row).some(node => node.tagName === 'strong'));
+  }
+  const plain = h.podcastDescription('A <guest> joins\nfor the show');
+  assert.equal(plain.textContent, 'A <guest> joins\nfor the show');
+});
 test('capability reconciliation preserves order, supported nodes, focus and single handlers', async () => {
   const h = harness(); await h.render(); const original = h.buttons(); original[1].focus();
   await h.render(); assert.equal(h.document.activeElement, original[1]);

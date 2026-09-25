@@ -2109,6 +2109,16 @@ h2 {
   color: var(--ink-dim);
 }
 
+.podcast-description {
+  color: var(--ink-dim);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.podcast-description a {
+  color: var(--sl-color-primary-400);
+}
+
 .podcast-episode-row h3 {
   margin: 0.25rem 0;
 }

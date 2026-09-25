@@ -1706,6 +1706,55 @@ function renderPodcastError(error: unknown, preserve = false): void {
     }
 }
 
+const podcastDescriptionTags = new Set(['p', 'br', 'strong', 'b', 'em', 'i', 'ul', 'ol', 'li', 'a']);
+const podcastDiscardTags = new Set(['script', 'style', 'iframe', 'object', 'embed', 'svg', 'math', 'form']);
+
+function podcastDescription(value: string): HTMLElement {
+    const description = document.createElement('div');
+    description.className = 'podcast-description';
+    // A plain-text feed can use angle brackets as prose; parse only when it
+    // contains recognizable HTML so those words remain visible.
+    if (!/<\/?(?:p|br|strong|b|em|i|ul|ol|li|a|div|span|script|style|iframe|object|embed|svg|math|form)(?=[\s/>])/i.test(value)) {
+        description.textContent = value;
+        return description;
+    }
+    const parsed = new DOMParser().parseFromString(value, 'text/html');
+
+    function appendSafe(source: Node, target: Node): void {
+        if (source.nodeType === Node.TEXT_NODE) {
+            target.appendChild(document.createTextNode(source.textContent ?? ''));
+            return;
+        }
+        if (source.nodeType !== Node.ELEMENT_NODE) return;
+        const element = source as Element;
+        const tag = element.localName;
+        if (podcastDiscardTags.has(tag)) return;
+        let destination = target;
+        if (podcastDescriptionTags.has(tag)) {
+            if (tag === 'a') {
+                const href = element.getAttribute('href');
+                let url: URL | null = null;
+                try { if (href) url = new URL(href); } catch { /* Ignore malformed URLs. */ }
+                if (url && (url.protocol === 'https:' || url.protocol === 'http:')) {
+                    const link = document.createElement('a');
+                    link.href = url.href;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    target.appendChild(link);
+                    destination = link;
+                }
+            } else {
+                destination = document.createElement(tag);
+                target.appendChild(destination);
+            }
+        }
+        for (const child of element.childNodes) appendSafe(child, destination);
+    }
+
+    for (const child of parsed.body.childNodes) appendSafe(child, description);
+    return description;
+}
+
 function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
     const row = document.createElement('div');
     row.className = 'podcast-episode-row';
@@ -1720,9 +1769,7 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
     metadata.textContent = [episode.publishedAt, duration, t('library.books.compatibility_unknown')].filter(Boolean).join(' · ');
     row.append(metadata);
     if (episode.description) {
-        const description = document.createElement('p');
-        description.textContent = episode.description;
-        row.append(description);
+        row.append(podcastDescription(episode.description));
     }
     row.append(podcastButton(t('library.podcast.play'), () => {
         if (!state.podcastServerId) return;
@@ -1772,9 +1819,7 @@ function podcastShowRow(show: PodcastShow): HTMLElement {
         basketStore.add(podcastShowBasketItem(show.id, show.title, serverId, detail.episodes));
     }));
     if (show.description) {
-        const description = document.createElement('p');
-        description.textContent = show.description;
-        row.append(description);
+        row.append(podcastDescription(show.description));
     }
     return row;
 }
