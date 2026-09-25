@@ -378,7 +378,7 @@ function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
         subtitle: state.isBookLibrary
             ? (tracks.length === 1 ? t('library.books.complete') : t('library.books.part', { number: track.trackNumber ?? index + 1 }))
             : track.artistName,
-        sizeBytes: track.sizeBytes ?? (track.duration > 0 ? track.duration : 3_600) * 16_000,
+        sizeBytes: track.sizeBytes ?? (state.isBookLibrary ? (track.duration > 0 ? track.duration : 3_600) * 16_000 : 0),
         sizeTicks: track.duration * 10_000_000,
         childCount: 1,
     }));

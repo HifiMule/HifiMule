@@ -4,7 +4,7 @@
 baseline_commit: da404dcbc881f6cf9b2d67dfc484ea8595073032
 ---
 
-Status: review
+Status: done
 
 ## Story
 
@@ -22,6 +22,12 @@ so that durable books and changing episode feeds fit my device.
 6. **Regression evidence.** Offline tests cover mixed music/book/podcast servers, independent budgets, recent/unplayed retention, incompatible items, legacy-manifest defaults, separate and shared folder roots, folder changes, managed-only deletion, playlist references, and preview/execution parity. Existing Jellyfin/Subsonic music sync and direct playback remain functional.
 
 ## Tasks / Subtasks
+
+### Review Findings
+
+- [x] [Review][Patch] [P1] Preserve direct-media validation on staged retry [hifimule-daemon/src/sync.rs:3013] — The retry now disables redirects for direct media and rechecks the expected content type before staging.
+- [x] [Review][Patch] [P2] Give zero-duration podcast episodes a positive capacity estimate [hifimule-daemon/src/rpc.rs:5981] — `None` and `Some(0)` now use the same one-hour fallback in Autofill, desired items, and UI basket estimates.
+- [x] [Review][Patch] [P2] Keep the audiobook size fallback scoped to books [hifimule-ui/src/library.ts:381] — Ordinary music tracks with missing size metadata retain their prior zero-byte UI estimate.
 
 - [x] Admit Audiobookshelf media to device selection and sync (AC: 1, 3)
   - [x] Carry explicit media role and stable provider identity from Books/Podcasts catalog through desired items, preview, add plan, and synced manifest entries; do not infer a podcast from a song-shaped ID.
@@ -92,6 +98,7 @@ GPT-6
 - Podcast retention sorts parsed UTC publication times newest first with episode ID as a stable tie-break; missing or malformed dates sort last. It estimates 128 kbps using a one-hour duration fallback and fills within the server's byte budget. Because typed catalog playback state is unavailable, `unplayedOnly` uses the recent fallback and tells the user so; it does not read or write player-owned progress.
 - Verification: daemon suite `1131 passed, 0 failed, 6 ignored`; Audiobookshelf contract suite `5 passed`; UI source tests `19 passed` plus retention round-trip tests `2 passed`; UI TypeScript check passed; Rust formatting and Git whitespace checks passed. No live device or remote Audiobookshelf was used.
 - 2026-09-25 follow-up verification: daemon suite `1132 passed, 0 failed, 6 ignored`; Audiobookshelf contract suite `5 passed`; UI tests `24 passed`; UI TypeScript check passed. Book, book-part, podcast show, and episode basket entries now reach the existing sync item ID and server ID route. No live UI/device run was performed.
+- 2026-09-25 code review: Three findings patched. Focused Rust duration test and four UI selection tests pass; Rust formatting and Git whitespace checks pass. UI TypeScript check was unavailable in this environment because npm and local TypeScript dependencies are absent.
 
 ### File List
 

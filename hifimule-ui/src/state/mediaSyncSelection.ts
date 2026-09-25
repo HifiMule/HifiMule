@@ -19,7 +19,8 @@ export function bookBasketItem(id: string, name: string, serverId: string | unde
 }
 
 export function podcastEpisodeBasketItem(episode: PodcastEpisode, serverId: string): BasketItem {
-    const duration = episode.durationSeconds ?? UNKNOWN_PODCAST_DURATION_SECONDS;
+    const duration = episode.durationSeconds && episode.durationSeconds > 0
+        ? episode.durationSeconds : UNKNOWN_PODCAST_DURATION_SECONDS;
     return {
         id: episode.id, name: episode.title, type: 'PodcastEpisode', serverId,
         childCount: 1,
@@ -30,7 +31,10 @@ export function podcastEpisodeBasketItem(episode: PodcastEpisode, serverId: stri
 
 export function podcastShowBasketItem(id: string, name: string, serverId: string,
     episodes: PodcastEpisode[]): BasketItem {
-    const duration = episodes.reduce((sum, episode) => sum + (episode.durationSeconds ?? UNKNOWN_PODCAST_DURATION_SECONDS), 0);
+    const duration = episodes.reduce((sum, episode) => sum + (
+        episode.durationSeconds && episode.durationSeconds > 0
+            ? episode.durationSeconds : UNKNOWN_PODCAST_DURATION_SECONDS
+    ), 0);
     return {
         id, name, type: 'PodcastShow', serverId,
         childCount: episodes.length,

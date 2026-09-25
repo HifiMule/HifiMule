@@ -4499,7 +4499,7 @@ fn podcast_episode_to_desired(
         name: episode.title.clone(),
         album: Some(show_name.to_string()),
         artist: None,
-        size_bytes: u64::from(episode.duration_seconds.unwrap_or(3600)).saturating_mul(16_000),
+        size_bytes: podcast_estimated_size_bytes(episode.duration_seconds),
         etag: None,
         provider_album_id: Some(episode.show_id.clone()),
         provider_content_type: None,
@@ -4508,6 +4508,22 @@ fn podcast_episode_to_desired(
         track_number: None,
         server_id: None,
     }
+}
+
+fn podcast_estimated_size_bytes(duration_seconds: Option<u32>) -> u64 {
+    u64::from(
+        duration_seconds
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(3_600),
+    ) * 16_000
+}
+
+#[cfg(test)]
+#[test]
+fn podcast_unknown_duration_reserves_capacity() {
+    assert_eq!(podcast_estimated_size_bytes(None), 3_600 * 16_000);
+    assert_eq!(podcast_estimated_size_bytes(Some(0)), 3_600 * 16_000);
+    assert_eq!(podcast_estimated_size_bytes(Some(60)), 60 * 16_000);
 }
 
 fn load_selected_transcoding_profile(profile_id: Option<&str>) -> Result<Option<Value>, String> {
@@ -5978,7 +5994,7 @@ async fn expand_podcast_auto_fill(
             if excluded.contains(episode.id.as_str()) {
                 continue;
             }
-            let size_bytes = episode.duration_seconds.unwrap_or(3600) as u64 * 16_000;
+            let size_bytes = podcast_estimated_size_bytes(episode.duration_seconds);
             candidates.push((
                 podcast_published_at(&episode.published_at),
                 episode.id.clone(),

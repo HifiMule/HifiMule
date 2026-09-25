@@ -34,3 +34,9 @@ test('podcast selections carry typed show and episode identities with conservati
     assert.equal(episode.id, 'episode-2');
     assert.equal(episode.sizeBytes, 3600 * 16_000);
 });
+
+test('zero-duration podcast metadata uses the unknown-duration size estimate', () => {
+    const episode = { id: 'episode-zero', title: 'Unknown length', durationSeconds: 0 };
+    assert.equal(podcastEpisodeBasketItem(episode, 'podcast-server').sizeBytes, 3_600 * 16_000);
+    assert.equal(podcastShowBasketItem('show', 'Talks', 'podcast-server', [episode]).sizeBytes, 3_600 * 16_000);
+});

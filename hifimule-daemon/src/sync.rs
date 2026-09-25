@@ -3009,14 +3009,34 @@ pub async fn execute_provider_sync(
                     first_error
                 );
                 let _ = tokio::fs::remove_file(&staged_path).await;
+                let retry_client = if direct_media.is_some() {
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .expect("valid HTTP client")
+                } else {
+                    reqwest::Client::new()
+                };
                 let retry_response = tokio::select! {
-                    result = reqwest::Client::new().get(&url).headers(sync_headers.clone()).send() => result,
+                    result = retry_client.get(&url).headers(sync_headers.clone()).send() => result,
                     _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => {
                         break Err(anyhow::anyhow!("Cancelled while retrying staged source"));
                     },
                 };
                 match retry_response {
                     Ok(retry) if retry.status().is_success() => {
+                        if let Some(media) = direct_media.as_ref() {
+                            let retry_content_type = retry
+                                .headers()
+                                .get(reqwest::header::CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok());
+                            if retry_content_type != media.request.expected_content_type.as_deref() {
+                                break Err(anyhow::anyhow!(
+                                    "Direct response content type changed on retry after: {}",
+                                    first_error
+                                ));
+                            }
+                        }
                         response = retry;
                         break stream_to_staging_file(
                             response.bytes_stream(),
