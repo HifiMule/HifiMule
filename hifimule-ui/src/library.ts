@@ -884,7 +884,8 @@ function setViewMode(mode: 'grid' | 'list') {
     clearSelection();
     state.listViewMode = mode;
     renderModeBar();
-    renderCurrentView();
+    if (state.browseMode === 'podcasts') renderPodcastContent();
+    else renderCurrentView();
 }
 
 // --- List multi-selection (Story 9.11) ---
@@ -1521,6 +1522,7 @@ async function loadMoreForListView() {
 }
 
 function renderCurrentView() {
+    document.getElementById('library-content')?.classList.remove('podcast-list-view');
     const mode = state.listViewMode;
     const onCurate = state.browseMode === 'playlists' && _supportsPlaylistWrite
         ? openCurationView
@@ -1648,40 +1650,85 @@ let podcastEpisodeCatalog: PodcastEpisode[] = [];
 let podcastEpisodeNextOffset = 0;
 let podcastCurrentShow: string | null = null;
 let podcastCurrentShowTitle = '';
+let podcastCurrentShowDescription: string | null = null;
 let podcastCatalogTruncated = false;
+let podcastSearchEpisodes: PodcastEpisode[] = [];
+let podcastSearchTruncated = false;
+const expandedPodcastEpisodes = new Set<string>();
+let podcastDescriptionId = 0;
+
+function renderPodcastContent(): void {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    container.replaceChildren();
+    container.classList.toggle('podcast-list-view', state.listViewMode === 'list');
+    if (podcastCurrentShow) {
+        container.append(podcastIconButton(t('library.podcast.back'), 'arrow-left', () => { void loadPodcastView(); }));
+        const title = document.createElement('h2');
+        title.textContent = podcastCurrentShowTitle;
+        container.append(title);
+        if (podcastCurrentShowDescription) container.append(podcastDescription(podcastCurrentShowDescription));
+        if (podcastEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
+        const items = document.createElement('div');
+        items.className = state.listViewMode === 'grid' ? 'media-grid' : 'podcast-list';
+        for (const episode of podcastEpisodes) items.append(podcastEpisodeRow(episode));
+        container.append(items);
+        if (podcastEpisodeNextOffset < podcastEpisodeCatalog.length) container.append(podcastIconButton(t('library.podcast.load_more'), 'arrow-down-circle', () => { void openPodcastShow(podcastCurrentShow!, true); }));
+        if (podcastCatalogTruncated) podcastStatus(container, t('library.podcast.truncated'));
+        return;
+    }
+    podcastSearchForm(container);
+    if (podcastShows.length === 0 && podcastSearchEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
+    const items = document.createElement('div');
+    items.className = state.listViewMode === 'grid' ? 'media-grid' : 'podcast-list';
+    for (const show of podcastShows) items.append(podcastShowRow(show));
+    for (const episode of podcastSearchEpisodes) items.append(podcastEpisodeRow(episode));
+    container.append(items);
+    if (podcastQuery) {
+        if (podcastSearchTruncated) podcastStatus(container, t('library.podcast.truncated'));
+    } else if (podcastNextOffset < podcastTotal) {
+        container.append(podcastIconButton(t('library.podcast.load_more'), 'arrow-down-circle', () => { void loadPodcastView(true); }));
+    }
+}
 
 function refreshPodcastBasketButtons(): void {
-    document.querySelectorAll<HTMLButtonElement>('#library-content .podcast-basket-toggle').forEach(button => {
+    document.querySelectorAll<HTMLElement>('#library-content .podcast-basket-toggle').forEach(button => {
         const selected = basketStore.has(button.dataset.basketId ?? '');
-        button.textContent = t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket');
+        button.setAttribute('name', selected ? 'dash-circle-fill' : 'plus-circle-fill');
+        button.setAttribute('label', t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket'));
         button.setAttribute('aria-pressed', String(selected));
+        button.closest('.media-card, .podcast-show-row, .podcast-episode-row')?.classList.toggle('is-selected', selected);
     });
 }
 basketStore.addEventListener('update', refreshPodcastBasketButtons);
 
-function podcastBasketButton(id: string, add: () => Promise<void>): HTMLButtonElement {
-    const button = podcastButton('', () => {
+function podcastBasketButton(id: string, add: () => Promise<void>): HTMLElement {
+    const button = document.createElement('sl-icon-button') as any;
+    button.className = 'basket-toggle-btn podcast-basket-toggle';
+    button.dataset.basketId = id;
+    button.addEventListener('click', (event: Event) => {
+        event.stopPropagation();
         if (!basketStore.admitPhysicalTargetMutation()) return;
         if (basketStore.has(id)) {
             basketStore.remove(id);
             return;
         }
-        button.disabled = true;
+        button.loading = true;
         void add().catch(error => showToast((error as Error).message, 'danger', ERROR_TOAST_DURATION))
-            .finally(() => { button.disabled = false; refreshPodcastBasketButtons(); });
+            .finally(() => { button.loading = false; refreshPodcastBasketButtons(); });
     });
-    button.className = 'podcast-basket-toggle';
-    button.dataset.basketId = id;
-    button.textContent = t(basketStore.has(id) ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket');
-    button.setAttribute('aria-pressed', String(basketStore.has(id)));
+    const selected = basketStore.has(id);
+    button.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
+    button.label = t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket');
+    button.setAttribute('aria-pressed', String(selected));
     return button;
 }
 
-function podcastButton(label: string, action: () => void): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = label;
-    button.addEventListener('click', action);
+function podcastIconButton(label: string, icon: string, action: () => void): HTMLElement {
+    const button = document.createElement('sl-icon-button') as any;
+    button.name = icon;
+    button.label = label;
+    button.addEventListener('click', (event: Event) => { event.stopPropagation(); action(); });
     return button;
 }
 
@@ -1756,22 +1803,37 @@ function podcastDescription(value: string): HTMLElement {
 }
 
 function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
-    const row = document.createElement('div');
-    row.className = 'podcast-episode-row';
-    const type = document.createElement('p');
-    type.textContent = t('library.podcast.episode');
-    row.append(type);
-    const heading = document.createElement('h3');
-    heading.textContent = episode.title;
-    row.append(heading);
-    const metadata = document.createElement('p');
-    const duration = episode.durationSeconds === null ? '' : `${Math.floor(episode.durationSeconds / 60)} min`;
-    metadata.textContent = [episode.publishedAt, duration, t('library.books.compatibility_unknown')].filter(Boolean).join(' · ');
-    row.append(metadata);
-    if (episode.description) {
-        row.append(podcastDescription(episode.description));
+    const grid = state.listViewMode === 'grid';
+    const row = document.createElement(grid ? 'sl-card' : 'div');
+    row.className = grid ? 'media-card podcast-episode-row' : 'podcast-episode-row media-list-row';
+    if (basketStore.has(episode.id)) row.classList.add('is-selected');
+    if (grid) {
+        const artwork = podcastArtwork(episode.coverArtId);
+        const overlay = document.createElement('div');
+        overlay.className = 'selection-overlay';
+        overlay.append(podcastBasketButton(episode.id, async () => {
+            const serverId = state.podcastServerId;
+            if (serverId && basketStore.getActiveServerId() === serverId) basketStore.add(podcastEpisodeBasketItem(episode, serverId));
+        }));
+        artwork.append(overlay);
+        row.append(artwork);
+    } else {
+        row.append(podcastArtwork(episode.coverArtId));
     }
-    row.append(podcastButton(t('library.podcast.play'), () => {
+    const content = document.createElement('div');
+    content.className = grid ? 'card-content' : 'media-list-row__info';
+    const heading = document.createElement(grid ? 'strong' : 'div');
+    heading.className = grid ? '' : 'media-list-row__name';
+    heading.textContent = episode.title;
+    content.append(heading);
+    const published = episode.publishedAt ? new Date(episode.publishedAt) : null;
+    const date = published && !Number.isNaN(published.getTime()) ? published.toLocaleDateString() : (episode.publishedAt ?? '');
+    const metadata = document.createElement('div');
+    metadata.className = grid ? 'card-subtitle' : 'media-list-row__subtitle';
+    metadata.textContent = date;
+    content.append(metadata);
+    row.append(content);
+    row.append(podcastIconButton(t('library.podcast.play'), 'play-fill', () => {
         if (!state.podcastServerId) return;
         void playbackPlayEpisode(state.podcastServerId, episode.id)
             .catch(error => {
@@ -1781,33 +1843,61 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
                 showToast(t(key), 'danger', ERROR_TOAST_DURATION);
             });
     }));
-    row.append(podcastBasketButton(episode.id, async () => {
+    if (!grid) row.append(podcastBasketButton(episode.id, async () => {
         const serverId = state.podcastServerId;
-        if (!serverId || basketStore.getActiveServerId() !== serverId) return;
-        basketStore.add(podcastEpisodeBasketItem(episode, serverId));
+        if (serverId && basketStore.getActiveServerId() === serverId) basketStore.add(podcastEpisodeBasketItem(episode, serverId));
     }));
-    return row;
+    if (!episode.description?.trim()) return row;
+
+    const description = podcastDescription(episode.description);
+    description.id = `podcast-episode-description-${++podcastDescriptionId}`;
+    const expanded = expandedPodcastEpisodes.has(episode.id);
+    description.hidden = !expanded;
+    const toggle = podcastIconButton(
+        t(expanded ? 'library.podcast.hide_description' : 'library.podcast.show_description'),
+        expanded ? 'chevron-up' : 'info-circle',
+        () => {
+            const open = description.hidden;
+            description.hidden = !open;
+            if (open) expandedPodcastEpisodes.add(episode.id);
+            else expandedPodcastEpisodes.delete(episode.id);
+            toggle.setAttribute('name', open ? 'chevron-up' : 'info-circle');
+            toggle.setAttribute('label', t(open ? 'library.podcast.hide_description' : 'library.podcast.show_description'));
+            toggle.setAttribute('aria-expanded', String(open));
+        },
+    );
+    toggle.setAttribute('aria-controls', description.id);
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.classList.add('podcast-description-toggle');
+    row.append(toggle);
+    if (grid) {
+        row.append(description);
+        return row;
+    }
+    const entry = document.createElement('div');
+    entry.className = 'podcast-list-entry';
+    entry.append(row, description);
+    return entry;
 }
 
 function podcastShowRow(show: PodcastShow): HTMLElement {
-    const row = document.createElement('div');
-    row.className = 'podcast-show-row';
-    const type = document.createElement('p');
-    type.textContent = t('library.podcast.show');
-    row.append(type);
-    if (show.coverArtId) {
-        const image = document.createElement('img');
-        image.alt = '';
-        image.loading = 'lazy';
-        image.width = 80;
-        image.height = 80;
-        row.append(image);
-        void getImageUrl(show.coverArtId, 160).then(url => {
-            if (row.isConnected) image.src = url;
-        }).catch(() => { image.remove(); });
-    }
-    row.append(podcastButton(show.title, () => { void openPodcastShow(show.id); }));
-    row.append(podcastBasketButton(show.id, async () => {
+    const grid = state.listViewMode === 'grid';
+    const row = document.createElement(grid ? 'sl-card' : 'div');
+    row.className = grid ? 'media-card podcast-show-row' : 'podcast-show-row media-list-row';
+    if (basketStore.has(show.id)) row.classList.add('is-selected');
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-label', show.title);
+    row.addEventListener('click', () => { void openPodcastShow(show.id); });
+    row.addEventListener('keydown', event => {
+        const key = (event as KeyboardEvent).key;
+        if (event.target === row && (key === 'Enter' || key === ' ')) {
+            event.preventDefault();
+            void openPodcastShow(show.id);
+        }
+    });
+    const artwork = podcastArtwork(show.coverArtId);
+    const addShow = async () => {
         const serverId = state.podcastServerId;
         if (!serverId || basketStore.getActiveServerId() !== serverId) return;
         const detail = await fetchPodcastShow(show.id, 0, 5_000);
@@ -1817,11 +1907,38 @@ function podcastShowRow(show: PodcastShow): HTMLElement {
         }
         if (state.podcastServerId !== serverId || basketStore.getActiveServerId() !== serverId) return;
         basketStore.add(podcastShowBasketItem(show.id, show.title, serverId, detail.episodes));
-    }));
-    if (show.description) {
-        row.append(podcastDescription(show.description));
+    };
+    if (grid) {
+        const overlay = document.createElement('div');
+        overlay.className = 'selection-overlay';
+        overlay.append(podcastBasketButton(show.id, addShow));
+        artwork.append(overlay);
     }
+    row.append(artwork);
+    const content = document.createElement('div');
+    content.className = grid ? 'card-content' : 'media-list-row__info';
+    const title = document.createElement(grid ? 'strong' : 'div');
+    title.className = grid ? '' : 'media-list-row__name';
+    title.textContent = show.title;
+    content.append(title);
+    if (show.episodeCount != null) {
+        const count = document.createElement('div');
+        count.className = grid ? 'card-subtitle' : 'media-list-row__subtitle';
+        count.textContent = String(show.episodeCount);
+        content.append(count);
+    }
+    row.append(content);
+    if (!grid) row.append(podcastBasketButton(show.id, addShow));
     return row;
+}
+
+function podcastArtwork(coverArtId: string | null): HTMLElement {
+    const artwork = document.createElement('div');
+    artwork.className = state.listViewMode === 'grid' ? 'card-image' : 'media-list-row__thumb';
+    if (coverArtId) void getImageUrl(coverArtId, state.listViewMode === 'grid' ? 300 : 64)
+        .then(url => { if (artwork.isConnected) artwork.style.backgroundImage = `url('${url}')`; })
+        .catch(() => {});
+    return artwork;
 }
 
 function podcastSearchForm(container: HTMLElement): void {
@@ -1837,7 +1954,12 @@ function podcastSearchForm(container: HTMLElement): void {
     form.append(label);
     const submit = document.createElement('button');
     submit.type = 'submit';
-    submit.textContent = t('library.podcast.search_button');
+    submit.className = 'podcast-icon-action';
+    submit.setAttribute('aria-label', t('library.podcast.search_button'));
+    const searchIcon = document.createElement('sl-icon');
+    searchIcon.setAttribute('name', 'search');
+    searchIcon.setAttribute('aria-hidden', 'true');
+    submit.append(searchIcon);
     form.append(submit);
     form.addEventListener('submit', event => {
         event.preventDefault();
@@ -1862,6 +1984,7 @@ async function openPodcastShow(showId: string, append = false): Promise<void> {
             if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
             podcastCurrentShow = showId;
             podcastCurrentShowTitle = detail.show.title;
+            podcastCurrentShowDescription = detail.show.description;
             podcastEpisodeCatalog = detail.episodes;
             podcastCatalogTruncated = detail.possiblyTruncated;
             podcastEpisodeNextOffset = 0;
@@ -1869,17 +1992,15 @@ async function openPodcastShow(showId: string, append = false): Promise<void> {
         if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
         podcastEpisodeNextOffset = Math.min(podcastEpisodeNextOffset + 50, podcastEpisodeCatalog.length);
         podcastEpisodes = podcastEpisodeCatalog.slice(0, podcastEpisodeNextOffset);
-        container.replaceChildren();
-        container.append(podcastButton(t('library.podcast.back'), () => { void loadPodcastView(); }));
-        const title = document.createElement('h2');
-        title.textContent = podcastCurrentShowTitle;
-        container.append(title);
-        if (podcastEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
-        for (const episode of podcastEpisodes) container.append(podcastEpisodeRow(episode));
-        if (podcastEpisodeNextOffset < podcastEpisodeCatalog.length) container.append(podcastButton(t('library.podcast.load_more'), () => { void openPodcastShow(showId, true); }));
-        if (podcastCatalogTruncated) podcastStatus(container, t('library.podcast.truncated'));
+        renderPodcastContent();
     } catch (error) {
-        if (request === podcastRequest) renderPodcastError(error, append);
+        if (request === podcastRequest) {
+            if (!append) {
+                container.replaceChildren();
+                container.append(podcastIconButton(t('library.podcast.back'), 'arrow-left', () => { void loadPodcastView(); }));
+            }
+            renderPodcastError(error, true);
+        }
     }
 }
 
@@ -1889,6 +2010,10 @@ async function loadPodcastView(append = false): Promise<void> {
     const request = ++podcastRequest;
     podcastCurrentShow = null;
     if (!append) {
+        podcastSearchEpisodes = [];
+        podcastSearchTruncated = false;
+    }
+    if (!append) {
         container.replaceChildren();
         podcastSearchForm(container);
         podcastStatus(container, t('library.podcast.show') + '…');
@@ -1897,12 +2022,10 @@ async function loadPodcastView(append = false): Promise<void> {
         if (podcastQuery) {
             const result = await searchPodcasts(podcastQuery);
             if (request !== podcastRequest || state.browseMode !== 'podcasts') return;
-            container.replaceChildren();
-            podcastSearchForm(container);
-            if (result.shows.length === 0 && result.episodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
-            for (const show of result.shows) container.append(podcastShowRow(show));
-            for (const episode of result.episodes) container.append(podcastEpisodeRow(episode));
-            if (result.possiblyTruncated) podcastStatus(container, t('library.podcast.truncated'));
+            podcastShows = result.shows;
+            podcastSearchEpisodes = result.episodes;
+            podcastSearchTruncated = result.possiblyTruncated;
+            renderPodcastContent();
             return;
         }
         const page = await fetchPodcastShows(append ? podcastNextOffset : 0, 50);
@@ -1910,11 +2033,7 @@ async function loadPodcastView(append = false): Promise<void> {
         podcastShows = append ? [...podcastShows, ...page.shows] : page.shows;
         podcastTotal = page.total;
         podcastNextOffset = (append ? podcastNextOffset : 0) + 50;
-        container.replaceChildren();
-        podcastSearchForm(container);
-        if (podcastShows.length === 0) podcastStatus(container, t('library.podcast.empty'));
-        for (const show of podcastShows) container.append(podcastShowRow(show));
-        if (podcastNextOffset < podcastTotal) container.append(podcastButton(t('library.podcast.load_more'), () => { void loadPodcastView(true); }));
+        renderPodcastContent();
     } catch (error) {
         if (request === podcastRequest) renderPodcastError(error, append);
     }
@@ -2823,6 +2942,9 @@ export async function initLibraryView() {
             ? (selected.serverId ?? null) : null;
         ++podcastRequest;
         podcastShows = [];
+        expandedPodcastEpisodes.clear();
+        podcastSearchEpisodes = [];
+        podcastSearchTruncated = false;
         podcastTotal = 0;
         podcastNextOffset = 0;
         podcastQuery = '';
