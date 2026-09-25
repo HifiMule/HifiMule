@@ -139,6 +139,8 @@ pub enum PlaybackSeekMechanism {
     NavidromeOriginalOpus,
     NavidromeOriginalMp3,
     NavidromeOriginalFlac,
+    AudiobookshelfDirectMp3,
+    AudiobookshelfDirectM4a,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

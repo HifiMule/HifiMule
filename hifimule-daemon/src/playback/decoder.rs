@@ -551,10 +551,12 @@ fn seek_representation_matches(
         | PlaybackSeekMechanism::NavidromeOriginalM4a => {
             has_container("mov") && matches!(codec, "aac" | "alac")
         }
+        PlaybackSeekMechanism::AudiobookshelfDirectM4a => has_container("mov") && codec == "aac",
         PlaybackSeekMechanism::JellyfinOriginalOpus
         | PlaybackSeekMechanism::NavidromeOriginalOpus => has_container("ogg") && codec == "opus",
         PlaybackSeekMechanism::JellyfinOriginalMp3
-        | PlaybackSeekMechanism::NavidromeOriginalMp3 => has_container("mp3") && codec == "mp3",
+        | PlaybackSeekMechanism::NavidromeOriginalMp3
+        | PlaybackSeekMechanism::AudiobookshelfDirectMp3 => has_container("mp3") && codec == "mp3",
         PlaybackSeekMechanism::JellyfinOriginalFlac
         | PlaybackSeekMechanism::NavidromeOriginalFlac => has_container("flac") && codec == "flac",
     }
@@ -968,6 +970,11 @@ mod tests {
                 0.015,
             ),
             (
+                "generated-seek-aac.m4a",
+                PlaybackSeekMechanism::AudiobookshelfDirectM4a,
+                0.015,
+            ),
+            (
                 "generated-seek-alac.m4a",
                 PlaybackSeekMechanism::JellyfinOriginalM4a,
                 1.0e-6,
@@ -980,6 +987,11 @@ mod tests {
             (
                 "generated-seek-mp3.mp3",
                 PlaybackSeekMechanism::JellyfinOriginalMp3,
+                0.02,
+            ),
+            (
+                "generated-seek-mp3.mp3",
+                PlaybackSeekMechanism::AudiobookshelfDirectMp3,
                 0.02,
             ),
             (
@@ -1097,6 +1109,21 @@ mod tests {
             PlaybackSeekMechanism::NavidromeOriginalMp3,
             "mp3",
             "mp3"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::AudiobookshelfDirectMp3,
+            "mp3",
+            "mp3"
+        ));
+        assert!(seek_representation_matches(
+            PlaybackSeekMechanism::AudiobookshelfDirectM4a,
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "aac"
+        ));
+        assert!(!seek_representation_matches(
+            PlaybackSeekMechanism::AudiobookshelfDirectM4a,
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "alac"
         ));
         assert!(seek_representation_matches(
             PlaybackSeekMechanism::NavidromeOriginalFlac,
@@ -1520,6 +1547,23 @@ mod tests {
             ),
             Some(10_000)
         );
+        for mechanism in [
+            PlaybackSeekMechanism::AudiobookshelfDirectMp3,
+            PlaybackSeekMechanism::AudiobookshelfDirectM4a,
+        ] {
+            assert_eq!(
+                validated_seek_duration_ms(mechanism, 0, 1, 48_000, Some(10_000)),
+                None
+            );
+            assert_eq!(
+                validated_seek_duration_ms(mechanism, 504_000, 1, 48_000, Some(12_000)),
+                None
+            );
+            assert_eq!(
+                validated_seek_duration_ms(mechanism, 504_000, 1, 48_000, Some(10_000)),
+                Some(10_500)
+            );
+        }
     }
 
     #[test]

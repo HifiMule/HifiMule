@@ -4,8 +4,8 @@
 use super::{
     BookPartTiming, BookProgress, BookTiming, BrowseCapabilities, BrowseMode, Capabilities,
     MediaProvider, PlaybackCleanup, PlaybackDescription, PlaybackProvenance, PlaybackRefresh,
-    PlaybackRepresentation, PlaybackRequest, ProviderChangeContext, ProviderError,
-    ProviderLibraryRole, ScrobbleRequest, ServerType, TranscodeProfile,
+    PlaybackRepresentation, PlaybackRequest, PlaybackSeekMechanism, ProviderChangeContext,
+    ProviderError, ProviderLibraryRole, ScrobbleRequest, ServerType, TranscodeProfile,
 };
 use crate::domain::models::{
     Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChapterMarker, Credit,
@@ -736,7 +736,11 @@ impl AudiobookshelfProvider {
                 sample_rate: None,
                 bit_depth: None,
                 provenance: PlaybackProvenance::Original,
-                seek_mechanism: None,
+                seek_mechanism: Some(match codec {
+                    "mp3" => PlaybackSeekMechanism::AudiobookshelfDirectMp3,
+                    "aac" => PlaybackSeekMechanism::AudiobookshelfDirectM4a,
+                    _ => unreachable!("format was validated above"),
+                }),
                 request: PlaybackRequest {
                     url,
                     headers,
@@ -2767,7 +2771,11 @@ impl MediaProvider for AudiobookshelfProvider {
                 sample_rate: None,
                 bit_depth: None,
                 provenance: PlaybackProvenance::Original,
-                seek_mechanism: None,
+                seek_mechanism: Some(match codec {
+                    "mp3" => PlaybackSeekMechanism::AudiobookshelfDirectMp3,
+                    "aac" => PlaybackSeekMechanism::AudiobookshelfDirectM4a,
+                    _ => unreachable!("format was validated above"),
+                }),
                 request: PlaybackRequest {
                     url,
                     headers,
@@ -3228,6 +3236,10 @@ mod tests {
         assert_eq!(description.representations.len(), 1);
         assert_eq!(description.representations[0].codec.as_deref(), Some("mp3"));
         assert!(description.representations[0].request.range_supported);
+        assert_eq!(
+            description.representations[0].seek_mechanism,
+            Some(PlaybackSeekMechanism::AudiobookshelfDirectMp3)
+        );
         let debug = format!("{:?}", description.representations[0].request);
         assert!(!debug.contains("session-secret"));
         assert!(!debug.contains("access-fixture"));
@@ -4842,6 +4854,10 @@ mod tests {
         assert_eq!(description.song.id, id);
         assert_eq!(description.representations[0].codec.as_deref(), Some("mp3"));
         assert!(description.song.album_id.is_none());
+        assert_eq!(
+            description.representations[0].seek_mechanism,
+            Some(PlaybackSeekMechanism::AudiobookshelfDirectMp3)
+        );
         drop(description);
         for _ in 0..50 {
             if close.matched_async().await {
