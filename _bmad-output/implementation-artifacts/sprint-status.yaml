@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-25  # Story 17.8 code review complete
+last_updated: 2026-09-25  # Story 17.9 created
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -231,5 +231,5 @@ development_status:
   17-6-preserve-audiobookshelf-listening-continuity-safely: done
   17-7-add-audiobookshelf-podcast-servers-and-direct-playback: done
   17-8-synchronize-audiobookshelf-media-with-independent-policies: done
-  17-9-refine-audiobookshelf-grouping-and-compatibility-feedback: backlog
+  17-9-refine-audiobookshelf-grouping-and-compatibility-feedback: ready-for-dev
   epic-17-retrospective: optional
