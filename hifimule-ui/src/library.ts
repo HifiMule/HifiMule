@@ -675,12 +675,18 @@ function renderBookContext(container: HTMLElement): void {
             container.appendChild(note);
         }
     } else if (state.bookChapters.length > 0) {
-        const section = document.createElement('section');
-        section.setAttribute('aria-label', t('library.books.chapters'));
-        const heading = document.createElement('h3');
+        const section = document.createElement('details');
+        section.className = 'book-chapters';
+        const summary = document.createElement('summary');
+        const heading = document.createElement('strong');
         heading.textContent = t('library.books.chapters');
-        section.appendChild(heading);
+        const count = document.createElement('span');
+        count.className = 'book-chapters__count';
+        count.textContent = String(state.bookChapters.length);
+        summary.append(heading, count);
+        section.appendChild(summary);
         const list = document.createElement('ol');
+        list.className = 'book-chapters__list';
         state.bookChapters.forEach((chapter, index) => {
             const item = document.createElement('li');
             item.textContent = t('library.books.chapter_interval', {
@@ -1395,7 +1401,9 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     (content as any).__listScroller = scroller;
     function paint() {
         const currentItems = state.items;
-        const scrollTop = content.scrollTop;
+        const scrollerTop = scroller.getBoundingClientRect().top
+            - content.getBoundingClientRect().top + content.scrollTop;
+        const scrollTop = Math.max(0, content.scrollTop - scrollerTop);
         const viewportH = content.clientHeight;
         const first = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - OVERSCAN);
         const last = Math.min(currentItems.length - 1, Math.ceil((scrollTop + viewportH) / VIRTUAL_ROW_HEIGHT) + OVERSCAN);
