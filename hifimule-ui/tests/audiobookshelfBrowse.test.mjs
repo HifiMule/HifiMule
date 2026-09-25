@@ -16,12 +16,14 @@ test('Audiobookshelf albums retain ordered public credit presentation', () => {
 });
 
 test('Audiobookshelf books and parts use the existing playback routes without music actions', () => {
-    assert.match(card, /\['Book', 'BookPart'\]/);
+    assert.match(card, /const showSelection = isBrowseItem \|\| mode === 'items'/);
+    assert.match(card, /basketStore\.add\(bookBasketItem/);
     assert.match(card, /\['MusicAlbum', 'Book'\]/);
     assert.match(card, /\['Audio', 'BookPart'\]/);
     assert.match(card, /if \(!isPart\)/);
     assert.match(library, /item\.type === 'Audio' \|\| item\.type === 'BookPart'/);
     assert.match(library, /item\.type === 'MusicAlbum' \|\| item\.type === 'Book'/);
+    assert.match(library, /resolved === 'Book' \|\| resolved === 'BookPart'/);
     assert.match(albumPlay, /playbackPlayAlbum\(source\.serverId, source\.albumId\)/);
     assert.match(card, /playbackPlayTrack\(playbackSource\.serverId, playbackSource\.trackId\)/);
     for (const locale of Object.values(catalog)) {

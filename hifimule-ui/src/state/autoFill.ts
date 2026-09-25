@@ -135,6 +135,7 @@ export interface PromotionStage {
 
 export interface AutoFillPipeline {
     enabled: boolean;
+    podcastRetention: { recentCount: number; unplayedOnly: boolean };
     filter: FilterStage;
     sources: SourceEntry[];
     unit: Unit;
@@ -170,6 +171,7 @@ export function emptyFilter(): FilterStage {
 export function defaultLegacyPipeline(maxBytes?: number): AutoFillPipeline {
     return {
         enabled: true,
+        podcastRetention: { recentCount: 10, unplayedOnly: false },
         filter: emptyFilter(),
         sources: [{ kind: 'library' }],
         unit: 'track',
@@ -192,6 +194,7 @@ export function normalizePipeline(raw: Partial<AutoFillPipeline> | null | undefi
     if (!raw) return base;
     return {
         enabled: raw.enabled ?? false,
+        podcastRetention: { recentCount: raw.podcastRetention?.recentCount ?? 10, unplayedOnly: raw.podcastRetention?.unplayedOnly ?? false },
         filter: { ...emptyFilter(), ...(raw.filter ?? {}) },
         sources: Array.isArray(raw.sources) && raw.sources.length > 0
             ? raw.sources.map((s) => ({ ...s }))
@@ -331,6 +334,7 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
     }
     return {
         enabled: p.enabled,
+        podcastRetention: { recentCount: Math.max(0, Math.min(100, Math.floor(p.podcastRetention?.recentCount ?? 10))), unplayedOnly: !!p.podcastRetention?.unplayedOnly },
         filter: {
             includeTags: p.filter.includeTags ?? [],
             excludeTags: p.filter.excludeTags ?? [],

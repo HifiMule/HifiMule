@@ -55,6 +55,8 @@ pub struct AutoFillPipeline {
     /// Whether auto-fill is active. The *engine* does not gate on this — enabling is a
     /// fetch-layer/caller concern (Story 12.3); [`run_pipeline`] runs regardless.
     pub enabled: bool,
+    /// Audiobookshelf Podcasts retention. Ignored for music servers.
+    pub podcast_retention: PodcastRetention,
     /// Tag/genre include-exclude filter applied per candidate. Empty = pass-through.
     pub filter: FilterStage,
     /// Ordered list of sources to draw from, optionally blended by `share`.
@@ -91,6 +93,24 @@ pub struct AutoFillPipeline {
     /// unit-grouping refinement / output reorder over the existing `unit` axis. All-default ⇒ zero
     /// behavior change.
     pub promotion: PromotionStage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PodcastRetention {
+    /// Maximum newest episodes retained per show, including episodes with unknown dates.
+    pub recent_count: usize,
+    /// Playback state is not available in the typed catalog. Unknown state falls back to recent.
+    pub unplayed_only: bool,
+}
+
+impl Default for PodcastRetention {
+    fn default() -> Self {
+        Self {
+            recent_count: 10,
+            unplayed_only: false,
+        }
+    }
 }
 
 /// Tag/genre filter. All fields default to empty, which means "pass everything through".
@@ -629,6 +649,7 @@ impl AutoFillPipeline {
     pub fn default_legacy(max_bytes: Option<u64>) -> Self {
         Self {
             enabled: true,
+            podcast_retention: PodcastRetention::default(),
             filter: FilterStage::default(),
             sources: vec![SourceEntry::new(SourceKind::Library)],
             unit: Unit::Track,

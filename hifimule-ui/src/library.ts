@@ -40,6 +40,7 @@ import { TracksBrowseView } from './components/TracksBrowseView';
 import { createTrackPreviewButton } from './components/TrackPreviewButton';
 import { createTrackQueueButton } from './components/TrackQueueButton';
 import { basketStore } from './state/basket';
+import { bookBasketItem, podcastEpisodeBasketItem, podcastShowBasketItem } from './state/mediaSyncSelection';
 import { t } from './i18n';
 import { showToast, ERROR_TOAST_DURATION } from './toast';
 
@@ -377,7 +378,7 @@ function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
         subtitle: state.isBookLibrary
             ? (tracks.length === 1 ? t('library.books.complete') : t('library.books.part', { number: track.trackNumber ?? index + 1 }))
             : track.artistName,
-        sizeBytes: track.sizeBytes ?? 0,
+        sizeBytes: track.sizeBytes ?? (track.duration > 0 ? track.duration : 3_600) * 16_000,
         sizeTicks: track.duration * 10_000_000,
         childCount: 1,
     }));
@@ -886,7 +887,7 @@ function setViewMode(mode: 'grid' | 'list') {
 // genres and playlists render no checkbox and are skipped by Shift-ranges.
 function isSelectableListItem(item: BrowseDisplayItem): boolean {
     const resolved = item.basketType ?? item.type;
-    return resolved === 'MusicArtist' || resolved === 'MusicAlbum' || resolved === 'Audio';
+    return resolved === 'MusicArtist' || resolved === 'MusicAlbum' || resolved === 'Audio' || resolved === 'Book' || resolved === 'BookPart';
 }
 
 // Repaint mounted rows (selection is app state — remounted rows re-read it)
@@ -1087,6 +1088,7 @@ async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ add
     const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
     const toAdd: BrowseDisplayItem[] = [];
     const needsFetch = new Set<BrowseDisplayItem>();
+    const books = new Map<string, ReturnType<typeof bookBasketItem>>();
     let skipped = 0;
     for (const item of items) {
         const itemId = item.basketId ?? item.id;
@@ -1114,8 +1116,17 @@ async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ add
         for (const s of sizeData ?? []) sizeById.set(s.id, s);
     }
 
+    for (const book of toAdd.filter(item => item.type === 'Book')) {
+        const detail = await fetchBrowseAlbum(book.id);
+        books.set(book.id, bookBasketItem(book.id, book.name, book.serverId, book.subtitle ?? undefined, detail.tracks));
+    }
+
     for (const item of toAdd) {
         const itemId = item.basketId ?? item.id;
+        if (item.serverId && basketStore.getActiveServerId() !== item.serverId) {
+            skipped++;
+            continue;
+        }
         const resolvedType = item.basketType ?? item.type;
         if (needsFetch.has(item)) {
             const info = countById.get(itemId) ?? { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
@@ -1124,20 +1135,23 @@ async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ add
                 id: itemId,
                 name: item.name,
                 type: resolvedType,
+                serverId: item.serverId,
                 artist: item.subtitle ?? undefined,
                 childCount: info.recursiveItemCount ?? 0,
                 sizeTicks: item.sizeTicks || (info.cumulativeRunTimeTicks ?? 0),
                 sizeBytes: sizeInfo.totalSizeBytes ?? 0,
             });
         } else {
+            const book = books.get(item.id);
             basketStore.add({
                 id: itemId,
                 name: item.name,
                 type: resolvedType,
+                serverId: item.serverId,
                 artist: item.subtitle ?? undefined,
-                childCount: item.childCount ?? 0,
-                sizeTicks: item.sizeTicks ?? 0,
-                sizeBytes: item.sizeBytes ?? 0,
+                childCount: book?.childCount ?? item.childCount ?? 0,
+                sizeTicks: book?.sizeTicks ?? item.sizeTicks ?? 0,
+                sizeBytes: book?.sizeBytes ?? item.sizeBytes ?? 0,
             });
         }
     }
@@ -1321,7 +1335,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
         });
         row.appendChild(curateBtn);
     }
-    if (item.type !== 'Book' && item.type !== 'BookPart') row.appendChild(toggleBtn);
+    row.appendChild(toggleBtn);
     return row;
 }
 
@@ -1630,6 +1644,33 @@ let podcastCurrentShow: string | null = null;
 let podcastCurrentShowTitle = '';
 let podcastCatalogTruncated = false;
 
+function refreshPodcastBasketButtons(): void {
+    document.querySelectorAll<HTMLButtonElement>('#library-content .podcast-basket-toggle').forEach(button => {
+        const selected = basketStore.has(button.dataset.basketId ?? '');
+        button.textContent = t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket');
+        button.setAttribute('aria-pressed', String(selected));
+    });
+}
+basketStore.addEventListener('update', refreshPodcastBasketButtons);
+
+function podcastBasketButton(id: string, add: () => Promise<void>): HTMLButtonElement {
+    const button = podcastButton('', () => {
+        if (!basketStore.admitPhysicalTargetMutation()) return;
+        if (basketStore.has(id)) {
+            basketStore.remove(id);
+            return;
+        }
+        button.disabled = true;
+        void add().catch(error => showToast((error as Error).message, 'danger', ERROR_TOAST_DURATION))
+            .finally(() => { button.disabled = false; refreshPodcastBasketButtons(); });
+    });
+    button.className = 'podcast-basket-toggle';
+    button.dataset.basketId = id;
+    button.textContent = t(basketStore.has(id) ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket');
+    button.setAttribute('aria-pressed', String(basketStore.has(id)));
+    return button;
+}
+
 function podcastButton(label: string, action: () => void): HTMLButtonElement {
     const button = document.createElement('button');
     button.type = 'button';
@@ -1687,6 +1728,11 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
                 showToast(t(key), 'danger', ERROR_TOAST_DURATION);
             });
     }));
+    row.append(podcastBasketButton(episode.id, async () => {
+        const serverId = state.podcastServerId;
+        if (!serverId || basketStore.getActiveServerId() !== serverId) return;
+        basketStore.add(podcastEpisodeBasketItem(episode, serverId));
+    }));
     return row;
 }
 
@@ -1708,6 +1754,17 @@ function podcastShowRow(show: PodcastShow): HTMLElement {
         }).catch(() => { image.remove(); });
     }
     row.append(podcastButton(show.title, () => { void openPodcastShow(show.id); }));
+    row.append(podcastBasketButton(show.id, async () => {
+        const serverId = state.podcastServerId;
+        if (!serverId || basketStore.getActiveServerId() !== serverId) return;
+        const detail = await fetchPodcastShow(show.id, 0, 5_000);
+        if (detail.possiblyTruncated) {
+            showToast(t('library.podcast.truncated'), 'danger', ERROR_TOAST_DURATION);
+            return;
+        }
+        if (state.podcastServerId !== serverId || basketStore.getActiveServerId() !== serverId) return;
+        basketStore.add(podcastShowBasketItem(show.id, show.title, serverId, detail.episodes));
+    }));
     if (show.description) {
         const description = document.createElement('p');
         description.textContent = show.description;

@@ -2,12 +2,13 @@
 // Handles rendering of media items in the grid with selection support.
 
 import { basketStore } from '../state/basket';
-import { getImageUrl, playbackPlayTrack, rpcCall } from '../rpc';
+import { fetchBrowseAlbum, getImageUrl, playbackPlayTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { showToast } from '../toast';
 import { createAlbumPlayButton } from './AlbumPlayButton';
 import { createTrackPreviewButton } from './TrackPreviewButton';
 import { createTrackQueueButton } from './TrackQueueButton';
+import { bookBasketItem } from '../state/mediaSyncSelection';
 
 export interface JellyfinItem {
     Id: string;
@@ -66,10 +67,7 @@ export class MediaCard {
         const isSelected = basketStore.has(itemId);
         if (isSelected) card.classList.add('is-selected');
 
-        // Audiobookshelf books and parts remain outside the music basket.
-        const showSelection = isBrowseItem
-            ? !['Book', 'BookPart'].includes((item as BrowseDisplayItem).type)
-            : mode === 'items';
+        const showSelection = isBrowseItem || mode === 'items';
         const btnDisabled = !selectionAllowed;
 
         let subtitleHtml = '';
@@ -193,7 +191,21 @@ export class MediaCard {
                     basketStore.remove(itemId);
                 } else if (isBrowseItem) {
                     const bi = item as BrowseDisplayItem;
+                    if (bi.serverId && basketStore.getActiveServerId() !== bi.serverId) return;
                     const resolvedType = bi.basketType ?? bi.type;
+                    if (resolvedType === 'Book') {
+                        toggleBtn.loading = true;
+                        try {
+                            const detail = await fetchBrowseAlbum(bi.id);
+                            if (bi.serverId && basketStore.getActiveServerId() !== bi.serverId) return;
+                            basketStore.add(bookBasketItem(bi.id, bi.name, bi.serverId, bi.subtitle ?? undefined, detail.tracks));
+                        } catch (err) {
+                            showToast((err as Error).message, 'danger');
+                        } finally {
+                            toggleBtn.loading = false;
+                        }
+                        return;
+                    }
                     const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
                     const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
                     const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!bi.childCount || !bi.sizeBytes);
@@ -220,6 +232,7 @@ export class MediaCard {
                                 id: resolvedId,
                                 name: bi.name,
                                 type: resolvedType,
+                                serverId: bi.serverId,
                                 artist: bi.subtitle ?? undefined,
                                 childCount: info.recursiveItemCount,
                                 sizeTicks: bi.sizeTicks || info.cumulativeRunTimeTicks,
@@ -236,6 +249,7 @@ export class MediaCard {
                             id: bi.basketId ?? bi.id,
                             name: bi.name,
                             type: resolvedType,
+                            serverId: bi.serverId,
                             artist: bi.subtitle ?? undefined,
                             childCount: bi.childCount ?? 0,
                             sizeTicks: bi.sizeTicks ?? 0,

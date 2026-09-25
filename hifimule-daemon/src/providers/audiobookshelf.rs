@@ -2414,6 +2414,18 @@ impl MediaProvider for AudiobookshelfProvider {
     ) -> Result<String, ProviderError> {
         Err(unsupported("download_url"))
     }
+
+    async fn resolve_sync_media(
+        &self,
+        id: &str,
+    ) -> Result<crate::providers::SyncMediaRepresentation, ProviderError> {
+        // A direct session supplies authenticated media and cleanup, without
+        // reading or writing the player's progress record.
+        let playback = self.resolve_playback(id).await?;
+        crate::providers::SyncMediaRepresentation::from_playback_representations(
+            playback.representations,
+        )
+    }
     async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
         if self.library_role == Some(ProviderLibraryRole::Podcast) {
             return self.resolve_podcast_playback(song_id).await;

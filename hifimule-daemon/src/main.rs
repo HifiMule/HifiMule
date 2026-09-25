@@ -1248,6 +1248,7 @@ fn push_auto_fill_items(
                 run_time_seconds: -1,
             });
             desired_items.push(sync::DesiredItem {
+                media_role: crate::device::MediaRole::Music,
                 jellyfin_id: item.id,
                 name: item.name,
                 album: item.album,
@@ -1299,6 +1300,7 @@ mod auto_sync_tests {
     #[test]
     fn push_auto_fill_items_dedups_and_writes_playlist() {
         let mut desired_items = vec![sync::DesiredItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: "manual".to_string(),
             name: "manual".to_string(),
             album: None,
@@ -1332,6 +1334,7 @@ mod auto_sync_tests {
     #[test]
     fn auto_sync_delta_has_work_when_only_playlist_changes() {
         let delta = sync::SyncDelta {
+            blocked: vec![],
             adds: vec![],
             deletes: vec![],
             id_changes: vec![],
@@ -1476,6 +1479,10 @@ async fn run_auto_sync_via_provider(
 
     let mut seen_ids = std::collections::HashSet::new();
     desired_items.retain(|item| seen_ids.insert(item.jellyfin_id.clone()));
+    let media_role = device::MediaRole::from_library_role(provider.library_role());
+    for item in &mut desired_items {
+        item.media_role = media_role;
+    }
 
     if desired_items.is_empty() && !manifest.basket_items.is_empty() {
         daemon_log!("[AutoSync] No downloadable items resolved from basket, skipping");
@@ -1849,6 +1856,7 @@ fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::Desired
         .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
         .unwrap_or(0);
     sync::DesiredItem {
+        media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
         name: song.title.clone(),
         album: song.album_title.clone(),

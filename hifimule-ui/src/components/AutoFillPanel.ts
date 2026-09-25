@@ -205,16 +205,21 @@ export class AutoFillPanel {
                         ${t('basket.autofill.enable')}
                     </sl-switch>
                 </div>
-                ${this.renderFilterStage()}
+                ${this.opts.modes.includes('podcasts') ? `
+                    <sl-input id="af-podcast-recent" type="number" min="0" max="100" label="${t('basket.autofill.podcast_recent')}" value="${p.podcastRetention.recentCount}"></sl-input>
+                    <sl-switch id="af-podcast-unplayed" ${p.podcastRetention.unplayedOnly ? 'checked' : ''}>${t('basket.autofill.podcast_unplayed')}</sl-switch>
+                    <div class="device-settings-description">${t('basket.autofill.podcast_progress_fallback')}</div>
+                ` : ''}
+                ${this.opts.modes.includes('podcasts') ? '' : this.renderFilterStage()}
 
-                <div class="auto-fill-advanced">
+                ${this.opts.modes.includes('podcasts') ? '' : `<div class="auto-fill-advanced">
                     <div id="af-advanced-header" class="device-folders-header" role="button" tabindex="0"
                          aria-expanded="${this.advancedOpen}">
                         <sl-icon name="chevron-right" class="af-advanced-chevron${this.advancedOpen ? ' af-advanced-chevron--open' : ''}"></sl-icon>
                         <span>${t('basket.autofill.advanced')}</span>
                     </div>
                     ${this.advancedOpen ? this.renderAdvanced() : ''}
-                </div>
+                </div>`}
                 ${this.renderBudgetStage()}
                 <div id="af-preview" class="auto-fill-preview">${this.renderPreviewContent()}</div>
             </div>
@@ -1124,6 +1129,12 @@ export class AutoFillPanel {
      * can never diverge — the preview always reflects the exact config a Save would write. */
     private buildPipeline(): AutoFillPipeline {
         this.captureInputs();
+        if (this.opts.modes.includes('podcasts')) {
+            const recent = this.dialog?.querySelector('#af-podcast-recent') as any;
+            const unplayed = this.dialog?.querySelector('#af-podcast-unplayed') as any;
+            this.pipeline.podcastRetention.recentCount = clampInt(Number(recent?.value ?? 10), 0, 100);
+            this.pipeline.podcastRetention.unplayedOnly = !!unplayed?.checked;
+        }
         // Budget (GB → bytes); empty clears the ceiling.
         this.pipeline.budget.maxBytes = this.bytesFromGbInput(
             this.budgetGbInput,

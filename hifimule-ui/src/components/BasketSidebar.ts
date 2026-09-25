@@ -43,6 +43,8 @@ interface ConnectedDeviceSummary {
     icon?: string | null;
     managedPaths?: string[];
     playlistPath?: string | null;
+    audiobookPath?: string | null;
+    podcastPath?: string | null;
     transcodingProfileId?: string | null;
 }
 
@@ -561,6 +563,8 @@ export class BasketSidebar {
             ?? current.playlistPath
             ?? current.playlist_path
             ?? '';
+        const audiobookFolder = selected.audiobookPath ?? current.audiobookPath ?? current.audiobook_path ?? '';
+        const podcastFolder = selected.podcastPath ?? current.podcastPath ?? current.podcast_path ?? '';
         let selectedIcon = selected.icon || 'usb-drive';
         const selectedProfileId = selected.transcodingProfileId
             ?? current.transcodingProfileId
@@ -596,6 +600,8 @@ export class BasketSidebar {
                     ${this.escapeHtml(selectedProfile?.description ?? '')}
                 </div>
                 <sl-input id="device-settings-music" label="${t('basket.device.music_folder')}" value="${this.escapeHtml(musicFolder)}"></sl-input>
+                <sl-input id="device-settings-audiobook" label="${t('basket.device.audiobook_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(audiobookFolder)}"></sl-input>
+                <sl-input id="device-settings-podcast" label="${t('basket.device.podcast_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(podcastFolder)}"></sl-input>
                 <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
@@ -619,9 +625,13 @@ export class BasketSidebar {
         const profileSelect = dialog.querySelector('#device-settings-transcoding-profile') as any;
         const profileDesc = dialog.querySelector('#device-settings-transcoding-desc') as HTMLElement | null;
         const musicInput = dialog.querySelector('#device-settings-music') as any;
+        const audiobookInput = dialog.querySelector('#device-settings-audiobook') as any;
+        const podcastInput = dialog.querySelector('#device-settings-podcast') as any;
         const playlistInput = dialog.querySelector('#device-settings-playlist') as any;
         let foldersEdited = false;
         musicInput?.addEventListener('sl-input', () => { foldersEdited = true; });
+        audiobookInput?.addEventListener('sl-input', () => { foldersEdited = true; });
+        podcastInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         playlistInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         profileSelect?.addEventListener('sl-change', (event: any) => {
             const profile = profiles.find(p => p.id === event.target.value);
@@ -643,12 +653,16 @@ export class BasketSidebar {
             try {
                 const musicFolderValue = ((dialog.querySelector('#device-settings-music') as any)?.value ?? '').trim();
                 const playlistFolderValue = ((dialog.querySelector('#device-settings-playlist') as any)?.value ?? '').trim();
+                const audiobookFolderValue = ((dialog.querySelector('#device-settings-audiobook') as any)?.value ?? '').trim();
+                const podcastFolderValue = ((dialog.querySelector('#device-settings-podcast') as any)?.value ?? '').trim();
                 const payload: Record<string, unknown> = {
                     deviceId: selected.deviceId,
                     name: (dialog.querySelector('#device-settings-name') as any)?.value ?? '',
                     icon: selectedIcon || null,
                     transcodingProfileId: (dialog.querySelector('#device-settings-transcoding-profile') as any)?.value ?? 'passthrough',
                     playlistFolderPath: playlistFolderValue,
+                    audiobookFolderPath: audiobookFolderValue,
+                    podcastFolderPath: podcastFolderValue,
                 };
                 if (musicFolderValue !== '') {
                     payload.musicFolderPath = musicFolderValue;
@@ -1260,6 +1274,15 @@ export class BasketSidebar {
         try {
 
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
+            const blocked = Array.isArray((delta as any)?.blocked) ? (delta as any).blocked as Array<{ name?: string; reason?: string }> : [];
+            if (blocked.length > 0 && !await this.confirmBlockedMedia(blocked)) {
+                this.stopPolling();
+                this.isSyncing = false;
+                this.currentOperationId = null;
+                this.currentOperation = null;
+                this.render();
+                return;
+            }
             const rawCleanupCount = (delta as any)?.destructiveCleanupCount;
             const deleteCount = typeof rawCleanupCount === 'number'
                 ? rawCleanupCount
@@ -1468,6 +1491,25 @@ export class BasketSidebar {
         if (etaSeconds < 10) return t('basket.sync.almost_done');
         if (etaSeconds < 60) return t('basket.sync.seconds_left', { count: Math.round(etaSeconds) });
         return t('basket.sync.minutes_left', { count: Math.round(etaSeconds / 60) });
+    }
+
+    private confirmBlockedMedia(blocked: Array<{ name?: string; reason?: string }>): Promise<boolean> {
+        return new Promise((resolve) => {
+            const dialog = document.createElement('sl-dialog') as any;
+            dialog.label = t('basket.sync.blocked_title');
+            dialog.innerHTML = `
+                <p>${t('basket.sync.blocked_help')}</p>
+                <ul>${blocked.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(item.reason ?? '')}</li>`).join('')}</ul>
+                <sl-button slot="footer" variant="default" id="blocked-cancel">${t('basket.actions.cancel')}</sl-button>
+                <sl-button slot="footer" variant="primary" id="blocked-continue">${t('basket.actions.start_sync')}</sl-button>
+            `;
+            document.body.appendChild(dialog);
+            let proceed = false;
+            dialog.querySelector('#blocked-cancel')?.addEventListener('click', () => dialog.hide());
+            dialog.querySelector('#blocked-continue')?.addEventListener('click', () => { proceed = true; dialog.hide(); });
+            dialog.addEventListener('sl-after-hide', () => { dialog.remove(); resolve(proceed); }, { once: true });
+            customElements.whenDefined('sl-dialog').then(() => dialog.show());
+        });
     }
 
     private formatSyncSpeeds(op: SyncOperation): string {
@@ -1698,6 +1740,10 @@ export class BasketSidebar {
     }
 
     private itemTypeLabel(type: string): string {
+        if (type === 'Book') return t('basket.item.type.book');
+        if (type === 'BookPart') return t('basket.item.type.book_part');
+        if (type === 'PodcastShow') return t('basket.item.type.podcast_show');
+        if (type === 'PodcastEpisode') return t('basket.item.type.podcast_episode');
         if (type === 'MusicAlbum' || type === 'FavoriteAlbum') return t('basket.item.type.album');
         if (type === 'Playlist') return t('basket.item.type.playlist');
         if (type === 'FavoriteArtist') return t('basket.item.type.favorites');

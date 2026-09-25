@@ -1,6 +1,10 @@
 # Story 17.8: Synchronize Audiobookshelf media with independent policies
 
-Status: ready-for-dev
+---
+baseline_commit: da404dcbc881f6cf9b2d67dfc484ea8595073032
+---
+
+Status: review
 
 ## Story
 
@@ -19,18 +23,18 @@ so that durable books and changing episode feeds fit my device.
 
 ## Tasks / Subtasks
 
-- [ ] Admit Audiobookshelf media to device selection and sync (AC: 1, 3)
-  - [ ] Carry explicit media role and stable provider identity from Books/Podcasts catalog through desired items, preview, add plan, and synced manifest entries; do not infer a podcast from a song-shaped ID.
-  - [ ] Reuse server budgets, remote-removal reconciliation, compatibility checks, atomic transfer, and managed-path ownership. Ensure partial book/episode failures are reported precisely.
-- [ ] Add podcast Autofill retention (AC: 2)
-  - [ ] Extend the existing per-server pipeline and settings contract for recent/unplayed episodes, with a documented ordering/tie-break, fallback for unavailable progress/date, byte estimate, and capacity limit.
-  - [ ] Keep background sync entirely separate from player-owned Audiobookshelf progress read/write.
-- [ ] Add device folder configuration end to end (AC: 4, 5)
-  - [ ] Add optional audiobook/podcast paths to manifest with backward-compatible defaults and serialization aliases; initialize directories as needed.
-  - [ ] Extend device initialize/update/list RPCs, UI types, Initialize Device, Device Settings, and localized labels/help. Preserve Playlists as its own control.
-  - [ ] Route each media role to its effective root in preview, transfer, delta/reconciliation, and safe delete validation. Handle equal roots, changed roots, MTP folder-cache invalidation, and playlist relative paths.
-- [ ] Verify integrations and regressions (AC: 1–6)
-  - [ ] Add focused daemon provider/RPC/sync tests and UI settings tests; run existing relevant suites and record actual evidence and limitations.
+- [x] Admit Audiobookshelf media to device selection and sync (AC: 1, 3)
+  - [x] Carry explicit media role and stable provider identity from Books/Podcasts catalog through desired items, preview, add plan, and synced manifest entries; do not infer a podcast from a song-shaped ID.
+  - [x] Reuse server budgets, remote-removal reconciliation, compatibility checks, atomic transfer, and managed-path ownership. Ensure partial book/episode failures are reported precisely.
+- [x] Add podcast Autofill retention (AC: 2)
+  - [x] Extend the existing per-server pipeline and settings contract for recent/unplayed episodes, with a documented ordering/tie-break, fallback for unavailable progress/date, byte estimate, and capacity limit.
+  - [x] Keep background sync entirely separate from player-owned Audiobookshelf progress read/write.
+- [x] Add device folder configuration end to end (AC: 4, 5)
+  - [x] Add optional audiobook/podcast paths to manifest with backward-compatible defaults and serialization aliases; initialize directories as needed.
+  - [x] Extend device initialize/update/list RPCs, UI types, Initialize Device, Device Settings, and localized labels/help. Preserve Playlists as its own control.
+  - [x] Route each media role to its effective root in preview, transfer, delta/reconciliation, and safe delete validation. Handle equal roots, changed roots, MTP folder-cache invalidation, and playlist relative paths.
+- [x] Verify integrations and regressions (AC: 1–6)
+  - [x] Add focused daemon provider/RPC/sync tests and UI settings tests; run existing relevant suites and record actual evidence and limitations.
 
 ## Dev Notes
 
@@ -66,6 +70,17 @@ so that durable books and changing episode feeds fit my device.
 
 ## Dev Agent Record
 
+### Debug Log
+
+- 2026-09-24: Began story from baseline `da404dcbc881f6cf9b2d67dfc484ea8595073032`. Traced provider selection, delta, transfer, and manifest paths. Audiobookshelf deliberately rejects generic `download_url`; direct media requires an authenticated session-scoped request, and the verified transcode response is HLS rather than a downloadable audio file.
+- Wrote a red test for audiobook role propagation and made it pass using the repository daemon build wrapper (`node scripts/build-daemon.mjs test -p hifimule-daemon audiobook_role_survives_delta_planning`). Prototype edits then encountered repeated implementation failures while extending the transfer and policy seam. The prototype did not meet the story's acceptance criteria, so all production and test edits were restored to the baseline. No task is claimed complete.
+- Resumed implementation and replaced the prototype with typed provider media resolution, authenticated direct transfer with one refresh on 401, preview compatibility blocks, role-aware delta and manifest ownership, per-server podcast retention, and device folder settings. Incomplete podcast catalog pages abort retention reconciliation to protect managed episodes.
+- 2026-09-25: Follow-up found that book and book-part basket controls were hidden and podcast rows had playback only. Added grid/list selection for books and parts, podcast show/episode selection, typed basket labels, and matching UI/daemon audiobook size estimates when source byte metadata is unavailable.
+
+### Implementation Plan
+
+- Implemented typed provider-owned sync representation with request headers and session cleanup through staging, preview compatibility admission, role-aware delta and transfer, podcast retention, and the device folder contract and UI.
+
 ### Agent Model Used
 
 GPT-6
@@ -73,7 +88,37 @@ GPT-6
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- 2026-09-24: Resumed after the earlier halted attempt. Audiobookshelf Books and Podcasts use explicit media roles, typed catalog identities, verified direct representations, and preview blocked reasons. The UI offers independent folder paths and podcast retention settings.
+- Podcast retention sorts parsed UTC publication times newest first with episode ID as a stable tie-break; missing or malformed dates sort last. It estimates 128 kbps using a one-hour duration fallback and fills within the server's byte budget. Because typed catalog playback state is unavailable, `unplayedOnly` uses the recent fallback and tells the user so; it does not read or write player-owned progress.
+- Verification: daemon suite `1131 passed, 0 failed, 6 ignored`; Audiobookshelf contract suite `5 passed`; UI source tests `19 passed` plus retention round-trip tests `2 passed`; UI TypeScript check passed; Rust formatting and Git whitespace checks passed. No live device or remote Audiobookshelf was used.
+- 2026-09-25 follow-up verification: daemon suite `1132 passed, 0 failed, 6 ignored`; Audiobookshelf contract suite `5 passed`; UI tests `24 passed`; UI TypeScript check passed. Book, book-part, podcast show, and episode basket entries now reach the existing sync item ID and server ID route. No live UI/device run was performed.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/17-8-synchronize-audiobookshelf-media-with-independent-policies.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/auto_fill/pipeline.rs`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/scrobbler.rs`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/AutoFillPanel.ts`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/components/InitDeviceModal.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/state/autoFill.ts`
+- `hifimule-ui/src/state/mediaSyncSelection.ts`
+- `hifimule-ui/tests/audiobookshelfBrowse.test.mjs`
+- `hifimule-ui/tests/story17-8Policy.test.mjs`
+- `hifimule-ui/tests/story17-8Selection.test.mjs`
+
+### Change Log
+
+- 2026-09-24: Captured baseline, marked story in progress, and recorded the halted implementation attempt; no tasks completed.
+- 2026-09-24: Implemented Story 17.8 and moved to review after daemon, UI, contract, formatting, and whitespace verification.
+- 2026-09-25: Completed missing audiobook and podcast UI selection and corrected audiobook size estimates; reran daemon and UI regression suites.

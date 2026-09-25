@@ -8,9 +8,30 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use tokio::time::{Duration, sleep};
 
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaRole {
+    #[default]
+    Music,
+    Audiobook,
+    Podcast,
+}
+
+impl MediaRole {
+    pub fn from_library_role(role: Option<crate::providers::ProviderLibraryRole>) -> Self {
+        match role {
+            Some(crate::providers::ProviderLibraryRole::Audiobook) => Self::Audiobook,
+            Some(crate::providers::ProviderLibraryRole::Podcast) => Self::Podcast,
+            None => Self::Music,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncedItem {
+    #[serde(default)]
+    pub media_role: MediaRole,
     #[serde(rename = "providerItemId")]
     pub jellyfin_id: String,
     pub name: String,
@@ -87,6 +108,20 @@ pub struct DeviceManifest {
     pub managed_paths: Vec<String>,
     #[serde(
         default,
+        rename = "audiobookPath",
+        alias = "audiobook_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audiobook_path: Option<String>,
+    #[serde(
+        default,
+        rename = "podcastPath",
+        alias = "podcast_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub podcast_path: Option<String>,
+    #[serde(
+        default,
         rename = "playlistPath",
         alias = "playlist_path",
         skip_serializing_if = "Option::is_none"
@@ -130,6 +165,29 @@ pub struct DeviceManifest {
 }
 
 impl DeviceManifest {
+    pub fn media_path(&self, role: MediaRole) -> Option<&str> {
+        let override_path = match role {
+            MediaRole::Music => None,
+            MediaRole::Audiobook => self.audiobook_path.as_deref(),
+            MediaRole::Podcast => self.podcast_path.as_deref(),
+        };
+        override_path
+            .filter(|path| !path.trim().is_empty())
+            .or_else(|| self.managed_paths.first().map(String::as_str))
+    }
+
+    pub fn media_paths(&self) -> Vec<&str> {
+        let mut paths = Vec::new();
+        for role in [MediaRole::Music, MediaRole::Audiobook, MediaRole::Podcast] {
+            if let Some(path) = self.media_path(role) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths
+    }
+
     pub fn resolved_playlist_path(&self) -> Option<&str> {
         self.playlist_path
             .as_deref()
@@ -1623,6 +1681,8 @@ impl DeviceManager {
             icon,
             version: "1.0".to_string(),
             managed_paths,
+            audiobook_path: None,
+            podcast_path: None,
             playlist_path,
             synced_items: vec![],
             dirty: false,
@@ -1735,7 +1795,12 @@ impl DeviceManager {
         // If manifest doesn't exist, we treat no folders as managed (empty vec)
         let managed_paths = manifest
             .as_ref()
-            .map(|m| m.managed_paths.clone())
+            .map(|m| {
+                m.media_paths()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
 
         // MTP devices use a synthetic path that cannot be traversed via std::fs.
@@ -1849,7 +1914,7 @@ impl DeviceManager {
 
         // Collect all actual files on disk within managed paths
         let mut on_disk_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for managed_path in &manifest.managed_paths {
+        for managed_path in manifest.media_paths() {
             let full_path = device_path.join(managed_path);
             if let Ok(meta) = tokio::fs::symlink_metadata(&full_path).await {
                 if !meta.is_dir() {

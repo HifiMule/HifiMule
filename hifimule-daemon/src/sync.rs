@@ -66,6 +66,7 @@ fn provider_source_label(server_id: Option<String>) -> String {
 /// An item desired for sync (from the UI basket / Jellyfin API).
 #[derive(Debug, Clone)]
 pub struct DesiredItem {
+    pub media_role: crate::device::MediaRole,
     pub jellyfin_id: String,
     pub name: String,
     pub album: Option<String>,
@@ -86,6 +87,8 @@ pub struct DesiredItem {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncAddItem {
+    #[serde(default)]
+    pub media_role: crate::device::MediaRole,
     pub jellyfin_id: String,
     pub name: String,
     pub album: Option<String>,
@@ -140,10 +143,23 @@ pub struct SyncDeleteItem {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBlockedItem {
+    pub provider_item_id: String,
+    pub name: String,
+    pub server_id: Option<String>,
+    pub media_role: crate::device::MediaRole,
+    pub reason_code: String,
+    pub reason: String,
+}
+
 /// An item whose Jellyfin ID changed but file remains identical.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncIdChangeItem {
+    #[serde(default)]
+    pub media_role: crate::device::MediaRole,
     pub old_jellyfin_id: String,
     pub new_jellyfin_id: String,
     pub old_local_path: String,
@@ -193,6 +209,8 @@ pub struct PlaylistSyncItem {
 #[serde(rename_all = "camelCase")]
 pub struct SyncDelta {
     pub adds: Vec<SyncAddItem>,
+    #[serde(default)]
+    pub blocked: Vec<SyncBlockedItem>,
     pub deletes: Vec<SyncDeleteItem>,
     pub id_changes: Vec<SyncIdChangeItem>,
     pub unchanged: usize,
@@ -365,7 +383,8 @@ fn compatible_optional_eq<T: PartialEq>(left: &Option<T>, right: &Option<T>) -> 
 }
 
 fn id_change_candidate_matches(add: &SyncAddItem, old: &SyncedItem) -> bool {
-    compatible_optional_eq(&add.provider_album_id, &old.provider_album_id)
+    add.media_role == old.media_role
+        && compatible_optional_eq(&add.provider_album_id, &old.provider_album_id)
         && compatible_optional_eq(&add.provider_content_type, &old.provider_content_type)
         && compatible_optional_eq(&add.provider_suffix, &old.provider_suffix)
         && compatible_optional_eq(&add.track_number, &old.track_number)
@@ -1549,6 +1568,21 @@ fn provider_audio_format(suffix: Option<&str>, content_type: Option<&str>) -> Au
     format
 }
 
+fn sync_media_audio_format(media: &crate::providers::SyncMediaRepresentation) -> AudioFormat {
+    let mut format = provider_audio_format(Some(&media.container), None);
+    add_audio_codec_keys(&mut format.codecs, &media.codec);
+    format
+}
+
+pub fn sync_direct_media_compatible(
+    device_profile: Option<&serde_json::Value>,
+    preferred_audio_container: Option<&str>,
+    media: &crate::providers::SyncMediaRepresentation,
+) -> bool {
+    audio_compatibility_profile(device_profile, preferred_audio_container)
+        .source_is_direct_compatible(&sync_media_audio_format(media))
+}
+
 fn audio_requirement(
     container: Option<&str>,
     codec: Option<&str>,
@@ -2466,6 +2500,7 @@ pub async fn execute_provider_sync(
         let producer_operation_manager = Arc::clone(&operation_manager);
         let producer_operation_id = operation_id.clone();
         let producer_managed_path = managed_path.clone();
+        let producer_manifest = manifest_snapshot.clone();
         let producer_device_path = device_path.to_path_buf();
         let producer_compatibility = compatibility.clone();
         let producer_byte_limiter = Arc::clone(&byte_limiter);
@@ -2513,12 +2548,50 @@ pub async fn execute_provider_sync(
                 add_item.jellyfin_id,
                 add_item.size_bytes
             );
-            let source_format = provider_audio_format(
-                add_item.provider_suffix.as_deref(),
-                add_item.provider_content_type.as_deref(),
-            );
+            let direct_media = if add_item.media_role != crate::device::MediaRole::Music {
+                let result = tokio::select! {
+                    result = producer_provider.resolve_sync_media(&add_item.jellyfin_id) => result,
+                    _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => break,
+                };
+                match result {
+                    Ok(media) => Some(media),
+                    Err(error) => {
+                        let message = format!("Direct media unavailable: {error}");
+                        if add_item.is_auto_fill {
+                            warnings.push(format!("[Sync] Skipped '{}' ({}): {message}", add_item.name, add_item.jellyfin_id));
+                            mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                            continue;
+                        }
+                        errors.push(SyncFileError {
+                            jellyfin_id: add_item.jellyfin_id.clone(),
+                            filename: add_item.name.clone(),
+                            error_message: message,
+                        });
+                        let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                        break;
+                    }
+                }
+            } else {
+                None
+            };
+            let source_format = if let Some(media) = direct_media.as_ref() {
+                sync_media_audio_format(media)
+            } else {
+                provider_audio_format(
+                    add_item.provider_suffix.as_deref(),
+                    add_item.provider_content_type.as_deref(),
+                )
+            };
             let source_direct_compatible =
                 producer_compatibility.source_is_direct_compatible(&source_format);
+            if direct_media.is_some() && !source_direct_compatible {
+                warnings.push(format!(
+                    "[Sync] Skipped '{}' ({}): direct format is incompatible and no verified file transcode is available",
+                    add_item.name, add_item.jellyfin_id
+                ));
+                mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                continue;
+            }
             let profile = if producer_compatibility.is_constrained() && !source_direct_compatible {
                 match producer_compatibility.transcode_profile.clone() {
                     Some(mut profile) => {
@@ -2556,6 +2629,9 @@ pub async fn execute_provider_sync(
             );
             let url_result = tokio::select! {
                 result = async {
+                    if let Some(media) = direct_media.as_ref() {
+                        return Ok(media.request.url.to_string());
+                    }
                     match producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await {
                         Ok(url) => Ok(url),
                         Err(first_error) => {
@@ -2609,11 +2685,26 @@ pub async fn execute_provider_sync(
                     continue;
                 }
             };
+            let sync_headers = direct_media
+                .as_ref()
+                .map(|media| media.request.headers.clone())
+                .unwrap_or_default();
             crate::daemon_log!("[Sync] Preparing '{}': opening HTTP stream", add_item.name);
             let response_result = tokio::select! {
                 result = async {
-                    let client = reqwest::Client::new();
-                    match client.get(&url).send().await {
+                    let client = if direct_media.is_some() {
+                        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("valid HTTP client")
+                    } else {
+                        reqwest::Client::new()
+                    };
+                    match client.get(&url).headers(sync_headers.clone()).send().await {
+                        Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                            if let Some(refresh) = direct_media.as_ref().and_then(|media| media.request.refresh.as_ref()) {
+                                if let Some(headers) = refresh().await {
+                                    client.get(&url).headers(headers).send().await
+                                } else { Ok(response) }
+                            } else { Ok(response) }
+                        }
                         Ok(response)
                             if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
                                 && !response.status().is_server_error() => Ok(response),
@@ -2623,11 +2714,11 @@ pub async fn execute_provider_sync(
                                 add_item.name,
                                 response.status()
                             );
-                            client.get(&url).send().await
+                            client.get(&url).headers(sync_headers.clone()).send().await
                         }
                         Err(first_error) => {
                             crate::daemon_log!("[Sync] Retrying HTTP source for '{}': {}", add_item.name, first_error);
-                            client.get(&url).send().await
+                            client.get(&url).headers(sync_headers.clone()).send().await
                         }
                     }
                 } => result,
@@ -2686,6 +2777,16 @@ pub async fn execute_provider_sync(
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok());
+            if let Some(media) = direct_media.as_ref()
+                && response_content_type != media.request.expected_content_type.as_deref()
+            {
+                warnings.push(format!(
+                    "[Sync] Skipped '{}' ({}): direct response content type changed",
+                    add_item.name, add_item.jellyfin_id
+                ));
+                mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                continue;
+            }
             let response_format = provider_audio_format(None, response_content_type);
             let extension_override = if !producer_compatibility.is_constrained() {
                 source_format
@@ -2759,8 +2860,12 @@ pub async fn execute_provider_sync(
                 "[Sync] Preparing '{}': constructing target path",
                 add_item.name
             );
+            let media_root = producer_manifest.as_ref()
+                .and_then(|manifest| manifest.media_path(add_item.media_role))
+                .map(|folder| producer_device_path.join(folder))
+                .unwrap_or_else(|| producer_managed_path.clone());
             let construction = match construct_desired_file_path(
-                &producer_managed_path,
+                &media_root,
                 &add_item,
                 extension_override.as_deref(),
             ) {
@@ -2905,7 +3010,7 @@ pub async fn execute_provider_sync(
                 );
                 let _ = tokio::fs::remove_file(&staged_path).await;
                 let retry_response = tokio::select! {
-                    result = reqwest::Client::new().get(&url).send() => result,
+                    result = reqwest::Client::new().get(&url).headers(sync_headers.clone()).send() => result,
                     _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => {
                         break Err(anyhow::anyhow!("Cancelled while retrying staged source"));
                     },
@@ -3202,6 +3307,7 @@ pub async fn execute_provider_sync(
                 );
                 let synced_at = now_iso8601();
                 synced_items.push(crate::device::SyncedItem {
+                    media_role: staged.add_item.media_role,
                     jellyfin_id: staged.add_item.jellyfin_id.clone(),
                     name: staged.add_item.name.clone(),
                     album: staged.add_item.album.clone(),
@@ -3460,6 +3566,7 @@ pub async fn execute_provider_sync(
         }
         let synced_at = now_iso8601();
         synced_items.push(crate::device::SyncedItem {
+            media_role: id_change.media_role,
             jellyfin_id: id_change.new_jellyfin_id.clone(),
             name: id_change.name.clone(),
             album: id_change.album.clone(),
@@ -3682,6 +3789,7 @@ pub async fn augment_delta_with_existence_check(
         if !device_file_exists(device_io, &item.local_path).await {
             to_add.push(annotate_add(
                 SyncAddItem {
+                    media_role: desired.media_role,
                     jellyfin_id: desired.jellyfin_id.clone(),
                     name: desired.name.clone(),
                     album: desired.album.clone(),
@@ -3952,11 +4060,12 @@ async fn generate_m3u_files(
 /// a separate add+delete.
 pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta {
     let profile_dirty = manifest.transcoding_profile_dirty;
-    let music_folder = manifest
-        .managed_paths
-        .first()
-        .map(|path| normalized_device_folder(path))
-        .unwrap_or_default();
+    let media_folder = |role| {
+        manifest
+            .media_path(role)
+            .map(normalized_device_folder)
+            .unwrap_or_default()
+    };
     // Pre-index desired items for O(1) lookup — avoids O(N×M) scans in both passes below.
     let desired_by_id: std::collections::HashMap<&str, &DesiredItem> = desired_items
         .iter()
@@ -3967,7 +4076,11 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .iter()
         .filter(|i| {
             let desired = desired_by_id.get(i.jellyfin_id.as_str()).copied();
-            let outside_music_folder = !device_path_in_or_equal(&i.local_path, &music_folder);
+            if desired.is_some_and(|item| item.media_role != i.media_role) {
+                return false;
+            }
+            let outside_music_folder =
+                !device_path_in_or_equal(&i.local_path, &media_folder(i.media_role));
             if outside_music_folder {
                 return false;
             }
@@ -4004,7 +4117,10 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     if profile_dirty {
                         return Some("transcoding-profile-change");
                     }
-                    if !device_path_in_or_equal(&item.local_path, &music_folder) {
+                    if item.media_role != i.media_role {
+                        return Some("media-role-change");
+                    }
+                    if !device_path_in_or_equal(&item.local_path, &media_folder(i.media_role)) {
                         return Some("music-folder-change");
                     }
                     bitrate_stale_reason(i.original_bitrate, item.original_bitrate)
@@ -4012,6 +4128,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 .unwrap_or("new-selection");
             annotate_add(
                 SyncAddItem {
+                    media_role: i.media_role,
                     jellyfin_id: i.jellyfin_id.clone(),
                     name: i.name.clone(),
                     album: i.album.clone(),
@@ -4059,7 +4176,11 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
 
     for item in &manifest.synced_items {
         let stale_for_profile = profile_dirty && desired_ids.contains(item.jellyfin_id.as_str());
-        let stale_for_relocation = !device_path_in_or_equal(&item.local_path, &music_folder);
+        let stale_for_relocation =
+            !device_path_in_or_equal(&item.local_path, &media_folder(item.media_role));
+        let stale_for_role = desired_by_id
+            .get(item.jellyfin_id.as_str())
+            .is_some_and(|desired| desired.media_role != item.media_role);
         let stale_for_quality = desired_by_id
             .get(item.jellyfin_id.as_str())
             .copied()
@@ -4069,6 +4190,8 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             .is_some();
         let reason_code = if stale_for_profile {
             "transcoding-profile-change"
+        } else if stale_for_role {
+            "media-role-change"
         } else if stale_for_relocation {
             "music-folder-change"
         } else {
@@ -4083,6 +4206,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         if stale_for_profile
             || stale_for_relocation
             || stale_for_quality
+            || stale_for_role
             || !desired_ids.contains(item.jellyfin_id.as_str())
         {
             let idx = deletes.len();
@@ -4150,6 +4274,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     .map(|s| s.to_string());
                 id_changes.push(annotate_id_change(
                     SyncIdChangeItem {
+                        media_role: add.media_role,
                         old_jellyfin_id: del.jellyfin_id.clone(),
                         new_jellyfin_id: add.jellyfin_id.clone(),
                         old_local_path: del.local_path.clone(),
@@ -4193,6 +4318,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .collect();
 
     SyncDelta {
+        blocked: vec![],
         adds,
         deletes,
         id_changes,
@@ -4350,6 +4476,7 @@ mod tests {
         artist: Option<&str>,
     ) -> SyncedItem {
         SyncedItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: name.to_string(),
             album: album.map(|s| s.to_string()),
@@ -4442,6 +4569,7 @@ mod tests {
             .unwrap();
 
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![],
             deletes: vec![SyncDeleteItem {
                 jellyfin_id: "stale-id".to_string(),
@@ -4519,6 +4647,7 @@ mod tests {
             .unwrap();
 
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![],
             deletes: vec![SyncDeleteItem {
                 jellyfin_id: "stale-id".to_string(),
@@ -4728,6 +4857,7 @@ mod tests {
         artist: Option<&str>,
     ) -> DesiredItem {
         DesiredItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: name.to_string(),
             album: album.map(|s| s.to_string()),
@@ -4770,6 +4900,89 @@ mod tests {
             .collect();
         assert_eq!(by_id["track-a"], Some("server-jelly"));
         assert_eq!(by_id["track-b"], Some("server-navi"));
+    }
+
+    #[test]
+    fn audiobook_role_survives_delta_planning() {
+        let mut book_part = make_desired("part-1", "Part 1", Some("Book"), Some("Author"));
+        book_part.media_role = crate::device::MediaRole::Audiobook;
+        let delta = calculate_delta(
+            &[book_part],
+            &DeviceManifest {
+                managed_paths: vec!["Music".into()],
+                ..DeviceManifest::default()
+            },
+        );
+        assert_eq!(
+            delta.adds[0].media_role,
+            crate::device::MediaRole::Audiobook
+        );
+    }
+
+    #[test]
+    fn media_folder_change_only_relocates_its_role() {
+        let mut manifest = DeviceManifest {
+            managed_paths: vec!["Music".into()],
+            audiobook_path: Some("Books".into()),
+            podcast_path: Some("Podcasts".into()),
+            ..DeviceManifest::default()
+        };
+        let mut book = make_desired("book-part", "Part", Some("Book"), Some("Author"));
+        book.media_role = crate::device::MediaRole::Audiobook;
+        let music = make_desired("song", "Song", Some("Album"), Some("Artist"));
+        let mut old_book = make_synced_item("book-part", "Part", Some("Book"), Some("Author"));
+        old_book.media_role = crate::device::MediaRole::Audiobook;
+        old_book.local_path = "Books/Author/Book/Part.mp3".into();
+        let old_music = make_synced_item("song", "Song", Some("Album"), Some("Artist"));
+        manifest.synced_items = vec![old_book, old_music];
+        manifest.audiobook_path = Some("NewBooks".into());
+        let delta = calculate_delta(&[book, music], &manifest);
+        assert_eq!(
+            delta
+                .adds
+                .iter()
+                .map(|item| item.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["book-part"]
+        );
+        assert_eq!(
+            delta
+                .deletes
+                .iter()
+                .map(|item| item.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["book-part"]
+        );
+    }
+
+    #[test]
+    fn sync_direct_media_compatibility_uses_verified_codec() {
+        let media = crate::providers::SyncMediaRepresentation {
+            codec: "mp3".into(),
+            container: "mp3".into(),
+            request: crate::providers::PlaybackRequest {
+                url: reqwest::Url::parse("https://example.invalid/media").unwrap(),
+                headers: reqwest::header::HeaderMap::new(),
+                range_supported: true,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: Some("audio/mpeg".into()),
+            },
+        };
+        let mp3 = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+        let flac = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        assert!(sync_direct_media_compatible(Some(&mp3), None, &media));
+        assert!(!sync_direct_media_compatible(Some(&flac), None, &media));
+    }
+
+    #[test]
+    fn blocked_media_preview_defaults_for_legacy_delta() {
+        let delta = calculate_delta(&[], &DeviceManifest::default());
+        let mut encoded = serde_json::to_value(&delta).unwrap();
+        assert_eq!(encoded["blocked"], serde_json::json!([]));
+        encoded.as_object_mut().unwrap().remove("blocked");
+        let decoded: SyncDelta = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.blocked.is_empty());
     }
 
     fn generic_mp3_profile() -> serde_json::Value {
@@ -4981,6 +5194,7 @@ mod tests {
         size_bytes: u64,
     ) -> SyncAddItem {
         SyncAddItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: format!("Track {id}"),
             album: Some("Album".to_string()),
@@ -5202,6 +5416,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-jellyfin",
                 "flac",
@@ -5264,6 +5479,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-missing",
                 "flac",
@@ -5336,6 +5552,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
                 "flac",
@@ -5409,6 +5626,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
                 "flac",
@@ -5464,6 +5682,7 @@ mod tests {
             .await;
         assert!(operation_manager.request_cancel(&operation_id).await);
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
                 "flac",
@@ -5530,6 +5749,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
                 "flac",
@@ -5592,6 +5812,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
                 "flac",
@@ -5673,6 +5894,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
                 "flac",
@@ -5763,6 +5985,7 @@ mod tests {
             .create_operation(operation_id.clone(), 2)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![
                 add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
                 add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
@@ -5852,6 +6075,7 @@ mod tests {
             add.is_auto_fill = true;
         }
         let delta = SyncDelta {
+            blocked: vec![],
             adds,
             deletes: vec![],
             id_changes: vec![],
@@ -5922,6 +6146,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-retry",
                 "flac",
@@ -6002,6 +6227,7 @@ mod tests {
             .create_operation(operation_id.clone(), 2)
             .await;
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![
                 add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
                 add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
@@ -6680,11 +6906,13 @@ mod tests {
     #[test]
     fn test_format_id_change_diagnostics_includes_sample_and_omitted_count() {
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![],
             deletes: vec![],
             id_changes: vec![
                 annotate_id_change(
                     SyncIdChangeItem {
+                        media_role: crate::device::MediaRole::Music,
                         old_jellyfin_id: "old-1".to_string(),
                         new_jellyfin_id: "new-1".to_string(),
                         old_local_path: "Music/A/Track.flac".to_string(),
@@ -6705,6 +6933,7 @@ mod tests {
                 ),
                 annotate_id_change(
                     SyncIdChangeItem {
+                        media_role: crate::device::MediaRole::Music,
                         old_jellyfin_id: "old-2".to_string(),
                         new_jellyfin_id: "new-2".to_string(),
                         old_local_path: "Music/A/Other.flac".to_string(),
@@ -6740,6 +6969,7 @@ mod tests {
     #[test]
     fn test_synced_item_original_name_serializes_as_camel_case() {
         let item = crate::device::SyncedItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: "id1".to_string(),
             name: "Truncated Track".to_string(),
             album: None,
@@ -6777,6 +7007,7 @@ mod tests {
 
     fn make_playlist_synced_item(id: &str, local_path: &str) -> crate::device::SyncedItem {
         crate::device::SyncedItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: local_path.to_string(),
             album: None,
@@ -6799,6 +7030,7 @@ mod tests {
     #[test]
     fn test_calculate_delta_cleans_up_tracks_outside_current_music_folder() {
         let desired = vec![DesiredItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: "t1".to_string(),
             name: "Song".to_string(),
             album: Some("Album".to_string()),
@@ -6861,6 +7093,7 @@ mod tests {
     #[test]
     fn test_calculate_delta_does_not_convert_relocation_to_id_change() {
         let desired = vec![DesiredItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: "new-id".to_string(),
             name: "Song".to_string(),
             album: Some("Album".to_string()),
@@ -6877,6 +7110,7 @@ mod tests {
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
         manifest.synced_items = vec![crate::device::SyncedItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: "old-id".to_string(),
             name: "Song".to_string(),
             album: Some("Album".to_string()),
@@ -7219,6 +7453,7 @@ mod tests {
                 last_modified: "2026-01-01T00:00:00Z".to_string(),
             });
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![],
             deletes: vec![],
             id_changes: vec![],
@@ -7237,8 +7472,10 @@ mod tests {
     #[test]
     fn test_change_reason_summary_counts_replacement_pair_once() {
         let delta = SyncDelta {
+            blocked: vec![],
             adds: vec![annotate_add(
                 SyncAddItem {
+                    media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "track-1".to_string(),
                     name: "Track".to_string(),
                     album: None,
@@ -7271,6 +7508,7 @@ mod tests {
             )],
             id_changes: vec![annotate_id_change(
                 SyncIdChangeItem {
+                    media_role: crate::device::MediaRole::Music,
                     old_jellyfin_id: "old".to_string(),
                     new_jellyfin_id: "new".to_string(),
                     old_local_path: "Music/Other.flac".to_string(),
@@ -7830,6 +8068,7 @@ mod tests {
             let url = server.url();
             tokio::spawn(async move {
                 let delta = SyncDelta {
+                    blocked: vec![],
                     adds: vec![add_item_with_provider_format(
                         "fixed-target",
                         "flac",

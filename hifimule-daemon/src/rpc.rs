@@ -3909,6 +3909,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
                 "name": m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| m.device_id.clone()),
                 "icon": m.icon.clone(),
                 "managedPaths": m.managed_paths.clone(),
+                "audiobookPath": m.audiobook_path.clone(),
+                "podcastPath": m.podcast_path.clone(),
                 "playlistPath": m.playlist_path.clone(),
                 "transcodingProfileId": m.transcoding_profile_id.clone(),
                 "deviceClass": match class {
@@ -4281,14 +4283,28 @@ async fn provider_legacy_item_count(
 }
 
 fn provider_track_size(track: &Song) -> u64 {
-    track
-        .bitrate_kbps
-        .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(track.duration_seconds))
-        .unwrap_or(0)
+    track.size_bytes.unwrap_or_else(|| {
+        track
+            .bitrate_kbps
+            .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(track.duration_seconds))
+            .unwrap_or_else(|| {
+                if track.provider_metadata.identity.is_some() {
+                    16_000
+                        * u64::from(if track.duration_seconds == 0 {
+                            3_600
+                        } else {
+                            track.duration_seconds
+                        })
+                } else {
+                    0
+                }
+            })
+    })
 }
 
 fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
     crate::sync::DesiredItem {
+        media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
         name: song.title.clone(),
         album: song.album_title.clone(),
@@ -4300,6 +4316,196 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
         provider_suffix: song.suffix.clone(),
         original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
         track_number: song.track_number,
+        server_id: None,
+    }
+}
+
+fn provider_media_role(provider: &dyn MediaProvider) -> crate::device::MediaRole {
+    crate::device::MediaRole::from_library_role(provider.library_role())
+}
+
+async fn blocked_provider_media_add(
+    add: &crate::sync::SyncAddItem,
+    provider: &dyn MediaProvider,
+    profile: Option<&Value>,
+    preferred_container: Option<&str>,
+) -> Option<crate::sync::SyncBlockedItem> {
+    if add.media_role == crate::device::MediaRole::Music {
+        return None;
+    }
+    let (reason_code, reason) = match provider.resolve_sync_media(&add.jellyfin_id).await {
+        Ok(media)
+            if crate::sync::sync_direct_media_compatible(profile, preferred_container, &media) =>
+        {
+            return None;
+        }
+        Ok(_) => (
+            "incompatible-direct-format",
+            "Direct audio format is unsupported by this device; no verified file transcode is available",
+        ),
+        Err(ProviderError::Auth(_)) => {
+            ("provider-auth", "Audiobookshelf authentication is required")
+        }
+        Err(ProviderError::NotFound { .. }) => {
+            ("remote-item-missing", "Remote media is unavailable")
+        }
+        Err(_) => (
+            "direct-media-unavailable",
+            "A verified direct audio representation is unavailable",
+        ),
+    };
+    Some(crate::sync::SyncBlockedItem {
+        provider_item_id: add.jellyfin_id.clone(),
+        name: add.name.clone(),
+        server_id: add.server_id.clone(),
+        media_role: add.media_role,
+        reason_code: reason_code.into(),
+        reason: reason.into(),
+    })
+}
+
+fn apply_blocked_media_adds(
+    delta: &mut crate::sync::SyncDelta,
+    blocked: Vec<crate::sync::SyncBlockedItem>,
+) {
+    let blocked_ids: HashSet<&str> = blocked
+        .iter()
+        .map(|item| item.provider_item_id.as_str())
+        .collect();
+    delta
+        .adds
+        .retain(|add| !blocked_ids.contains(add.jellyfin_id.as_str()));
+    // A failed replacement must not delete its previously managed copy.
+    delta
+        .deletes
+        .retain(|delete| !blocked_ids.contains(delete.jellyfin_id.as_str()));
+    delta.blocked.extend(blocked);
+}
+
+async fn preflight_provider_media_adds(
+    delta: &mut crate::sync::SyncDelta,
+    provider: Arc<dyn MediaProvider>,
+    profile: Option<&Value>,
+    preferred_container: Option<&str>,
+) {
+    let mut blocked = Vec::new();
+    for add in &delta.adds {
+        if let Some(item) =
+            blocked_provider_media_add(add, provider.as_ref(), profile, preferred_container).await
+        {
+            blocked.push(item);
+        }
+    }
+    apply_blocked_media_adds(delta, blocked);
+}
+
+async fn preview_media_profile(
+    state: &AppState,
+    manifest: &crate::device::DeviceManifest,
+) -> Result<(Option<Value>, Option<&'static str>), JsonRpcError> {
+    let profile = load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref())
+        .map_err(|message| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message,
+            data: None,
+        })?;
+    let preferred = if profile.is_some() {
+        None
+    } else {
+        state
+            .device_manager
+            .get_sync_target_for_device(&manifest.device_id)
+            .await
+            .and_then(|(_, _, io)| io.preferred_audio_container())
+    };
+    Ok((profile, preferred))
+}
+
+async fn preflight_state_media_adds(
+    state: &AppState,
+    manifest: &crate::device::DeviceManifest,
+    delta: &mut crate::sync::SyncDelta,
+    default_provider: Option<Arc<dyn MediaProvider>>,
+) -> Result<(), JsonRpcError> {
+    if !delta
+        .adds
+        .iter()
+        .any(|add| add.media_role != crate::device::MediaRole::Music)
+    {
+        return Ok(());
+    }
+    let (profile, preferred) = preview_media_profile(state, manifest).await?;
+    if let Some(provider) = default_provider {
+        preflight_provider_media_adds(delta, provider, profile.as_ref(), preferred).await;
+        return Ok(());
+    }
+    let mut providers: HashMap<String, Arc<dyn MediaProvider>> = HashMap::new();
+    let mut blocked = Vec::new();
+    for add in &delta.adds {
+        if add.media_role == crate::device::MediaRole::Music {
+            continue;
+        }
+        let Some(server_id) = add.server_id.as_deref() else {
+            blocked.push(crate::sync::SyncBlockedItem {
+                provider_item_id: add.jellyfin_id.clone(),
+                name: add.name.clone(),
+                server_id: None,
+                media_role: add.media_role,
+                reason_code: "server-unavailable".into(),
+                reason: "Source server identity is unavailable".into(),
+            });
+            continue;
+        };
+        let provider = if let Some(provider) = providers.get(server_id) {
+            provider.clone()
+        } else {
+            match get_provider_by_server_id_for(state, server_id).await {
+                Ok(provider) => {
+                    providers.insert(server_id.to_string(), provider.clone());
+                    provider
+                }
+                Err(_) => {
+                    blocked.push(crate::sync::SyncBlockedItem {
+                        provider_item_id: add.jellyfin_id.clone(),
+                        name: add.name.clone(),
+                        server_id: add.server_id.clone(),
+                        media_role: add.media_role,
+                        reason_code: "server-unavailable".into(),
+                        reason: "Source server is unavailable".into(),
+                    });
+                    continue;
+                }
+            }
+        };
+        if let Some(item) =
+            blocked_provider_media_add(add, provider.as_ref(), profile.as_ref(), preferred).await
+        {
+            blocked.push(item);
+        }
+    }
+    apply_blocked_media_adds(delta, blocked);
+    Ok(())
+}
+
+fn podcast_episode_to_desired(
+    episode: &crate::domain::models::PodcastEpisode,
+    show_name: &str,
+) -> crate::sync::DesiredItem {
+    // Episode catalog details do not expose a byte size. Reserve 128 kbit/s,
+    // using one hour when duration is missing; transfer checks actual capacity.
+    crate::sync::DesiredItem {
+        media_role: crate::device::MediaRole::Podcast,
+        jellyfin_id: episode.id.clone(),
+        name: episode.title.clone(),
+        album: Some(show_name.to_string()),
+        artist: None,
+        size_bytes: u64::from(episode.duration_seconds.unwrap_or(3600)).saturating_mul(16_000),
+        etag: None,
+        provider_album_id: Some(episode.show_id.clone()),
+        provider_content_type: None,
+        provider_suffix: None,
+        original_bitrate: None,
+        track_number: None,
         server_id: None,
     }
 }
@@ -4460,6 +4666,71 @@ async fn provider_sync_items_for_id(
     ),
     JsonRpcError,
 > {
+    let role = provider_media_role(provider.as_ref());
+    if role == crate::device::MediaRole::Podcast {
+        return provider_podcast_sync_items_for_id(provider, item_id).await;
+    }
+    let (mut items, playlist) = provider_sync_items_for_id_inner(provider, item_id).await?;
+    for item in &mut items {
+        item.media_role = role;
+    }
+    Ok((items, playlist))
+}
+
+async fn provider_podcast_sync_items_for_id(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<
+    (
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    ),
+    JsonRpcError,
+> {
+    match provider.get_podcast_show(item_id).await {
+        Ok(show) => {
+            if show.possibly_truncated {
+                return Err(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: "Podcast show is incomplete; select episodes individually".into(),
+                    data: None,
+                });
+            }
+            return Ok((
+                show.episodes
+                    .iter()
+                    .map(|episode| podcast_episode_to_desired(episode, &show.show.title))
+                    .collect(),
+                None,
+            ));
+        }
+        Err(ProviderError::NotFound { .. }) | Err(ProviderError::UnsupportedCapability(_)) => {}
+        Err(error) => return Err(provider_error_to_rpc(error)),
+    }
+    let episode = provider
+        .get_podcast_episode(item_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let show = provider
+        .get_podcast_show(&episode.show_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok((
+        vec![podcast_episode_to_desired(&episode, &show.show.title)],
+        None,
+    ))
+}
+
+async fn provider_sync_items_for_id_inner(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<
+    (
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    ),
+    JsonRpcError,
+> {
     if let Ok(album) = provider.get_album(item_id).await {
         return Ok((
             album
@@ -4537,6 +4808,7 @@ async fn provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
+    let media_role = provider_media_role(provider.as_ref());
     // Story 12.3: normalize both the legacy single object and the new array form
     // (AC1). This single-server fast path is reached only when routing resolved
     // every auto-fill slot to the selected server, so the relevant descriptor (if
@@ -4702,7 +4974,7 @@ async fn provider_calculate_delta(
             {
                 af_pity_fired.push(sid.to_string());
             }
-            let fill_items = expand_auto_fill_slot(provider, pipeline_opt, fill_params)
+            let fill_items = expand_auto_fill_slot(provider.clone(), pipeline_opt, fill_params)
                 .await
                 .map_err(|e| JsonRpcError {
                     code: ERR_CONNECTION_FAILED,
@@ -4727,6 +4999,7 @@ async fn provider_calculate_delta(
                     af_item_ids.insert(item.id.clone());
                     autofill_playlist_tracks.push(autofill_playlist_track(&item));
                     desired_items.push(crate::sync::DesiredItem {
+                        media_role: crate::device::MediaRole::Music,
                         jellyfin_id: item.id,
                         name: item.name,
                         album: item.album,
@@ -4750,6 +5023,9 @@ async fn provider_calculate_delta(
 
     // Story 2.13: tag untagged items with the selected server's portable id.
     tag_untagged_with_selected_portable(_state, &mut desired_items)?;
+    for item in &mut desired_items {
+        item.media_role = media_role;
+    }
 
     crate::daemon_log!(
         "[Delta] Provider desired set prepared: desired_items={} playlists={}; calculating manifest delta",
@@ -4809,6 +5085,7 @@ async fn provider_calculate_delta(
         }
     }
     patch_delta_auto_fill(&mut delta, &af_item_ids);
+    preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
@@ -4877,6 +5154,7 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         })
         .or(item.bitrate);
     crate::sync::DesiredItem {
+        media_role: crate::device::MediaRole::Music,
         jellyfin_id: item.id,
         name: item.name,
         album: item.album,
@@ -5574,6 +5852,7 @@ fn push_fill_items_dedup(
     desired_items: &mut Vec<crate::sync::DesiredItem>,
     seen_ids: &mut HashSet<String>,
     server_id: &str,
+    media_role: crate::device::MediaRole,
     remaining: &mut Option<u64>,
     autofill_playlist_tracks: &mut Vec<crate::sync::PlaylistTrackInfo>,
 ) -> u64 {
@@ -5583,6 +5862,7 @@ fn push_fill_items_dedup(
             let size = item.size_bytes;
             autofill_playlist_tracks.push(autofill_playlist_track(&item));
             desired_items.push(crate::sync::DesiredItem {
+                media_role,
                 jellyfin_id: item.id,
                 name: item.name,
                 album: item.album,
@@ -5635,12 +5915,113 @@ async fn expand_auto_fill_slot(
     pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
     params: crate::auto_fill::AutoFillParams,
 ) -> anyhow::Result<Vec<crate::auto_fill::AutoFillItem>> {
+    if provider.library_role() == Some(crate::providers::ProviderLibraryRole::Podcast) {
+        return expand_podcast_auto_fill(provider, pipeline, params).await;
+    }
     match pipeline {
         Some(p) if crate::auto_fill::needs_configurable_expansion(p) => {
             crate::auto_fill::expand_with_pipeline(provider, p, params).await
         }
         _ => crate::auto_fill::run_auto_fill_provider(provider, params).await,
     }
+}
+
+async fn expand_podcast_auto_fill(
+    provider: Arc<dyn MediaProvider>,
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    params: crate::auto_fill::AutoFillParams,
+) -> anyhow::Result<Vec<crate::auto_fill::AutoFillItem>> {
+    let retention = pipeline
+        .map(|p| &p.podcast_retention)
+        .cloned()
+        .unwrap_or_default();
+    let limit = retention.recent_count.min(100);
+    if limit == 0 || params.max_fill_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let mut shows = Vec::new();
+    let mut offset = 0u32;
+    loop {
+        let (page, total) = provider.list_podcast_shows(offset, 100).await?;
+        if page.is_empty() {
+            if offset < total {
+                anyhow::bail!("Podcast show list ended before the declared total");
+            }
+            break;
+        }
+        offset = offset.saturating_add(page.len() as u32);
+        shows.extend(page);
+        if offset >= total {
+            break;
+        }
+        if shows.len() >= 10_000 {
+            anyhow::bail!("Podcast show list exceeds the safe page limit");
+        }
+    }
+    shows.sort_by(|a, b| a.id.cmp(&b.id));
+    let excluded: std::collections::HashSet<_> =
+        params.exclude_item_ids.iter().map(String::as_str).collect();
+    let mut candidates = Vec::new();
+    for show in shows {
+        let detail = provider.get_podcast_show(&show.id).await?;
+        if detail.possibly_truncated {
+            anyhow::bail!("Podcast episode list is truncated; retention cannot safely reconcile");
+        }
+        let mut episodes = detail.episodes;
+        // Parse offsets to UTC; missing or malformed dates come last, then stable episode ID.
+        episodes.sort_by(|a, b| {
+            podcast_published_at(&b.published_at)
+                .cmp(&podcast_published_at(&a.published_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        for episode in episodes.into_iter().take(limit) {
+            if excluded.contains(episode.id.as_str()) {
+                continue;
+            }
+            let size_bytes = episode.duration_seconds.unwrap_or(3600) as u64 * 16_000;
+            candidates.push((
+                podcast_published_at(&episode.published_at),
+                episode.id.clone(),
+                crate::auto_fill::AutoFillItem {
+                    id: episode.id,
+                    name: episode.title,
+                    album: Some(detail.show.title.clone()),
+                    artist: None,
+                    provider_album_id: Some(detail.show.id.clone()),
+                    provider_content_type: None,
+                    provider_suffix: None,
+                    track_number: None,
+                    size_bytes,
+                    priority_reason: if retention.unplayed_only {
+                        "recent episode (play state unavailable)".into()
+                    } else {
+                        "recent episode".into()
+                    },
+                    tier: None,
+                },
+            ));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut remaining = params.max_fill_bytes;
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(_, _, item)| {
+            if item.size_bytes <= remaining {
+                remaining -= item.size_bytes;
+                Some(item)
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+fn podcast_published_at(value: &Option<String>) -> Option<i64> {
+    value
+        .as_deref()
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+        .map(|date| date.timestamp())
 }
 
 /// Story 13.1: current time as Unix seconds — the single clock read for auto-fill. The pure engine
@@ -6102,6 +6483,7 @@ async fn multi_provider_calculate_delta(
                 for mut item in tracks {
                     if seen_ids.insert(item.jellyfin_id.clone()) {
                         item.server_id = Some(server_id.clone());
+                        item.media_role = provider_media_role(provider.as_ref());
                         desired_items.push(item);
                     }
                 }
@@ -6114,6 +6496,7 @@ async fn multi_provider_calculate_delta(
             for mut item in tracks {
                 if seen_ids.insert(item.jellyfin_id.clone()) {
                     item.server_id = Some(server_id.clone());
+                    item.media_role = provider_media_role(provider.as_ref());
                     desired_items.push(item);
                 }
             }
@@ -6194,6 +6577,12 @@ async fn multi_provider_calculate_delta(
             let provider = match get_provider_by_server_id_for(state, &af_server).await {
                 Ok(p) => p,
                 Err(e) => {
+                    if manifest.synced_items.iter().any(|item| {
+                        item.server_id.as_deref() == Some(&af_server)
+                            && item.media_role == crate::device::MediaRole::Podcast
+                    }) {
+                        return Err(JsonRpcError { code: ERR_CONNECTION_FAILED, message: "Podcast source unavailable; sync cannot safely reconcile retained episodes".into(), data: None });
+                    }
                     crate::daemon_log!(
                         "[AutoFill] skipping slot for server {}: provider unavailable: {}",
                         af_server,
@@ -6247,18 +6636,27 @@ async fn multi_provider_calculate_delta(
             {
                 af_pity_fired.push(af_server.clone());
             }
-            let fill_items = match expand_auto_fill_slot(provider, pipeline_opt, fill_params).await
-            {
-                Ok(items) => items,
-                Err(e) => {
-                    crate::daemon_log!(
-                        "[AutoFill] skipping slot for server {}: expansion failed: {}",
-                        af_server,
-                        e
-                    );
-                    continue;
-                }
-            };
+            let fill_items =
+                match expand_auto_fill_slot(provider.clone(), pipeline_opt, fill_params).await {
+                    Ok(items) => items,
+                    Err(e) => {
+                        if provider_media_role(provider.as_ref())
+                            == crate::device::MediaRole::Podcast
+                        {
+                            return Err(JsonRpcError {
+                                code: ERR_CONNECTION_FAILED,
+                                message: format!("Podcast retention unavailable: {e}"),
+                                data: None,
+                            });
+                        }
+                        crate::daemon_log!(
+                            "[AutoFill] skipping slot for server {}: expansion failed: {}",
+                            af_server,
+                            e
+                        );
+                        continue;
+                    }
+                };
             for item in &fill_items {
                 if let Some(tier) = item.tier.clone() {
                     af_tier_map.insert(item.id.clone(), tier);
@@ -6275,6 +6673,7 @@ async fn multi_provider_calculate_delta(
                 &mut desired_items,
                 &mut seen_ids,
                 &af_server,
+                provider_media_role(provider.as_ref()),
                 &mut remaining,
                 &mut autofill_playlist_tracks,
             );
@@ -6308,6 +6707,7 @@ async fn multi_provider_calculate_delta(
         .await;
     }
     patch_delta_auto_fill(&mut delta, &af_item_ids);
+    preflight_state_media_adds(state, manifest, &mut delta, None).await?;
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
 
@@ -6430,6 +6830,7 @@ async fn handle_sync_calculate_delta(
             })
             .or(item.bitrate);
         crate::sync::DesiredItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: item.id,
             name: item.name,
             album: item.album,
@@ -6750,6 +7151,7 @@ async fn handle_sync_calculate_delta(
                         af_item_ids.insert(item.id.clone());
                         autofill_playlist_tracks.push(autofill_playlist_track(&item));
                         desired_items.push(crate::sync::DesiredItem {
+                            media_role: crate::device::MediaRole::Music,
                             jellyfin_id: item.id,
                             name: item.name,
                             album: item.album,
@@ -7020,6 +7422,7 @@ async fn handle_sync_execute(
                 continue;
             }
             force_adds.push(crate::sync::SyncAddItem {
+                media_role: item.media_role,
                 jellyfin_id: item.jellyfin_id.clone(),
                 name: item.name.clone(),
                 album: item.album.clone(),
@@ -7448,9 +7851,16 @@ async fn handle_sync_get_resume_state(state: &AppState) -> Result<Value, JsonRpc
                             let _ = device_io.delete_file(&f.path).await;
                         }
                     }
-                    crate::device::cleanup_tmp_files(device_io, &manifest.managed_paths)
-                        .await
-                        .unwrap_or(0)
+                    crate::device::cleanup_tmp_files(
+                        device_io,
+                        &manifest
+                            .media_paths()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>(),
+                    )
+                    .await
+                    .unwrap_or(0)
                 } else {
                     0
                 }
@@ -7891,9 +8301,17 @@ fn apply_manifest_settings_update(
     icon: Option<Option<String>>,
     transcoding_profile_id: Option<Option<String>>,
     music_folder_path: Option<String>,
+    audiobook_folder_path: Option<Option<String>>,
+    podcast_folder_path: Option<Option<String>>,
     playlist_folder_path: Option<Option<String>>,
 ) -> ManifestUpdateOutcome {
     let old_music = manifest.managed_paths.first().cloned();
+    let old_audiobook = manifest
+        .media_path(crate::device::MediaRole::Audiobook)
+        .map(str::to_string);
+    let old_podcast = manifest
+        .media_path(crate::device::MediaRole::Podcast)
+        .map(str::to_string);
     let old_playlist = manifest.resolved_playlist_path().map(str::to_string);
 
     if let Some(name) = name {
@@ -7924,13 +8342,29 @@ fn apply_manifest_settings_update(
     if let Some(playlist_folder_path) = playlist_folder_path {
         manifest.playlist_path = playlist_folder_path.filter(|path| !path.trim().is_empty());
     }
+    if let Some(path) = audiobook_folder_path {
+        manifest.audiobook_path = path;
+    }
+    if let Some(path) = podcast_folder_path {
+        manifest.podcast_path = path;
+    }
 
     let new_music = manifest.managed_paths.first().cloned();
+    let new_audiobook = manifest
+        .media_path(crate::device::MediaRole::Audiobook)
+        .map(str::to_string);
+    let new_podcast = manifest
+        .media_path(crate::device::MediaRole::Podcast)
+        .map(str::to_string);
     let new_playlist = manifest.resolved_playlist_path().map(str::to_string);
     let music_changed = old_music != new_music;
     let playlist_changed = old_playlist != new_playlist;
 
-    if music_changed || playlist_changed {
+    if music_changed
+        || playlist_changed
+        || old_audiobook != new_audiobook
+        || old_podcast != new_podcast
+    {
         remove_folder_id_cache_for_path_change(
             &mut manifest.folder_ids,
             old_music.as_deref(),
@@ -7941,6 +8375,16 @@ fn apply_manifest_settings_update(
             old_playlist.as_deref(),
             new_playlist.as_deref(),
         );
+        remove_folder_id_cache_for_path_change(
+            &mut manifest.folder_ids,
+            old_audiobook.as_deref(),
+            new_audiobook.as_deref(),
+        );
+        remove_folder_id_cache_for_path_change(
+            &mut manifest.folder_ids,
+            old_podcast.as_deref(),
+            new_podcast.as_deref(),
+        );
         if playlist_changed && let Some(old_playlist) = old_playlist.as_deref() {
             for entry in &mut manifest.playlists {
                 entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
@@ -7948,35 +8392,17 @@ fn apply_manifest_settings_update(
         }
     }
 
-    let tracks_to_remove = if music_changed {
-        new_music
-            .as_deref()
-            .map(|folder| {
-                manifest
-                    .synced_items
-                    .iter()
-                    .filter(|item| !path_in_or_equal(&item.local_path, folder))
-                    .count()
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let bytes_to_remove = if music_changed {
-        new_music
-            .as_deref()
-            .map(|folder| {
-                manifest
-                    .synced_items
-                    .iter()
-                    .filter(|item| !path_in_or_equal(&item.local_path, folder))
-                    .map(|item| item.size_bytes)
-                    .sum()
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let moved_items: Vec<_> = manifest
+        .synced_items
+        .iter()
+        .filter(|item| {
+            manifest
+                .media_path(item.media_role)
+                .is_some_and(|folder| !path_in_or_equal(&item.local_path, folder))
+        })
+        .collect();
+    let tracks_to_remove = moved_items.len();
+    let bytes_to_remove = moved_items.iter().map(|item| item.size_bytes).sum();
     let playlists_to_remove = if playlist_changed {
         manifest.playlists.len()
     } else {
@@ -7984,7 +8410,10 @@ fn apply_manifest_settings_update(
     };
 
     ManifestUpdateOutcome {
-        relocation_required: music_changed || playlist_changed,
+        relocation_required: music_changed
+            || playlist_changed
+            || old_audiobook != new_audiobook
+            || old_podcast != new_podcast,
         tracks_to_remove,
         playlists_to_remove,
         bytes_to_remove,
@@ -8042,6 +8471,34 @@ async fn handle_device_update_manifest(
     let music_folder_path = string_param(&params, "musicFolderPath")?
         .map(normalize_editable_folder_path)
         .transpose()?;
+    let optional_media_folder = |key| -> Result<Option<Option<String>>, JsonRpcError> {
+        if params.get(key).is_none() {
+            return Ok(None);
+        }
+        let path = string_param(&params, key)?.unwrap_or("").trim();
+        Ok(Some(if path.is_empty() {
+            None
+        } else {
+            Some(normalize_editable_folder_path(path)?)
+        }))
+    };
+    let audiobook_folder_path = optional_media_folder("audiobookFolderPath")?;
+    let podcast_folder_path = optional_media_folder("podcastFolderPath")?;
+    if let Some(device_io) = state.device_manager.get_device_io().await {
+        for path in [
+            audiobook_folder_path.as_ref().and_then(|p| p.as_deref()),
+            podcast_folder_path.as_ref().and_then(|p| p.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            device_io.ensure_dir(path).await.map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to create media folder: {e}"),
+                data: None,
+            })?;
+        }
+    }
     let playlist_folder_path = if params.get("playlistFolderPath").is_some() {
         let raw = string_param(&params, "playlistFolderPath")?
             .unwrap_or("")
@@ -8092,6 +8549,8 @@ async fn handle_device_update_manifest(
                 icon_update,
                 transcoding_profile_update,
                 music_folder_path,
+                audiobook_folder_path,
+                podcast_folder_path,
                 playlist_folder_path,
             );
         })
@@ -8135,6 +8594,8 @@ async fn handle_device_initialize(
         "observedDestinationRevision",
         "folderPath",
         "playlistFolderPath",
+        "audiobookFolderPath",
+        "podcastFolderPath",
         "profileId",
         "transcodingProfileId",
         "name",
@@ -8175,6 +8636,14 @@ async fn handle_device_initialize(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|path| !path.is_empty())
+        .map(normalize_editable_folder_path)
+        .transpose()?;
+    let audiobook_folder_path = string_param(&params, "audiobookFolderPath")?
+        .filter(|path| !path.trim().is_empty())
+        .map(normalize_editable_folder_path)
+        .transpose()?;
+    let podcast_folder_path = string_param(&params, "podcastFolderPath")?
+        .filter(|path| !path.trim().is_empty())
         .map(normalize_editable_folder_path)
         .transpose()?;
 
@@ -8228,7 +8697,7 @@ async fn handle_device_initialize(
         }
     }
 
-    let manifest = state
+    let mut manifest = state
         .device_manager
         .initialize_pending_device(
             pending_id,
@@ -8254,6 +8723,40 @@ async fn handle_device_initialize(
                 data: None,
             }
         })?;
+
+    if audiobook_folder_path.is_some() || podcast_folder_path.is_some() {
+        if let Some(device_io) = state.device_manager.get_device_io().await {
+            for path in [
+                audiobook_folder_path.as_deref(),
+                podcast_folder_path.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                device_io.ensure_dir(path).await.map_err(|e| JsonRpcError {
+                    code: ERR_STORAGE_ERROR,
+                    message: format!("Failed to create media folder: {e}"),
+                    data: None,
+                })?;
+            }
+        }
+        let book_path = audiobook_folder_path.clone();
+        let podcast_path = podcast_folder_path.clone();
+        state
+            .device_manager
+            .update_manifest(|current| {
+                current.audiobook_path = book_path;
+                current.podcast_path = podcast_path;
+            })
+            .await
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: e.to_string(),
+                data: None,
+            })?;
+        manifest.audiobook_path = audiobook_folder_path;
+        manifest.podcast_path = podcast_folder_path;
+    }
 
     state
         .db
@@ -8294,6 +8797,8 @@ async fn handle_device_initialize(
             "deviceId": manifest.device_id,
             "version": manifest.version,
             "managedPaths": manifest.managed_paths,
+            "audiobookPath": manifest.audiobook_path,
+            "podcastPath": manifest.podcast_path,
             "playlistPath": manifest.playlist_path,
             "transcodingProfileId": manifest.transcoding_profile_id,
         }
@@ -8955,6 +9460,7 @@ mod tests {
 
     fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
         crate::sync::SyncAddItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: id.to_string(),
             album: None,
@@ -8979,6 +9485,7 @@ mod tests {
     fn patch_delta_bitrate_overrides_scopes_to_autofill_items_only() {
         // A manual item (not in the map) and two auto-fill items (in the map) on the same server.
         let mut delta = crate::sync::SyncDelta {
+            blocked: vec![],
             adds: vec![
                 add_item("manual-1", Some("srv")),
                 add_item("af-1", Some("srv")),
@@ -9017,6 +9524,7 @@ mod tests {
 
         // An empty map is a no-op (nothing stamped).
         let mut delta2 = crate::sync::SyncDelta {
+            blocked: vec![],
             adds: vec![add_item("x", Some("srv"))],
             deletes: Vec::new(),
             id_changes: Vec::new(),
@@ -9031,6 +9539,7 @@ mod tests {
     #[test]
     fn patch_delta_auto_fill_marks_non_tiered_items_only() {
         let mut delta = crate::sync::SyncDelta {
+            blocked: vec![],
             adds: vec![
                 add_item("manual", Some("srv")),
                 add_item("auto", Some("srv")),
@@ -9989,8 +10498,11 @@ mod tests {
             icon: Some("usb-drive".to_string()),
             version: "1.0".to_string(),
             managed_paths: vec!["Music".to_string()],
+            audiobook_path: None,
+            podcast_path: None,
             playlist_path: None,
             synced_items: vec![crate::device::SyncedItem {
+                media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song-1".to_string(),
                 name: "Track".to_string(),
                 album: None,
@@ -10047,6 +10559,31 @@ mod tests {
     }
 
     #[test]
+    fn media_folder_paths_inherit_music_and_accept_aliases() {
+        let legacy: crate::device::DeviceManifest = serde_json::from_str(
+            r#"{"device_id":"dev","version":"1.0","managed_paths":["Music"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.media_path(crate::device::MediaRole::Audiobook),
+            Some("Music")
+        );
+        assert_eq!(
+            legacy.media_path(crate::device::MediaRole::Podcast),
+            Some("Music")
+        );
+        let modern: crate::device::DeviceManifest = serde_json::from_str(r#"{"device_id":"dev","version":"1.0","managed_paths":["Music"],"audiobookPath":"Books","podcast_path":"Podcasts"}"#).unwrap();
+        assert_eq!(
+            modern.media_path(crate::device::MediaRole::Audiobook),
+            Some("Books")
+        );
+        assert_eq!(
+            modern.media_path(crate::device::MediaRole::Podcast),
+            Some("Podcasts")
+        );
+    }
+
+    #[test]
     fn editable_folder_path_rejects_unsafe_values() {
         for invalid in [
             "",
@@ -10080,6 +10617,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
 
         assert!(!outcome.relocation_required);
@@ -10097,6 +10636,8 @@ mod tests {
             None,
             None,
             Some("Audio".to_string()),
+            None,
+            None,
             Some(Some("Playlists".to_string())),
         );
 
@@ -12145,6 +12686,7 @@ mod tests {
 
         // Manual item "m1" (100 bytes) already resolved on server s1.
         let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {
+            media_role: crate::device::MediaRole::Music,
             jellyfin_id: "m1".to_string(),
             name: "manual".to_string(),
             album: None,
@@ -12176,6 +12718,7 @@ mod tests {
             &mut desired_items,
             &mut seen_ids,
             "s1",
+            crate::device::MediaRole::Music,
             &mut remaining,
             &mut autofill_playlist_tracks,
         );
@@ -12231,6 +12774,7 @@ mod tests {
             &mut desired_items,
             &mut seen_ids,
             "s2",
+            crate::device::MediaRole::Music,
             &mut remaining,
             &mut autofill_playlist_tracks,
         );
@@ -12810,6 +13354,7 @@ mod tests {
             version: "1.1".to_string(),
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![crate::device::SyncedItem {
+                media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song1".to_string(),
                 name: "Existing".to_string(),
                 album: Some("Album".to_string()),
@@ -12913,6 +13458,7 @@ mod tests {
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![
                 crate::device::SyncedItem {
+                    media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "item-a".to_string(),
                     name: "Track A".to_string(),
                     album: None,
@@ -12931,6 +13477,7 @@ mod tests {
                     server_id: None,
                 },
                 crate::device::SyncedItem {
+                    media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "item-b".to_string(),
                     name: "Track B".to_string(),
                     album: None,
@@ -14754,6 +15301,7 @@ mod tests {
         songs: HashMap<String, crate::domain::models::Song>,
         tracks: Vec<crate::domain::models::Song>,
         song_auth_error: Option<String>,
+        podcast_complete: bool,
     }
 
     impl FakeBrowseProvider {
@@ -14769,6 +15317,7 @@ mod tests {
                 songs: HashMap::new(),
                 tracks: vec![],
                 song_auth_error: None,
+                podcast_complete: false,
             })
         }
 
@@ -14786,6 +15335,7 @@ mod tests {
                 songs: HashMap::new(),
                 tracks: vec![],
                 song_auth_error: None,
+                podcast_complete: false,
             })
         }
 
@@ -14800,6 +15350,7 @@ mod tests {
                 songs,
                 tracks: vec![],
                 song_auth_error: None,
+                podcast_complete: false,
             })
         }
 
@@ -14819,6 +15370,7 @@ mod tests {
                 songs,
                 tracks: vec![],
                 song_auth_error: None,
+                podcast_complete: false,
             })
         }
 
@@ -14831,6 +15383,7 @@ mod tests {
                 songs: HashMap::new(),
                 tracks: vec![],
                 song_auth_error: Some(message.to_string()),
+                podcast_complete: false,
             })
         }
 
@@ -14843,12 +15396,59 @@ mod tests {
                 songs: HashMap::new(),
                 tracks,
                 song_auth_error: None,
+                podcast_complete: false,
             })
         }
     }
 
     #[async_trait::async_trait]
     impl MediaProvider for FakeBrowseProvider {
+        async fn resolve_sync_media(
+            &self,
+            _id: &str,
+        ) -> Result<crate::providers::SyncMediaRepresentation, ProviderError> {
+            Ok(crate::providers::SyncMediaRepresentation {
+                codec: "mp3".into(),
+                container: "mp3".into(),
+                request: crate::providers::PlaybackRequest {
+                    url: reqwest::Url::parse("https://example.invalid/episode").unwrap(),
+                    headers: reqwest::header::HeaderMap::new(),
+                    range_supported: true,
+                    cleanup: None,
+                    refresh: None,
+                    expected_content_type: Some("audio/mpeg".into()),
+                },
+            })
+        }
+
+        fn library_role(&self) -> Option<crate::providers::ProviderLibraryRole> {
+            self.modes
+                .contains(&crate::providers::BrowseMode::Podcasts)
+                .then_some(crate::providers::ProviderLibraryRole::Podcast)
+        }
+
+        async fn get_podcast_episode(
+            &self,
+            id: &str,
+        ) -> Result<crate::domain::models::PodcastEpisode, ProviderError> {
+            if id != "episode-opaque" {
+                return Err(ProviderError::NotFound {
+                    item_type: "episode".into(),
+                    id: "unavailable".into(),
+                });
+            }
+            Ok(crate::domain::models::PodcastEpisode {
+                item_type: crate::domain::models::PodcastEntityType::Episode,
+                id: id.into(),
+                show_id: "show-opaque".into(),
+                title: "First".into(),
+                description: None,
+                duration_seconds: Some(60),
+                published_at: None,
+                cover_art_id: None,
+            })
+        }
+
         async fn list_podcast_shows(
             &self,
             offset: u32,
@@ -14897,7 +15497,7 @@ mod tests {
                     published_at: None,
                     cover_art_id: None,
                 }],
-                possibly_truncated: true,
+                possibly_truncated: !self.podcast_complete,
             })
         }
         async fn search_podcasts(
@@ -15292,6 +15892,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_episode_sync_uses_typed_identity() {
+        let provider =
+            FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
+        let (items, playlist) =
+            provider_sync_items_for_id(provider as Arc<dyn MediaProvider>, "episode-opaque")
+                .await
+                .expect("typed episode should be admitted");
+        assert!(playlist.is_none());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].jellyfin_id, "episode-opaque");
+        assert_eq!(items[0].media_role, crate::device::MediaRole::Podcast);
+        assert_eq!(items[0].provider_album_id.as_deref(), Some("show-opaque"));
+        assert!(items[0].size_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn podcast_autofill_respects_recent_limit_budget_and_unknown_progress() {
+        let mut provider =
+            FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
+        Arc::get_mut(&mut provider).unwrap().podcast_complete = true;
+        let mut pipeline = crate::auto_fill::AutoFillPipeline::default_legacy(Some(1_000_000));
+        pipeline.podcast_retention.recent_count = 1;
+        pipeline.podcast_retention.unplayed_only = true;
+        let params = crate::auto_fill::AutoFillParams {
+            exclude_item_ids: vec![],
+            max_fill_bytes: 1_000_000,
+            device_id: "device".into(),
+            server_id: "server".into(),
+            now_unix: 0,
+            history: Default::default(),
+            rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
+            local: now_civil(),
+        };
+        let items =
+            expand_auto_fill_slot(provider as Arc<dyn MediaProvider>, Some(&pipeline), params)
+                .await
+                .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "episode-opaque");
+        assert!(items[0].priority_reason.contains("play state unavailable"));
+        assert_eq!(items[0].size_bytes, 960_000);
+    }
+
+    #[test]
+    fn podcast_dates_compare_in_utc_with_unknown_last() {
+        let a = Some("2026-09-24T02:00:00+02:00".to_string());
+        let b = Some("2026-09-24T01:00:00Z".to_string());
+        assert!(podcast_published_at(&b) > podcast_published_at(&a));
+        assert!(podcast_published_at(&a) > podcast_published_at(&None));
+    }
+
+    #[tokio::test]
+    async fn incompatible_podcast_is_blocked_before_transfer() {
+        let provider =
+            FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
+        let (items, _) = provider_sync_items_for_id(
+            provider.clone() as Arc<dyn MediaProvider>,
+            "episode-opaque",
+        )
+        .await
+        .unwrap();
+        let mut delta = crate::sync::calculate_delta(
+            &items,
+            &crate::device::DeviceManifest {
+                managed_paths: vec!["Music".into()],
+                ..Default::default()
+            },
+        );
+        let flac_only = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        preflight_provider_media_adds(
+            &mut delta,
+            provider as Arc<dyn MediaProvider>,
+            Some(&flac_only),
+            None,
+        )
+        .await;
+        assert!(delta.adds.is_empty());
+        assert_eq!(delta.blocked.len(), 1);
+        assert_eq!(delta.blocked[0].reason_code, "incompatible-direct-format");
+        assert_eq!(
+            delta.blocked[0].media_role,
+            crate::device::MediaRole::Podcast
+        );
+    }
+
+    #[tokio::test]
     async fn provider_sync_items_for_id_propagates_song_lookup_failures() {
         let provider = FakeBrowseProvider::with_song_auth_error("auth failed");
 
@@ -15409,6 +16097,20 @@ mod tests {
             album_loudness: Default::default(),
             provider_metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn audiobook_part_without_reported_bytes_uses_duration_estimate() {
+        let mut part = make_fake_song("part", "Part");
+        part.duration_seconds = 120;
+        part.provider_metadata.identity = Some(crate::domain::models::ProviderIdentity {
+            library_id: "library".into(),
+            library_item_id: "book".into(),
+            media_id: "media".into(),
+        });
+        assert_eq!(provider_track_size(&part), 1_920_000);
+        part.size_bytes = Some(2_000_000);
+        assert_eq!(provider_track_size(&part), 2_000_000);
     }
 
     #[tokio::test]

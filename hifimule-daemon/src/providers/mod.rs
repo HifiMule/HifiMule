@@ -161,6 +161,55 @@ pub struct PlaybackDescription {
     pub representations: Vec<PlaybackRepresentation>,
 }
 
+/// Daemon-private representation admitted for managed device sync. Ownership of
+/// `request` keeps provider session cleanup alive until the staged read ends.
+#[derive(Debug, Clone)]
+pub struct SyncMediaRepresentation {
+    pub codec: String,
+    pub container: String,
+    pub request: PlaybackRequest,
+}
+
+impl SyncMediaRepresentation {
+    pub fn from_playback_representations(
+        mut representations: Vec<PlaybackRepresentation>,
+    ) -> Result<Self, ProviderError> {
+        if representations.len() != 1 {
+            return Err(ProviderError::UnsupportedCapability(
+                "sync requires one verified direct media representation".into(),
+            ));
+        }
+        let representation = representations.pop().unwrap();
+        if representation.provenance != PlaybackProvenance::Original {
+            return Err(ProviderError::UnsupportedCapability(
+                "sync requires original direct media".into(),
+            ));
+        }
+        let codec = representation
+            .codec
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ProviderError::UnsupportedCapability("sync codec is unverified".into())
+            })?;
+        let container = representation
+            .container
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ProviderError::UnsupportedCapability("sync container is unverified".into())
+            })?;
+        if representation.request.expected_content_type.is_none() {
+            return Err(ProviderError::UnsupportedCapability(
+                "sync content type is unverified".into(),
+            ));
+        }
+        Ok(Self {
+            codec,
+            container,
+            request: representation.request,
+        })
+    }
+}
+
 /// Daemon-private book progress. Times are integer milliseconds at this
 /// boundary; the Audiobookshelf adapter alone converts to whole-book seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +459,17 @@ pub trait MediaProvider: Send + Sync {
         song_id: &str,
         profile: Option<&TranscodeProfile>,
     ) -> Result<String, ProviderError>;
+
+    /// A private authenticated media request for device sync. Providers without
+    /// this capability continue using `download_url` for music.
+    async fn resolve_sync_media(
+        &self,
+        _id: &str,
+    ) -> Result<SyncMediaRepresentation, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "direct sync media is unavailable".into(),
+        ))
+    }
 
     async fn resolve_playback(&self, _song_id: &str) -> Result<PlaybackDescription, ProviderError> {
         Err(ProviderError::UnsupportedCapability(
@@ -1849,6 +1909,23 @@ mod tests {
                 expected_content_type: None,
             },
         }
+    }
+
+    #[test]
+    fn sync_media_requires_one_verified_original_representation() {
+        let mut direct = representation("mp3", PlaybackProvenance::Original, None, None, None);
+        direct.container = Some("mp3".into());
+        direct.request.expected_content_type = Some("audio/mpeg".into());
+        let admitted = SyncMediaRepresentation::from_playback_representations(vec![direct.clone()])
+            .expect("one original representation");
+        assert_eq!(admitted.codec, "mp3");
+        assert_eq!(admitted.container, "mp3");
+        assert!(
+            SyncMediaRepresentation::from_playback_representations(vec![direct.clone(), direct,])
+                .is_err()
+        );
+        let alternative = representation("mp3", PlaybackProvenance::Alternative, None, None, None);
+        assert!(SyncMediaRepresentation::from_playback_representations(vec![alternative]).is_err());
     }
 
     #[test]

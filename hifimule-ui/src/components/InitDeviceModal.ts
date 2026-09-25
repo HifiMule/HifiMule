@@ -3,6 +3,7 @@
 // Follows the RepairModal.ts pattern: sl-dialog, class-based, open() method, onComplete callback.
 
 import { rpcCall } from '../rpc';
+import { t } from '../i18n';
 
 interface DeviceProfileSummary {
     id: string;
@@ -203,6 +204,14 @@ export class InitDeviceModal {
                         clearable
                     ></sl-input>
                 </div>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">${t('basket.device.audiobook_folder')}</label>
+                    <sl-input id="init-audiobook-folder-input" placeholder="${t('basket.device.media_folder_inherit')}" clearable></sl-input>
+                </div>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">${t('basket.device.podcast_folder')}</label>
+                    <sl-input id="init-podcast-folder-input" placeholder="${t('basket.device.media_folder_inherit')}" clearable></sl-input>
+                </div>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">Linked Jellyfin Profile</div>
                     <div style="font-size: 0.85rem;">
@@ -314,6 +323,8 @@ export class InitDeviceModal {
         const folderPath: string = folderInput?.value?.trim() ?? '';
         const playlistFolderInput = this.dialog?.querySelector('#init-playlist-folder-input') as any;
         const playlistFolderPath: string = playlistFolderInput?.value?.trim() ?? '';
+        const audiobookFolderPath: string = (this.dialog?.querySelector('#init-audiobook-folder-input') as any)?.value?.trim() ?? '';
+        const podcastFolderPath: string = (this.dialog?.querySelector('#init-podcast-folder-input') as any)?.value?.trim() ?? '';
 
         const profileSelect = this.dialog?.querySelector('#init-transcoding-profile') as any;
         let transcodingProfileId = profileSelect?.value;
@@ -329,6 +340,8 @@ export class InitDeviceModal {
                 observedDestinationRevision: this.observedDestinationRevision,
                 folderPath,
                 playlistFolderPath,
+                audiobookFolderPath,
+                podcastFolderPath,
                 profileId: userId,
                 transcodingProfileId,
                 name: deviceName,
