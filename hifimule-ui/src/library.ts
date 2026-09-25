@@ -297,10 +297,13 @@ function mapFavoriteAlbums(
 function mapPlaylists(playlists: BrowsePlaylist[]): BrowseDisplayItem[] {
     return playlists.map(p => ({
         id: p.id,
+        serverId: p.serverId,
         name: p.name,
         type: 'Playlist' as const,
         coverArtId: null,
-        subtitle: null,
+        subtitle: state.isBookLibrary
+            ? t(p.id.startsWith('abs-series-') ? 'library.books.series_read_only' : 'library.books.collection_read_only')
+            : null,
         childCount: p.trackCount,
         sizeBytes: 0,
         sizeTicks: p.durationSeconds * 10_000_000,
@@ -346,6 +349,7 @@ function mapFlatTracks(
     tracks: BrowseTrack[],
     mode?: 'frequentlyPlayed' | 'recentlyPlayed' | 'favorites',
 ): BrowseDisplayItem[] {
+    const compatibilityUnknown = state.isBookLibrary ? t('library.books.compatibility_unknown') : '';
     return tracks.map(t => {
         let subtitle = `${t.artistName} — ${t.albumName}`;
         if (mode === 'frequentlyPlayed' && t.playCount != null) {
@@ -358,9 +362,11 @@ function mapFlatTracks(
             id: t.id,
             serverId: t.serverId,
             name: t.title,
-            type: 'Audio' as const,
+            type: state.isBookLibrary ? 'BookPart' as const : 'Audio' as const,
             coverArtId: t.coverArtId,
-            subtitle,
+            subtitle: state.isBookLibrary
+                ? `${t.albumName ?? ''} · ${compatibilityUnknown}`
+                : subtitle,
             sizeBytes: t.sizeBytes ?? 0,
             sizeTicks: t.duration * 10_000_000,
             childCount: 1,
@@ -376,7 +382,7 @@ function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
         type: state.isBookLibrary ? 'BookPart' as const : 'Audio' as const,
         coverArtId: track.coverArtId,
         subtitle: state.isBookLibrary
-            ? (tracks.length === 1 ? t('library.books.complete') : t('library.books.part', { number: track.trackNumber ?? index + 1 }))
+            ? `${tracks.length === 1 ? t('library.books.complete') : t('library.books.part', { number: track.trackNumber ?? index + 1 })} · ${t('library.books.compatibility_unknown')}`
             : track.artistName,
         sizeBytes: track.sizeBytes ?? (state.isBookLibrary ? (track.duration > 0 ? track.duration : 3_600) * 16_000 : 0),
         sizeTicks: track.duration * 10_000_000,
@@ -1711,7 +1717,7 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
     row.append(heading);
     const metadata = document.createElement('p');
     const duration = episode.durationSeconds === null ? '' : `${Math.floor(episode.durationSeconds / 60)} min`;
-    metadata.textContent = [episode.publishedAt, duration].filter(Boolean).join(' · ');
+    metadata.textContent = [episode.publishedAt, duration, t('library.books.compatibility_unknown')].filter(Boolean).join(' · ');
     row.append(metadata);
     if (episode.description) {
         const description = document.createElement('p');

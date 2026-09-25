@@ -256,6 +256,7 @@ export interface BrowseAlbum {
 
 export interface BrowsePlaylist {
     id: string;
+    serverId?: string;
     name: string;
     trackCount: number;
     durationSeconds: number;

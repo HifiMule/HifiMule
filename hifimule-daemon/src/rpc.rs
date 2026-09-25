@@ -2137,11 +2137,21 @@ async fn handle_browse_get_podcast_episode(
 }
 
 async fn handle_browse_list_playlists(state: &AppState) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let playlists = provider
         .list_playlists()
         .await
         .map_err(provider_error_to_rpc)?;
+    let playlists = playlists
+        .into_iter()
+        .map(|playlist| {
+            let mut value = serde_json::to_value(playlist).expect("playlist is serializable");
+            if let Some(server_id) = server_id.as_deref() {
+                value["serverId"] = serde_json::json!(server_id);
+            }
+            value
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({ "playlists": playlists }))
 }
 
@@ -4389,11 +4399,18 @@ async fn preflight_provider_media_adds(
     preferred_container: Option<&str>,
 ) {
     let mut blocked = Vec::new();
-    for add in &delta.adds {
+    for add in &mut delta.adds {
+        if add.media_role == crate::device::MediaRole::Music {
+            continue;
+        }
         if let Some(item) =
             blocked_provider_media_add(add, provider.as_ref(), profile, preferred_container).await
         {
             blocked.push(item);
+        } else {
+            add.reason_code = Some("verified-direct-format".into());
+            add.reason =
+                Some("Verified direct audio representation is compatible with this device".into());
         }
     }
     apply_blocked_media_adds(delta, blocked);
@@ -4441,7 +4458,7 @@ async fn preflight_state_media_adds(
     }
     let mut providers: HashMap<String, Arc<dyn MediaProvider>> = HashMap::new();
     let mut blocked = Vec::new();
-    for add in &delta.adds {
+    for add in &mut delta.adds {
         if add.media_role == crate::device::MediaRole::Music {
             continue;
         }
@@ -4481,6 +4498,10 @@ async fn preflight_state_media_adds(
             blocked_provider_media_add(add, provider.as_ref(), profile.as_ref(), preferred).await
         {
             blocked.push(item);
+        } else {
+            add.reason_code = Some("verified-direct-format".into());
+            add.reason =
+                Some("Verified direct audio representation is compatible with this device".into());
         }
     }
     apply_blocked_media_adds(delta, blocked);
@@ -15992,6 +16013,39 @@ mod tests {
         assert_eq!(
             delta.blocked[0].media_role,
             crate::device::MediaRole::Podcast
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_podcast_preflight_records_verified_direct_reason() {
+        let provider =
+            FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
+        let (items, _) = provider_sync_items_for_id(
+            provider.clone() as Arc<dyn MediaProvider>,
+            "episode-opaque",
+        )
+        .await
+        .unwrap();
+        let mut delta = crate::sync::calculate_delta(
+            &items,
+            &crate::device::DeviceManifest {
+                managed_paths: vec!["Music".into()],
+                ..Default::default()
+            },
+        );
+        let mp3 = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+        preflight_provider_media_adds(
+            &mut delta,
+            provider as Arc<dyn MediaProvider>,
+            Some(&mp3),
+            None,
+        )
+        .await;
+        assert!(delta.blocked.is_empty());
+        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(
+            delta.adds[0].reason_code.as_deref(),
+            Some("verified-direct-format")
         );
     }
 

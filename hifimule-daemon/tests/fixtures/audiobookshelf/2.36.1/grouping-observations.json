@@ -1,0 +1,24 @@
+{
+  "observation": "verified-on-controlled-v2.36.1-deployment-2026-09-25",
+  "libraryAlias": "books-library",
+  "seriesPages": [
+    { "page": 0, "limit": 1, "total": 4, "results": [{ "id": "series-1", "name": "Series A", "libraryId": "books-library", "books": ["book-1"] }] },
+    { "page": 1, "limit": 1, "total": 4, "results": [{ "id": "series-2", "name": "Series B", "libraryId": "books-library", "books": ["book-2", "book-3", "book-4"] }] }
+  ],
+  "allSeriesMemberOrder": [
+    ["book-1"],
+    ["book-2", "book-3", "book-4"],
+    ["book-5", "book-6", "book-7", "book-8", "book-9", "book-10"],
+    ["book-11", "book-12"]
+  ],
+  "collectionPages": [
+    { "page": 0, "limit": 1, "total": 1, "results": [{ "id": "collection-1", "name": "Collection A", "libraryId": "books-library", "books": ["book-2", "book-4", "book-12", "book-11", "book-3"] }] },
+    { "page": 1, "limit": 1, "total": 1, "results": [] }
+  ],
+  "seriesDetailFields": ["id", "name", "nameIgnorePrefix", "description", "addedAt", "updatedAt", "libraryId"],
+  "seriesDetailHasBooks": false,
+  "collectionDetailMemberOrder": ["book-2", "book-4", "book-12", "book-11", "book-3"],
+  "memberIdentityFields": ["id", "libraryId", "mediaType", "media.id"],
+  "allObservedMembersInSelectedBookLibrary": true,
+  "seriesSequenceOnListMembers": null
+}

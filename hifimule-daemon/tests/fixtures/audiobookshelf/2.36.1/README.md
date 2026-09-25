@@ -7,3 +7,5 @@ This fixture set is synthetic and redacted at authoring time. It records only fi
 All real IDs, endpoint origins, titles, paths, credentials, tokens, authenticated URLs, request-header values, and error bodies are excluded. The contract document is the authority for endpoint templates and source evidence.
 
 2026-09-22 correction: the synthetic book fixtures previously used `audioFiles[].id` and string chapter IDs. Live book-detail parsing exposed the audio-file mismatch; the Audiobookshelf API documents `audioFiles[].ino` as a string and chapter IDs as numbers. The fixtures now use those wire field types. Their fixture-local values remain synthetic.
+
+2026-09-25 grouping follow-up: `grouping-observations.json` records verified v2.36.1 paging, member order, overlap, and list/detail differences with fixture-local aliases only. It is a redacted observation summary, not a raw response or an implementation fixture with real item metadata.

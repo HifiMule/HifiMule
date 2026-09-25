@@ -1,6 +1,10 @@
+---
+baseline_commit: e5ad913d2a3381942281520798cbf7c51617e587
+---
+
 # Story 17.9: Refine Audiobookshelf grouping and compatibility feedback
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -17,18 +21,18 @@ so that I can curate and synchronize confidently as the library changes.
 
 ## Tasks / Subtasks
 
-- [ ] Validate the Audiobookshelf grouping contract against the supported server fixture/version set (AC: 1, 5)
-  - [ ] Capture sanitized series and collection list/detail fixtures, including pagination, membership and ordering; document any version differences in `docs/audiobookshelf-integration-contract.md`.
-  - [ ] Keep grouping IDs namespaced by type and selected library/server; reject cross-library members.
-- [ ] Map groupings through `MediaProvider` read-only playlist methods (AC: 1, 4)
-  - [ ] Extend `AudiobookshelfProvider::list_playlists` and `get_playlist`; retain `supports_playlist_write: false` and reject mutation methods.
-  - [ ] Use existing playlist RPC and UI browse rendering. Expose a clear read-only affordance and hide/disable write controls only for this provider; keep music provider write behavior.
-- [ ] Add progressive compatibility feedback (AC: 2, 3)
-  - [ ] Define explicit direct, transcoded, blocked and unknown states and their localized user text. Use available facts for cheap browse-time status; defer uncertain decisions to sync planning.
-  - [ ] Reuse Story 17.8's target-profile preview admission and blocked reasons; avoid starting playback sessions or fetching full media during browsing.
-- [ ] Verify regression and responsiveness (AC: 1–5)
-  - [ ] Test bounded paging/lazy requests, stale and duplicate members, auth failure, and cross-server isolation.
-  - [ ] Test compatibility UI states against preview results, including unsupported formats and transcode failure; run focused daemon, UI, and contract checks.
+- [x] Validate the Audiobookshelf grouping contract against the supported server fixture/version set (AC: 1, 5)
+  - [x] Capture sanitized series and collection list/detail fixtures, including pagination, membership and ordering; document any version differences in `docs/audiobookshelf-integration-contract.md`.
+  - [x] Keep grouping IDs namespaced by type and selected library/server; reject cross-library members.
+- [x] Map groupings through `MediaProvider` read-only playlist methods (AC: 1, 4)
+  - [x] Extend `AudiobookshelfProvider::list_playlists` and `get_playlist`; retain `supports_playlist_write: false` and reject mutation methods.
+  - [x] Use existing playlist RPC and UI browse rendering. Expose a clear read-only affordance and hide/disable write controls only for this provider; keep music provider write behavior.
+- [x] Add progressive compatibility feedback (AC: 2, 3)
+  - [x] Define explicit direct, transcoded, blocked and unknown states and their localized user text. Use available facts for cheap browse-time status; defer uncertain decisions to sync planning.
+  - [x] Reuse Story 17.8's target-profile preview admission and blocked reasons; avoid starting playback sessions or fetching full media during browsing.
+- [x] Verify regression and responsiveness (AC: 1–5)
+  - [x] Test bounded paging/lazy requests, stale and duplicate members, auth failure, and cross-server isolation.
+  - [x] Test compatibility UI states against preview results, including unsupported formats and transcode failure; run focused daemon, UI, and contract checks.
 
 ## Dev Notes
 
@@ -68,9 +72,34 @@ GPT-6
 
 ### Debug Log References
 
+- 2026-09-25: Began Story 17.9 at baseline `e5ad913d2a3381942281520798cbf7c51617e587`. The required first task needs observed series and collection list/detail responses from a supported server. Existing v2.36.1 fixtures contain no grouping responses, and this workspace exposes no controlled probe configuration. Official API documentation gives endpoint hypotheses but cannot establish version-specific membership or ordering. Paused before creating fixtures or implementing grouping behavior; requested controlled server access or sanitized responses.
+- 2026-09-25: User supplied controlled v2.36.1 test-server access. Probed Books series/collection paging and detail shapes with a disposable account; kept only alias-only observations. The initial pause was resolved in this run.
+- 2026-09-25: Implemented paged read-only group mapping, source-order part resolution from embedded book metadata, selected-library checks, stale/duplicate skipping, and portable server tagging on playlist RPC results. Kept playlist mutations unsupported.
+- 2026-09-25: Added unknown browse labels and profile-backed direct/blocked sync planning feedback for audiobook parts and podcast episodes. Transcoded wording is defined for a verified future representation, while the current ABS resolver only admits verified direct delivery.
+
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Controlled v2.36.1 grouping list/detail responses were validated and summarized in an alias-only fixture and contract record.
+- Books series and collections now browse as read-only playlists with distinct source identities. Opening a group uses embedded members and does not start media sessions or fetch each item.
+- The selected server ID follows playlist browse results into device selection. Sync planning lists verified direct eligibility or an actionable block reason using the selected device profile; browse-time compatibility remains unknown when metadata cannot prove it.
+- Verification: full daemon suite passed (1,139 unit tests, 5 contract tests, 6 ignored); 26 UI tests passed; TypeScript check, production UI build, Rust formatting, Git diff check, and Clippy completed successfully. Clippy reported existing non-fatal warnings.
 
 ### File List
 
+- `_bmad-output/implementation-artifacts/17-9-refine-audiobookshelf-grouping-and-compatibility-feedback.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/audiobookshelf-integration-contract.md`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/README.md`
+- `hifimule-daemon/tests/fixtures/audiobookshelf/2.36.1/grouping-observations.json`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/tests/audiobookshelfBrowse.test.mjs`
+
+## Change Log
+
+- 2026-09-25: Implemented Audiobookshelf read-only series/collection browsing and profile-backed compatibility feedback; validated controlled v2.36.1 grouping behavior and regression suites.
