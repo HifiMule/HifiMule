@@ -478,7 +478,10 @@ function libraryQueueHarness({ conflict, refreshFails = false, deferAdmission = 
   });
   const button = load('components/TrackQueueButton.ts', { '../state/queue': queue, '../i18n': translations });
   const tracks = load('components/TracksBrowseView.ts', { '../state/queue': queue });
-  const library = load('library.ts', { './state/queue': queue },
+  const library = load('library.ts', {
+    './state/queue': queue,
+    './state/basket': { basketStore: { addEventListener() {} } },
+  },
     '\nexports.queueTest = { state, bulkAddSelectionToQueue };');
   const rows = [
     { id: 'first', serverId: 'server-a', type: 'Audio' },

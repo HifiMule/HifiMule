@@ -17,6 +17,7 @@ function harness(locale = 'en') {
   const basketStore = {
     addEventListener() {},
     removeEventListener(type, handler) { audit.push(`remove:basket:${handler.name || 'handler'}`); },
+    has() { return false; },
   };
   class Element {
     children = []; attributes = {}; listeners = {}; className = ''; textContent = ''; hidden = false;
