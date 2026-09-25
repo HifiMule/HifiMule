@@ -4526,9 +4526,32 @@ fn podcast_episode_to_desired(
         provider_content_type: None,
         provider_suffix: None,
         original_bitrate: None,
-        track_number: None,
+        track_number: podcast_date_number(&episode.published_at),
         server_id: None,
     }
+}
+
+fn podcast_date_number(value: &Option<String>) -> Option<u32> {
+    use chrono::Datelike;
+    value
+        .as_deref()
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+        .and_then(|date| {
+            (1..=9999)
+                .contains(&date.year())
+                .then(|| (date.year() as u32) * 10_000 + date.month() * 100 + date.day())
+        })
+}
+
+#[cfg(test)]
+#[test]
+fn podcast_publication_date_uses_source_calendar_day() {
+    assert_eq!(
+        podcast_date_number(&Some("2026-09-24T23:30:00-04:00".into())),
+        Some(20260924)
+    );
+    assert_eq!(podcast_date_number(&None), None);
+    assert_eq!(podcast_date_number(&Some("invalid".into())), None);
 }
 
 fn podcast_estimated_size_bytes(duration_seconds: Option<u32>) -> u64 {
@@ -6027,7 +6050,7 @@ async fn expand_podcast_auto_fill(
                     provider_album_id: Some(detail.show.id.clone()),
                     provider_content_type: None,
                     provider_suffix: None,
-                    track_number: None,
+                    track_number: podcast_date_number(&episode.published_at),
                     size_bytes,
                     priority_reason: if retention.unplayed_only {
                         "recent episode (play state unavailable)".into()

@@ -1307,6 +1307,7 @@ fn construct_desired_file_path(
         .or(item.provider_suffix.as_deref())
         .unwrap_or("mp3");
 
+    let is_podcast = item.media_role == crate::device::MediaRole::Podcast;
     let artist_clean = sanitize_path_component(artist);
     let album_clean = sanitize_path_component(album);
     let track_name_clean = sanitize_path_component(track_name);
@@ -1315,10 +1316,15 @@ fn construct_desired_file_path(
     loop {
         let artist_final = truncate_component(&artist_clean, current_max_component);
         let album_final = truncate_component(&album_clean, current_max_component);
-        let track_num = item
-            .track_number
-            .map(|n| format!("{:02}", n))
-            .unwrap_or_else(|| "00".to_string());
+        let track_num = if is_podcast {
+            item.track_number
+                .map(|n| format!("{n:08}"))
+                .unwrap_or_else(|| "Undated".to_string())
+        } else {
+            item.track_number
+                .map(|n| format!("{n:02}"))
+                .unwrap_or_else(|| "00".to_string())
+        };
         let filename_base = format!("{} - {}", track_num, track_name_clean);
         let filename_candidate = format!("{}.{}", filename_base, extension);
         let (filename, original_name) =
@@ -1328,10 +1334,14 @@ fn construct_desired_file_path(
             } else {
                 (filename_candidate, None)
             };
-        let path = managed_path
-            .join(&artist_final)
-            .join(&album_final)
-            .join(&filename);
+        let path = if is_podcast {
+            managed_path.join(&album_final).join(&filename)
+        } else {
+            managed_path
+                .join(&artist_final)
+                .join(&album_final)
+                .join(&filename)
+        };
         let approx_abs_len = match path.canonicalize() {
             Ok(p) => p.to_string_lossy().chars().count(),
             Err(_) => match std::env::current_dir() {
@@ -6921,6 +6931,58 @@ mod tests {
         assert_eq!(delta.id_changes.len(), 0);
         assert_eq!(delta.adds.len(), 1);
         assert_eq!(delta.deletes.len(), 1);
+    }
+
+    #[test]
+    fn podcast_path_uses_show_and_publication_date() {
+        let mut desired = make_desired("episode", "News", Some("Talks"), None);
+        desired.media_role = crate::device::MediaRole::Podcast;
+        desired.track_number = Some(20260924);
+        let mut manifest = empty_manifest();
+        manifest.podcast_path = Some("Podcasts".into());
+        let delta = calculate_delta(&[desired], &manifest);
+        let path = construct_desired_file_path(Path::new("Podcasts"), &delta.adds[0], Some("mp3"))
+            .unwrap()
+            .path;
+        assert_eq!(
+            path,
+            Path::new("Podcasts")
+                .join("Talks")
+                .join("20260924 - News.mp3")
+        );
+    }
+
+    #[test]
+    fn podcast_path_without_date_is_deterministic() {
+        let mut desired = make_desired("episode", "News", Some("Talks"), None);
+        desired.media_role = crate::device::MediaRole::Podcast;
+        let delta = calculate_delta(&[desired], &empty_manifest());
+        let path = construct_desired_file_path(Path::new("Podcasts"), &delta.adds[0], Some("mp3"))
+            .unwrap()
+            .path;
+        assert_eq!(
+            path,
+            Path::new("Podcasts")
+                .join("Talks")
+                .join("Undated - News.mp3")
+        );
+    }
+
+    #[test]
+    fn music_path_keeps_artist_album_and_track_number() {
+        let mut desired = make_desired("song", "News", Some("Album"), Some("Artist"));
+        desired.track_number = Some(3);
+        let delta = calculate_delta(&[desired], &empty_manifest());
+        let path = construct_desired_file_path(Path::new("Music"), &delta.adds[0], Some("mp3"))
+            .unwrap()
+            .path;
+        assert_eq!(
+            path,
+            Path::new("Music")
+                .join("Artist")
+                .join("Album")
+                .join("03 - News.mp3")
+        );
     }
 
     #[test]
