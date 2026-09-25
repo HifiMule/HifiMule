@@ -147,8 +147,21 @@ struct GroupDto {
     #[serde(deserialize_with = "deserialize_nonempty")]
     library_id: String,
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_group_books")]
     books: Vec<BookDto>,
+}
+
+fn deserialize_group_books<'de, D>(deserializer: D) -> Result<Vec<BookDto>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let members = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    members
+        .into_iter()
+        .filter(|member| member.get("isMissing").and_then(|value| value.as_bool()) != Some(true))
+        .map(|member| serde_json::from_value(member).map_err(D::Error::custom))
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -1042,29 +1055,44 @@ impl AudiobookshelfProvider {
     async fn all_groupings(&self, kind: &str) -> Result<Vec<GroupDto>, ProviderError> {
         let library = self.audiobook_library_id()?;
         let mut groups = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut fetched = 0_u64;
         for page in 0..100 {
             let response = self.grouping_page(kind, page).await?;
             let total = response.total;
             let count = response.results.len();
+            fetched += count as u64;
             for group in response.results {
-                if group.library_id != library {
-                    return Err(ProviderError::Deserialization(
-                        "Audiobookshelf grouping left selected library".into(),
-                    ));
+                validate_group(library, &group)?;
+                if seen.insert(group.id.clone()) {
+                    groups.push(group);
                 }
-                if group
-                    .books
-                    .iter()
-                    .any(|book| book.library_id != library || book.media_type != "book")
-                {
-                    return Err(ProviderError::Deserialization(
-                        "Audiobookshelf grouping has foreign member".into(),
-                    ));
-                }
-                groups.push(group);
             }
-            if count == 0 || groups.len() as u64 >= total {
+            if count == 0 || fetched >= total {
                 return Ok(groups);
+            }
+        }
+        Err(ProviderError::UnsupportedCapability(
+            "Audiobookshelf grouping exceeds bounded browse limit".into(),
+        ))
+    }
+
+    async fn find_series(&self, id: &str) -> Result<Option<GroupDto>, ProviderError> {
+        let library = self.audiobook_library_id()?;
+        let mut fetched = 0_u64;
+        for page in 0..100 {
+            let response = self.grouping_page("series", page).await?;
+            let total = response.total;
+            let count = response.results.len();
+            fetched += count as u64;
+            for group in response.results {
+                validate_group(library, &group)?;
+                if group.id == id {
+                    return Ok(Some(group));
+                }
+            }
+            if count == 0 || fetched >= total {
+                return Ok(None);
             }
         }
         Err(ProviderError::UnsupportedCapability(
@@ -2081,12 +2109,36 @@ fn group_playlist(library: &str, kind: &str, group: &GroupDto) -> Playlist {
                 .books
                 .iter()
                 .filter(|book| !book.is_missing && seen.insert(&book.id))
-                .map(|book| book.media.audio_files.len() as u32)
+                .map(|book| {
+                    book.media
+                        .audio_files
+                        .iter()
+                        .filter(|file| numeric_index(&file.index).is_some())
+                        .count() as u32
+                })
                 .sum(),
         ),
         duration_seconds: None,
         cover_art_id: None,
     }
+}
+
+fn validate_group(library: &str, group: &GroupDto) -> Result<(), ProviderError> {
+    if group.library_id != library {
+        return Err(ProviderError::Deserialization(
+            "Audiobookshelf grouping left selected library".into(),
+        ));
+    }
+    if group
+        .books
+        .iter()
+        .any(|book| book.library_id != library || book.media_type != "book")
+    {
+        return Err(ProviderError::Deserialization(
+            "Audiobookshelf grouping has foreign member".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
@@ -2528,10 +2580,7 @@ impl MediaProvider for AudiobookshelfProvider {
                     id: "unavailable".into(),
                 });
             }
-            self.all_groupings("series")
-                .await?
-                .into_iter()
-                .find(|group| group.id == id)
+            self.find_series(&id).await?
         } else if playlist_id.starts_with("abs-collection-") {
             let (encoded_library, id, encoded_kind) = parse_opaque_id("collection", playlist_id)?;
             if encoded_library != library || encoded_kind != "collection" {
@@ -2540,7 +2589,13 @@ impl MediaProvider for AudiobookshelfProvider {
                     id: "unavailable".into(),
                 });
             }
-            Some(self.collection_detail(&id).await?)
+            let group = self.collection_detail(&id).await?;
+            if group.id != id {
+                return Err(ProviderError::Deserialization(
+                    "Audiobookshelf collection detail identity mismatch".into(),
+                ));
+            }
+            Some(group)
         } else {
             None
         }
@@ -3622,6 +3677,19 @@ mod tests {
             record["collectionPages"][0]["results"][0]["books"]
         );
         assert_eq!(record["seriesDetailHasBooks"], false);
+    }
+
+    #[test]
+    fn grouping_skips_missing_members_without_media_and_counts_playable_parts() {
+        let group: GroupDto = serde_json::from_str(
+            r#"{"id":"series-1","libraryId":"books","name":"Series","books":[{"id":"gone","libraryId":"books","mediaType":"book","isMissing":true},{"id":"live","libraryId":"books","mediaType":"book","media":{"id":"media-live","audioFiles":[{"ino":"valid","index":1},{"ino":"bad","index":"invalid"}]}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(group.books.len(), 1);
+        assert_eq!(
+            group_playlist("books", "series", &group).song_count,
+            Some(1)
+        );
     }
 
     #[tokio::test]

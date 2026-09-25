@@ -4,7 +4,7 @@ baseline_commit: e5ad913d2a3381942281520798cbf7c51617e587
 
 # Story 17.9: Refine Audiobookshelf grouping and compatibility feedback
 
-Status: review
+Status: done
 
 ## Story
 
@@ -20,6 +20,14 @@ so that I can curate and synchronize confidently as the library changes.
 5. Offline fixtures and tests cover grouping pagination and membership, overlapping IDs or names, stale entries, read-only actions, compatibility known/unknown/blocked states, responsive browse behavior, and preview/execution parity. Verify existing Jellyfin/Subsonic browse and playlist writing paths remain functional.
 
 ## Tasks / Subtasks
+
+### Review Findings
+
+- [x] [Review][Patch] Skip stale grouping members before requiring media data [hifimule-daemon/src/providers/audiobookshelf.rs:151]
+- [x] [Review][Patch] Resolve a series without scanning every grouping page [hifimule-daemon/src/providers/audiobookshelf.rs:2532]
+- [x] [Review][Patch] Deduplicate grouping IDs across paginated responses [hifimule-daemon/src/providers/audiobookshelf.rs:1064]
+- [x] [Review][Patch] Verify collection detail identity matches the requested collection [hifimule-daemon/src/providers/audiobookshelf.rs:2544]
+- [x] [Review][Patch] Count only playable parts in grouping summaries [hifimule-daemon/src/providers/audiobookshelf.rs:2082]
 
 - [x] Validate the Audiobookshelf grouping contract against the supported server fixture/version set (AC: 1, 5)
   - [x] Capture sanitized series and collection list/detail fixtures, including pagination, membership and ordering; document any version differences in `docs/audiobookshelf-integration-contract.md`.

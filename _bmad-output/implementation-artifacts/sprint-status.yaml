@@ -222,7 +222,7 @@ development_status:
   epic-16-retrospective: optional
 
   # Epic 17 — Audiobookshelf Integration (sprint-change-proposal-2026-09-20-audiobookshelf)
-  epic-17: in-progress
+  epic-17: done
   17-1-validate-audiobookshelf-integration-contract: done
   17-2-connect-audiobookshelf-libraries-as-independent-servers: done
   17-3-map-audiobookshelf-books-faithfully-into-the-hifimule-catalog: done
@@ -231,5 +231,5 @@ development_status:
   17-6-preserve-audiobookshelf-listening-continuity-safely: done
   17-7-add-audiobookshelf-podcast-servers-and-direct-playback: done
   17-8-synchronize-audiobookshelf-media-with-independent-policies: done
-  17-9-refine-audiobookshelf-grouping-and-compatibility-feedback: review
+  17-9-refine-audiobookshelf-grouping-and-compatibility-feedback: done
   epic-17-retrospective: optional
