@@ -133,6 +133,21 @@ require_ui_ready() {
     }
 }
 
+require_second_ui_exit() {
+    local exit_code=0 state
+    for _ in {1..40}; do
+        state=$(ps -p "$SECOND_UI_PID" -o stat= 2>/dev/null || true)
+        [[ -z "$state" || "$state" == Z* ]] && break
+        sleep 0.25
+    done
+    state=$(ps -p "$SECOND_UI_PID" -o stat= 2>/dev/null || true)
+    [[ -z "$state" || "$state" == Z* ]] || fail "concurrent-launch" "Second UI did not exit within 10s"
+    wait "$SECOND_UI_PID" || exit_code=$?
+    [[ "$exit_code" == 0 ]] || fail "concurrent-launch" "Second UI exited with code $exit_code"
+    echo "UI_PROCESS_EVIDENCE stage=concurrent-launch pid=$SECOND_UI_PID state=exited exitCode=$exit_code"
+    SECOND_UI_PID=""
+}
+
 # --- STEP 1: Install ---
 echo ""
 echo "==> STEP 1: Installing .deb package ..."
@@ -214,9 +229,9 @@ echo "==> STEP 3a: Concurrent launch and UI close/reopen ..."
 new_ui_smoke_id
 "$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 SECOND_UI_PID=$!
-sleep 1
 poll_health 15 || fail "concurrent-launch" "Concurrent UI lost the daemon"
-require_ui_ready "concurrent-launch" "$SECOND_UI_PID"
+require_second_ui_exit
+kill -0 "$APP_PID" 2>/dev/null || fail "concurrent-launch" "Original UI did not survive"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
 close_installed_ui "close-ui"
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"

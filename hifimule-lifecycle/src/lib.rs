@@ -564,6 +564,144 @@ pub fn cancel_launch_ticket_until(
     }
 }
 
+/// Independent of daemon ownership: only the desktop UI holds this lock.
+#[derive(Debug)]
+pub struct UiInstanceGuard {
+    lock_file: File,
+}
+
+impl UiInstanceGuard {
+    /// `None` means another UI already owns this profile. The stable lock file
+    /// is never removed; the OS lock, rather than file existence, decides.
+    pub fn acquire(app_data: &Path) -> Result<Option<Self>, LifecycleError> {
+        let runtime = prepare_runtime_dir(app_data)?;
+        let lock_file = private_open(&runtime.join("ui.lock"), true)?;
+        match lock_file.try_lock() {
+            Ok(()) => Ok(Some(Self { lock_file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(LifecycleError::new(
+                LifecycleErrorCode::LocalAccessDenied,
+                format!("Cannot acquire UI ownership: {error}"),
+            )),
+        }
+    }
+}
+
+impl Drop for UiInstanceGuard {
+    fn drop(&mut self) {
+        let _ = self.lock_file.unlock();
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiActivationRequest {
+    schema_version: u32,
+    request_id: String,
+}
+
+/// A mailbox rather than a UI server: concurrent requests may coalesce, since
+/// each asks for the same idempotent window activation. It works before daemon
+/// readiness and does not depend on a platform-specific notification endpoint.
+pub fn request_ui_activation(app_data: &Path) -> Result<String, LifecycleError> {
+    let runtime = prepare_runtime_dir(app_data)?;
+    let request_id = Uuid::new_v4().to_string();
+    atomic_write_json(
+        &runtime.join("ui-activation.json"),
+        &UiActivationRequest {
+            schema_version: 1,
+            request_id: request_id.clone(),
+        },
+    )?;
+    Ok(request_id)
+}
+
+pub fn read_ui_activation_request(app_data: &Path) -> Result<Option<String>, LifecycleError> {
+    read_ui_activation_record(app_data, "ui-activation.json")
+}
+
+pub fn acknowledge_ui_activation(app_data: &Path, request_id: &str) -> Result<(), LifecycleError> {
+    if Uuid::parse_str(request_id).is_err() {
+        return Err(LifecycleError::new(
+            LifecycleErrorCode::LocalAccessDenied,
+            "UI activation acknowledgment is invalid",
+        ));
+    }
+    let runtime = prepare_runtime_dir(app_data)?;
+    atomic_write_json(
+        &runtime.join("ui-activation-ack.json"),
+        &UiActivationRequest {
+            schema_version: 1,
+            request_id: request_id.to_owned(),
+        },
+    )
+}
+
+pub fn read_ui_activation_ack(app_data: &Path) -> Result<Option<String>, LifecycleError> {
+    read_ui_activation_record(app_data, "ui-activation-ack.json")
+}
+
+/// A duplicate waits briefly for the winner to acknowledge the request. If
+/// the winner exits first, the duplicate takes the released lock and opens the
+/// UI itself. Normal repeats return as soon as the mailbox is acknowledged.
+pub fn wait_for_ui_handoff(
+    app_data: &Path,
+    request_id: &str,
+    timeout: Duration,
+) -> Result<Option<UiInstanceGuard>, LifecycleError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(guard) = UiInstanceGuard::acquire(app_data)? {
+            return Ok(Some(guard));
+        }
+        if read_ui_activation_ack(app_data)?.as_deref() == Some(request_id) {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn read_ui_activation_record(
+    app_data: &Path,
+    name: &str,
+) -> Result<Option<String>, LifecycleError> {
+    let runtime = prepare_runtime_dir(app_data)?;
+    let path = runtime.join(name);
+    match path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(access_error(error)),
+        Ok(_) => {}
+    }
+    ensure_regular_private_file(&path)?;
+    let mut bytes = Vec::new();
+    private_read(&path)?
+        .take(257)
+        .read_to_end(&mut bytes)
+        .map_err(access_error)?;
+    if bytes.len() > 256 {
+        return Err(LifecycleError::new(
+            LifecycleErrorCode::LocalAccessDenied,
+            "UI activation request is too large",
+        ));
+    }
+    let request: UiActivationRequest = serde_json::from_slice(&bytes).map_err(|_| {
+        LifecycleError::new(
+            LifecycleErrorCode::LocalAccessDenied,
+            "UI activation request is malformed",
+        )
+    })?;
+    if request.schema_version != 1 || Uuid::parse_str(&request.request_id).is_err() {
+        return Err(LifecycleError::new(
+            LifecycleErrorCode::LocalAccessDenied,
+            "UI activation request is invalid",
+        ));
+    }
+    Ok(Some(request.request_id))
+}
+
 #[derive(Debug)]
 pub struct OwnerGuard {
     app_data: PathBuf,

@@ -919,6 +919,8 @@ fn run_candidate(
     let menu_channel = MenuEvent::receiver();
     let mut menu_resume_pending: Option<playback::native::NativeCommandReceipt> = None;
     let mut menu_resume_failure: Option<String> = None;
+    let mut dev_ui_runner: Option<std::process::Child> = None;
+    let mut ui_launches: Vec<std::process::Child> = Vec::new();
 
     // 4. Run the event loop
     // This will block the main thread
@@ -926,6 +928,20 @@ fn run_candidate(
         // WaitUntil lets the OS sleep this thread until a native event arrives or the
         // deadline expires. ControlFlow::Poll would spin at 100% CPU when idle.
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+
+        ui_launches.retain_mut(|child| match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                if !status.success() {
+                    eprintln!("UI launcher exited with status {status}");
+                }
+                false
+            }
+            Err(error) => {
+                eprintln!("Failed to reap UI launcher: {error}");
+                false
+            }
+        });
 
         if shutdown_operations.take_quit_retry()
             && !shutdown_pending
@@ -1183,52 +1199,104 @@ fn run_candidate(
                     }
                 }
             } else if event.id == open_ui_item.id() {
-                println!("'Open UI' clicked - Launching Tauri UI...");
+                // Post first. A live UI can act on this even if the launcher
+                // loses a close/reopen race or exits before Tauri is ready.
+                if let Err(error) = hifimule_lifecycle::request_ui_activation(&shutdown_app_data) {
+                    eprintln!("Failed to request UI activation: {error}");
+                }
 
-                let status = if cfg!(debug_assertions) {
-                    // Use Cargo's compile-time manifest path so Windows debug
-                    // launches do not depend on process env vars or cwd.
-                    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .parent()
-                        .map(|p| p.join("hifimule-ui"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("../hifimule-ui"));
+                if cfg!(debug_assertions) {
+                    // A UI started directly from target/debug may own the
+                    // profile even though this daemon has no npm child.
+                    let ui_running =
+                        match hifimule_lifecycle::UiInstanceGuard::acquire(&shutdown_app_data) {
+                            Ok(Some(guard)) => {
+                                drop(guard);
+                                false
+                            }
+                            Ok(None) => true,
+                            Err(error) => {
+                                eprintln!("Could not check UI ownership: {error}");
+                                false
+                            }
+                        };
+                    let runner_running =
+                        dev_ui_runner
+                            .as_mut()
+                            .is_some_and(|child| match child.try_wait() {
+                                Ok(None) => true,
+                                Ok(Some(status)) => {
+                                    if !status.success() {
+                                        eprintln!("UI dev runner exited with status {status}");
+                                    }
+                                    false
+                                }
+                                Err(error) => {
+                                    eprintln!("Failed to check UI dev runner: {error}");
+                                    false
+                                }
+                            });
+                    if ui_running {
+                        // The mailbox focuses its UI; another npm runner would
+                        // contend for the same Vite port.
+                        eprintln!("UI is active; activation requested");
+                    } else if runner_running {
+                        // The first runner still owns Vite. Reopen from its
+                        // compiled adjacent binary without starting Vite again.
+                        let mut ui_path = std::env::current_exe().unwrap_or_default();
+                        ui_path.set_file_name(if cfg!(windows) {
+                            "hifimule-ui.exe"
+                        } else {
+                            "hifimule-ui"
+                        });
+                        if ui_path.exists() {
+                            match std::process::Command::new(ui_path).spawn() {
+                                Ok(child) => ui_launches.push(child),
+                                Err(error) => eprintln!("Failed to reopen debug UI: {error}"),
+                            }
+                        } else {
+                            eprintln!("UI dev runner is still building; activation requested");
+                        }
+                    } else {
+                        // Use Cargo's compile-time manifest path so Windows debug
+                        // launches do not depend on process env vars or cwd.
+                        let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .parent()
+                            .map(|p| p.join("hifimule-ui"))
+                            .unwrap_or_else(|| std::path::PathBuf::from("../hifimule-ui"));
 
-                    #[cfg(windows)]
-                    {
-                        std::process::Command::new("cmd")
+                        #[cfg(windows)]
+                        let status = std::process::Command::new("cmd")
                             .args(["/C", "npm", "run", "tauri", "dev"])
                             .current_dir(ui_dir)
-                            .spawn()
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        std::process::Command::new("npm")
+                            .spawn();
+                        #[cfg(not(windows))]
+                        let status = std::process::Command::new("npm")
                             .args(["run", "tauri", "dev"])
                             .current_dir(ui_dir)
-                            .spawn()
+                            .spawn();
+                        match status {
+                            Ok(child) => dev_ui_runner = Some(child),
+                            Err(error) => eprintln!("Failed to launch UI dev runner: {error}"),
+                        }
                     }
                 } else {
-                    // In release, we assume the UI executable is in the same folder
+                    // A short-lived loser posts another mailbox request. If the
+                    // old UI exits during this click, this process opens a new UI.
                     let mut ui_path = std::env::current_exe().unwrap_or_default();
-                    let ui_name = if cfg!(windows) {
+                    ui_path.set_file_name(if cfg!(windows) {
                         "hifimule-ui.exe"
                     } else {
                         "hifimule-ui"
-                    };
-                    ui_path.set_file_name(ui_name);
-
+                    });
                     if ui_path.exists() {
-                        std::process::Command::new(ui_path).spawn()
+                        match std::process::Command::new(ui_path).spawn() {
+                            Ok(child) => ui_launches.push(child),
+                            Err(error) => eprintln!("Failed to launch UI: {error}"),
+                        }
                     } else {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("UI executable not found at {:?}", ui_path),
-                        ))
+                        eprintln!("UI executable not found at {:?}", ui_path);
                     }
-                };
-
-                if let Err(e) = status {
-                    eprintln!("Failed to launch UI: {}", e);
                 }
             }
         }

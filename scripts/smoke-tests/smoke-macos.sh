@@ -84,6 +84,27 @@ require_ui_ready() {
     }
 }
 
+require_second_ui_exit() {
+    local launcher_pid state exit_code=0
+    new_ui_smoke_id
+    # -n forces a second app process; -W waits for that launched app to exit.
+    # Waiting for open itself avoids a pre-launch PID snapshot passing early.
+    open -W -n "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" &
+    launcher_pid=$!
+    for _ in {1..60}; do
+        state=$(ps -p "$launcher_pid" -o stat= 2>/dev/null || true)
+        [[ -z "$state" || "$state" == Z* ]] && break
+        sleep 0.25
+    done
+    state=$(ps -p "$launcher_pid" -o stat= 2>/dev/null || true)
+    if [[ -n "$state" && "$state" != Z* ]]; then
+        kill "$launcher_pid" 2>/dev/null || true
+        fail "concurrent-launch" "Second app launch did not finish within 15s"
+    fi
+    wait "$launcher_pid" || exit_code=$?
+    [[ "$exit_code" == 0 ]] || fail "concurrent-launch" "Second app launch exited with code $exit_code"
+}
+
 cleanup() {
     echo "  Cleaning up ..."
     local pid
@@ -164,9 +185,12 @@ DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
 assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
 
 echo "==> STEP 4a: Concurrent launch and UI close/reopen ..."
-launch_installed_ui "concurrent-launch"
+INITIAL_UI_PID=$(installed_ui_pids)
+[[ "$INITIAL_UI_PID" =~ ^[0-9]+$ ]] || fail "concurrent-launch" "Expected exactly one original UI process"
+require_second_ui_exit
 poll_health 15 || fail "concurrent-launch" "Concurrent launch lost the daemon"
-require_ui_ready "concurrent-launch"
+[[ "$(installed_ui_pids)" == "$INITIAL_UI_PID" ]] || fail "concurrent-launch" "Second UI stayed alive or replaced the original"
+echo "UI_PROCESS_EVIDENCE stage=concurrent-launch survivingPid=$INITIAL_UI_PID"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
 close_installed_ui "close-ui"
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"

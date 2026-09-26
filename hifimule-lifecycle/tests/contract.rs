@@ -1,7 +1,8 @@
 use hifimule_lifecycle::{
     DESCRIPTOR_MAX_BYTES, LifecycleErrorCode, OwnerDescriptor, OwnerGuard, PROTOCOL_VERSION,
-    SCHEMA_VERSION, cancel_launch_ticket, constant_time_token_eq, create_launch_ticket,
-    read_descriptor, validate_launch_ticket,
+    SCHEMA_VERSION, UiInstanceGuard, acknowledge_ui_activation, cancel_launch_ticket,
+    constant_time_token_eq, create_launch_ticket, read_descriptor, read_ui_activation_request,
+    request_ui_activation, validate_launch_ticket,
 };
 
 #[test]
@@ -35,6 +36,138 @@ fn ownership_is_exclusive_and_released_without_unlinking_lock() {
     drop(owner);
     assert!(lock_path.exists());
     OwnerGuard::acquire(temp.path()).unwrap();
+}
+
+#[test]
+fn ui_loser_requests_activation_across_processes_and_exit_releases_lock() {
+    use std::io::BufRead;
+    let profile = tempfile::tempdir().unwrap();
+    let other_profile = tempfile::tempdir().unwrap();
+    let binary = env!("CARGO_BIN_EXE_lifecycle-owner-probe");
+    let mut winner = std::process::Command::new(binary)
+        .arg(profile.path())
+        .arg("5000")
+        .arg("--ui")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(winner.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "acquired");
+    assert!(UiInstanceGuard::acquire(profile.path()).unwrap().is_none());
+    assert!(
+        UiInstanceGuard::acquire(other_profile.path())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(read_ui_activation_request(profile.path()).unwrap(), None);
+    let loser = std::process::Command::new(binary)
+        .arg(profile.path())
+        .arg("0")
+        .arg("--ui")
+        .output()
+        .unwrap();
+    assert!(loser.status.success());
+    assert_eq!(loser.stdout, b"requested\n");
+    let first_request = read_ui_activation_request(profile.path()).unwrap().unwrap();
+    let second_request = request_ui_activation(profile.path()).unwrap();
+    assert_ne!(first_request, second_request);
+    assert_eq!(
+        read_ui_activation_request(profile.path()).unwrap(),
+        Some(second_request)
+    );
+    winner.kill().unwrap();
+    winner.wait().unwrap();
+    assert!(profile.path().join("runtime/ui.lock").exists());
+    assert!(UiInstanceGuard::acquire(profile.path()).unwrap().is_some());
+}
+
+#[test]
+fn ui_loser_takes_over_when_owner_exits_before_activation() {
+    use std::io::BufRead;
+    let profile = tempfile::tempdir().unwrap();
+    let guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let binary = env!("CARGO_BIN_EXE_lifecycle-owner-probe");
+    let mut loser = std::process::Command::new(binary)
+        .arg(profile.path())
+        .arg("0")
+        .arg("--ui-handoff")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(loser.stdout.take().unwrap());
+    let mut first = String::new();
+    output.read_line(&mut first).unwrap();
+    assert_eq!(first.trim(), "requested");
+    drop(guard);
+    let mut result = String::new();
+    output.read_line(&mut result).unwrap();
+    assert_eq!(result.trim(), "acquired");
+    assert!(loser.wait().unwrap().success());
+}
+
+#[test]
+fn ui_loser_exits_promptly_after_activation_acknowledgment() {
+    use std::io::BufRead;
+    let profile = tempfile::tempdir().unwrap();
+    let _guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let binary = env!("CARGO_BIN_EXE_lifecycle-owner-probe");
+    let mut loser = std::process::Command::new(binary)
+        .arg(profile.path())
+        .arg("0")
+        .arg("--ui-handoff")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(loser.stdout.take().unwrap());
+    let mut first = String::new();
+    output.read_line(&mut first).unwrap();
+    assert_eq!(first.trim(), "requested");
+    let request_id = read_ui_activation_request(profile.path()).unwrap().unwrap();
+    let started = std::time::Instant::now();
+    acknowledge_ui_activation(profile.path(), &request_id).unwrap();
+    let mut result = String::new();
+    output.read_line(&mut result).unwrap();
+    assert_eq!(result.trim(), "handled");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(loser.wait().unwrap().success());
+}
+
+#[test]
+fn malformed_or_oversized_ui_requests_are_rejected() {
+    let profile = tempfile::tempdir().unwrap();
+    request_ui_activation(profile.path()).unwrap();
+    let path = profile.path().join("runtime/ui-activation.json");
+    std::fs::write(&path, b"not json").unwrap();
+    assert!(read_ui_activation_request(profile.path()).is_err());
+    std::fs::write(&path, vec![b'x'; 257]).unwrap();
+    assert!(read_ui_activation_request(profile.path()).is_err());
+}
+
+#[test]
+fn simultaneous_activation_requests_coalesce_to_a_valid_request() {
+    let profile = tempfile::tempdir().unwrap();
+    let _winner = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let path = profile.path().to_path_buf();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                request_ui_activation(&path).unwrap()
+            })
+        })
+        .collect();
+    barrier.wait();
+    let issued: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    let stored = read_ui_activation_request(profile.path()).unwrap().unwrap();
+    assert!(issued.contains(&stored));
 }
 
 #[test]

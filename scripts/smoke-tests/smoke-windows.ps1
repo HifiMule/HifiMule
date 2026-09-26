@@ -168,13 +168,24 @@ $initialPid = [int]$descriptor.pid
 $initialInstance = [string]$descriptor.instanceId
 $secondSmokeId = [guid]::NewGuid().ToString()
 $secondUi = Start-Process $exe.FullName -ArgumentList "--smoke-id $secondSmokeId" -WindowStyle Hidden -PassThru
-Assert-UiReady $secondSmokeId
-Start-Sleep 2
+for ($i = 0; $i -lt 40; $i++) {
+    $secondUi.Refresh()
+    if ($secondUi.HasExited) { break }
+    Start-Sleep -Milliseconds 250
+}
+$secondUi.Refresh()
+if (-not $secondUi.HasExited -or $secondUi.ExitCode -ne 0) {
+    Fail $Platform "concurrent-launch" "Second UI did not exit cleanly within 10s"
+}
+$appProc.Refresh()
+if ($appProc.HasExited) {
+    Fail $Platform "concurrent-launch" "Original UI did not survive"
+}
+Write-Host "UI_PROCESS_EVIDENCE stage=concurrent-launch survivingPid=$($appProc.Id) loserPid=$($secondUi.Id) loserExitCode=$($secondUi.ExitCode)"
 $afterConcurrent = Get-Content $descriptorPath -Raw | ConvertFrom-Json
 if ($afterConcurrent.pid -ne $initialPid -or $afterConcurrent.instanceId -ne $initialInstance) {
     Fail $Platform "concurrent-launch" "Daemon identity changed"
 }
-if ($secondUi -and -not $secondUi.HasExited) { Stop-Process -Id $secondUi.Id -Force }
 if ($appProc -and -not $appProc.HasExited) { Stop-Process -Id $appProc.Id -Force }
 Start-Sleep 1
 if (-not (Get-Process -Id $initialPid -ErrorAction SilentlyContinue)) {

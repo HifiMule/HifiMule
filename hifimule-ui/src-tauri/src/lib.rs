@@ -1,4 +1,6 @@
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use tauri::{Manager, RunEvent};
 
 use hifimule_lifecycle::{LifecycleErrorCode as Code, LifecycleState, LifecycleStatus};
@@ -16,6 +18,8 @@ struct StartupState {
 
 #[derive(Clone)]
 struct StartupCoordinator(Arc<Mutex<StartupState>>);
+
+struct UiOwnershipStartupFailure;
 
 fn status(state: LifecycleState, error_code: Option<Code>) -> LifecycleStatus {
     LifecycleStatus {
@@ -103,7 +107,12 @@ impl StartupCoordinator {
 }
 
 #[tauri::command]
-fn retry_daemon_startup(coordinator: tauri::State<'_, StartupCoordinator>) {
+fn retry_daemon_startup(app: tauri::AppHandle, coordinator: tauri::State<'_, StartupCoordinator>) {
+    if app.try_state::<UiOwnershipStartupFailure>().is_some() {
+        // Re-elect ownership after the user fixes the runtime path/access.
+        // No daemon coordination was started in this failed process.
+        app.restart();
+    }
     coordinator.restart();
 }
 
@@ -766,6 +775,110 @@ fn initialize_xlib_threads() {
     );
 }
 
+fn window_to_activate(
+    main_visible: Option<bool>,
+    main_minimized: Option<bool>,
+    splash_visible: Option<bool>,
+    main_hydrated: bool,
+) -> Option<&'static str> {
+    if main_visible == Some(true) || main_minimized == Some(true) {
+        Some("main")
+    } else if splash_visible == Some(true) || (splash_visible.is_some() && !main_hydrated) {
+        Some("splashscreen")
+    } else if main_hydrated && main_visible.is_some() {
+        Some("main")
+    } else {
+        None
+    }
+}
+
+/// False only when neither window is ready. The watcher then retries the same
+/// request; failed OS focus requests are logged but not retried indefinitely.
+fn activate_existing_ui(app: &tauri::AppHandle) -> bool {
+    let main = app.get_webview_window("main");
+    let splash = app.get_webview_window("splashscreen");
+    let main_visible = main
+        .as_ref()
+        .map(|window| window.is_visible().unwrap_or(false));
+    let main_minimized = main
+        .as_ref()
+        .map(|window| window.is_minimized().unwrap_or(false));
+    let splash_visible = splash
+        .as_ref()
+        .map(|window| window.is_visible().unwrap_or(false));
+    let main_hydrated = app
+        .try_state::<StartupCoordinator>()
+        .is_some_and(|coordinator| {
+            coordinator
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .hydrated
+                .is_some()
+        });
+    let Some(label) =
+        window_to_activate(main_visible, main_minimized, splash_visible, main_hydrated)
+    else {
+        return false;
+    };
+    let window = if label == "main" { main } else { splash };
+    let Some(window) = window else { return false };
+    if let Err(error) = window.show() {
+        ui_log(&format!("Could not show {label} window: {error}"));
+    }
+    if let Err(error) = window.unminimize() {
+        ui_log(&format!("Could not restore {label} window: {error}"));
+    }
+    if let Err(error) = window.set_focus() {
+        ui_log(&format!("Could not focus {label} window: {error}"));
+    }
+    true
+}
+
+fn watch_ui_activation(
+    app: tauri::AppHandle,
+    app_data: std::path::PathBuf,
+    stopping: Arc<AtomicBool>,
+    initial_handled: Option<String>,
+) {
+    let mut handled = initial_handled;
+    let mut last_error: Option<String> = None;
+    while !stopping.load(Ordering::Relaxed) {
+        match hifimule_lifecycle::read_ui_activation_request(&app_data) {
+            Ok(Some(request_id)) if handled.as_deref() != Some(&request_id) => {
+                last_error = None;
+                let (reply_tx, reply_rx) = mpsc::channel();
+                let foreground_app = app.clone();
+                match app.run_on_main_thread(move || {
+                    let _ = reply_tx.send(activate_existing_ui(&foreground_app));
+                }) {
+                    Ok(()) => {
+                        if reply_rx.recv_timeout(std::time::Duration::from_secs(1)) == Ok(true) {
+                            if let Err(error) = hifimule_lifecycle::acknowledge_ui_activation(
+                                &app_data,
+                                &request_id,
+                            ) {
+                                ui_log(&format!("Could not acknowledge UI activation: {error}"));
+                            }
+                            handled = Some(request_id);
+                        }
+                    }
+                    Err(error) => ui_log(&format!("Could not schedule UI activation: {error}")),
+                }
+            }
+            Ok(_) => last_error = None,
+            Err(error) => {
+                let message = format!("Could not read UI activation request: {error}");
+                if last_error.as_deref() != Some(&message) {
+                    ui_log(&message);
+                    last_error = Some(message);
+                }
+            }
+        }
+        std::thread::sleep(hifimule_lifecycle::POLL_INTERVAL);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -775,6 +888,64 @@ pub fn run() {
         "HifiMule UI starting (release={})",
         !cfg!(debug_assertions)
     ));
+
+    // Arbitrate before constructing windows or coordinating the daemon. A
+    // startup access failure still builds the splash, where the existing
+    // lifecycle failure UI can explain it and offer Retry/Close.
+    let mut ui_guard = None;
+    let mut watcher_config = None;
+    let mut startup_error = None;
+    match hifimule_lifecycle::resolve_app_data_dir() {
+        Err(error) => {
+            ui_log(&format!("Cannot resolve UI profile: {error}"));
+            startup_error = Some(error.code());
+        }
+        Ok(app_data) => {
+            // Read before taking the lock: a request posted after this point
+            // must be delivered, while a previous run's request is ignored.
+            let baseline = match hifimule_lifecycle::read_ui_activation_request(&app_data) {
+                Ok(request) => request,
+                Err(error) => {
+                    ui_log(&format!("Cannot read prior UI activation request: {error}"));
+                    None
+                }
+            };
+            match hifimule_lifecycle::UiInstanceGuard::acquire(&app_data) {
+                Ok(Some(guard)) => {
+                    ui_guard = Some(guard);
+                    watcher_config = Some((app_data, baseline));
+                }
+                Ok(None) => {
+                    let request_id = match hifimule_lifecycle::request_ui_activation(&app_data) {
+                        Ok(request_id) => request_id,
+                        Err(error) => {
+                            ui_log(&format!("Could not request UI activation: {error}"));
+                            return;
+                        }
+                    };
+                    match hifimule_lifecycle::wait_for_ui_handoff(
+                        &app_data,
+                        &request_id,
+                        std::time::Duration::from_secs(5),
+                    ) {
+                        Ok(Some(guard)) => {
+                            ui_guard = Some(guard);
+                            watcher_config = Some((app_data, baseline));
+                        }
+                        Ok(None) => return,
+                        Err(error) => {
+                            ui_log(&format!("Could not complete UI handoff: {error}"));
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    ui_log(&format!("Cannot acquire UI ownership: {error}"));
+                    startup_error = Some(error.code());
+                }
+            }
+        }
+    }
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -789,23 +960,40 @@ pub fn run() {
             image_proxy,
             settings_set_launch_on_startup
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let coordinator = StartupCoordinator(Arc::new(Mutex::new(StartupState {
                 epoch: 0,
                 closed: false,
                 ticket: None,
                 observed: None,
                 hydrated: None,
-                status: status(LifecycleState::Starting, None),
+                status: status(
+                    if startup_error.is_some() {
+                        LifecycleState::Failed
+                    } else {
+                        LifecycleState::Starting
+                    },
+                    startup_error,
+                ),
             })));
             app.manage(coordinator.clone());
-            coordinator.restart();
+            if startup_error.is_none() {
+                coordinator.restart();
+            } else {
+                app.manage(UiOwnershipStartupFailure);
+            }
 
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
+    let stopping = Arc::new(AtomicBool::new(false));
+    let watcher_stopping = stopping.clone();
+    let watcher = watcher_config.map(|(app_data, baseline)| {
+        let app = builder.handle().clone();
+        std::thread::spawn(move || watch_ui_activation(app, app_data, watcher_stopping, baseline))
+    });
     builder.run(|app_handle, event| {
         if let RunEvent::Exit = event
             && let Some(coordinator) = app_handle.try_state::<StartupCoordinator>()
@@ -813,6 +1001,11 @@ pub fn run() {
             coordinator.close();
         }
     });
+    stopping.store(true, Ordering::Relaxed);
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
+    }
+    drop(ui_guard);
 }
 
 #[cfg(test)]
@@ -991,5 +1184,51 @@ mod lifecycle_tests {
         coordinator.close();
         assert!(!coordinator.current(2));
         assert!(coordinator.begin_attempt().is_none());
+    }
+}
+
+#[cfg(test)]
+mod window_activation_tests {
+    use super::window_to_activate;
+
+    #[test]
+    fn splash_wins_while_main_is_unhydrated_and_hidden() {
+        assert_eq!(
+            window_to_activate(Some(false), Some(false), Some(true), false),
+            Some("splashscreen")
+        );
+        assert_eq!(
+            window_to_activate(Some(false), Some(false), Some(false), false),
+            Some("splashscreen")
+        );
+        assert_eq!(
+            window_to_activate(Some(false), Some(false), None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn ready_main_can_be_restored_when_hidden_or_minimized() {
+        assert_eq!(
+            window_to_activate(Some(true), Some(false), Some(true), true),
+            Some("main")
+        );
+        assert_eq!(
+            window_to_activate(Some(false), Some(true), Some(true), true),
+            Some("main")
+        );
+        assert_eq!(
+            window_to_activate(Some(false), Some(false), None, true),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn absent_windows_do_not_consume_a_request() {
+        assert_eq!(window_to_activate(None, None, None, false), None);
+        assert_eq!(
+            window_to_activate(None, None, Some(true), false),
+            Some("splashscreen")
+        );
     }
 }
