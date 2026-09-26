@@ -13,7 +13,6 @@ on:
       candidate_version:
         description: 'Candidate version (must match Cargo and Tauri)'
         required: true
-        default: '0.15.0'
         type: string
 
 env:

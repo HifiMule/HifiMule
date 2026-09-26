@@ -63,12 +63,27 @@ test("0.15.0 release contract fixes the four shipping rows and package formats",
   assert.ok(contract.providers.some(({ kind }) => kind === "subsonic"));
 });
 
-test("Cargo, Tauri and platform bundle targets agree with the release contract", () => {
-  assert.match(read("Cargo.toml"), /\[workspace\.package\][\s\S]*?version = "0\.15\.0"/);
-  assert.equal(json("hifimule-ui/src-tauri/tauri.conf.json").version, "0.15.0");
+test("Cargo and Tauri versions agree with the platform bundle targets", () => {
+  const workspacePackage = read("Cargo.toml").replace(/\r\n?/g, "\n").split("[workspace.package]")[1]?.split(/\n\[/)[0];
+  assert.ok(workspacePackage, "Cargo must define [workspace.package]");
+  const cargoVersion = workspacePackage.match(/^version = "([^"]+)"$/m)?.[1];
+  assert.ok(cargoVersion, "Cargo workspace package must define a version");
+  assert.equal(json("hifimule-ui/src-tauri/tauri.conf.json").version, cargoVersion);
   assert.deepEqual(json("hifimule-ui/src-tauri/tauri.windows.conf.json").bundle.targets, ["msi", "nsis"]);
   assert.deepEqual(json("hifimule-ui/src-tauri/tauri.linux.conf.json").bundle.targets, ["deb", "appimage"]);
   assert.deepEqual(json("hifimule-ui/src-tauri/tauri.macos.conf.json").bundle.targets, ["app", "dmg"]);
+});
+
+test("Tauri opener versions are pinned together across Rust and JavaScript", () => {
+  const cargoManifestVersion = read("hifimule-ui/src-tauri/Cargo.toml").match(/^tauri-plugin-opener = "=([^"]+)"$/m)?.[1];
+  const cargoLockVersion = read("Cargo.lock").match(/\[\[package\]\]\s*name = "tauri-plugin-opener"\s*version = "([^"]+)"/)?.[1];
+  const packageJsonVersion = json("hifimule-ui/package.json").dependencies["@tauri-apps/plugin-opener"];
+  const packageLock = json("hifimule-ui/package-lock.json");
+  assert.ok(cargoManifestVersion, "Rust opener version must be exact");
+  assert.equal(cargoLockVersion, cargoManifestVersion);
+  assert.equal(packageJsonVersion, cargoManifestVersion);
+  assert.equal(packageLock.packages[""].dependencies["@tauri-apps/plugin-opener"], cargoManifestVersion);
+  assert.equal(packageLock.packages["node_modules/@tauri-apps/plugin-opener"].version, cargoManifestVersion);
 });
 
 test("release workflow supports explicit immutable candidates without publishing", () => {
