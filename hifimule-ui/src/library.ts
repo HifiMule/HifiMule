@@ -19,6 +19,8 @@ import {
     fetchBrowseAlbums,
     fetchBrowseAlbum,
     fetchBrowsePlaylists,
+    fetchBrowseSeries,
+    fetchBrowseCollections,
     fetchBrowsePlaylist,
     fetchBrowseGenres,
     fetchBrowseGenre,
@@ -78,6 +80,7 @@ interface AppState {
     selectedIds: Set<string>;
     selectionAnchorIdx: number | null;
     isBookLibrary: boolean;
+    bookServerId: string | null;
     bookSearchQuery: string;
     bookSearchTruncated: boolean;
     musicSearchQuery: string;
@@ -114,6 +117,7 @@ let state: AppState = {
     selectedIds: new Set(),
     selectionAnchorIdx: null,
     isBookLibrary: false,
+    bookServerId: null,
     bookSearchQuery: '',
     bookSearchTruncated: false,
     musicSearchQuery: '',
@@ -219,11 +223,13 @@ function showSpinner(container: HTMLElement) {
 function mapArtists(artists: BrowseArtist[]): BrowseDisplayItem[] {
     return artists.map(a => ({
         id: a.id,
+        serverId: state.isBookLibrary ? state.bookServerId ?? undefined : undefined,
         name: a.name,
         type: 'MusicArtist' as const,
+        basketType: state.isBookLibrary ? 'BookAuthor' : undefined,
         coverArtId: a.coverArtId,
         subtitle: null,
-        childCount: a.albumCount,
+        childCount: state.isBookLibrary ? (a.songCount ?? a.albumCount) : a.albumCount,
         sizeBytes: 0,
         sizeTicks: 0,
     }));
@@ -503,10 +509,13 @@ function favoriteTracksForAlbum(tree: FavoriteTree, albumId: string): BrowseTrac
 const browseModeIcons: Record<BrowseMode, string> = {
     search: 'search',
     artists: 'mic',
+    authors: 'pen',
     albums: 'disc',
     podcasts: 'broadcast',
     recentEpisodes: 'plus-square',
     playlists: 'collection-play',
+    series: 'bookshelf',
+    collections: 'collection',
     tracks: 'music-note',
     genres: 'tags',
     recentlyAdded: 'plus-square',
@@ -630,7 +639,7 @@ function createBreadcrumbs(): HTMLElement {
 function renderQuickNav(): HTMLElement | null {
     if (state.breadcrumbStack.length > 0) return null;
 
-    const isArtists = state.browseMode === 'artists';
+    const isArtists = state.browseMode === 'artists' || state.browseMode === 'authors';
     const isAlbums = state.browseMode === 'albums';
     if (!isArtists && !isAlbums) return null;
     if (isAlbums && state.isBookLibrary) return null;
@@ -919,7 +928,7 @@ function setViewMode(mode: 'grid' | 'list') {
 // genres and playlists render no checkbox and are skipped by Shift-ranges.
 function isSelectableListItem(item: BrowseDisplayItem): boolean {
     const resolved = item.basketType ?? item.type;
-    return resolved === 'MusicArtist' || resolved === 'MusicAlbum' || resolved === 'Audio' || resolved === 'Book' || resolved === 'BookPart';
+    return resolved === 'MusicArtist' || resolved === 'BookAuthor' || resolved === 'MusicAlbum' || resolved === 'Audio' || resolved === 'Book' || resolved === 'BookPart';
 }
 
 // Repaint mounted rows (selection is app state — remounted rows re-read it)
@@ -1117,7 +1126,7 @@ async function bulkAddSelectionToQueue(button: any): Promise<void> {
 // are mapped by id (response order is not guaranteed to match request order).
 async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ added: number; skipped: number }> {
     if (!basketStore.hasPhysicalTarget()) return { added: 0, skipped: items.length };
-    const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
+    const CONTAINER_TYPES = ['MusicArtist', 'BookAuthor', 'MusicAlbum', 'MusicGenre', 'Playlist'];
     const toAdd: BrowseDisplayItem[] = [];
     const needsFetch = new Set<BrowseDisplayItem>();
     const books = new Map<string, ReturnType<typeof bookBasketItem>>();
@@ -1479,6 +1488,7 @@ function listAutoloadSupported(): boolean {
     const depth = state.breadcrumbStack.length;
     switch (state.browseMode) {
         case 'artists':
+        case 'authors':
         case 'albums':
         case 'recentlyAdded':
         case 'frequentlyPlayed':
@@ -1502,7 +1512,7 @@ async function loadMoreForListView() {
         const depth = state.breadcrumbStack.length;
         const mode = state.browseMode;
 
-        if (mode === 'artists' && depth === 0) {
+        if ((mode === 'artists' || mode === 'authors') && depth === 0) {
             const r = await fetchBrowseArtists(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapArtists(r.artists)];
             state.pagination.total = r.total;
@@ -1744,6 +1754,7 @@ async function loadModeRoot() {
     switch (state.browseMode) {
         case 'search': renderMusicSearch(); break;
         case 'artists': await loadArtists(true); break;
+        case 'authors': await loadArtists(true); break;
         case 'albums':
             if (state.isBookLibrary && state.bookSearchQuery) await loadBookSearch(state.bookSearchQuery);
             else await loadAlbums(true);
@@ -1751,6 +1762,8 @@ async function loadModeRoot() {
         case 'podcasts': await loadPodcastView(); break;
         case 'recentEpisodes': await loadRecentPodcastEpisodes(); break;
         case 'playlists': await loadPlaylists(); break;
+        case 'series':
+        case 'collections': await loadPlaylists(); break;
         case 'tracks': loadTracksView(); break;
         case 'genres': await loadGenres(true); break;
         case 'recentlyAdded':
@@ -2483,7 +2496,11 @@ async function loadPlaylists() {
     state.loading = true;
     renderModeBar();
     try {
-        const result = await fetchBrowsePlaylists();
+        const result = state.browseMode === 'series'
+            ? await fetchBrowseSeries()
+            : state.browseMode === 'collections'
+                ? await fetchBrowseCollections()
+                : await fetchBrowsePlaylists();
         const mapped = mapPlaylists(result.playlists);
         state.items = mapped;
         state.pagination.total = mapped.length;
@@ -3043,6 +3060,7 @@ async function reloadCurrentLevel() {
             else await loadAlbumTracks(parentId);
             break;
         case 'artists':
+        case 'authors':
             if (depth === 1) await loadArtistAlbums(parentId);
             else await loadAlbumTracks(parentId);
             break;
@@ -3054,6 +3072,8 @@ async function reloadCurrentLevel() {
             await loadAlbumTracks(parentId);
             break;
         case 'playlists':
+        case 'series':
+        case 'collections':
             await loadPlaylistTracks(parentId);
             break;
         case 'genres':
@@ -3105,6 +3125,7 @@ async function loadMore() {
     if (depth === 0) {
         switch (state.browseMode) {
             case 'artists':
+            case 'authors':
                 if (state.activeLetter) await appendByLetter('artists', state.activeLetter);
                 else await loadArtists(false);
                 break;
@@ -3146,6 +3167,7 @@ export async function initLibraryView() {
         const servers = await serverList();
         const selected = servers.find(server => server.selected);
         state.isBookLibrary = selected?.serverType === 'audiobookshelf' && selected.libraryRole === 'audiobook';
+        state.bookServerId = state.isBookLibrary ? (selected?.serverId ?? null) : null;
         state.podcastServerId = selected?.serverType === 'audiobookshelf' && selected.libraryRole === 'podcast'
             ? (selected.serverId ?? null) : null;
         ++podcastRequest;

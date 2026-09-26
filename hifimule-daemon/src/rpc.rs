@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures::{StreamExt, TryStreamExt};
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -635,6 +636,10 @@ async fn handler(
             handle_browse_get_podcast_episode(&state, payload.params).await
         }
         "browse.listPlaylists" => handle_browse_list_playlists(&state).await,
+        "browse.listSeries" => handle_browse_list_groups(&state, BrowseMode::Series).await,
+        "browse.listCollections" => {
+            handle_browse_list_groups(&state, BrowseMode::Collections).await
+        }
         "browse.getPlaylist" => handle_browse_get_playlist(&state, payload.params).await,
         "browse.listGenres" => handle_browse_list_genres(&state, payload.params).await,
         "browse.getGenre" => handle_browse_get_genre(&state, payload.params).await,
@@ -2183,6 +2188,37 @@ async fn handle_browse_list_playlists(state: &AppState) -> Result<Value, JsonRpc
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({ "playlists": playlists }))
+}
+
+async fn handle_browse_list_groups(
+    state: &AppState,
+    mode: BrowseMode,
+) -> Result<Value, JsonRpcError> {
+    let (provider, server_id) = require_browse_provider(state).await?;
+    if !provider.capabilities().browse.list_modes.contains(&mode) {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Audiobook group browsing unavailable".into(),
+            data: None,
+        });
+    }
+    let groups = match mode {
+        BrowseMode::Series => provider.list_series().await,
+        BrowseMode::Collections => provider.list_collections().await,
+        _ => unreachable!("group handler accepts only series or collections"),
+    }
+    .map_err(provider_error_to_rpc)?;
+    let groups = groups
+        .into_iter()
+        .map(|group| {
+            let mut value = serde_json::to_value(group).expect("group is serializable");
+            if let Some(server_id) = server_id.as_deref() {
+                value["serverId"] = serde_json::json!(server_id);
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({ "playlists": groups }))
 }
 
 async fn handle_browse_get_playlist(
@@ -4250,6 +4286,34 @@ async fn provider_legacy_item_size(
     provider: Arc<dyn MediaProvider>,
     item_id: &str,
 ) -> Result<Value, JsonRpcError> {
+    if item_id.starts_with("abs-author-") {
+        let author = provider
+            .get_artist(item_id)
+            .await
+            .map_err(provider_error_to_rpc)?;
+        let mut total = 0_u64;
+        let mut seen = HashSet::new();
+        let details = futures::stream::iter(author.albums.into_iter().map(|album| {
+            let provider = provider.clone();
+            async move {
+                provider
+                    .get_album(&album.id)
+                    .await
+                    .map_err(provider_error_to_rpc)
+            }
+        }))
+        .buffered(4)
+        .try_collect::<Vec<_>>()
+        .await?;
+        for detail in details {
+            for track in detail.tracks {
+                if seen.insert(track.id.clone()) {
+                    total = total.saturating_add(provider_track_size(&track));
+                }
+            }
+        }
+        return Ok(serde_json::json!({ "id": item_id, "totalSizeBytes": total }));
+    }
     if let Ok(album) = provider.get_album(item_id).await {
         let total = album.tracks.iter().map(provider_track_size).sum::<u64>();
         return Ok(serde_json::json!({
@@ -4293,6 +4357,24 @@ async fn provider_legacy_item_count(
     provider: Arc<dyn MediaProvider>,
     item_id: &str,
 ) -> Result<Value, JsonRpcError> {
+    if item_id.starts_with("abs-author-") {
+        let author = provider
+            .get_artist(item_id)
+            .await
+            .map_err(provider_error_to_rpc)?;
+        let duration = author
+            .albums
+            .iter()
+            .try_fold(0_u64, |total, album| {
+                total.checked_add(u64::from(album.duration_seconds?))
+            })
+            .unwrap_or(0);
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "recursiveItemCount": author.artist.song_count.unwrap_or(0),
+            "cumulativeRunTimeTicks": duration.saturating_mul(JELLYFIN_TICKS_PER_SECOND),
+        }));
+    }
     if let Ok(album) = provider.get_album(item_id).await {
         let duration = album
             .tracks
@@ -4840,6 +4922,9 @@ async fn provider_sync_items_for_id_inner(
     ),
     JsonRpcError,
 > {
+    if item_id.starts_with("abs-author-") {
+        return provider_artist_sync_items(provider, item_id).await;
+    }
     if let Ok(album) = provider.get_album(item_id).await {
         return Ok((
             album
@@ -4874,15 +4959,7 @@ async fn provider_sync_items_for_id_inner(
     }
 
     if let Ok(artist) = provider.get_artist(item_id).await {
-        let mut tracks = Vec::new();
-        for album in artist.albums {
-            let album = provider
-                .get_album(&album.id)
-                .await
-                .map_err(provider_error_to_rpc)?;
-            tracks.extend(album.tracks.iter().map(provider_song_to_desired_item));
-        }
-        return Ok((tracks, None));
+        return provider_artist_albums_to_sync_items(provider, artist.albums).await;
     }
 
     match provider.get_song(item_id).await {
@@ -4900,6 +4977,49 @@ async fn provider_sync_items_for_id_inner(
         message: format!("Sync aborted: Failed to fetch item {item_id}: Not found"),
         data: None,
     })
+}
+
+async fn provider_artist_sync_items(
+    provider: Arc<dyn MediaProvider>,
+    artist_id: &str,
+) -> Result<
+    (
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    ),
+    JsonRpcError,
+> {
+    let artist = provider
+        .get_artist(artist_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    provider_artist_albums_to_sync_items(provider, artist.albums).await
+}
+
+async fn provider_artist_albums_to_sync_items(
+    provider: Arc<dyn MediaProvider>,
+    albums: Vec<Album>,
+) -> Result<
+    (
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    ),
+    JsonRpcError,
+> {
+    let mut tracks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for album in albums {
+        let detail = provider
+            .get_album(&album.id)
+            .await
+            .map_err(provider_error_to_rpc)?;
+        for track in &detail.tracks {
+            if seen.insert(track.id.clone()) {
+                tracks.push(provider_song_to_desired_item(track));
+            }
+        }
+    }
+    Ok((tracks, None))
 }
 
 async fn free_bytes_for_sync_device(state: &AppState, device_id: &str) -> Option<u64> {
@@ -15490,6 +15610,7 @@ mod tests {
         tracks: Vec<crate::domain::models::Song>,
         song_auth_error: Option<String>,
         podcast_complete: bool,
+        author_album_ids: Vec<String>,
     }
 
     impl FakeBrowseProvider {
@@ -15506,6 +15627,7 @@ mod tests {
                 tracks: vec![],
                 song_auth_error: None,
                 podcast_complete: false,
+                author_album_ids: vec![],
             })
         }
 
@@ -15524,6 +15646,7 @@ mod tests {
                 tracks: vec![],
                 song_auth_error: None,
                 podcast_complete: false,
+                author_album_ids: vec![],
             })
         }
 
@@ -15539,6 +15662,7 @@ mod tests {
                 tracks: vec![],
                 song_auth_error: None,
                 podcast_complete: false,
+                author_album_ids: vec![],
             })
         }
 
@@ -15559,6 +15683,26 @@ mod tests {
                 tracks: vec![],
                 song_auth_error: None,
                 podcast_complete: false,
+                author_album_ids: vec![],
+            })
+        }
+
+        fn with_author_albums(albums: Vec<crate::domain::models::AlbumWithTracks>) -> Arc<Self> {
+            let author_album_ids = albums.iter().map(|album| album.album.id.clone()).collect();
+            let albums = albums
+                .into_iter()
+                .map(|album| (album.album.id.clone(), album))
+                .collect();
+            Arc::new(Self {
+                modes: vec![crate::providers::BrowseMode::Authors],
+                genres: vec![],
+                albums,
+                genre_tracks: HashMap::new(),
+                songs: HashMap::new(),
+                tracks: vec![],
+                song_auth_error: None,
+                podcast_complete: false,
+                author_album_ids,
             })
         }
 
@@ -15572,6 +15716,7 @@ mod tests {
                 tracks: vec![],
                 song_auth_error: Some(message.to_string()),
                 podcast_complete: false,
+                author_album_ids: vec![],
             })
         }
 
@@ -15585,6 +15730,7 @@ mod tests {
                 tracks,
                 song_auth_error: None,
                 podcast_complete: false,
+                author_album_ids: vec![],
             })
         }
     }
@@ -15736,8 +15882,32 @@ mod tests {
         }
         async fn get_artist(
             &self,
-            _: &str,
+            id: &str,
         ) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            if id == "abs-author-test" {
+                let unique_parts = self
+                    .author_album_ids
+                    .iter()
+                    .filter_map(|album_id| self.albums.get(album_id))
+                    .flat_map(|detail| detail.tracks.iter().map(|track| track.id.as_str()))
+                    .collect::<HashSet<_>>();
+                return Ok(crate::domain::models::ArtistWithAlbums {
+                    artist: crate::domain::models::Artist {
+                        id: id.into(),
+                        name: "Author".into(),
+                        album_count: Some(self.author_album_ids.len() as u32),
+                        song_count: Some(unique_parts.len() as u32),
+                        cover_art_id: None,
+                    },
+                    albums: self
+                        .author_album_ids
+                        .iter()
+                        .filter_map(|album_id| {
+                            self.albums.get(album_id).map(|detail| detail.album.clone())
+                        })
+                        .collect(),
+                });
+            }
             Err(ProviderError::UnsupportedCapability(
                 "fake provider has no artists".to_string(),
             ))
@@ -16038,6 +16208,92 @@ mod tests {
             .unwrap();
         assert_eq!(search["shows"][0]["type"], "show");
         assert!(search.get("albums").is_none());
+    }
+
+    #[tokio::test]
+    async fn audiobook_author_selection_resolves_all_unique_parts_without_playlist() {
+        let part = |id: &str, album_id: &str| crate::domain::models::Song {
+            id: id.into(),
+            title: id.into(),
+            artist_id: None,
+            artist_name: Some("Author".into()),
+            album_id: Some(album_id.into()),
+            album_title: Some(album_id.into()),
+            duration_seconds: 60,
+            bitrate_kbps: None,
+            track_number: Some(1),
+            disc_number: None,
+            cover_art_id: None,
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+            content_type: None,
+            suffix: None,
+            size_bytes: Some(100),
+            album_loudness: Default::default(),
+            provider_metadata: Default::default(),
+        };
+        let album = |id: &str, tracks: Vec<crate::domain::models::Song>| {
+            crate::domain::models::AlbumWithTracks {
+                album: crate::domain::models::Album {
+                    id: id.into(),
+                    title: id.into(),
+                    artist_id: None,
+                    artist_name: Some("Author".into()),
+                    year: None,
+                    song_count: Some(tracks.len() as u32),
+                    duration_seconds: None,
+                    cover_art_id: None,
+                    provider_metadata: Default::default(),
+                },
+                tracks,
+                provider_metadata: Default::default(),
+            }
+        };
+        let provider = FakeBrowseProvider::with_author_albums(vec![
+            album(
+                "book-1",
+                vec![part("part-1", "book-1"), part("shared", "book-1")],
+            ),
+            album(
+                "book-2",
+                vec![part("part-2", "book-2"), part("shared", "book-2")],
+            ),
+        ]);
+        let (items, playlist) = provider_sync_items_for_id(
+            provider.clone() as Arc<dyn MediaProvider>,
+            "abs-author-test",
+        )
+        .await
+        .expect("author selection should resolve");
+        assert!(playlist.is_none());
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["part-1", "shared", "part-2"]
+        );
+        let count = provider_legacy_item_count(
+            provider.clone() as Arc<dyn MediaProvider>,
+            "abs-author-test",
+        )
+        .await
+        .unwrap();
+        let size = provider_legacy_item_size(
+            provider.clone() as Arc<dyn MediaProvider>,
+            "abs-author-test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count["recursiveItemCount"], 3);
+        assert_eq!(size["totalSizeBytes"], 300);
+        assert!(
+            provider_sync_items_for_id(provider as Arc<dyn MediaProvider>, "abs-author-missing")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

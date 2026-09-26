@@ -206,7 +206,7 @@ export class MediaCard {
                         }
                         return;
                     }
-                    const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
+                    const CONTAINER_TYPES = ['MusicArtist', 'BookAuthor', 'MusicAlbum', 'MusicGenre', 'Playlist'];
                     const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
                     const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!bi.childCount || !bi.sizeBytes);
 
@@ -240,6 +240,7 @@ export class MediaCard {
                             });
                         } catch (err) {
                             console.error('Failed to fetch item count:', err);
+                            showToast(err instanceof Error ? err.message : String(err), 'danger');
                         } finally {
                             toggleBtn.loading = false;
                             if (overlay) overlay.remove();

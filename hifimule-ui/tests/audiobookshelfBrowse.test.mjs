@@ -34,7 +34,7 @@ test('Audiobookshelf books and parts use the existing playback routes without mu
 });
 
 test('browse search response remains tracks-compatible while admitting books', () => {
-    assert.match(rpc, /tracks: BrowseTrack\[\]; albums\?: BrowseAlbum\[\]/);
+    assert.match(rpc, /tracks: BrowseTrack\[\]; albums: BrowseAlbum\[\]/);
     assert.match(rpc, /possiblyTruncated/);
 });
 
@@ -66,6 +66,25 @@ test('source groupings use read-only browse presentation and compatibility stays
             'library.books.compatibility_unknown', 'library.books.compatibility_direct',
             'library.books.compatibility_transcoded', 'library.books.compatibility_blocked',
             'basket.sync.compatibility_title', 'basket.sync.reason.incompatible_direct',
+        ]) assert.ok(locale[key], key);
+    }
+});
+
+test('Books browse separates series, collections, and selectable authors', () => {
+    assert.match(rpc, /"authors"[^;]+"series"[^;]+"collections"/);
+    assert.match(rpc, /fetchBrowseSeries\(\)/);
+    assert.match(rpc, /fetchBrowseCollections\(\)/);
+    assert.match(library, /case 'authors': await loadArtists\(true\)/);
+    assert.match(library, /state\.browseMode === 'series'[\s\S]+fetchBrowseSeries\(\)/);
+    assert.match(library, /state\.browseMode === 'collections'[\s\S]+fetchBrowseCollections\(\)/);
+    assert.match(library, /basketType: state\.isBookLibrary \? 'BookAuthor'/);
+    assert.match(card, /'BookAuthor'/);
+    assert.match(basketSidebar, /type === 'BookAuthor'/);
+    for (const locale of Object.values(catalog)) {
+        for (const key of [
+            'library.mode.authors', 'library.mode.series', 'library.mode.collections',
+            'basket.item.type.book_author',
+            'library.empty.authors', 'library.empty.series', 'library.empty.collections',
         ]) assert.ok(locale[key], key);
     }
 });

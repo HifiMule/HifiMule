@@ -462,6 +462,18 @@ pub trait MediaProvider: Send + Sync {
 
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError>;
 
+    async fn list_series(&self) -> Result<Vec<Playlist>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "series browsing unavailable".into(),
+        ))
+    }
+
+    async fn list_collections(&self) -> Result<Vec<Playlist>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "collection browsing unavailable".into(),
+        ))
+    }
+
     async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistWithTracks, ProviderError>;
 
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
@@ -746,8 +758,11 @@ pub enum BrowseMode {
     Podcasts,
     RecentEpisodes,
     Artists,
+    Authors,
     Albums,
     Playlists,
+    Series,
+    Collections,
     Tracks,
     Genres,
     RecentlyAdded,

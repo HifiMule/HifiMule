@@ -1767,6 +1767,7 @@ export class BasketSidebar {
     }
 
     private itemTypeLabel(type: string): string {
+        if (type === 'BookAuthor') return t('basket.item.type.book_author');
         if (type === 'Book') return t('basket.item.type.book');
         if (type === 'BookPart') return t('basket.item.type.book_part');
         if (type === 'PodcastShow') return t('basket.item.type.podcast_show');

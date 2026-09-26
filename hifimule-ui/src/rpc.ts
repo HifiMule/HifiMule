@@ -212,7 +212,7 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 
 // --- Provider-neutral browse types ---
 
-export type BrowseMode = "artists" | "albums" | "podcasts" | "recentEpisodes" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites" | "search";
+export type BrowseMode = "artists" | "authors" | "albums" | "podcasts" | "recentEpisodes" | "playlists" | "series" | "collections" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites" | "search";
 
 export interface PodcastShow {
     type: 'show';
@@ -239,6 +239,7 @@ export interface BrowseArtist {
     id: string;
     name: string;
     albumCount: number;
+    songCount?: number | null;
     coverArtId: string | null;
 }
 
@@ -626,6 +627,14 @@ export async function searchPodcasts(query: string): Promise<{ shows: PodcastSho
 
 export async function fetchBrowsePlaylists(): Promise<{ playlists: BrowsePlaylist[] }> {
     return await rpcCall('browse.listPlaylists');
+}
+
+export async function fetchBrowseSeries(): Promise<{ playlists: BrowsePlaylist[] }> {
+    return await rpcCall('browse.listSeries');
+}
+
+export async function fetchBrowseCollections(): Promise<{ playlists: BrowsePlaylist[] }> {
+    return await rpcCall('browse.listCollections');
 }
 
 export async function fetchBrowsePlaylist(
