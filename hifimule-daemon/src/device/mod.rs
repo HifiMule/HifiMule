@@ -342,7 +342,7 @@ impl AutoFillConfig {
 
     /// Resolves the effective pipeline for a (possibly absent) server id: the keyed pipeline when
     /// present, else the sole pipeline of a single-server install, else `None` (legacy fallback).
-    fn resolve_pipeline(&self, server_id: Option<&str>) -> Option<&AutoFillPipeline> {
+    pub(crate) fn resolve_pipeline(&self, server_id: Option<&str>) -> Option<&AutoFillPipeline> {
         if let Some(id) = server_id
             && let Some(pipeline) = self.pipelines.get(id)
         {

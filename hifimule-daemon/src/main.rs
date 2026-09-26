@@ -369,7 +369,14 @@ pub fn start_daemon_core(
                             daemon_log!("Device detected at {:?}: {:?}", path, manifest);
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
-                            let auto_fill_enabled = manifest.auto_fill.legacy_enabled();
+                            let selected_server_id = db
+                                .get_server_config()
+                                .ok()
+                                .flatten()
+                                .and_then(|config| config.server_id);
+                            let auto_fill_enabled = manifest
+                                .auto_fill
+                                .enabled_for(selected_server_id.as_deref());
                             let has_synced_items = !manifest.synced_items.is_empty();
                             let manifest_device_id = manifest.device_id.clone();
                             let scrobble_manifest = Arc::new(manifest.clone());
@@ -426,11 +433,11 @@ pub fn start_daemon_core(
                                     let state_tx_sync = state_tx_clone.clone();
                                     let device_id = manifest_device_id.clone();
 
-                                    if let Some(provider) = get_selected_provider(&db).await {
+                                    if let Some((provider, server_id)) = get_selected_provider(&db).await {
                                         tokio::spawn(async move {
                                             daemon_log!("[AutoSync] Starting auto-sync via provider");
                                             if let Err(e) = run_auto_sync_via_provider(
-                                                provider, dm, som, state_tx_sync, device_id,
+                                                provider, server_id, dm, som, state_tx_sync, device_id,
                                             ).await {
                                                 daemon_log!("[AutoSync] Provider auto-sync failed: {}", e);
                                             }
@@ -1232,6 +1239,7 @@ fn run_candidate(
 /// Resolves basket items into a sync delta, then executes the sync operation.
 fn push_auto_fill_items(
     items: Vec<auto_fill::AutoFillItem>,
+    media_role: device::MediaRole,
     desired_items: &mut Vec<sync::DesiredItem>,
     playlist_sync_items: &mut Vec<sync::PlaylistSyncItem>,
 ) {
@@ -1242,13 +1250,15 @@ fn push_auto_fill_items(
     let mut tracks = Vec::new();
     for item in items {
         if seen_ids.insert(item.id.clone()) {
-            tracks.push(sync::PlaylistTrackInfo {
-                jellyfin_id: item.id.clone(),
-                artist: item.artist.clone(),
-                run_time_seconds: -1,
-            });
+            if media_role == device::MediaRole::Music {
+                tracks.push(sync::PlaylistTrackInfo {
+                    jellyfin_id: item.id.clone(),
+                    artist: item.artist.clone(),
+                    run_time_seconds: -1,
+                });
+            }
             desired_items.push(sync::DesiredItem {
-                media_role: crate::device::MediaRole::Music,
+                media_role,
                 jellyfin_id: item.id,
                 name: item.name,
                 album: item.album,
@@ -1318,6 +1328,7 @@ mod auto_sync_tests {
 
         push_auto_fill_items(
             vec![fill_item("manual", Some(1)), fill_item("fill", Some(9))],
+            device::MediaRole::Music,
             &mut desired_items,
             &mut playlists,
         );
@@ -1329,6 +1340,41 @@ mod auto_sync_tests {
         assert_eq!(playlists[0].name, "Autofill");
         assert_eq!(playlists[0].tracks.len(), 1);
         assert_eq!(playlists[0].tracks[0].jellyfin_id, "fill");
+    }
+
+    #[test]
+    fn podcast_auto_fill_items_keep_role_without_music_playlist() {
+        let mut desired_items = Vec::new();
+        let mut playlists = Vec::new();
+        push_auto_fill_items(
+            vec![fill_item("episode", Some(20260102))],
+            device::MediaRole::Podcast,
+            &mut desired_items,
+            &mut playlists,
+        );
+        assert_eq!(desired_items[0].media_role, device::MediaRole::Podcast);
+        assert_eq!(desired_items[0].track_number, Some(20260102));
+        assert!(playlists.is_empty());
+    }
+
+    #[test]
+    fn auto_sync_uses_selected_server_pipeline() {
+        let mut config = device::AutoFillConfig::default();
+        let mut first = auto_fill::AutoFillPipeline::default_legacy(None);
+        first.podcast_retention.recent_count = 2;
+        let mut second = auto_fill::AutoFillPipeline::default_legacy(None);
+        second.podcast_retention.recent_count = 7;
+        config.pipelines.insert("first".into(), first);
+        config.pipelines.insert("second".into(), second);
+        assert_eq!(
+            config
+                .resolve_pipeline(Some("second"))
+                .unwrap()
+                .podcast_retention
+                .recent_count,
+            7
+        );
+        assert!(config.enabled_for(Some("second")));
     }
 
     #[test]
@@ -1358,11 +1404,13 @@ mod auto_sync_tests {
 /// Returns the selected server's provider from its stored credentials.
 async fn get_selected_provider(
     db: &Arc<db::Database>,
-) -> Option<Arc<dyn providers::MediaProvider>> {
+) -> Option<(Arc<dyn providers::MediaProvider>, Option<String>)> {
     let config = db.get_server_config().ok()??;
-    crate::server_manager::connect_provider_for(&config.into())
+    let server_id = config.server_id.clone();
+    let provider = crate::server_manager::connect_provider_for(&config.into())
         .await
-        .ok()
+        .ok()?;
+    Some((provider, server_id))
 }
 
 fn scoped_favorite_target_id<'a>(basket_item: &'a device::BasketItem, prefix: &str) -> &'a str {
@@ -1376,6 +1424,7 @@ fn scoped_favorite_target_id<'a>(basket_item: &'a device::BasketItem, prefix: &s
 /// then executes sync via execute_provider_sync.
 async fn run_auto_sync_via_provider(
     provider: Arc<dyn providers::MediaProvider>,
+    server_id: Option<String>,
     device_manager: Arc<device::DeviceManager>,
     sync_op_manager: Arc<sync::SyncOperationManager>,
     state_tx: std::sync::mpsc::Sender<DaemonState>,
@@ -1399,7 +1448,7 @@ async fn run_auto_sync_via_provider(
     let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
 
-    if manifest.basket_items.is_empty() && !manifest.auto_fill.legacy_enabled() {
+    if manifest.basket_items.is_empty() && !manifest.auto_fill.enabled_for(server_id.as_deref()) {
         if manifest.synced_items.is_empty() {
             daemon_log!("[AutoSync] No basket items and no synced items, skipping");
             let _ = state_tx.send(DaemonState::Idle);
@@ -1421,9 +1470,10 @@ async fn run_auto_sync_via_provider(
     }
 
     // Auto-fill: fill remaining space after basket items (or fill entirely when basket is empty).
-    if manifest.auto_fill.legacy_enabled() {
+    if manifest.auto_fill.enabled_for(server_id.as_deref()) {
         let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
-        let total_budget = if let Some(mb) = manifest.auto_fill.legacy_max_bytes() {
+        let total_budget = if let Some(mb) = manifest.auto_fill.max_bytes_for(server_id.as_deref())
+        {
             mb
         } else {
             match target.io.free_space().await {
@@ -1446,7 +1496,7 @@ async fn run_auto_sync_via_provider(
                 exclude_item_ids,
                 max_fill_bytes: auto_fill_budget,
                 device_id: manifest.device_id.clone(),
-                server_id: String::new(),
+                server_id: server_id.clone().unwrap_or_default(),
                 now_unix: crate::rpc::now_unix_secs(),
                 history: auto_fill::HistorySnapshot::default(),
                 rotation_cursor: 0,
@@ -1455,9 +1505,7 @@ async fn run_auto_sync_via_provider(
                 // Story 13.5: legacy auto-sync path — civil time inert (Context stage never runs here).
                 local: auto_fill::CivilTime::default(),
             };
-            let pipeline = (manifest.auto_fill.pipelines.len() == 1)
-                .then(|| manifest.auto_fill.pipelines.values().next())
-                .flatten();
+            let pipeline = manifest.auto_fill.resolve_pipeline(server_id.as_deref());
             match rpc::expand_auto_fill_slot(provider.clone(), pipeline, fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {
                     daemon_log!("[AutoSync] Provider auto-fill returned no items, skipping");
@@ -1469,7 +1517,12 @@ async fn run_auto_sync_via_provider(
                         "[AutoSync] Provider auto-fill resolved {} items",
                         items.len()
                     );
-                    push_auto_fill_items(items, &mut desired_items, &mut playlist_sync_items);
+                    push_auto_fill_items(
+                        items,
+                        device::MediaRole::from_library_role(provider.library_role()),
+                        &mut desired_items,
+                        &mut playlist_sync_items,
+                    );
                 }
                 Err(e) => {
                     daemon_log!("[AutoSync] Provider auto-fill failed: {}", e);
