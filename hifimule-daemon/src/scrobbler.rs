@@ -431,12 +431,13 @@ async fn find_jellyfin_item_id(
     entry: &ScrobblerEntry,
 ) -> anyhow::Result<Option<String>> {
     let candidates = client
-        .search_audio_items(url, token, user_id, &entry.title)
+        .search_audio_items(url, token, user_id, &entry.title, "Audio")
         .await?;
 
     let album_lower = entry.album.to_lowercase();
     let artist_lower = entry.artist.to_lowercase();
     Ok(candidates
+        .items
         .into_iter()
         .find(|item| {
             let album_match = item
