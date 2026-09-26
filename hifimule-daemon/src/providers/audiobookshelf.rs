@@ -213,7 +213,7 @@ struct SearchMediaDto {
     #[serde(default)]
     cover_path: Option<String>,
     #[serde(default)]
-    num_episodes: Option<u32>,
+    num_episodes: serde_json::Value,
     #[serde(default)]
     metadata: serde_json::Value,
 }
@@ -274,18 +274,23 @@ impl SearchLibraryItemDto {
                 metadata: PodcastMetadataDto {
                     title: metadata["title"].as_str().map(str::to_owned),
                     description: metadata["description"].as_str().map(str::to_owned),
+                    image_url: metadata["imageUrl"].as_str().map(str::to_owned),
                 },
                 episodes: Vec::new(),
-                num_episodes: self.media.num_episodes,
+                num_episodes: self
+                    .media
+                    .num_episodes
+                    .as_u64()
+                    .and_then(|count| u32::try_from(count).ok()),
             },
         }
     }
 
     fn media_id(&self) -> String {
         self.media
-            .library_item_id
+            .id
             .as_deref()
-            .or(self.media.id.as_deref())
+            .or(self.media.library_item_id.as_deref())
             .filter(|id| !id.trim().is_empty())
             .unwrap_or(&self.id)
             .to_owned()
@@ -304,7 +309,7 @@ struct PodcastSearchDto {
     #[serde(default)]
     podcast: Vec<PodcastSearchHit>,
     #[serde(default)]
-    episodes: Vec<PodcastEpisodeHit>,
+    episodes: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -315,13 +320,6 @@ enum PodcastSearchHit {
         library_item: SearchLibraryItemDto,
     },
     Item(SearchLibraryItemDto),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PodcastEpisodeHit {
-    library_item: SearchLibraryItemDto,
-    episode: PodcastEpisodeDto,
 }
 
 #[derive(Deserialize)]
@@ -437,6 +435,8 @@ impl<'de> Deserialize<'de> for BoundedPodcastEpisodes {
 struct PodcastMetadataDto {
     title: Option<String>,
     description: Option<String>,
+    #[serde(rename = "imageUrl")]
+    image_url: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2001,6 +2001,13 @@ fn podcast_show(library: &str, item: &PodcastDto) -> Result<PodcastShow, Provide
             .cover_path
             .as_deref()
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                item.media
+                    .metadata
+                    .image_url
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .map(|_| opaque_id("podcast-cover", &[library, &item.id, &item.media.id])),
         episode_count: item.media.num_episodes.or_else(|| {
             (!item.media.episodes.is_empty()).then_some(item.media.episodes.len() as u32)
@@ -2466,14 +2473,32 @@ impl MediaProvider for AudiobookshelfProvider {
             .episodes
             .into_iter()
             .take(LIMIT)
-            .map(|hit| {
-                let item = hit.library_item.into_podcast();
+            .filter_map(|hit| {
+                let item_value = hit.get("libraryItem").or_else(|| hit.get("podcast"))?;
+                let item =
+                    serde_json::from_value::<SearchLibraryItemDto>(item_value.clone()).ok()?;
+                let episode = hit
+                    .get("episode")
+                    .or_else(|| item_value.get("recentEpisode"))
+                    .or_else(|| hit.get("recentEpisode"))
+                    .unwrap_or(&hit);
+                let id = episode["id"].as_str().filter(|id| !id.trim().is_empty())?;
+                let episode = PodcastEpisodeDto {
+                    id: id.to_owned(),
+                    title: episode["title"].as_str().map(str::to_owned),
+                    description: episode["description"].as_str().map(str::to_owned),
+                    duration: episode["duration"].as_f64(),
+                    pub_date: episode["pubDate"].as_str().map(str::to_owned),
+                    published_at: episode["publishedAt"].as_i64(),
+                    updated_at: episode["updatedAt"].as_i64(),
+                    audio_file: None,
+                };
+                Some((item.into_podcast(), episode))
+            })
+            .map(|(item, episode)| {
                 let show = podcast_show(library, &item)?;
                 Ok::<PodcastEpisode, ProviderError>(podcast_episode(
-                    &show,
-                    library,
-                    &item,
-                    &hit.episode,
+                    &show, library, &item, &episode,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -2964,18 +2989,19 @@ impl MediaProvider for AudiobookshelfProvider {
             });
         }
         if self.library_role == Some(ProviderLibraryRole::Podcast) {
-            let show_id = opaque_id("show", &[library, &item_id, &media_id]);
-            let show = self.podcast_detail(&show_id).await?;
-            if show
-                .media
-                .cover_path
-                .as_deref()
-                .is_none_or(|value| value.trim().is_empty())
+            let item_url = item_endpoint(&self.base_url, &item_id)?;
+            let item_response = self.protected_get(&item_url).await?;
+            check_status(&item_response)?;
+            let show: SearchLibraryItemDto =
+                bounded_json(item_response, "podcast cover item").await?;
+            if show.library_id != library
+                || show.id != item_id
+                || show.media_type != "podcast"
+                || show.media_id() != media_id
             {
-                return Err(ProviderError::NotFound {
-                    item_type: "cover".into(),
-                    id: "unavailable".into(),
-                });
+                return Err(ProviderError::StaleConfiguration(
+                    "Audiobookshelf podcast identity changed".into(),
+                ));
             }
         }
         let item = item_endpoint(&self.base_url, &item_id)?;
@@ -3786,6 +3812,46 @@ mod tests {
         let cover = opaque_id("cover", &["books", "book-1", "media-1"]);
         let response = provider.fetch_cover_art(&cover).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn podcast_cover_uses_item_identity_without_parsing_episode_catalog() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let item = r#"{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","libraryItemId":"show-1","coverPath":null,"metadata":{"title":"Talks","imageUrl":"https://example.test/art.jpg"},"episodes":[{"id":null}]}}"#;
+        server
+            .mock("GET", "/api/items/show-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(item)
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/items/show-1/cover")
+            .with_status(200)
+            .with_header("content-type", "image/jpeg")
+            .with_body(vec![1_u8, 2, 3])
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("pod-id".into(), ProviderLibraryRole::Podcast)
+            .unwrap();
+        let show = serde_json::from_str::<SearchLibraryItemDto>(item)
+            .unwrap()
+            .into_podcast();
+        let cover = podcast_show("pod-id", &show).unwrap().cover_art_id.unwrap();
+        let response = provider.fetch_cover_art(&cover).await.unwrap();
         assert_eq!(response.bytes().await.unwrap().as_ref(), &[1, 2, 3]);
     }
 
@@ -5273,7 +5339,7 @@ mod tests {
         server.mock("GET", "/api/libraries/pod-id/search")
             .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("q".into(), "first".into()), Matcher::UrlEncoded("limit".into(), "50".into())]))
             .with_status(200).with_header("content-type", "application/json")
-            .with_body(r#"{"podcast":[],"episodes":[{"libraryItem":{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"libraryItemId":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":null}]}},"episode":{"id":"episode-1","title":"First","publishedAt":1767225600000}}]}"#)
+            .with_body(r#"{"podcast":[],"episodes":[{"unknown":"future search hit"},{"libraryItem":{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","libraryItemId":"show-1","metadata":{"title":"Talks"},"episodes":[{"id":null}]},"recentEpisode":{"id":"episode-1","title":"First","publishedAt":1767225600000}}}]}"#)
             .create_async().await;
         let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
             .await

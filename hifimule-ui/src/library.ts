@@ -2070,31 +2070,34 @@ function podcastArtwork(coverArtId: string | null): HTMLElement {
     const artwork = document.createElement('div');
     artwork.className = state.listViewMode === 'grid' ? 'card-image' : 'media-list-row__thumb';
     if (coverArtId) void getImageUrl(coverArtId, state.listViewMode === 'grid' ? 300 : 64)
-        .then(url => { if (artwork.isConnected) artwork.style.backgroundImage = `url('${url}')`; })
+        .then(url => { artwork.style.backgroundImage = `url('${url}')`; })
         .catch(() => {});
     return artwork;
 }
 
 function podcastSearchForm(container: HTMLElement): void {
     const form = document.createElement('form');
+    form.className = 'book-search';
     form.setAttribute('role', 'search');
-    const label = document.createElement('label');
-    label.textContent = t('library.podcast.search');
-    const input = document.createElement('input');
-    input.type = 'search';
+    const input = document.createElement('sl-input') as any;
+    input.setAttribute('aria-label', t('library.podcast.search'));
+    input.placeholder = t('library.podcast.search');
     input.maxLength = 256;
     input.value = podcastQuery;
-    label.append(input);
-    form.append(label);
-    const submit = document.createElement('button');
+    const submit = document.createElement('sl-button') as any;
     submit.type = 'submit';
-    submit.className = 'podcast-icon-action';
-    submit.setAttribute('aria-label', t('library.podcast.search_button'));
-    const searchIcon = document.createElement('sl-icon');
-    searchIcon.setAttribute('name', 'search');
-    searchIcon.setAttribute('aria-hidden', 'true');
-    submit.append(searchIcon);
-    form.append(submit);
+    submit.textContent = t('library.podcast.search_button');
+    form.append(input, submit);
+    if (podcastQuery) {
+        const clear = document.createElement('sl-button') as any;
+        clear.type = 'button';
+        clear.textContent = t('library.books.clear_search');
+        clear.addEventListener('click', () => {
+            podcastQuery = '';
+            void loadPodcastView();
+        });
+        form.append(clear);
+    }
     form.addEventListener('submit', event => {
         event.preventDefault();
         podcastQuery = input.value.trim();
