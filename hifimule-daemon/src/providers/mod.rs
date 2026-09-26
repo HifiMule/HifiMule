@@ -744,6 +744,7 @@ impl ProviderLibraryRole {
 #[serde(rename_all = "camelCase")]
 pub enum BrowseMode {
     Podcasts,
+    RecentEpisodes,
     Artists,
     Albums,
     Playlists,

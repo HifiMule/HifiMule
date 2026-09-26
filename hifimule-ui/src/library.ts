@@ -505,6 +505,7 @@ const browseModeIcons: Record<BrowseMode, string> = {
     artists: 'mic',
     albums: 'disc',
     podcasts: 'broadcast',
+    recentEpisodes: 'plus-square',
     playlists: 'collection-play',
     tracks: 'music-note',
     genres: 'tags',
@@ -908,7 +909,7 @@ function setViewMode(mode: 'grid' | 'list') {
     clearSelection();
     state.listViewMode = mode;
     renderModeBar();
-    if (state.browseMode === 'podcasts') renderPodcastContent();
+    if (state.browseMode === 'podcasts' || state.browseMode === 'recentEpisodes') renderPodcastContent();
     else renderCurrentView();
 }
 
@@ -1707,7 +1708,7 @@ async function switchMode(mode: BrowseMode) {
     ++musicSearchRequest;
 
     clearSelection();
-    if (state.browseMode === 'podcasts') ++podcastRequest;
+    if (state.browseMode === 'podcasts' || state.browseMode === 'recentEpisodes') ++podcastRequest;
     saveScroll();
     // Leaving Tracks mode: tear down the view's basket subscription and scroll
     // handlers. The instance is kept (not nulled) so re-entry can remount and
@@ -1748,6 +1749,7 @@ async function loadModeRoot() {
             else await loadAlbums(true);
             break;
         case 'podcasts': await loadPodcastView(); break;
+        case 'recentEpisodes': await loadRecentPodcastEpisodes(); break;
         case 'playlists': await loadPlaylists(); break;
         case 'tracks': loadTracksView(); break;
         case 'genres': await loadGenres(true); break;
@@ -1777,7 +1779,6 @@ function loadTracksView(): void {
 }
 
 let podcastRequest = 0;
-let podcastTab: 'shows' | 'recent' = 'shows';
 let podcastRecentEpisodes: PodcastEpisode[] = [];
 let podcastRecentTotal = 0;
 let podcastRecentNextOffset = 0;
@@ -1805,7 +1806,7 @@ function renderPodcastContent(): void {
     if (!container) return;
     container.replaceChildren();
     container.classList.toggle('podcast-list-view', state.listViewMode === 'list');
-    if (podcastCurrentShow) {
+    if (state.browseMode === 'podcasts' && podcastCurrentShow) {
         container.append(podcastIconButton(t('library.podcast.back'), 'arrow-left', () => { void loadPodcastView(); }));
         const title = document.createElement('h2');
         title.textContent = podcastCurrentShowTitle;
@@ -1820,26 +1821,7 @@ function renderPodcastContent(): void {
         if (podcastCatalogTruncated) podcastStatus(container, t('library.podcast.truncated'));
         return;
     }
-    const tabs = document.createElement('div');
-    tabs.className = 'podcast-tabs';
-    for (const [tab, key] of [['shows', 'library.podcast.tab_shows'], ['recent', 'library.podcast.tab_recent']] as const) {
-        const button = document.createElement('sl-button') as any;
-        button.textContent = t(key);
-        button.variant = podcastTab === tab ? 'primary' : 'default';
-        button.setAttribute('aria-pressed', String(podcastTab === tab));
-        button.addEventListener('click', () => {
-            if (podcastTab === tab) return;
-            ++podcastRequest;
-            podcastTab = tab;
-            podcastRecentLoading = false;
-            podcastShowsLoading = false;
-            if (tab === 'recent') void loadRecentPodcastEpisodes();
-            else void loadPodcastView();
-        });
-        tabs.append(button);
-    }
-    container.append(tabs);
-    if (podcastTab === 'recent') {
+    if (state.browseMode === 'recentEpisodes') {
         if (podcastRecentLoading) podcastStatus(container, t('library.podcast.loading_recent'));
         else if (podcastRecentError) {
             podcastStatus(container, podcastRecentError);
@@ -1884,7 +1866,7 @@ async function loadRecentPodcastEpisodes(append = false): Promise<void> {
     try {
         const page = await fetchRecentPodcastEpisodes(append ? podcastRecentNextOffset : 0, 50);
         const accepted = acceptRecentEpisodePage(
-            request, podcastRequest, state.browseMode === 'podcasts' && podcastTab === 'recent',
+            request, podcastRequest, state.browseMode === 'recentEpisodes',
             append ? podcastRecentEpisodes : [], append ? podcastRecentNextOffset : 0, 50, page,
         );
         if (!accepted) return;
@@ -1895,7 +1877,7 @@ async function loadRecentPodcastEpisodes(append = false): Promise<void> {
         podcastRecentLoading = false;
         renderPodcastContent();
     } catch (error) {
-        if (request !== podcastRequest || state.browseMode !== 'podcasts' || podcastTab !== 'recent') return;
+        if (request !== podcastRequest || state.browseMode !== 'recentEpisodes') return;
         const value = error as { code?: number; data?: { errorCode?: string } } | null;
         const code = value?.data?.errorCode;
         podcastRecentError = t(code === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
@@ -3174,7 +3156,6 @@ export async function initLibraryView() {
         podcastTotal = 0;
         podcastNextOffset = 0;
         podcastQuery = '';
-        podcastTab = 'shows';
         podcastRecentEpisodes = [];
         podcastRecentTotal = 0;
         podcastRecentNextOffset = 0;

@@ -2153,12 +2153,6 @@ h2 {
   top: auto;
 }
 
-.podcast-tabs {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
 .podcast-list .basket-toggle-btn {
   font-size: 1.25rem;
 }

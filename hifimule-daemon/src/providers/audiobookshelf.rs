@@ -149,20 +149,74 @@ struct GroupDto {
     library_id: String,
     name: String,
     #[serde(default, deserialize_with = "deserialize_group_books")]
-    books: Vec<BookDto>,
+    books: Vec<GroupBookDto>,
 }
 
-fn deserialize_group_books<'de, D>(deserializer: D) -> Result<Vec<BookDto>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-    let members = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    members
+fn deserialize_group_books<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<GroupBookDto>, D::Error> {
+    Ok(Vec::<GroupBookDto>::deserialize(deserializer)?
         .into_iter()
-        .filter(|member| member.get("isMissing").and_then(|value| value.as_bool()) != Some(true))
-        .map(|member| serde_json::from_value(member).map_err(D::Error::custom))
-        .collect()
+        .filter(|book| !book.is_missing)
+        .collect())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupBookDto {
+    #[serde(deserialize_with = "deserialize_nonempty")]
+    id: String,
+    #[serde(default)]
+    library_id: Option<String>,
+    #[serde(default)]
+    media_type: Option<String>,
+    #[serde(default)]
+    is_missing: bool,
+    #[serde(default)]
+    num_audio_files: Option<u32>,
+    #[serde(default)]
+    media: Option<serde_json::Value>,
+}
+
+impl GroupBookDto {
+    fn audio_file_count(&self) -> u32 {
+        self.num_audio_files
+            .or_else(|| {
+                self.media
+                    .as_ref()
+                    .and_then(|media| media.get("numAudioFiles"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|count| u32::try_from(count).ok())
+            })
+            .unwrap_or_else(|| {
+                self.media
+                    .as_ref()
+                    .and_then(|media| media.get("audioFiles"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(|files| {
+                        files
+                            .iter()
+                            .filter(|file| {
+                                file.get("ino")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some()
+                                    && file.get("index").and_then(numeric_index).is_some()
+                            })
+                            .count() as u32
+                    })
+                    .unwrap_or(0)
+            })
+    }
+
+    fn full_book(&self) -> Option<BookDto> {
+        let media = self.media.clone()?;
+        media.get("audioFiles")?.as_array()?;
+        serde_json::from_value(serde_json::json!({
+            "id": self.id, "libraryId": self.library_id, "mediaType": self.media_type,
+            "isMissing": self.is_missing, "media": media
+        }))
+        .ok()
+    }
 }
 
 #[derive(Deserialize)]
@@ -309,16 +363,37 @@ struct PodcastPageDto {
 struct RecentPodcastPageDto {
     total: u64,
     #[serde(default)]
-    episodes: Vec<RecentPodcastEpisodeDto>,
+    episodes: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RecentPodcastEpisodeDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
     library_item_id: String,
-    #[serde(flatten)]
     episode: PodcastEpisodeDto,
+}
+
+fn recent_podcast_episode(value: serde_json::Value) -> Option<RecentPodcastEpisodeDto> {
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+    };
+    Some(RecentPodcastEpisodeDto {
+        library_item_id: field("libraryItemId")?,
+        episode: PodcastEpisodeDto {
+            id: field("id")?,
+            title: field("title"),
+            description: field("description"),
+            duration: value.get("duration").and_then(serde_json::Value::as_f64),
+            pub_date: field("pubDate"),
+            published_at: value.get("publishedAt").and_then(serde_json::Value::as_i64),
+            updated_at: value.get("updatedAt").and_then(serde_json::Value::as_i64),
+            audio_file: value
+                .get("audioFile")
+                .and_then(|file| serde_json::from_value(file.clone()).ok()),
+        },
+    })
 }
 
 #[derive(Deserialize)]
@@ -339,15 +414,53 @@ enum PodcastSearchHit {
     Item(SearchLibraryItemDto),
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+fn podcast_media_identity(value: &mut serde_json::Value) {
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if let (Some(id), Some(media)) = (
+        id,
+        value
+            .get_mut("media")
+            .and_then(serde_json::Value::as_object_mut),
+    ) {
+        if !media.contains_key("id") && !media.contains_key("libraryItemId") {
+            media.insert("id".into(), serde_json::Value::String(id));
+        }
+    }
+}
+
 struct PodcastDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
-    #[serde(deserialize_with = "deserialize_nonempty")]
     library_id: String,
     media_type: String,
     media: PodcastMediaDto,
+}
+
+impl<'de> Deserialize<'de> for PodcastDto {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawPodcastDto {
+            #[serde(deserialize_with = "deserialize_nonempty")]
+            id: String,
+            #[serde(deserialize_with = "deserialize_nonempty")]
+            library_id: String,
+            media_type: String,
+            media: PodcastMediaDto,
+        }
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        podcast_media_identity(&mut value);
+        let raw: RawPodcastDto = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            id: raw.id,
+            library_id: raw.library_id,
+            media_type: raw.media_type,
+            media: raw.media,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -368,15 +481,36 @@ struct PodcastMediaDto {
 const MAX_PODCAST_BROWSE_EPISODES: usize = 5_000;
 const MAX_PODCAST_DETAIL_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct PodcastBrowseDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
-    #[serde(deserialize_with = "deserialize_nonempty")]
     library_id: String,
     media_type: String,
     media: PodcastBrowseMediaDto,
+}
+
+impl<'de> Deserialize<'de> for PodcastBrowseDto {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawPodcastBrowseDto {
+            #[serde(deserialize_with = "deserialize_nonempty")]
+            id: String,
+            #[serde(deserialize_with = "deserialize_nonempty")]
+            library_id: String,
+            media_type: String,
+            media: PodcastBrowseMediaDto,
+        }
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        podcast_media_identity(&mut value);
+        let raw: RawPodcastBrowseDto = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            id: raw.id,
+            library_id: raw.library_id,
+            media_type: raw.media_type,
+            media: raw.media,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -500,23 +634,53 @@ struct PodcastAudioFileDto {
     duration: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 struct BookDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
-    #[serde(deserialize_with = "deserialize_nonempty")]
     library_id: String,
     media_type: String,
-    #[serde(default)]
     is_missing: bool,
     media: BookMediaDto,
 }
 
+impl<'de> Deserialize<'de> for BookDto {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawBookDto {
+            #[serde(deserialize_with = "deserialize_nonempty")]
+            id: String,
+            #[serde(deserialize_with = "deserialize_nonempty")]
+            library_id: String,
+            media_type: String,
+            #[serde(default)]
+            is_missing: bool,
+            media: BookMediaDto,
+        }
+        let raw = RawBookDto::deserialize(deserializer)?;
+        let mut media = raw.media;
+        if media.id.is_empty() {
+            media.id = raw.id.clone();
+        }
+        Ok(Self {
+            id: raw.id,
+            library_id: raw.library_id,
+            media_type: raw.media_type,
+            is_missing: raw.is_missing,
+            media,
+        })
+    }
+}
+
+/* Book media may omit its own ID; the library item ID is its stable fallback. */
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookMediaDto {
-    #[serde(alias = "libraryItemId", deserialize_with = "deserialize_nonempty")]
+    #[serde(
+        default,
+        alias = "libraryItemId",
+        deserialize_with = "deserialize_nonempty"
+    )]
     id: String,
     #[serde(default)]
     cover_path: Option<String>,
@@ -524,8 +688,19 @@ struct BookMediaDto {
     metadata: BookMetadataDto,
     #[serde(default)]
     audio_files: Vec<AudioFileDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_valid_chapters")]
     chapters: Vec<ChapterDto>,
+}
+
+fn deserialize_valid_chapters<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ChapterDto>, D::Error> {
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -533,12 +708,50 @@ struct BookMediaDto {
 struct BookMetadataDto {
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_book_authors")]
     authors: Vec<BookAuthorDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     narrators: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     published_year: Option<String>,
+}
+
+fn deserialize_book_authors<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<BookAuthorDto>, D::Error> {
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| match value {
+            serde_json::Value::String(name) if !name.trim().is_empty() => {
+                Some(BookAuthorDto { id: None, name })
+            }
+            value => serde_json::from_value(value).ok(),
+        })
+        .collect())
+}
+
+fn deserialize_string_list<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect())
+}
+
+fn deserialize_optional_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::String(text) => Some(text),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2110,7 +2323,7 @@ fn audiobookshelf_browse_capabilities(role: Option<ProviderLibraryRole>) -> Brow
             list_modes: vec![BrowseMode::Albums, BrowseMode::Playlists],
         },
         Some(ProviderLibraryRole::Podcast) => BrowseCapabilities {
-            list_modes: vec![BrowseMode::Podcasts],
+            list_modes: vec![BrowseMode::Podcasts, BrowseMode::RecentEpisodes],
         },
         _ => BrowseCapabilities::default(),
     }
@@ -2288,13 +2501,7 @@ fn group_playlist(library: &str, kind: &str, group: &GroupDto) -> Playlist {
                 .books
                 .iter()
                 .filter(|book| !book.is_missing && seen.insert(&book.id))
-                .map(|book| {
-                    book.media
-                        .audio_files
-                        .iter()
-                        .filter(|file| numeric_index(&file.index).is_some())
-                        .count() as u32
-                })
+                .map(GroupBookDto::audio_file_count)
                 .sum(),
         ),
         duration_seconds: None,
@@ -2308,11 +2515,13 @@ fn validate_group(library: &str, group: &GroupDto) -> Result<(), ProviderError> 
             "Audiobookshelf grouping left selected library".into(),
         ));
     }
-    if group
-        .books
-        .iter()
-        .any(|book| book.library_id != library || book.media_type != "book")
-    {
+    if group.books.iter().any(|book| {
+        book.library_id.as_deref().is_some_and(|id| id != library)
+            || book
+                .media_type
+                .as_deref()
+                .is_some_and(|kind| kind != "book")
+    }) {
         return Err(ProviderError::Deserialization(
             "Audiobookshelf grouping has foreign member".into(),
         ));
@@ -2428,8 +2637,17 @@ impl MediaProvider for AudiobookshelfProvider {
             ));
         }
         let source_count = page.episodes.len() as u32;
-        let item_ids = page
+        let recent = page
             .episodes
+            .into_iter()
+            .filter_map(recent_podcast_episode)
+            .collect::<Vec<_>>();
+        if source_count > 0 && recent.is_empty() {
+            return Err(ProviderError::Deserialization(
+                "Audiobookshelf recent episodes lack stable identities".into(),
+            ));
+        }
+        let item_ids = recent
             .iter()
             .map(|recent| recent.library_item_id.clone())
             .collect::<std::collections::HashSet<_>>();
@@ -2478,13 +2696,13 @@ impl MediaProvider for AudiobookshelfProvider {
                 shows.insert(id, item);
             }
         }
-        let mut episodes = Vec::with_capacity(page.episodes.len());
-        for recent in page.episodes {
-            let Some(item) = shows.get(&recent.library_item_id) else {
+        let mut episodes = Vec::with_capacity(recent.len());
+        for entry in recent {
+            let Some(item) = shows.get(&entry.library_item_id) else {
                 continue;
             };
             let show = podcast_show(library, item)?;
-            episodes.push(podcast_episode(&show, library, item, &recent.episode));
+            episodes.push(podcast_episode(&show, library, item, &entry.episode));
         }
         Ok((
             episodes,
@@ -2907,7 +3125,12 @@ impl MediaProvider for AudiobookshelfProvider {
         let mut seen = std::collections::HashSet::new();
         let mut tracks = Vec::new();
         for book in group.books {
-            if book.library_id != library || book.media_type != "book" {
+            if book.library_id.as_deref().is_some_and(|id| id != library)
+                || book
+                    .media_type
+                    .as_deref()
+                    .is_some_and(|kind| kind != "book")
+            {
                 return Err(ProviderError::Deserialization(
                     "Audiobookshelf grouping has foreign member".into(),
                 ));
@@ -2915,8 +3138,21 @@ impl MediaProvider for AudiobookshelfProvider {
             if book.is_missing || !seen.insert(book.id.clone()) {
                 continue;
             }
-            let album_id = opaque_id("album", &[library, &book.id, &book.media.id]);
-            tracks.extend(map_book_detail(library, &album_id, book)?.tracks);
+            let detail: BookDto = if let Some(full) = book.full_book() {
+                full
+            } else {
+                let endpoint = item_endpoint(&self.base_url, &book.id)?;
+                let response = self.protected_get(&endpoint).await?;
+                check_status(&response)?;
+                bounded_json(response, "book detail").await?
+            };
+            if detail.id != book.id || detail.library_id != library || detail.media_type != "book" {
+                return Err(ProviderError::Deserialization(
+                    "Audiobookshelf grouping has foreign member".into(),
+                ));
+            }
+            let album_id = opaque_id("album", &[library, &detail.id, &detail.media.id]);
+            tracks.extend(map_book_detail(library, &album_id, detail)?.tracks);
         }
         Ok(PlaylistWithTracks { playlist, tracks })
     }
@@ -3872,7 +4108,7 @@ mod tests {
         );
         assert_eq!(
             audiobookshelf_browse_capabilities(Some(ProviderLibraryRole::Podcast)).list_modes,
-            vec![BrowseMode::Podcasts]
+            vec![BrowseMode::Podcasts, BrowseMode::RecentEpisodes]
         );
     }
 
@@ -4029,6 +4265,38 @@ mod tests {
             group_playlist("books", "series", &group).song_count,
             Some(1)
         );
+    }
+
+    #[test]
+    fn minified_group_members_and_book_media_without_id_are_accepted() {
+        let group: GroupDto = serde_json::from_str(
+            r#"{"id":"series-1","libraryId":"books","name":"Series","books":[{"id":"book-1","mediaType":"book","media":{"numAudioFiles":2}}]}"#,
+        ).unwrap();
+        assert_eq!(
+            group_playlist("books", "series", &group).song_count,
+            Some(2)
+        );
+        validate_group("books", &group).unwrap();
+        let book: BookDto = serde_json::from_str(
+            r#"{"id":"book-1","libraryId":"books","mediaType":"book","media":{"metadata":{"title":"Book","authors":["Author"],"publishedYear":2024},"audioFiles":[{"ino":"file-1","index":1,"duration":30}],"chapters":null}}"#,
+        ).unwrap();
+        assert_eq!(book.media.id, "book-1");
+        assert_eq!(book.media.metadata.authors[0].name, "Author");
+        assert_eq!(book.media.audio_files.len(), 1);
+    }
+
+    #[test]
+    fn expanded_recent_episode_metadata_does_not_reject_the_page() {
+        let page: RecentPodcastPageDto = serde_json::from_str(
+            r#"{"total":1,"episodes":[{"libraryItemId":"show-1","id":"ep-1","title":"New","duration":12.5,"podcast":{"metadata":{"title":"Show"}},"audioTrack":{"index":1},"audioFile":null}]}"#,
+        ).unwrap();
+        let episode = recent_podcast_episode(page.episodes.into_iter().next().unwrap()).unwrap();
+        assert_eq!(episode.library_item_id, "show-1");
+        assert_eq!(episode.episode.id, "ep-1");
+        let show: PodcastBrowseDto = serde_json::from_str(
+            r#"{"id":"show-1","libraryId":"podcasts","mediaType":"podcast","media":{"metadata":{"title":"Show"},"episodes":[]}}"#,
+        ).unwrap();
+        assert_eq!(show.media.id, "show-1");
     }
 
     #[tokio::test]
