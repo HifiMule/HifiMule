@@ -1289,10 +1289,7 @@ export class BasketSidebar {
 
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
             const blocked = Array.isArray((delta as any)?.blocked) ? (delta as any).blocked as Array<{ name?: string; reason?: string; reasonCode?: string }> : [];
-            const eligible = Array.isArray((delta as any)?.adds)
-                ? (delta as any).adds.filter((item: any) => item.mediaRole === 'audiobook') as Array<{ name?: string; reason?: string; reasonCode?: string }>
-                : [];
-            if ((blocked.length > 0 || eligible.length > 0) && !await this.confirmMediaCompatibility(eligible, blocked)) {
+            if (blocked.length > 0 && !await this.confirmBlockedMedia(blocked)) {
                 this.stopPolling();
                 this.isSyncing = false;
                 this.currentOperationId = null;
@@ -1510,16 +1507,13 @@ export class BasketSidebar {
         return t('basket.sync.minutes_left', { count: Math.round(etaSeconds / 60) });
     }
 
-    private confirmMediaCompatibility(
-        eligible: Array<{ name?: string; reason?: string; reasonCode?: string }>,
+    private confirmBlockedMedia(
         blocked: Array<{ name?: string; reason?: string; reasonCode?: string }>,
     ): Promise<boolean> {
         return new Promise((resolve) => {
             const dialog = document.createElement('sl-dialog') as any;
             dialog.label = t('basket.sync.compatibility_title');
             const reasonKeys: Record<string, string> = {
-                'verified-direct-format': 'library.books.compatibility_direct',
-                'verified-transcoded-format': 'library.books.compatibility_transcoded',
                 'incompatible-direct-format': 'basket.sync.reason.incompatible_direct',
                 'provider-auth': 'basket.sync.reason.provider_auth',
                 'remote-item-missing': 'basket.sync.reason.remote_missing',
@@ -1531,8 +1525,8 @@ export class BasketSidebar {
                 return key ? t(key) : item.reason ?? t('library.books.compatibility_unknown');
             };
             dialog.innerHTML = `
-                <p>${t(blocked.length > 0 ? 'basket.sync.blocked_help' : 'basket.sync.compatibility_help')}</p>
-                <ul>${eligible.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(reason(item))}</li>`).join('')}${blocked.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(t('library.books.compatibility_blocked'))} — ${this.escapeHtml(reason(item))}</li>`).join('')}</ul>
+                <p>${t('basket.sync.blocked_help')}</p>
+                <ul>${blocked.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(t('library.books.compatibility_blocked'))} — ${this.escapeHtml(reason(item))}</li>`).join('')}</ul>
                 <sl-button slot="footer" variant="default" id="blocked-cancel">${t('basket.actions.cancel')}</sl-button>
                 <sl-button slot="footer" variant="primary" id="blocked-continue">${t('basket.actions.start_sync')}</sl-button>
             `;
