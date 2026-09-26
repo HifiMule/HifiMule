@@ -66,13 +66,15 @@ function harness(locale = 'en') {
   document.getElementById = id => id === 'browse-mode-bar' ? root : id === 'library-content' ? content : null;
   const exports = {};
   const played = [];
+  class StaleBrowseResponse extends Error {}
   const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks, loadPodcastView, openPodcastShow, renderPodcastError, podcastDescription, podcastEpisodeRow, podcastShowRow };';
   const source = ts.transpileModule(input, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   vm.runInNewContext(source, { exports, document, console, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
     DOMParser: class { parseFromString() { return { body: { childNodes: parsedDescription?.children ?? [] } }; } },
     requestAnimationFrame: f => f(),
     require: name => name === './i18n' ? {t:(key,params={})=>(catalog[locale][key] ?? key).replace(/\{(\w+)\}/g,(_,name)=>String(params[name] ?? ''))}
-      : name === './rpc' ? {fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[],
+      : name === './rpc' ? {getBrowseGeneration: ()=>0, StaleBrowseResponse,
+        fetchBrowseModes: async()=>{if(modesError)throw modesError;return modesResult;}, serverList: async()=>[],
         fetchPodcastShows: async()=>{if(podcastShowsError)throw podcastShowsError;return {shows:[{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1}],total:51};},
         fetchPodcastShow: async()=>{podcastShowFetches++;if(podcastEpisodesError)throw podcastEpisodesError;return {show:{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:60},episodes:Array.from({length:60},(_,i)=>({id:i===0?'episode-opaque':`episode-${i}`,showId:'show-opaque',title:i===0?'First':`Episode ${i}`,description:null,durationSeconds:60,publishedAt:'2026-01-01',coverArtId:null})),total:60,possiblyTruncated:true};},
         playbackPlayEpisode: async(serverId,episodeId)=>played.push([serverId,episodeId])}
