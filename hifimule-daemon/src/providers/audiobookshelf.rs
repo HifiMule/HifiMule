@@ -359,11 +359,42 @@ struct PodcastPageDto {
     results: Vec<PodcastDto>,
 }
 
-#[derive(Deserialize)]
 struct RecentPodcastPageDto {
     total: u64,
-    #[serde(default)]
     episodes: Vec<serde_json::Value>,
+}
+
+fn recent_podcast_page(value: serde_json::Value) -> Result<RecentPodcastPageDto, ProviderError> {
+    if let serde_json::Value::Array(episodes) = &value {
+        return Ok(RecentPodcastPageDto {
+            total: episodes.len() as u64,
+            episodes: episodes.clone(),
+        });
+    }
+    let mut object = value
+        .as_object()
+        .ok_or_else(|| {
+            ProviderError::Deserialization("invalid Audiobookshelf recent episode page".into())
+        })?
+        .clone();
+    let episodes = match object.remove("episodes") {
+        Some(serde_json::Value::Array(episodes)) => episodes,
+        Some(serde_json::Value::Null) => Vec::new(),
+        _ => {
+            return Err(ProviderError::Deserialization(
+                "invalid Audiobookshelf recent episode list".into(),
+            ));
+        }
+    };
+    let total = object
+        .remove("total")
+        .and_then(|total| match total {
+            serde_json::Value::Number(number) => number.as_u64(),
+            serde_json::Value::String(text) => text.parse().ok(),
+            _ => None,
+        })
+        .unwrap_or(episodes.len() as u64);
+    Ok(RecentPodcastPageDto { total, episodes })
 }
 
 struct RecentPodcastEpisodeDto {
@@ -1970,7 +2001,12 @@ async fn bounded_json_with_limit<T: DeserializeOwned>(
         } else {
             &safe_path
         };
-        eprintln!("Audiobookshelf {context} response rejected at {safe_path}");
+        eprintln!(
+            "Audiobookshelf {context} response rejected at {safe_path} ({:?}, line {}, column {})",
+            error.inner().classify(),
+            error.inner().line(),
+            error.inner().column()
+        );
         ProviderError::Deserialization(format!(
             "invalid Audiobookshelf {context} response at {safe_path}"
         ))
@@ -2630,7 +2666,8 @@ impl MediaProvider for AudiobookshelfProvider {
         );
         let response = self.protected_get(&endpoint).await?;
         check_status(&response)?;
-        let page: RecentPodcastPageDto = bounded_json(response, "recent podcast episodes").await?;
+        let payload: serde_json::Value = bounded_json(response, "recent podcast episodes").await?;
+        let page = recent_podcast_page(payload)?;
         if page.episodes.len() > limit as usize {
             return Err(ProviderError::Deserialization(
                 "oversized recent podcast page".into(),
@@ -4287,12 +4324,19 @@ mod tests {
 
     #[test]
     fn expanded_recent_episode_metadata_does_not_reject_the_page() {
-        let page: RecentPodcastPageDto = serde_json::from_str(
+        let payload: serde_json::Value = serde_json::from_str(
             r#"{"total":1,"episodes":[{"libraryItemId":"show-1","id":"ep-1","title":"New","duration":12.5,"podcast":{"metadata":{"title":"Show"}},"audioTrack":{"index":1},"audioFile":null}]}"#,
         ).unwrap();
+        let page = recent_podcast_page(payload).unwrap();
         let episode = recent_podcast_episode(page.episodes.into_iter().next().unwrap()).unwrap();
         assert_eq!(episode.library_item_id, "show-1");
         assert_eq!(episode.episode.id, "ep-1");
+        let page = recent_podcast_page(serde_json::json!({"episodes": [{"id": "ep-2"}]})).unwrap();
+        assert_eq!(page.total, 1);
+        let page = recent_podcast_page(serde_json::json!({"total": "2", "episodes": []})).unwrap();
+        assert_eq!(page.total, 2);
+        let page = recent_podcast_page(serde_json::json!([{"id": "ep-3"}])).unwrap();
+        assert_eq!(page.total, 1);
         let show: PodcastBrowseDto = serde_json::from_str(
             r#"{"id":"show-1","libraryId":"podcasts","mediaType":"podcast","media":{"metadata":{"title":"Show"},"episodes":[]}}"#,
         ).unwrap();
