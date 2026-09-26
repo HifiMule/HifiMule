@@ -1386,7 +1386,7 @@ impl AudiobookshelfProvider {
         let base = self.base_url.clone();
         let runtime = tokio::runtime::Handle::current();
         Arc::new(PlaybackCleanup::new(move || {
-            super::register_playback_cleanup(runtime.spawn(async move {
+            let cleanup = runtime.spawn(async move {
                 let Ok(mut url) = reqwest::Url::parse(&format!("{base}/api/session")) else {
                     return false;
                 };
@@ -1415,7 +1415,8 @@ impl AudiobookshelfProvider {
                         .await;
                 }
                 result.is_ok_and(|response| response.status().is_success())
-            }));
+            });
+            super::register_playback_cleanup(&runtime, cleanup);
         }))
     }
 

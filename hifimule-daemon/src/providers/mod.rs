@@ -51,8 +51,11 @@ static PLAYBACK_CLEANUPS: OnceLock<Mutex<Vec<tokio::task::JoinHandle<()>>>> = On
 static PLAYBACK_CLEANUP_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub(crate) fn register_playback_cleanup(handle: tokio::task::JoinHandle<bool>) {
-    let monitored = tokio::spawn(async move {
+pub(crate) fn register_playback_cleanup(
+    runtime: &tokio::runtime::Handle,
+    handle: tokio::task::JoinHandle<bool>,
+) {
+    let monitored = runtime.spawn(async move {
         if !matches!(handle.await, Ok(true)) {
             PLAYBACK_CLEANUP_FAILED.store(true, std::sync::atomic::Ordering::Release);
         }
@@ -1900,17 +1903,29 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_drain_waits_for_cleanup_registered_while_draining() {
+        let runtime = tokio::runtime::Handle::current();
         let (release_first, first) = tokio::sync::oneshot::channel::<()>();
-        register_playback_cleanup(tokio::spawn(async move { first.await.is_ok() }));
+        register_playback_cleanup(&runtime, tokio::spawn(async move { first.await.is_ok() }));
         let drain = tokio::spawn(drain_playback_cleanups());
         tokio::task::yield_now().await;
         let (release_second, second) = tokio::sync::oneshot::channel::<()>();
-        register_playback_cleanup(tokio::spawn(async move { second.await.is_ok() }));
+        register_playback_cleanup(&runtime, tokio::spawn(async move { second.await.is_ok() }));
         release_first.send(()).unwrap();
         tokio::task::yield_now().await;
         assert!(!drain.is_finished());
         release_second.send(()).unwrap();
         assert!(drain.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn cleanup_registration_from_decoder_thread_uses_captured_runtime() {
+        let runtime = tokio::runtime::Handle::current();
+        let cleanup = Arc::new(PlaybackCleanup::new(move || {
+            let task = runtime.spawn(async { true });
+            register_playback_cleanup(&runtime, task);
+        }));
+        std::thread::spawn(move || drop(cleanup)).join().unwrap();
+        assert!(drain_playback_cleanups().await);
     }
 
     fn representation(
