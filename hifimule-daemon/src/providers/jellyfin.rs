@@ -71,6 +71,15 @@ impl JellyfinProvider {
     }
 
     fn map_error(error: anyhow::Error) -> ProviderError {
+        if let Some(transport) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        {
+            crate::log_to_file(&format!(
+                "[jellyfin transport] {}",
+                super::transport_failure_diagnostic(transport)
+            ));
+        }
         let message = error.to_string();
 
         if message.contains("Authentication failed") {

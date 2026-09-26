@@ -258,35 +258,149 @@ fn validate_checkpoint_retry_scope(
 fn spawn_detached_daemon(expected_generation: u64, attempt_id: &str) -> Result<(), String> {
     let path = resolve_daemon_binary_path()
         .ok_or_else(|| "SPAWN_FAILED: daemon binary was not found".to_string())?;
-    let mut command = std::process::Command::new(path);
-    let generation_arg = expected_generation.to_string();
-    command
-        .args([
-            "--launch-generation",
-            &generation_arg,
-            "--launch-attempt",
-            attempt_id,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    return spawn_macos_daemon_agent(&path, expected_generation, attempt_id);
+
+    #[cfg(not(target_os = "macos"))]
     {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        let mut command = std::process::Command::new(path);
+        let generation_arg = expected_generation.to_string();
+        command
+            .args([
+                "--launch-generation",
+                &generation_arg,
+                "--launch-attempt",
+                attempt_id,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+        }
+        command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("SPAWN_FAILED: {error}"))
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+}
+
+#[cfg(target_os = "macos")]
+const ON_DEMAND_DAEMON_LABEL_PREFIX: &str = "hifimule.github.io.daemon.on-demand";
+
+#[cfg(target_os = "macos")]
+fn on_demand_daemon_label(profile: &str) -> String {
+    // Stable FNV-1a suffix keeps independent test/user profiles from sharing
+    // a launchd service and accidentally booting out each other's daemon.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in profile.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
     }
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("SPAWN_FAILED: {error}"))
+    format!("{ON_DEMAND_DAEMON_LABEL_PREFIX}.{hash:016x}")
+}
+
+#[cfg(target_os = "macos")]
+fn plist_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_macos_daemon_agent(
+    daemon_path: &std::path::Path,
+    expected_generation: u64,
+    attempt_id: &str,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // launchd starts the daemon independently of the UI's process-responsibility
+    // chain. On macOS 15+, a detached child of an exited UI can otherwise lose
+    // Local Network access even while the UI app is allowed in System Settings.
+    let app_data = hifimule_lifecycle::resolve_app_data_dir()
+        .map_err(|error| format!("SPAWN_FAILED: {error}"))?;
+    let runtime = app_data.join("runtime");
+    let plist_path = runtime.join("daemon-on-demand.plist");
+    let daemon_path = daemon_path
+        .to_str()
+        .ok_or("SPAWN_FAILED: daemon path is not UTF-8")?;
+    let app_data_str = app_data
+        .to_str()
+        .ok_or("SPAWN_FAILED: profile path is not UTF-8")?;
+    let label = on_demand_daemon_label(app_data_str);
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|error| format!("SPAWN_FAILED: cannot determine user id: {error}"))?;
+    if !uid.status.success() {
+        return Err("SPAWN_FAILED: cannot determine user id".into());
+    }
+    let uid = String::from_utf8(uid.stdout).map_err(|_| "SPAWN_FAILED: invalid user id output")?;
+    let uid = uid
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "SPAWN_FAILED: invalid user id")?;
+    let domain = format!("gui/{uid}");
+    let service = format!("{domain}/{label}");
+
+    // The owner lock was just checked and found free. Remove any completed
+    // one-shot job from an earlier daemon run before reusing its fixed label.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &service])
+        .output();
+
+    let plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <plist version=\"1.0\"><dict>\n\
+         <key>Label</key><string>{label}</string>\n\
+         <key>AssociatedBundleIdentifiers</key><string>hifimule.github.io</string>\n\
+         <key>EnvironmentVariables</key><dict>\n\
+         <key>HIFIMULE_APP_DATA_DIR</key><string>{}</string>\n\
+         </dict>\n\
+         <key>ProgramArguments</key><array>\n\
+         <string>{}</string>\n\
+         <string>--launch-generation</string><string>{expected_generation}</string>\n\
+         <string>--launch-attempt</string><string>{}</string>\n\
+         </array>\n\
+         <key>RunAtLoad</key><true/>\n\
+         <key>KeepAlive</key><false/>\n\
+         <key>StandardOutPath</key><string>/dev/null</string>\n\
+         <key>StandardErrorPath</key><string>/dev/null</string>\n\
+         </dict></plist>\n",
+        plist_escape(app_data_str),
+        plist_escape(daemon_path),
+        plist_escape(attempt_id),
+    );
+    std::fs::write(&plist_path, plist)
+        .map_err(|error| format!("SPAWN_FAILED: cannot write daemon agent: {error}"))?;
+    std::fs::set_permissions(&plist_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("SPAWN_FAILED: cannot secure daemon agent: {error}"))?;
+    let output = std::process::Command::new("launchctl")
+        .args(["bootstrap", &domain])
+        .arg(&plist_path)
+        .output()
+        .map_err(|error| format!("SPAWN_FAILED: cannot start daemon agent: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "SPAWN_FAILED: daemon agent failed to start: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 fn coordinate_daemon(
@@ -421,6 +535,8 @@ const LAUNCHD_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <dict>
     <key>Label</key>
     <string>com.hifimule.daemon</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>hifimule.github.io</string>
     <key>ProgramArguments</key>
     <array>
         <string>{DAEMON_PATH}</string>

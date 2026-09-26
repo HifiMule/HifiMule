@@ -101,6 +101,33 @@ function isBrowseMethod(method: string): boolean {
     return method.startsWith('browse.') || method.startsWith('jellyfin_');
 }
 
+// A server switch does not cancel Tauri invokes that are already in flight.
+// Their responses still belong to the old provider and must not update the
+// newly selected server's library (including its error state).
+let browseGeneration = 0;
+
+export function getBrowseGeneration(): number {
+    return browseGeneration;
+}
+
+export class StaleBrowseResponse extends Error {
+    constructor() {
+        super('Browse response belongs to a previous server');
+        this.name = 'StaleBrowseResponse';
+    }
+}
+
+const activeServerMutations = new Set([
+    'server.select',
+    'server.connect',
+    'server.audiobookshelf.commit',
+    'server.remove',
+    'server.reauthenticate',
+    'server.logout',
+    'login',
+    'logout',
+]);
+
 export async function rpcCall(method: string, params: any = {}): Promise<any> {
     // Never log params: several RPCs carry passwords, tokens, opaque setup IDs,
     // or future credential fields. Method-only logging is safe and useful.
@@ -108,9 +135,19 @@ export async function rpcCall(method: string, params: any = {}): Promise<any> {
     // Use Tauri invoke to proxy RPC calls through the Rust backend.
     // Direct fetch from the webview to http://localhost is blocked in release mode
     // because Tauri serves pages from https://tauri.localhost (mixed content).
+    const generation = browseGeneration;
     try {
-        return await invoke('rpc_proxy', { method, params });
+        const result = await invoke('rpc_proxy', { method, params });
+        if (isBrowseMethod(method) && generation !== browseGeneration) {
+            throw new StaleBrowseResponse();
+        }
+        if (activeServerMutations.has(method)) ++browseGeneration;
+        return result;
     } catch (error) {
+        if (error instanceof StaleBrowseResponse) throw error;
+        if (isBrowseMethod(method) && generation !== browseGeneration) {
+            throw new StaleBrowseResponse();
+        }
         // AC11: an expired/invalid credential on a browse RPC surfaces a scoped
         // re-auth prompt. Dispatch a global event a central handler reacts to.
         if (rpcErrorCode(error) === ERR_UNAUTHORIZED && isBrowseMethod(method)) {

@@ -1363,6 +1363,12 @@ fn auth_token(password: &str, salt: &str) -> String {
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
+    if error.status().is_none() && !error.is_decode() {
+        crate::log_to_file(&format!(
+            "[subsonic transport] {}",
+            super::transport_failure_diagnostic(&error)
+        ));
+    }
     if error.is_decode() {
         ProviderError::Deserialization(sanitize_subsonic_message(&error.to_string()))
     } else if let Some(status) = error.status() {

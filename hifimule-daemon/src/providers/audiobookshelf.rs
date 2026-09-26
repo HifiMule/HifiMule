@@ -2017,6 +2017,10 @@ trait Pipe: Sized {
 impl<T> Pipe for T {}
 
 fn transport_error(error: reqwest::Error) -> ProviderError {
+    crate::log_to_file(&format!(
+        "[audiobookshelf transport] {}",
+        super::transport_failure_diagnostic(&error)
+    ));
     ProviderError::Http {
         status: error.status().map(|status| status.as_u16()),
         message: "Audiobookshelf transport failed".into(),

@@ -147,6 +147,12 @@ APP_PATH="${INSTALL_ROOT}/${APP_NAME}.app"
 cp -R "$APP_IN_DMG" "$INSTALL_ROOT/" ||
     fail "install" "Failed to copy .app to $INSTALL_ROOT"
 
+LOCAL_NETWORK_USAGE=$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)
+[[ -n "$LOCAL_NETWORK_USAGE" ]] ||
+    fail "install" "App bundle is missing its local-network usage description"
+python3 "$(dirname "$0")/check-macos-daemon-plist.py" "$APP_PATH/Contents/MacOS/hifimule-daemon" ||
+    fail "install" "Daemon is missing its embedded local-network usage description"
+
 hdiutil detach "$MOUNT_POINT" -quiet || true
 echo "  Install OK"
 

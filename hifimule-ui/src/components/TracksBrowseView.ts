@@ -6,6 +6,7 @@ import {
     BrowseArtist,
     BrowseAlbum,
     BrowseTrack,
+    StaleBrowseResponse,
     playbackPlayTrack,
 } from '../rpc';
 import { appendTracksToQueueFromLibrary } from '../state/queue';
@@ -116,6 +117,9 @@ export class TracksBrowseView {
         // The instance is cached module-level and remounted on re-entry: clear
         // the selection here or it resurrects when the user returns (AC 10),
         // and remove the document-level Escape listener so it doesn't leak.
+        ++this.artistGen;
+        ++this.albumGen;
+        ++this.trackGen;
         this.clearSelection();
         this.removeEscapeListener();
         this.teardownScrollHandlers();
@@ -245,7 +249,7 @@ export class TracksBrowseView {
                 this.appendArtistRows(newItems);
             }
         } catch (e) {
-            if (!this.container.isConnected || gen !== this.artistGen) return;
+            if (e instanceof StaleBrowseResponse || !this.container.isConnected || gen !== this.artistGen) return;
             this.artistState.loading = false;
             this.artistState.errored = true;
             this.showPanelError(ARTIST_SCROLL, e as Error);
@@ -294,7 +298,7 @@ export class TracksBrowseView {
                 this.appendAlbumRows(this.albumState.items.slice(startIndex));
             }
         } catch (e) {
-            if (!this.container.isConnected || gen !== this.albumGen) return;
+            if (e instanceof StaleBrowseResponse || !this.container.isConnected || gen !== this.albumGen) return;
             this.albumState.loading = false;
             this.albumState.errored = true;
             this.showPanelError(ALBUM_SCROLL, e as Error);
@@ -346,7 +350,7 @@ export class TracksBrowseView {
                 this.appendTrackRows(newItems);
             }
         } catch (e) {
-            if (!this.container.isConnected || gen !== this.trackGen) return;
+            if (e instanceof StaleBrowseResponse || !this.container.isConnected || gen !== this.trackGen) return;
             this.trackState.loading = false;
             this.trackState.errored = true;
             this.showPanelError(TRACK_PANEL, e as Error);

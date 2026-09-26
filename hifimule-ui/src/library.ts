@@ -32,7 +32,9 @@ import {
     fetchBrowseSearch,
     serverList,
     getImageUrl,
+    getBrowseGeneration,
     rpcCall,
+    StaleBrowseResponse,
     playbackPlayTrack,
 } from './rpc';
 import { appendTracksToQueueFromLibrary } from './state/queue';
@@ -1674,6 +1676,7 @@ async function loadMusicSearch(query: string): Promise<void> {
         state.musicSearchResults = results;
     } catch (error) {
         if (request !== musicSearchRequest || state.browseMode !== 'search' || !container.isConnected) return;
+        if (error instanceof StaleBrowseResponse) return;
         state.musicSearchResults = null;
         state.musicSearchError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -1686,6 +1689,7 @@ async function loadMusicSearch(query: string): Promise<void> {
 
 
 function renderError(error: Error) {
+    if (error instanceof StaleBrowseResponse) return;
     const container = document.getElementById('library-content');
     if (!container) return;
 
@@ -1896,6 +1900,7 @@ async function loadRecentPodcastEpisodes(append = false): Promise<void> {
         renderPodcastContent();
     } catch (error) {
         if (request !== podcastRequest || state.browseMode !== 'recentEpisodes') return;
+        if (error instanceof StaleBrowseResponse) return;
         const value = error as { code?: number; data?: { errorCode?: string } } | null;
         const code = value?.data?.errorCode;
         podcastRecentError = t(code === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
@@ -1955,6 +1960,7 @@ function podcastStatus(container: HTMLElement, label: string): void {
 }
 
 function renderPodcastError(error: unknown, preserve = false): void {
+    if (error instanceof StaleBrowseResponse) return;
     const value = error as { code?: number; data?: { errorCode?: string } } | null;
     const code = value?.data?.errorCode;
     const key = code === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
@@ -2212,6 +2218,7 @@ async function openPodcastShow(showId: string, append = false): Promise<void> {
         podcastEpisodes = podcastEpisodeCatalog.slice(0, podcastEpisodeNextOffset);
         renderPodcastContent();
     } catch (error) {
+        if (error instanceof StaleBrowseResponse) return;
         if (request === podcastRequest) {
             if (!append) {
                 container.replaceChildren();
@@ -3156,6 +3163,7 @@ async function loadMore() {
 
 export async function initLibraryView() {
     console.log('Initializing library view...');
+    const generation = getBrowseGeneration();
 
     ++podcastRequest;
 
@@ -3169,7 +3177,9 @@ export async function initLibraryView() {
 
     try {
         const modesResult = await fetchBrowseModes();
+        if (generation !== getBrowseGeneration()) return;
         const servers = await serverList();
+        if (generation !== getBrowseGeneration()) return;
         const selected = servers.find(server => server.selected);
         state.isBookLibrary = selected?.serverType === 'audiobookshelf' && selected.libraryRole === 'audiobook';
         state.bookServerId = state.isBookLibrary ? (selected?.serverId ?? null) : null;
@@ -3200,10 +3210,12 @@ export async function initLibraryView() {
             : (modesResult[0] ?? 'artists');
         state.browseMode = defaultMode;
     } catch (e) {
+        if (generation !== getBrowseGeneration()) return;
         renderError(e as Error);
         return;
     }
 
+    if (generation !== getBrowseGeneration()) return;
     renderModeBar();
     if (state.availableModes.length > 0) await loadModeRoot();
     else container?.replaceChildren();

@@ -33,8 +33,9 @@ fn main() {
         );
     }
     if target_os == "macos" {
-        // Embed Info.plist so macOS reads LSUIElement=true at process launch,
-        // suppressing the Dock icon before NSApplication is even initialised.
+        // The daemon outlives the UI, so macOS must be able to identify its
+        // local-network usage independently as well as suppress its Dock icon.
+        println!("cargo:rerun-if-changed=Info.plist");
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         println!("cargo:rustc-link-arg=-sectcreate");
         println!("cargo:rustc-link-arg=__TEXT");

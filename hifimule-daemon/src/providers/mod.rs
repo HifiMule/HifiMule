@@ -5,6 +5,7 @@ use crate::domain::models::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::error::Error as _;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
@@ -864,6 +865,31 @@ pub struct ScrobbleRequest {
 pub enum ScrobbleSubmission {
     Playing,
     Played,
+}
+
+/// Log only transport categories and OS error codes; reqwest's formatted
+/// error can contain server URLs and signed query credentials.
+pub(crate) fn transport_failure_diagnostic(error: &reqwest::Error) -> String {
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return format!(
+                "connect={} timeout={} io_kind={:?} os_code={:?}",
+                error.is_connect(),
+                error.is_timeout(),
+                io.kind(),
+                io.raw_os_error()
+            );
+        }
+        source = cause.source();
+    }
+    format!(
+        "connect={} timeout={} request={} body={}",
+        error.is_connect(),
+        error.is_timeout(),
+        error.is_request(),
+        error.is_body()
+    )
 }
 
 #[derive(Debug, Error)]

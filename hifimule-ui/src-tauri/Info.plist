@@ -2,13 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.hifimule.daemon</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>HifiMule connects to media servers on your local network to browse and sync your library, including while the UI is closed.</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
 </dict>
 </plist>
