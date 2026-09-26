@@ -3266,7 +3266,7 @@ pub async fn execute_provider_sync(
                 jellyfin_id: staged.add_item.jellyfin_id.clone(),
                 filename: staged.add_item.name.clone(),
                 error_message: format!(
-                    "Staged file too large to read ({} bytes > {} byte limit)",
+                    "Staged file too large ({} bytes > {} byte limit)",
                     staged.staged_size, MAX_FILE_BUFFER_BYTES
                 ),
             });
@@ -3275,21 +3275,10 @@ pub async fn execute_provider_sync(
             writer_failed = true;
             continue;
         }
-        let buffer = match tokio::fs::read(&staged.staged_path).await {
-            Ok(buffer) => buffer,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: staged.add_item.jellyfin_id.clone(),
-                    filename: staged.add_item.name.clone(),
-                    error_message: format!("Failed to read staged file: {}", e),
-                });
-                let _ = operation_manager.request_cancel(&operation_id).await;
-                let _ = tokio::fs::remove_file(&staged.staged_path).await;
-                writer_failed = true;
-                continue;
-            }
-        };
-        let write_result = match device_io.write_with_verify(&staged.rel_path, &buffer).await {
+        let write_result = match device_io
+            .write_with_verify_from_path(&staged.rel_path, &staged.staged_path)
+            .await
+        {
             Ok(result) => Ok(result),
             Err(first_error) => {
                 crate::daemon_log!(
@@ -3297,7 +3286,9 @@ pub async fn execute_provider_sync(
                     staged.add_item.name,
                     first_error
                 );
-                device_io.write_with_verify(&staged.rel_path, &buffer).await
+                device_io
+                    .write_with_verify_from_path(&staged.rel_path, &staged.staged_path)
+                    .await
             }
         };
         match write_result {
@@ -5332,6 +5323,7 @@ mod tests {
     struct BlockingFirstWriteDeviceIo {
         inner: Arc<dyn crate::device_io::DeviceIO>,
         writes: std::sync::atomic::AtomicUsize,
+        fail_first: AtomicBool,
         first_write_started: Notify,
         release_first_write: Notify,
     }
@@ -5347,6 +5339,7 @@ mod tests {
             Arc::new(Self {
                 inner,
                 writes: std::sync::atomic::AtomicUsize::new(0),
+                fail_first: AtomicBool::new(false),
                 first_write_started: Notify::new(),
                 release_first_write: Notify::new(),
             })
@@ -5389,6 +5382,25 @@ mod tests {
             self.inner.write_with_verify(path, data).await
         }
 
+        async fn write_with_verify_from_path(
+            &self,
+            path: &str,
+            source: &std::path::Path,
+        ) -> anyhow::Result<()> {
+            if self
+                .writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                if self.fail_first.swap(false, Ordering::SeqCst) {
+                    anyhow::bail!("injected path write failure");
+                }
+                self.first_write_started.notify_one();
+                self.release_first_write.notified().await;
+            }
+            self.inner.write_with_verify_from_path(path, source).await
+        }
+
         async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
             self.inner.delete_file(path).await
         }
@@ -5424,6 +5436,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_provider_sync_downloads_jellyfin_track() {
+        let audio: Vec<u8> = (0..2_500_000).map(|index| (index % 251) as u8).collect();
         let mut server = mockito::Server::new_async().await;
         let _stream = server
             .mock("GET", "/Items/song-jellyfin/Download")
@@ -5433,7 +5446,7 @@ mod tests {
             ))
             .with_status(200)
             .with_header("content-type", "audio/flac")
-            .with_body(vec![1_u8, 2, 3, 4])
+            .with_body(audio.clone())
             .expect(1)
             .create_async()
             .await;
@@ -5451,7 +5464,7 @@ mod tests {
                 "song-jellyfin",
                 "flac",
                 "audio/flac",
-                4,
+                audio.len() as u64,
             )],
             deletes: vec![],
             id_changes: vec![],
@@ -5483,6 +5496,86 @@ mod tests {
 
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].size_bytes, audio.len() as u64);
+        assert_eq!(
+            tokio::fs::read(dir.path().join(&synced[0].local_path))
+                .await
+                .unwrap(),
+            audio
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_retries_staged_path_write() {
+        let audio: Vec<u8> = (0..1_500_000).map(|index| (index % 251) as u8).collect();
+        let mut server = mockito::Server::new_async().await;
+        let _stream = server
+            .mock("GET", "/Items/song-retry/Download")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "ApiKey".into(),
+                "token".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(audio.clone())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let retry_io = BlockingFirstWriteDeviceIo::new(device_io);
+        retry_io.fail_first.store(true, Ordering::SeqCst);
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-staged-retry");
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            blocked: vec![],
+            adds: vec![add_item_with_provider_format(
+                "song-retry",
+                "flac",
+                "audio/flac",
+                audio.len() as u64,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let (synced, errors) = execute_test_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                    crate::api::JellyfinClient::new(),
+                    server.url(),
+                    "token",
+                    "user",
+                )),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            operation_manager,
+            operation_id.clone(),
+            Arc::clone(&manager),
+            retry_io.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(retry_io.writes.load(Ordering::SeqCst), 2);
+        assert_eq!(synced.len(), 1);
+        assert_eq!(
+            tokio::fs::read(dir.path().join(&synced[0].local_path))
+                .await
+                .unwrap(),
+            audio
+        );
+        assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
     }
 
     #[tokio::test]
@@ -5555,6 +5648,13 @@ mod tests {
                 .synced_items
                 .is_empty()
         );
+        let persisted: DeviceManifest = serde_json::from_slice(
+            &tokio::fs::read(dir.path().join(".hifimule.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(persisted.synced_items.is_empty());
     }
 
     #[tokio::test]
@@ -5748,6 +5848,13 @@ mod tests {
             provider_staging_dirs_for_operation(&operation_id).is_empty(),
             "provider staging directory should be removed after cancellation"
         );
+        let persisted: DeviceManifest = serde_json::from_slice(
+            &tokio::fs::read(dir.path().join(".hifimule.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(persisted.synced_items.is_empty());
     }
 
     #[tokio::test]
@@ -8060,6 +8167,13 @@ mod tests {
                 anyhow::bail!("injected manifest persistence failure");
             }
             self.inner.write_with_verify(path, data).await
+        }
+        async fn write_with_verify_from_path(
+            &self,
+            path: &str,
+            source: &std::path::Path,
+        ) -> anyhow::Result<()> {
+            self.inner.write_with_verify_from_path(path, source).await
         }
         async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
             self.inner.delete_file(path).await

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +20,12 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()>;
+    /// Write a staged file without loading its contents into memory. Test doubles may
+    /// use this default; production backends override it with streaming transfers.
+    async fn write_with_verify_from_path(&self, path: &str, source: &Path) -> Result<()> {
+        let data = tokio::fs::read(source).await?;
+        self.write_with_verify(path, &data).await
+    }
     async fn delete_file(&self, path: &str) -> Result<()>;
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     async fn free_space(&self) -> Result<u64>;
@@ -147,6 +153,15 @@ impl MscBackend {
     }
 }
 
+/// Removes an incomplete MSC sibling file if a transfer is cancelled or fails.
+struct PendingMscWrite(PathBuf);
+
+impl Drop for PendingMscWrite {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn is_missing_object_error(error: &anyhow::Error) -> bool {
     if error
         .downcast_ref::<std::io::Error>()
@@ -205,6 +220,30 @@ impl DeviceIO for MscBackend {
             return write_result;
         }
 
+        tokio::fs::rename(&tmp_path, &full).await?;
+        Ok(())
+    }
+
+    async fn write_with_verify_from_path(&self, path: &str, source: &Path) -> Result<()> {
+        check_relative(path)?;
+        let full = self.root.join(path);
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let tmp_path = full.with_file_name(format!(
+            "{}.tmp",
+            full.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let _cleanup = PendingMscWrite(tmp_path.clone());
+        let mut input = tokio::fs::File::open(source).await?;
+        let source_size = input.metadata().await?.len();
+        let mut output = tokio::fs::File::create(&tmp_path).await?;
+        let copied = tokio::io::copy(&mut input, &mut output).await?;
+        output.sync_all().await?;
+        if copied != source_size || input.metadata().await?.len() != source_size {
+            anyhow::bail!("MSC source changed size during transfer");
+        }
+        drop(output);
         tokio::fs::rename(&tmp_path, &full).await?;
         Ok(())
     }
@@ -346,6 +385,10 @@ pub trait MtpHandle: Send + Sync {
     }
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
+    fn write_file_from_path(&self, path: &str, source: &Path) -> Result<()> {
+        let data = std::fs::read(source)?;
+        self.write_file(path, &data)
+    }
     fn delete_file(&self, path: &str) -> Result<()>;
     fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     fn free_space(&self) -> Result<u64>;
@@ -405,6 +448,30 @@ impl DeviceIO for MtpBackend {
         // The manifest-level dirty flag already tracks interrupted syncs; keep
         // the device write path focused on the real destination object.
         self.write_file(path, data).await
+    }
+
+    async fn write_with_verify_from_path(&self, path: &str, source: &Path) -> Result<()> {
+        check_relative(path)?;
+        // Keep both the device lock and a hard link to the staged bytes inside
+        // the blocking task. Dropping the async caller must not let staging
+        // cleanup remove its source or let another MTP operation start early.
+        let guard = Arc::clone(&self.operation_lock).lock_owned().await;
+        let source_dir = tempfile::tempdir()?;
+        let preserved_source = source_dir.path().join("source");
+        std::fs::hard_link(source, &preserved_source).map_err(|error| {
+            anyhow::anyhow!(
+                "Cannot preserve staged file for MTP transfer with a hard link: {error}"
+            )
+        })?;
+        let handle = Arc::clone(&self.handle);
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let _source_dir = source_dir;
+            handle.write_file_from_path(&path, &preserved_source)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("MTP write_file_from_path task panicked: {}", e))?
     }
 
     async fn delete_file(&self, path: &str) -> Result<()> {
@@ -535,6 +602,131 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn msc_streamed_write_replaces_file_and_cleans_failed_temp() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().join("device"));
+        let source = dir.path().join("staged.audio");
+        let bytes: Vec<u8> = (0..2_500_000).map(|index| (index % 251) as u8).collect();
+        tokio::fs::write(&source, &bytes).await.unwrap();
+        backend.write_file("Music/book.mp3", b"old").await.unwrap();
+
+        backend
+            .write_with_verify_from_path("Music/book.mp3", &source)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(dir.path().join("device/Music/book.mp3"))
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert!(!dir.path().join("device/Music/book.mp3.tmp").exists());
+
+        let error = backend
+            .write_with_verify_from_path("Music/book.mp3", &dir.path().join("missing"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(!dir.path().join("device/Music/book.mp3.tmp").exists());
+        assert_eq!(
+            tokio::fs::read(dir.path().join("device/Music/book.mp3"))
+                .await
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn msc_cancelled_partial_copy_removes_temp_and_preserves_target() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.pipe");
+        let source_name = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(source_name.as_ptr(), 0o600) }, 0);
+        let backend = Arc::new(MscBackend::new(dir.path().join("device")));
+        backend.write_file("Music/book.mp3", b"old").await.unwrap();
+        let tmp_path = dir.path().join("device/Music/book.mp3.tmp");
+        let target_path = dir.path().join("device/Music/book.mp3");
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let source_for_writer = source.clone();
+        let writer = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut pipe = std::fs::OpenOptions::new()
+                .write(true)
+                .open(source_for_writer)
+                .unwrap();
+            pipe.write_all(&[42; 8192]).unwrap();
+            release_rx.recv().unwrap();
+        });
+        let transfer = tokio::spawn(async move {
+            backend
+                .write_with_verify_from_path("Music/book.mp3", &source)
+                .await
+        });
+        let partial_copy = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if tokio::fs::metadata(&tmp_path)
+                    .await
+                    .is_ok_and(|meta| meta.len() > 0)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        transfer.abort();
+        let _ = transfer.await;
+        release_tx.send(()).unwrap();
+        writer.await.unwrap();
+        partial_copy.unwrap();
+        assert!(!tmp_path.exists());
+        assert_eq!(tokio::fs::read(target_path).await.unwrap(), b"old");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn msc_rejects_source_size_change_before_replacement() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.pipe");
+        let source_name = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(source_name.as_ptr(), 0o600) }, 0);
+        let backend = MscBackend::new(dir.path().join("device"));
+        backend.write_file("Music/book.mp3", b"old").await.unwrap();
+        let source_for_writer = source.clone();
+        let writer = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut pipe = std::fs::OpenOptions::new()
+                .write(true)
+                .open(source_for_writer)
+                .unwrap();
+            pipe.write_all(b"new bytes").unwrap();
+        });
+
+        let error = backend
+            .write_with_verify_from_path("Music/book.mp3", &source)
+            .await
+            .unwrap_err();
+        writer.await.unwrap();
+        assert!(error.to_string().contains("source changed size"));
+        assert_eq!(
+            tokio::fs::read(dir.path().join("device/Music/book.mp3"))
+                .await
+                .unwrap(),
+            b"old"
+        );
+        assert!(!dir.path().join("device/Music/book.mp3.tmp").exists());
+    }
+
+    #[tokio::test]
     async fn msc_write_with_verify_no_tmp_on_success() {
         let dir = tempdir().unwrap();
         let backend = MscBackend::new(dir.path().to_path_buf());
@@ -657,6 +849,18 @@ pub mod tests {
                 .lock()
                 .unwrap()
                 .insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+
+        fn write_file_from_path(&self, path: &str, source: &Path) -> Result<()> {
+            self.call_log
+                .lock()
+                .unwrap()
+                .push(format!("write_from_path:{}", path));
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), std::fs::read(source)?);
             Ok(())
         }
 
@@ -789,6 +993,112 @@ pub mod tests {
                 .unwrap()
                 .contains_key("Music/track.mp3.dirty")
         );
+    }
+
+    #[tokio::test]
+    async fn mtp_staged_write_forwards_source_path_to_handle() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("staged.audio");
+        let bytes: Vec<u8> = (0..1_500_000).map(|index| (index % 251) as u8).collect();
+        tokio::fs::write(&source, &bytes).await.unwrap();
+        let mock = Arc::new(MockMtpHandle::new());
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
+
+        backend
+            .write_with_verify_from_path("Music/book.mp3", &source)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *mock.call_log.lock().unwrap(),
+            vec!["write_from_path:Music/book.mp3"]
+        );
+        assert_eq!(mock.files.lock().unwrap()["Music/book.mp3"], bytes);
+    }
+
+    struct BlockingPathMtpHandle {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<PathBuf>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        received: Mutex<Vec<u8>>,
+        list_calls: AtomicUsize,
+    }
+
+    impl MtpHandle for BlockingPathMtpHandle {
+        fn read_file(&self, _path: &str) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn write_file(&self, _path: &str, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn write_file_from_path(&self, _path: &str, source: &Path) -> Result<()> {
+            self.started
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(source.to_path_buf())
+                .unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            *self.received.lock().unwrap() = std::fs::read(source)?;
+            Ok(())
+        }
+        fn delete_file(&self, _path: &str) -> Result<()> {
+            Ok(())
+        }
+        fn list_files(&self, _path: &str) -> Result<Vec<FileEntry>> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        fn free_space(&self) -> Result<u64> {
+            Ok(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn mtp_cancelled_caller_keeps_source_and_device_lock_until_transfer_ends() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("staged.audio");
+        let bytes = b"staged audio".to_vec();
+        tokio::fs::write(&source, &bytes).await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mock = Arc::new(BlockingPathMtpHandle {
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(release_rx),
+            received: Mutex::new(Vec::new()),
+            list_calls: AtomicUsize::new(0),
+        });
+        let backend = Arc::new(MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>));
+        let write = {
+            let backend = Arc::clone(&backend);
+            let source = source.clone();
+            tokio::spawn(async move {
+                backend
+                    .write_with_verify_from_path("Music/book.mp3", &source)
+                    .await
+            })
+        };
+        let preserved_source = started_rx.await.unwrap();
+        write.abort();
+        let _ = write.await;
+        tokio::fs::remove_file(&source).await.unwrap();
+        assert!(preserved_source.exists());
+
+        let list = {
+            let backend = Arc::clone(&backend);
+            tokio::spawn(async move { backend.list_files("").await })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(mock.list_calls.load(Ordering::SeqCst), 0);
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), list)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*mock.received.lock().unwrap(), bytes);
+        assert_eq!(mock.list_calls.load(Ordering::SeqCst), 1);
+        assert!(!preserved_source.exists());
     }
 
     #[tokio::test]

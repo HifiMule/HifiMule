@@ -785,7 +785,13 @@ pub mod windows_wpd {
                 CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
             // FOF_SILENT(0x0004) | FOF_NOCONFIRMATION(0x0010) | FOF_NOERRORUI(0x0400)
             file_op.SetOperationFlags(FILEOPERATION_FLAGS(0x0414))?;
-            file_op.CopyItem(&source_item, &dest_folder, PCWSTR::null(), None)?;
+            let target_name = HSTRING::from(filename);
+            file_op.CopyItem(
+                &source_item,
+                &dest_folder,
+                PCWSTR(target_name.as_ptr()),
+                None,
+            )?;
             file_op.PerformOperations()?;
             crate::daemon_log!("[WPD] shell_copy_to_device: PerformOperations OK");
 
@@ -1021,6 +1027,253 @@ pub mod windows_wpd {
         Ok(())
     }
 
+    enum WpdWriteInput<'a> {
+        Bytes(&'a [u8]),
+        File(&'a std::path::Path),
+    }
+
+    impl WpdWriteInput<'_> {
+        fn size(&self) -> Result<u64> {
+            match self {
+                Self::Bytes(data) => Ok(data.len() as u64),
+                Self::File(path) => Ok(std::fs::metadata(path)?.len()),
+            }
+        }
+
+        fn preflight(&self) -> Result<()> {
+            if let Self::File(path) = self {
+                let _ = std::fs::File::open(path)?;
+            }
+            Ok(())
+        }
+
+        fn write_chunk(stream: &IStream, mut bytes: &[u8], offset: &mut u64) -> Result<()> {
+            while !bytes.is_empty() {
+                let mut written = 0u32;
+                let hr = unsafe {
+                    stream.Write(
+                        bytes.as_ptr() as *const _,
+                        bytes.len() as u32,
+                        Some(&mut written),
+                    )
+                };
+                if hr == windows::Win32::Foundation::S_FALSE {
+                    return Err(anyhow::anyhow!(
+                        "WPD write_file: partial write at offset {}",
+                        offset
+                    ));
+                }
+                hr.ok()?;
+                if written == 0 {
+                    return Err(anyhow::anyhow!("WPD write_file: stream stalled"));
+                }
+                if written as usize > bytes.len() {
+                    return Err(anyhow::anyhow!(
+                        "WPD write_file: invalid stream write count"
+                    ));
+                }
+                *offset += written as u64;
+                bytes = &bytes[written as usize..];
+            }
+            Ok(())
+        }
+
+        fn write_stream(
+            &self,
+            stream: &IStream,
+            optimal_buf: u32,
+            expected_size: u64,
+        ) -> Result<()> {
+            let chunk = (optimal_buf as usize).max(4096).min(1024 * 1024);
+            let mut offset = 0u64;
+            match self {
+                Self::Bytes(data) => {
+                    for part in data.chunks(chunk) {
+                        Self::write_chunk(stream, part, &mut offset)?;
+                    }
+                }
+                Self::File(path) => {
+                    use std::io::Read;
+                    let mut input = std::fs::File::open(path)?;
+                    let mut buffer = vec![0u8; chunk];
+                    loop {
+                        let count = input.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        Self::write_chunk(stream, &buffer[..count], &mut offset)?;
+                    }
+                    if input.metadata()?.len() != expected_size {
+                        return Err(anyhow::anyhow!("WPD write_file: source changed size"));
+                    }
+                }
+            }
+            if offset != expected_size {
+                return Err(anyhow::anyhow!(
+                    "WPD write_file: source changed during transfer"
+                ));
+            }
+            Ok(())
+        }
+
+        fn shell_copy(
+            &self,
+            handle: &WpdHandle,
+            parent_components: &[&str],
+            filename: &str,
+        ) -> Result<()> {
+            match self {
+                Self::File(path) => handle.shell_copy(parent_components, filename, path),
+                Self::Bytes(data) => {
+                    let temp_dir = tempfile::tempdir()?;
+                    let source = temp_dir.path().join(filename);
+                    std::fs::write(&source, data)?;
+                    handle.shell_copy(parent_components, filename, &source)
+                }
+            }
+        }
+    }
+
+    impl WpdHandle {
+        fn write_input(&self, path: &str, source: WpdWriteInput<'_>) -> Result<()> {
+            source.preflight()?;
+            let source_size = source.size()?;
+            let components = super::split_path_components(path);
+            if components.is_empty() {
+                return Err(anyhow::anyhow!("WPD write_file: empty path"));
+            }
+            let filename = components[components.len() - 1];
+            let parent_components = &components[..components.len() - 1];
+
+            if self.prefers_shell_copy() {
+                {
+                    let (_com, device) = self.session()?;
+                    unsafe {
+                        let content = device.Content()?;
+                        // T4: pass storage_id to avoid double DEVICE enumeration.
+                        ensure_dir_chain(&content, parent_components, self.storage_id.as_deref())?;
+                    }
+                }
+
+                crate::daemon_log!(
+                    "[WPD] write_file: using Shell copy first for Garmin-style WPD device path={}",
+                    path
+                );
+                return source.shell_copy(self, parent_components, filename);
+            }
+
+            // Primary path (WPD): ensure dirs, delete existing, attempt
+            // CreateObjectWithPropertiesAndData. Works correctly on standard WPD devices
+            // (USB drives, most MTP devices). Falls back to Shell copy if the WPD write
+            // fails — e.g. Garmin's driver creates a folder object instead of a file, so the
+            // subsequent stream write stalls and we fall through to the Shell path.
+            let wpd_result: Result<()> = {
+                let (_com, device) = self.session()?;
+                unsafe {
+                    let content = device.Content()?;
+                    // T4: pass storage_id.
+                    let parent_id_hstr =
+                        ensure_dir_chain(&content, parent_components, self.storage_id.as_deref())?;
+                    let parent_id_str = parent_id_hstr.to_string();
+
+                    if let Some(existing_id) =
+                        find_child_object_id(&content, &parent_id_str, filename)?
+                    {
+                        // T12: log the ID of the object being deleted before replace.
+                        crate::daemon_log!(
+                            "[WPD] write_file: deleting existing object {:?} at path={}",
+                            existing_id,
+                            path
+                        );
+                        let col = make_object_id_collection(&existing_id)?;
+                        let mut pp: Option<IPortableDevicePropVariantCollection> = None;
+                        let _ = content.Delete(0, &col, &mut pp);
+                    }
+
+                    let result = (|| -> Result<()> {
+                        let props: IPortableDeviceValues =
+                            CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
+                        props.SetStringValue(
+                            &WPD_OBJECT_PARENT_ID,
+                            PCWSTR(parent_id_hstr.as_ptr()),
+                        )?;
+                        let fname_hstr = HSTRING::from(filename);
+                        props.SetStringValue(
+                            &WPD_OBJECT_ORIGINAL_FILE_NAME,
+                            PCWSTR(fname_hstr.as_ptr()),
+                        )?;
+                        props.SetStringValue(&WPD_OBJECT_NAME, PCWSTR(fname_hstr.as_ptr()))?;
+                        props.SetGuidValue(
+                            &WPD_OBJECT_CONTENT_TYPE,
+                            &WPD_CONTENT_TYPE_GENERIC_FILE,
+                        )?;
+                        props.SetGuidValue(&WPD_OBJECT_FORMAT, &WPD_OBJECT_FORMAT_UNDEFINED)?;
+                        props.SetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE, source_size)?;
+
+                        crate::daemon_log!(
+                            "[WPD] write_file: CreateObjectWithPropertiesAndData path={} size={}",
+                            path,
+                            source_size
+                        );
+                        let mut stream_opt: Option<IStream> = None;
+                        let mut optimal_buf = 0u32;
+                        content.CreateObjectWithPropertiesAndData(
+                            &props,
+                            &mut stream_opt,
+                            &mut optimal_buf,
+                            std::ptr::null_mut(),
+                        )?;
+                        let stream = stream_opt
+                            .ok_or_else(|| anyhow::anyhow!("WPD write_file: no stream returned"))?;
+
+                        source.write_stream(&stream, optimal_buf, source_size)?;
+
+                        crate::daemon_log!("[WPD] write_file: Commit path={}", path);
+                        let data_stream: IPortableDeviceDataStream = stream.cast()?;
+                        data_stream.Commit(STGC_DEFAULT)?;
+                        crate::daemon_log!("[WPD] write_file: Commit OK path={}", path);
+                        Ok(())
+                    })();
+
+                    if result.is_err() {
+                        // Clean up any erroneous object left by the failed write (e.g. the
+                        // folder that Garmin's driver creates in place of a file).
+                        if let Ok(Some(bad_id)) =
+                            find_child_object_id(&content, &parent_id_str, filename)
+                        {
+                            // T12: log the erroneous object ID so the incomplete state is diagnosable.
+                            crate::daemon_log!(
+                                "[WPD] write_file: deleted erroneous object {:?} at path={}",
+                                bad_id,
+                                path
+                            );
+                            if let Ok(col) = make_object_id_collection(&bad_id) {
+                                let mut pp: Option<IPortableDevicePropVariantCollection> = None;
+                                let _ = content.Delete(0, &col, &mut pp);
+                            }
+                        }
+                    }
+                    result
+                }
+            };
+
+            if wpd_result.is_ok() {
+                return Ok(());
+            }
+            // T9: log the original WPD error at warn level before attempting Shell fallback.
+            eprintln!(
+                "[WPD WARN] write_file: WPD write failed for '{}' ({}), trying Shell copy",
+                path,
+                wpd_result.as_ref().unwrap_err()
+            );
+
+            // Shell copy fallback uses IFileOperation::CopyItem.
+            // Used for devices like Garmin where CreateObjectWithPropertiesAndData creates
+            // folder objects; Shell copy uses the MTP SendObject path that works correctly.
+            source.shell_copy(self, parent_components, filename)
+        }
+    }
+
     impl MtpHandle for WpdHandle {
         fn begin_sync_job(&self) -> Result<()> {
             if !self.prefers_shell_copy() {
@@ -1071,181 +1324,11 @@ pub mod windows_wpd {
         }
 
         fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
-            let components = super::split_path_components(path);
-            if components.is_empty() {
-                return Err(anyhow::anyhow!("WPD write_file: empty path"));
-            }
-            let filename = components[components.len() - 1];
-            let parent_components = &components[..components.len() - 1];
+            self.write_input(path, WpdWriteInput::Bytes(data))
+        }
 
-            if self.prefers_shell_copy() {
-                {
-                    let (_com, device) = self.session()?;
-                    unsafe {
-                        let content = device.Content()?;
-                        // T4: pass storage_id to avoid double DEVICE enumeration.
-                        ensure_dir_chain(&content, parent_components, self.storage_id.as_deref())?;
-                    }
-                }
-
-                crate::daemon_log!(
-                    "[WPD] write_file: using Shell copy first for Garmin-style WPD device path={}",
-                    path
-                );
-                // T7: UUID temp naming to guarantee uniqueness under concurrent writes.
-                let temp_dir =
-                    std::env::temp_dir().join(format!("hifimule_{}", uuid::Uuid::new_v4()));
-                std::fs::create_dir_all(&temp_dir)?;
-                let temp_path = temp_dir.join(filename);
-                std::fs::write(&temp_path, data)?;
-                let copy_result = self.shell_copy(parent_components, filename, &temp_path);
-                let _ = std::fs::remove_file(&temp_path);
-                let _ = std::fs::remove_dir(&temp_dir);
-                return copy_result;
-            }
-
-            // Primary path (WPD): ensure dirs, delete existing, attempt
-            // CreateObjectWithPropertiesAndData. Works correctly on standard WPD devices
-            // (USB drives, most MTP devices). Falls back to Shell copy if the WPD write
-            // fails — e.g. Garmin's driver creates a folder object instead of a file, so the
-            // subsequent stream write stalls and we fall through to the Shell path.
-            let wpd_result: Result<()> = {
-                let (_com, device) = self.session()?;
-                unsafe {
-                    let content = device.Content()?;
-                    // T4: pass storage_id.
-                    let parent_id_hstr =
-                        ensure_dir_chain(&content, parent_components, self.storage_id.as_deref())?;
-                    let parent_id_str = parent_id_hstr.to_string();
-
-                    if let Some(existing_id) =
-                        find_child_object_id(&content, &parent_id_str, filename)?
-                    {
-                        // T12: log the ID of the object being deleted before replace.
-                        crate::daemon_log!(
-                            "[WPD] write_file: deleting existing object {:?} at path={}",
-                            existing_id,
-                            path
-                        );
-                        let col = make_object_id_collection(&existing_id)?;
-                        let mut pp: Option<IPortableDevicePropVariantCollection> = None;
-                        let _ = content.Delete(0, &col, &mut pp);
-                    }
-
-                    let result = (|| -> Result<()> {
-                        let props: IPortableDeviceValues =
-                            CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
-                        props.SetStringValue(
-                            &WPD_OBJECT_PARENT_ID,
-                            PCWSTR(parent_id_hstr.as_ptr()),
-                        )?;
-                        let fname_hstr = HSTRING::from(filename);
-                        props.SetStringValue(
-                            &WPD_OBJECT_ORIGINAL_FILE_NAME,
-                            PCWSTR(fname_hstr.as_ptr()),
-                        )?;
-                        props.SetStringValue(&WPD_OBJECT_NAME, PCWSTR(fname_hstr.as_ptr()))?;
-                        props.SetGuidValue(
-                            &WPD_OBJECT_CONTENT_TYPE,
-                            &WPD_CONTENT_TYPE_GENERIC_FILE,
-                        )?;
-                        props.SetGuidValue(&WPD_OBJECT_FORMAT, &WPD_OBJECT_FORMAT_UNDEFINED)?;
-                        props.SetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE, data.len() as u64)?;
-
-                        crate::daemon_log!(
-                            "[WPD] write_file: CreateObjectWithPropertiesAndData path={} size={}",
-                            path,
-                            data.len()
-                        );
-                        let mut stream_opt: Option<IStream> = None;
-                        let mut optimal_buf = 0u32;
-                        content.CreateObjectWithPropertiesAndData(
-                            &props,
-                            &mut stream_opt,
-                            &mut optimal_buf,
-                            std::ptr::null_mut(),
-                        )?;
-                        let stream = stream_opt
-                            .ok_or_else(|| anyhow::anyhow!("WPD write_file: no stream returned"))?;
-
-                        // T2: explicit S_FALSE (partial write) handling.
-                        let chunk = (optimal_buf as usize).max(4096);
-                        let mut offset = 0usize;
-                        while offset < data.len() {
-                            let end = (offset + chunk).min(data.len());
-                            let slice = &data[offset..end];
-                            let mut written = 0u32;
-                            let hr = stream.Write(
-                                slice.as_ptr() as *const _,
-                                slice.len() as u32,
-                                Some(&mut written),
-                            );
-                            if hr == windows::Win32::Foundation::S_FALSE {
-                                return Err(anyhow::anyhow!(
-                                    "WPD write_file: partial write at offset {}",
-                                    offset
-                                ));
-                            }
-                            hr.ok()?;
-                            offset += written as usize;
-                            if written == 0 {
-                                return Err(anyhow::anyhow!(
-                                    "WPD write_file: stream stalled (zero bytes written)"
-                                ));
-                            }
-                        }
-
-                        crate::daemon_log!("[WPD] write_file: Commit path={}", path);
-                        let data_stream: IPortableDeviceDataStream = stream.cast()?;
-                        data_stream.Commit(STGC_DEFAULT)?;
-                        crate::daemon_log!("[WPD] write_file: Commit OK path={}", path);
-                        Ok(())
-                    })();
-
-                    if result.is_err() {
-                        // Clean up any erroneous object left by the failed write (e.g. the
-                        // folder that Garmin's driver creates in place of a file).
-                        if let Ok(Some(bad_id)) =
-                            find_child_object_id(&content, &parent_id_str, filename)
-                        {
-                            // T12: log the erroneous object ID so the incomplete state is diagnosable.
-                            crate::daemon_log!(
-                                "[WPD] write_file: deleted erroneous object {:?} at path={}",
-                                bad_id,
-                                path
-                            );
-                            if let Ok(col) = make_object_id_collection(&bad_id) {
-                                let mut pp: Option<IPortableDevicePropVariantCollection> = None;
-                                let _ = content.Delete(0, &col, &mut pp);
-                            }
-                        }
-                    }
-                    result
-                }
-            };
-
-            if wpd_result.is_ok() {
-                return Ok(());
-            }
-            // T9: log the original WPD error at warn level before attempting Shell fallback.
-            eprintln!(
-                "[WPD WARN] write_file: WPD write failed for '{}' ({}), trying Shell copy",
-                path,
-                wpd_result.as_ref().unwrap_err()
-            );
-
-            // Shell copy fallback: write to a local temp file then IFileOperation::CopyItem.
-            // Used for devices like Garmin where CreateObjectWithPropertiesAndData creates
-            // folder objects; Shell copy uses the MTP SendObject path that works correctly.
-            // T7: UUID temp naming.
-            let temp_dir = std::env::temp_dir().join(format!("hifimule_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&temp_dir)?;
-            let temp_path = temp_dir.join(filename);
-            std::fs::write(&temp_path, data)?;
-            let copy_result = self.shell_copy(parent_components, filename, &temp_path);
-            let _ = std::fs::remove_file(&temp_path);
-            let _ = std::fs::remove_dir(&temp_dir);
-            copy_result
+        fn write_file_from_path(&self, path: &str, source: &std::path::Path) -> Result<()> {
+            self.write_input(path, WpdWriteInput::File(source))
         }
 
         fn delete_file(&self, path: &str) -> Result<()> {
@@ -2217,6 +2300,17 @@ pub mod libmtp {
         }
 
         fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+            let tmp = temp_path();
+            let result = (|| {
+                std::fs::write(&tmp, data)?;
+                self.write_file_from_path(path, &tmp)
+            })();
+            let _ = std::fs::remove_file(&tmp);
+            result
+        }
+
+        fn write_file_from_path(&self, path: &str, source: &std::path::Path) -> Result<()> {
+            let source_size = std::fs::metadata(source)?.len();
             let guard = self.device.lock().unwrap();
             let dev = *guard;
             let components = super::split_path_components(path);
@@ -2293,9 +2387,7 @@ pub mod libmtp {
                     path
                 );
             }
-            let tmp = temp_path();
-            std::fs::write(&tmp, data)?;
-            let tmp_cstr = std::ffi::CString::new(tmp.to_string_lossy().as_bytes())?;
+            let source_cstr = std::ffi::CString::new(source.to_string_lossy().as_bytes())?;
             let fname_cstr = std::ffi::CString::new(*filename)?;
             let ext = std::path::Path::new(filename)
                 .extension()
@@ -2313,7 +2405,7 @@ pub mod libmtp {
                 parent_id,
                 storage_id,
                 filename: fname_cstr.as_ptr() as *mut _,
-                filesize: data.len() as u64,
+                filesize: source_size,
                 modificationdate: 0,
                 filetype,
                 next: std::ptr::null_mut(),
@@ -2321,13 +2413,12 @@ pub mod libmtp {
             let rc = unsafe {
                 LIBMTP_Send_File_From_File(
                     dev,
-                    tmp_cstr.as_ptr(),
+                    source_cstr.as_ptr(),
                     &mut file_meta,
                     std::ptr::null(),
                     std::ptr::null(),
                 )
             };
-            let _ = std::fs::remove_file(&tmp);
             if rc != LIBMTP_ERROR_NONE {
                 drop(guard);
                 crate::daemon_log!(
