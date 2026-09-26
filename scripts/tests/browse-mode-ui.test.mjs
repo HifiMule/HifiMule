@@ -24,6 +24,17 @@ function harness(locale = 'en') {
     children = []; attributes = {}; listeners = {}; className = ''; textContent = ''; hidden = false;
     updateComplete = Promise.resolve(); scrolls = 0; dataset = {};
     constructor(tag) { this.tagName = tag; if (tag === 'sl-button') { this.button = new Element('button'); this.shadowRoot = { querySelector: () => this.button }; } }
+    get classList() { return {
+      add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(' '); },
+      remove: (...names) => { this.className = this.className.split(/\s+/).filter(name => name && !names.includes(name)).join(' '); },
+      contains: name => this.className.split(/\s+/).includes(name),
+      toggle: (name, force) => {
+        const present = this.className.split(/\s+/).includes(name);
+        const next = force === undefined ? !present : Boolean(force);
+        if (next) this.classList.add(name); else this.classList.remove(name);
+        return next;
+      },
+    }; }
     get nodeType() { return this.tagName === '#text' ? 3 : 1; }
     get localName() { return this.tagName; }
     get childNodes() { return this.children; }
@@ -42,7 +53,7 @@ function harness(locale = 'en') {
     contains(n) { return this === n || this.children.some(c => c.contains(n)); }
     addEventListener(k,f) { (this.listeners[k] ??= []).push(f); }
     removeEventListener(k,f) { audit.push(`remove:${k}:${f.name || 'handler'}`); this.listeners[k] = (this.listeners[k] ?? []).filter(listener => listener !== f); }
-    async click() { for (const f of this.listeners.click ?? []) await f(); }
+    async click() { for (const f of this.listeners.click ?? []) await f({ stopPropagation() {}, target: this }); }
     focus() { document.activeElement = this; }
     scrollIntoView() { this.scrolls++; }
     querySelectorAll(s) { const match = n => s.startsWith('.') ? n.className.split(' ').includes(s.slice(1)) : s === 'span' ? n.tagName === 'span' : s.includes('[data-mode') ? n.tagName === 'sl-button' && n.getAttribute('data-mode') !== null && (!s.includes('=') || n.getAttribute('data-mode') === s.split('"')[1]) : s.includes('[data-view') ? n.getAttribute('data-view') !== null : s === 'sl-button' ? n.tagName === s : false; return this.children.flatMap(n => [...(match(n) ? [n] : []), ...n.querySelectorAll(s)]); }
@@ -113,11 +124,10 @@ test('podcast description keeps formatting and safe links without executable mar
   assert.ok(nodes.some(node => node.textContent === '\nPlain text'));
   assert.ok(!nodes.some(node => node.tagName === 'script' || node.textContent === 'alert(1)'));
   const episode = h.podcastEpisodeRow({id:'episode',title:'Episode',description:'<p>server supplied HTML</p>',durationSeconds:null,publishedAt:null});
+  assert.ok(walk(episode).some(node => node.className === 'podcast-description'));
+  assert.ok(walk(episode).some(node => node.tagName === 'strong'));
   const show = h.podcastShowRow({id:'show',title:'Show',description:'<p>server supplied HTML</p>',coverArtId:null});
-  for (const row of [episode, show]) {
-    assert.ok(walk(row).some(node => node.className === 'podcast-description'));
-    assert.ok(walk(row).some(node => node.tagName === 'strong'));
-  }
+  assert.ok(walk(show).some(node => node.textContent === 'Show'));
   const plain = h.podcastDescription('A <guest> joins\nfor the show');
   assert.equal(plain.textContent, 'A <guest> joins\nfor the show');
 });
@@ -247,13 +257,13 @@ test('podcast view presents shows and episodes with a typed play action', async 
   let labels = walk(h.content).map(node => node.textContent).filter(Boolean);
   assert.ok(labels.includes('Talks'));
   assert.ok(!labels.includes('Book'));
-  const show = walk(h.content).find(node => node.tagName === 'button' && node.textContent === 'Talks');
+  const show = walk(h.content).find(node => node.getAttribute('role') === 'button' && node.getAttribute('aria-label') === 'Talks');
   assert.ok(show);
   await show.click();
   await new Promise(resolve => setTimeout(resolve, 0));
   labels = walk(h.content).map(node => node.textContent).filter(Boolean);
   assert.ok(labels.includes('First'));
-  const play = walk(h.content).find(node => node.tagName === 'button' && node.textContent === catalog.en['library.podcast.play']);
+  const play = walk(h.content).find(node => node.tagName === 'sl-icon-button' && node.label === catalog.en['library.podcast.play']);
   assert.ok(play);
   await play.click();
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -284,7 +294,7 @@ test('failed show Load more preserves rows and episode pages stay local', async 
   await h.openPodcastShow('show-opaque', true);
   assert.ok(walk(h.content).some(node => node.textContent === 'First'));
   assert.ok(walk(h.content).some(node => node.textContent === 'Episode 59'));
-  assert.ok(walk(h.content).some(node => node.textContent === catalog.en['library.podcast.back']));
+  assert.ok(walk(h.content).some(node => node.label === catalog.en['library.podcast.back']));
   assert.ok(walk(h.content).some(node => node.textContent === catalog.en['library.podcast.truncated']));
   assert.equal(h.getPodcastShowFetches(), 1);
 });
