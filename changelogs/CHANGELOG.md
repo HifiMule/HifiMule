@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.16.0 - 2026-09-27
+
+HifiMule now supports **Audiobookshelf**. You can add a Books or Podcasts library to the Server Hub, browse and search its contents, and listen directly on your computer. Books appear with their authors, series, and collections; Podcasts adds a Recent Episodes view so you can find unfinished episodes across shows. Audiobooks play in part order, and supported direct streams let you seek within a book part or episode. Your audiobook listening position is kept with Audiobookshelf.
+
+You can also put books, authors, podcast shows, and individual episodes in your device basket. Separate audiobook and podcast folders keep them organized on the player, while per-server Auto-Fill settings and podcast retention help choose what to carry. The sync preview explains when a selected file cannot be used with the device profile, and large audio files now transfer without loading the whole file into memory.
+
+A new **Search** tab finds artists, albums, and tracks in Jellyfin and Subsonic-compatible music libraries, and playlists can now start a listening session. This release also fixes Audiobookshelf search and podcast artwork, a crash when seeking a large file, and reopening the UI from the background service.
+
 ## v0.15.0 - 2026-09-20
 
 HifiMule can now play music directly from your configured servers. You can play a track or a complete album, build and edit an upcoming queue, seek through supported sources, choose your audio output, and keep the essential controls close at hand in a **floating playback bar** while you browse. A separate Preview action lets you audition a full track and return to your main listening session without losing your place.
