@@ -2047,6 +2047,18 @@ fn apply_inner_with_album_context(
             "queue revision is stale",
         ));
     }
+    if let SessionOperation::PlayPlaylist {
+        expected_generation_id,
+        ..
+    } = &p.operation
+    {
+        if expected_generation_id != &i.generation_id {
+            return Err(PlaybackError::conflict(
+                "GENERATION_CONFLICT",
+                "playlist admission is stale",
+            ));
+        }
+    }
     if i.restoration.status == "error" {
         return Err(PlaybackError::conflict(
             "RESTORE_FAILED",
@@ -2093,9 +2105,13 @@ fn apply_inner_with_album_context(
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
     match &p.operation {
-        SessionOperation::ReplaceQueue { sources } | SessionOperation::PlayAlbum { sources } => {
+        SessionOperation::ReplaceQueue { sources }
+        | SessionOperation::PlayAlbum { sources }
+        | SessionOperation::PlayPlaylist { sources, .. } => {
             if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
                 validate_album_sources(sources)?;
+            } else if matches!(p.operation, SessionOperation::PlayPlaylist { .. }) {
+                validate_ordered_sources(sources, "PLAYLIST_INVALID")?;
             } else {
                 validate_sources(sources)?;
             }
@@ -2137,7 +2153,10 @@ fn apply_inner_with_album_context(
                 })?;
             next_session.state = if assigned.is_empty() {
                 TransportState::Idle
-            } else if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
+            } else if matches!(
+                p.operation,
+                SessionOperation::PlayAlbum { .. } | SessionOperation::PlayPlaylist { .. }
+            ) {
                 TransportState::Buffering
             } else {
                 TransportState::Paused
@@ -2441,7 +2460,9 @@ fn apply_inner_with_album_context(
         code: None,
     };
     i.playback = match &p.operation {
-        SessionOperation::PlayTrack { .. } | SessionOperation::PlayAlbum { .. } => PlaybackState {
+        SessionOperation::PlayTrack { .. }
+        | SessionOperation::PlayAlbum { .. }
+        | SessionOperation::PlayPlaylist { .. } => PlaybackState {
             status: PlaybackStatus::Loading,
             ..Default::default()
         },
@@ -2476,7 +2497,9 @@ fn apply_inner_with_album_context(
     };
     if matches!(
         p.operation,
-        SessionOperation::PlayTrack { .. } | SessionOperation::PlayAlbum { .. }
+        SessionOperation::PlayTrack { .. }
+            | SessionOperation::PlayAlbum { .. }
+            | SessionOperation::PlayPlaylist { .. }
     ) && i.outputs.is_some()
         && let Err(code) = output_policy(i)
     {
@@ -2491,7 +2514,9 @@ fn apply_inner_with_album_context(
     Ok(ApplyResult {
         start_audio: matches!(
             p.operation,
-            SessionOperation::PlayTrack { .. } | SessionOperation::PlayAlbum { .. }
+            SessionOperation::PlayTrack { .. }
+                | SessionOperation::PlayAlbum { .. }
+                | SessionOperation::PlayPlaylist { .. }
         ) && (i.outputs.is_none() || output_policy(i).is_ok()),
         current_metadata: metadata(i),
         session_id: i.session.session_id.clone(),
@@ -2766,16 +2791,19 @@ fn validate_sources(s: &[TrackSource]) -> PResult<()> {
     Ok(())
 }
 fn validate_album_sources(s: &[TrackSource]) -> PResult<()> {
+    validate_ordered_sources(s, "ALBUM_INVALID")
+}
+fn validate_ordered_sources(s: &[TrackSource], code: &'static str) -> PResult<()> {
     if s.is_empty() || s.len() > super::album::MAX_ALBUM_OCCURRENCES {
         return Err(PlaybackError::invalid(
-            "ALBUM_INVALID",
-            "album source count is invalid",
+            code,
+            "ordered source count is invalid",
         ));
     }
     for source in s {
         source
             .validate()
-            .map_err(|message| PlaybackError::invalid("ALBUM_INVALID", message))?;
+            .map_err(|message| PlaybackError::invalid(code, message))?;
     }
     Ok(())
 }

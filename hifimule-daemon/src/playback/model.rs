@@ -465,6 +465,11 @@ pub enum SessionOperation {
     PlayAlbum {
         sources: Vec<TrackSource>,
     },
+    #[serde(skip_deserializing)]
+    PlayPlaylist {
+        sources: Vec<TrackSource>,
+        expected_generation_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -530,6 +530,16 @@ export async function playbackPlayAlbum(serverId: string, albumId: string): Prom
     }
 }
 
+export async function playbackPlayPlaylist(serverId: string, playlistId: string): Promise<void> {
+    const current = await playbackGetSession();
+    await rpcCall('playback.playPlaylist', {
+        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+        commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
+        expectedGenerationId: current.generationId,
+        source: { serverId, playlistId },
+    });
+}
+
 export async function playbackControl(action: 'back' | 'pause' | 'resume' | 'stop' | 'next' | 'retry' | 'returnToSession', observed?: PlaybackSessionSnapshot): Promise<void> {
     const current = observed ?? await playbackGetSession();
     if (!current.current) return;

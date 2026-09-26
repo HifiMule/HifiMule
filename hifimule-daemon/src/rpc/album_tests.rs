@@ -78,8 +78,30 @@ impl MediaProvider for AlbumProvider {
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
         unreachable!()
     }
-    async fn get_playlist(&self, _: &str) -> Result<PlaylistWithTracks, ProviderError> {
-        unreachable!()
+    async fn get_playlist(&self, id: &str) -> Result<PlaylistWithTracks, ProviderError> {
+        let ids: &[&str] = if id == "empty" {
+            &[]
+        } else {
+            &["last", "first", "last"]
+        };
+        Ok(PlaylistWithTracks {
+            playlist: serde_json::from_value(json!({
+                "id": id, "name": "Mix", "trackCount": ids.len(),
+                "durationSeconds": ids.len(), "coverArtId": null
+            }))
+            .unwrap(),
+            tracks: ids
+                .iter()
+                .enumerate()
+                .map(|(index, track_id)| {
+                    serde_json::from_value(json!({
+                        "id": track_id, "title": track_id, "duration": 1,
+                        "trackNumber": 3 - index
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+        })
     }
     async fn search(&self, _: &str) -> Result<SearchResult, ProviderError> {
         unreachable!()
@@ -136,6 +158,63 @@ async fn book_album_rpc_admits_each_part_in_order_with_portable_source() {
             format!("book-part-{}", index + 1)
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn playlist_rpc_starts_in_provider_order_and_preserves_repeated_tracks() {
+    let f = Fixture::new().await;
+    let mut request = f.request();
+    request["source"] = json!({"serverId": f.server_id, "playlistId": "mix"});
+    handle_playback_play_playlist(&f.state, Some(request), None)
+        .await
+        .unwrap();
+    let snapshot = f.state.playback.snapshot().unwrap();
+    assert_eq!(
+        snapshot.queue_kind,
+        crate::playback::model::QueueKind::Manual
+    );
+    assert_eq!(
+        snapshot
+            .occurrences
+            .iter()
+            .map(|item| item.source.track_id.as_str())
+            .collect::<Vec<_>>(),
+        ["last", "first", "last"]
+    );
+    assert_eq!(snapshot.current.unwrap().source.track_id, "last");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_playlist_does_not_replace_the_existing_queue() {
+    let f = Fixture::new().await;
+    let before = f.state.playback.snapshot().unwrap();
+    let mut request = f.request();
+    request["source"] = json!({"serverId": f.server_id, "playlistId": "empty"});
+    let error = handle_playback_play_playlist(&f.state, Some(request), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.data.unwrap()["code"], "PLAYLIST_INVALID");
+    assert_eq!(
+        f.state.playback.snapshot().unwrap().queue_revision,
+        before.queue_revision
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_playlist_play_does_not_replace_the_existing_queue() {
+    let f = Fixture::new().await;
+    let before = f.state.playback.snapshot().unwrap();
+    let mut request = f.request();
+    request["expectedGenerationId"] = uuid::Uuid::new_v4().to_string().into();
+    request["source"] = json!({"serverId": f.server_id, "playlistId": "mix"});
+    let error = handle_playback_play_playlist(&f.state, Some(request), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.data.unwrap()["code"], "GENERATION_CONFLICT");
+    assert_eq!(
+        f.state.playback.snapshot().unwrap().queue_revision,
+        before.queue_revision
+    );
 }
 
 struct Fixture {

@@ -6,6 +6,7 @@ import { fetchBrowseAlbum, getImageUrl, playbackPlayTrack, rpcCall } from '../rp
 import { t } from '../i18n';
 import { showToast } from '../toast';
 import { createAlbumPlayButton } from './AlbumPlayButton';
+import { createPlaylistPlayButton } from './PlaylistPlayButton';
 import { createTrackPreviewButton } from './TrackPreviewButton';
 import { createTrackQueueButton } from './TrackQueueButton';
 import { bookBasketItem } from '../state/mediaSyncSelection';
@@ -38,6 +39,7 @@ export interface BrowseDisplayItem {
     subtitle?: string | null;
     year?: number | null;
     childCount?: number;
+    playablePlaylist?: boolean;
     sizeBytes?: number;
     sizeTicks?: number;
 }
@@ -141,6 +143,12 @@ export class MediaCard {
             const album = item as BrowseDisplayItem;
             const play = createAlbumPlayButton(album.id, album.serverId, itemName, album.type === 'Book' ? 'book' : 'album');
             card.querySelector('.card-content')?.appendChild(play);
+        }
+        if (isBrowseItem && (item as BrowseDisplayItem).playablePlaylist) {
+            const playlist = item as BrowseDisplayItem;
+            card.querySelector('.card-content')?.appendChild(
+                createPlaylistPlayButton(playlist.id, playlist.serverId, itemName, playlist.childCount),
+            );
         }
 
         // Load image asynchronously via Tauri proxy

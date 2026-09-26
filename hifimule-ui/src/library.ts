@@ -38,6 +38,7 @@ import {
 import { appendTracksToQueueFromLibrary } from './state/queue';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { createAlbumPlayButton } from './components/AlbumPlayButton';
+import { createPlaylistPlayButton } from './components/PlaylistPlayButton';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { TracksBrowseView } from './components/TracksBrowseView';
 import { createTrackPreviewButton } from './components/TrackPreviewButton';
@@ -323,6 +324,7 @@ function mapPlaylists(playlists: BrowsePlaylist[]): BrowseDisplayItem[] {
         serverId: p.serverId,
         name: p.name,
         type: 'Playlist' as const,
+        playablePlaylist: state.browseMode === 'playlists',
         coverArtId: null,
         subtitle: state.isBookLibrary
             ? t(p.id.startsWith('abs-series-') ? 'library.books.series_read_only' : 'library.books.collection_read_only')
@@ -1363,6 +1365,9 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     if (item.type === 'MusicAlbum' || item.type === 'Book') {
         const play = createAlbumPlayButton(item.id, item.serverId, item.name, item.type === 'Book' ? 'book' : 'album');
         row.appendChild(play);
+    }
+    if (item.playablePlaylist) {
+        row.appendChild(createPlaylistPlayButton(item.id, item.serverId, item.name, item.childCount));
     }
     // Curate button: appears on Playlist rows when playlist write is supported (mirrors MediaCard grid behavior)
     if (onCurate && item.type === 'Playlist') {

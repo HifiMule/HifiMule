@@ -594,6 +594,9 @@ async fn handler(
         "playback.playAlbum" => {
             handle_playback_play_album(&state, payload.params, mutation_guard.take()).await
         }
+        "playback.playPlaylist" => {
+            handle_playback_play_playlist(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.previewTrack" => {
             handle_playback_preview_track(&state, payload.params, mutation_guard.take()).await
         }
@@ -725,6 +728,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playback.applySession"
             | "playback.playEpisode"
             | "playback.playAlbum"
+            | "playback.playPlaylist"
             | "playback.previewTrack"
             | "playback.control"
             | "playback.seek"
@@ -1057,11 +1061,21 @@ async fn handle_playback_apply_session_inner(
         message: "Invalid playback.applySession parameters".into(),
         data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
     })?;
+    handle_playback_apply_session_parsed(state, p, mutation_guard, allow_podcast_episode).await
+}
+
+async fn handle_playback_apply_session_parsed(
+    state: &AppState,
+    p: crate::playback::model::ApplySessionParams,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+    allow_podcast_episode: bool,
+) -> Result<Value, JsonRpcError> {
     let added_sources: Vec<_> = match &p.operation {
         crate::playback::model::SessionOperation::PlayTrack { source } => vec![source],
         crate::playback::model::SessionOperation::ReplaceQueue { sources }
         | crate::playback::model::SessionOperation::AppendQueue { sources }
-        | crate::playback::model::SessionOperation::PlayAlbum { sources } => {
+        | crate::playback::model::SessionOperation::PlayAlbum { sources }
+        | crate::playback::model::SessionOperation::PlayPlaylist { sources, .. } => {
             sources.iter().collect()
         }
         _ => Vec::new(),
@@ -1090,6 +1104,9 @@ async fn handle_playback_apply_session_inner(
     let source = match &p.operation {
         crate::playback::model::SessionOperation::PlayTrack { source } => Some(source.clone()),
         crate::playback::model::SessionOperation::PlayAlbum { sources } => sources.first().cloned(),
+        crate::playback::model::SessionOperation::PlayPlaylist { sources, .. } => {
+            sources.first().cloned()
+        }
         _ => None,
     };
     let playback = state.playback.clone();
@@ -1289,6 +1306,97 @@ async fn handle_playback_play_episode(
         }),
     );
     handle_playback_apply_session_inner(state, Some(payload), mutation_guard, true).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayPlaylistSource {
+    server_id: String,
+    playlist_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayPlaylistParams {
+    schema_version: u32,
+    instance_id: String,
+    session_id: String,
+    command_id: String,
+    expected_queue_revision: String,
+    expected_generation_id: String,
+    source: PlayPlaylistSource,
+}
+
+async fn handle_playback_play_playlist(
+    state: &AppState,
+    params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
+    use crate::playback::model::{ApplySessionParams, MAX_ID_BYTES, SessionOperation, TrackSource};
+
+    let p = serde_json::from_value::<PlayPlaylistParams>(params.unwrap_or(Value::Null)).map_err(
+        |_| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.playPlaylist parameters".into(),
+            data: Some(serde_json::json!({"code":"PLAYLIST_INVALID"})),
+        },
+    )?;
+    if p.source.server_id.is_empty()
+        || p.source.playlist_id.is_empty()
+        || p.source.server_id.len() > MAX_ID_BYTES
+        || p.source.playlist_id.len() > MAX_ID_BYTES
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playlist source".into(),
+            data: Some(serde_json::json!({"code":"PLAYLIST_INVALID"})),
+        });
+    }
+    let provider = crate::server_manager::get_provider_by_server_id(
+        &state.server_manager,
+        &state.db,
+        &p.source.server_id,
+    )
+    .await
+    .map_err(provider_error_to_rpc)?;
+    let playlist = provider
+        .get_playlist(&p.source.playlist_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    if playlist.tracks.is_empty()
+        || playlist.tracks.len() > crate::playback::album::MAX_ALBUM_OCCURRENCES
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Playlist cannot be queued".into(),
+            data: Some(serde_json::json!({"code":"PLAYLIST_INVALID"})),
+        });
+    }
+    let sources = playlist
+        .tracks
+        .into_iter()
+        .map(|track| TrackSource {
+            server_id: p.source.server_id.clone(),
+            track_id: track.id,
+        })
+        .collect();
+    handle_playback_apply_session_parsed(
+        state,
+        ApplySessionParams {
+            schema_version: p.schema_version,
+            instance_id: p.instance_id,
+            session_id: p.session_id,
+            command_id: p.command_id,
+            expected_queue_revision: p.expected_queue_revision,
+            operation: SessionOperation::PlayPlaylist {
+                sources,
+                expected_generation_id: p.expected_generation_id,
+            },
+        },
+        mutation_guard,
+        false,
+    )
+    .await
 }
 
 async fn handle_playback_play_album(
