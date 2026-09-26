@@ -31,16 +31,17 @@ Currently supported languages:
 - `en` — English
 - `fr` — French
 - `es` — Spanish
+- `de` — German
 
 ## Add A New Language
 
 1. Add a new top-level object to `hifimule-i18n/catalog.json`.
 
-   Example for German:
+   Example for a future language (replace `xx` with its code):
 
    ```json
    {
-     "de": {
+     "xx": {
        "app.name": "HifiMule",
        "server.default": "Server"
      }
@@ -80,11 +81,11 @@ Currently supported languages:
    }
    ```
 
-   In `hifimule-ui/src/i18n.ts`, add the language to the `Language` type and `normalizeLanguage()`:
+   In `hifimule-ui/src/i18n.ts`, add the language to the `Language` type and `SUPPORTED_LANGUAGES`:
 
    ```ts
-   type Language = 'en' | 'fr' | 'es' | 'de';
-   return base === 'fr' || base === 'es' || base === 'de' ? base : DEFAULT_LANGUAGE;
+   type Language = 'en' | 'fr' | 'es' | 'de' | 'xx';
+   const SUPPORTED_LANGUAGES: readonly Language[] = ['en', 'fr', 'es', 'de', 'xx'];
    ```
 
    Also update `hifimule-ui/src/i18n-catalog.d.ts` to include the new code.
@@ -94,14 +95,14 @@ Currently supported languages:
    UI quick test in the browser console:
 
    ```js
-   localStorage.setItem('hifimule.language', 'de')
+   localStorage.setItem('hifimule.language', 'xx')
    location.reload()
    ```
 
    Daemon quick test:
 
    ```powershell
-   $env:HIFIMULE_LANG='de'
+   $env:HIFIMULE_LANG='xx'
    rtk cargo run -p hifimule-daemon
    ```
 

@@ -1,5 +1,7 @@
 # Audiobookshelf integration contract
 
+> This file preserves dated, controlled-server evidence and the feature gates that existed when each record was written. The current Audiobookshelf Books and Podcasts implementation is documented in the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md). Historical statements such as “not an enabled integration” describe the state at that record's date.
+
 ## Record 1 — v2.36.1 (2026-09-21)
 
 This is the mandatory discovery gate for Epic 17, not an enabled integration. Its controlled deployment used local authentication and a disposable test account. The server advertised local authentication, successful login returned an access token and refresh token, and authenticated library discovery returned distinct `book` and `podcast` roles. The pinned upstream source revision for tag `v2.36.1` is `e4569a4fdb85233d6c6c7bb4aa744f3cff9c7f56`.

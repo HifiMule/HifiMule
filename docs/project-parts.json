@@ -1,9 +1,34 @@
 {
   "repository_type": "monorepo",
   "workspace_type": "cargo",
-  "last_updated": "2026-09-20",
+  "last_updated": "2026-09-27",
   "version": "0.15.0",
   "parts": [
+    {
+      "part_id": "hifimule-daemon",
+      "display_name": "HifiMule Daemon",
+      "project_type_id": "backend",
+      "root_path": "hifimule-daemon/",
+      "primary_language": "Rust",
+      "primary_framework": "Axum 0.8",
+      "entry_points": [
+        "src/main.rs"
+      ],
+      "description": "Authenticated local JSON-RPC daemon with media providers (Jellyfin, Subsonic/OpenSubsonic, Audiobookshelf), FFmpeg/CPAL playback, SQLite, auto-fill, and MSC/MTP sync"
+    },
+    {
+      "part_id": "hifimule-ui",
+      "display_name": "HifiMule UI",
+      "project_type_id": "desktop",
+      "root_path": "hifimule-ui/",
+      "primary_language": "TypeScript and Rust",
+      "primary_framework": "Tauri 2",
+      "entry_points": [
+        "src/main.ts",
+        "src-tauri/src/main.rs"
+      ],
+      "description": "Desktop shell and WebView for provider-neutral music, Books, Podcasts, playback and device sync"
+    },
     {
       "part_id": "hifimule-i18n",
       "display_name": "HifiMule i18n",
@@ -11,57 +36,75 @@
       "root_path": "hifimule-i18n/",
       "primary_language": "Rust",
       "primary_framework": "none",
-      "entry_points": ["src/lib.rs"],
-      "description": "Shared translation catalog crate used by daemon/UI-adjacent flows for English, French, Spanish, and German strings"
+      "entry_points": [
+        "src/lib.rs"
+      ],
+      "description": "Shared catalog with English, French, Spanish, and German translations"
     },
     {
-      "part_id": "hifimule-daemon",
-      "display_name": "HifiMule Daemon",
-      "project_type_id": "backend",
-      "root_path": "hifimule-daemon/",
+      "part_id": "hifimule-lifecycle",
+      "display_name": "HifiMule lifecycle",
+      "project_type_id": "library",
+      "root_path": "hifimule-lifecycle/",
       "primary_language": "Rust",
-      "primary_framework": "Axum",
-      "entry_points": ["src/main.rs"],
-      "description": "Background daemon service with system tray, provider-aware JSON-RPC API, FFmpeg/CPAL desktop playback, native media controls, Jellyfin/Subsonic/OpenSubsonic adapters, SQLite storage, portable server identity, playlist editing, and configurable auto-fill"
-    },
-    {
-      "part_id": "hifimule-ui",
-      "display_name": "HifiMule UI",
-      "project_type_id": "desktop",
-      "root_path": "hifimule-ui/",
-      "primary_language": "TypeScript",
-      "primary_framework": "Tauri 2",
-      "entry_points": ["src/main.ts", "src-tauri/src/main.rs"],
-      "description": "Tauri 2 desktop music application with TypeScript/Vite frontend, Shoelace web components, server hub, playback controls and destination, playlist curation, tracks browse, auto-fill builder, and provider-neutral browse/sync UI"
+      "primary_framework": "none",
+      "entry_points": [
+        "src/lib.rs"
+      ],
+      "description": "Shared daemon and UI ownership, startup generation, authenticated health, and activation contract"
     }
   ],
   "integration_points": [
     {
       "from": "hifimule-ui",
       "to": "hifimule-daemon",
-      "type": "JSON-RPC 2.0 over HTTP",
-      "endpoint": "http://127.0.0.1:19140/",
-      "method_count": 90,
-      "details": "UI sends JSON-RPC requests to daemon for server connection/management, provider-neutral browse, desktop playback and queue control, playlist editing, auto-fill pipeline preview/persistence, device management, sync, manifests, scrobbling, and transcoding"
+      "type": "Bearer-authenticated JSON-RPC 2.0 over loopback HTTP",
+      "endpoint": "http://127.0.0.1:<owner descriptor port>/",
+      "method_count": 94,
+      "details": "Tauri rpc_proxy verifies lifecycle owner and forwards server, browse, playback, device, sync, manifest, auto-fill and playlist methods"
     },
     {
       "from": "hifimule-ui",
       "to": "hifimule-daemon",
-      "type": "HTTP GET",
-      "endpoint": "http://127.0.0.1:19140/jellyfin/image/{id}",
-      "details": "Image proxy — daemon fetches active-provider cover art with auth"
+      "type": "Authenticated HTTP GET via image_proxy",
+      "endpoint": "http://127.0.0.1:<owner descriptor port>/jellyfin/image/{id}",
+      "details": "Native Tauri shell fetches active-provider cover art"
+    },
+    {
+      "from": "hifimule-ui",
+      "to": "hifimule-lifecycle",
+      "type": "Rust crate dependency",
+      "details": "UI lock, activation mailbox, launch tickets and owner validation"
     },
     {
       "from": "hifimule-daemon",
-      "to": "Media Server (external)",
-      "type": "HTTP/HTTPS",
-      "details": "Daemon communicates with Jellyfin, Subsonic, Navidrome, or OpenSubsonic servers for library data, downloads, cover art, scrobbling, and change detection"
+      "to": "hifimule-lifecycle",
+      "type": "Rust crate dependency",
+      "details": "Exclusive daemon lock, private descriptor and launch generation"
     },
     {
       "from": "hifimule-daemon",
       "to": "hifimule-i18n",
       "type": "Rust crate dependency",
-      "details": "Daemon uses shared translation lookup for user-facing messages, notifications, and errors"
+      "details": "Shared user-facing translations"
+    },
+    {
+      "from": "hifimule-ui",
+      "to": "hifimule-i18n",
+      "type": "Shared catalog import",
+      "details": "TypeScript imports catalog.json through Vite alias"
+    },
+    {
+      "from": "hifimule-daemon",
+      "to": "Media servers",
+      "type": "HTTP/HTTPS via MediaProvider",
+      "details": "Jellyfin, Subsonic/OpenSubsonic/Navidrome, and scoped Audiobookshelf Books/Podcasts libraries"
+    },
+    {
+      "from": "hifimule-daemon",
+      "to": "Portable devices",
+      "type": "MSC filesystem or MTP",
+      "details": "Role-aware staged transfers and device manifest updates"
     }
   ]
 }

@@ -1,14 +1,14 @@
 # API Contracts — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep | **Protocol:** JSON-RPC 2.0 over HTTP POST to `localhost:19140`
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Protocol:** Bearer-authenticated JSON-RPC 2.0 over HTTP POST to the current lifecycle descriptor port
 
-All requests: `Content-Type: application/json`  
+All requests: `Content-Type: application/json` and `Authorization: Bearer <owner descriptor token>`. The daemon binds an available `127.0.0.1` port and publishes it in private `<app-data>/runtime/owner.json`; port `19140` is a legacy collision check only. The Tauri `rpc_proxy` supplies the token and verifies owner identity.
 All successful responses: `{ "jsonrpc": "2.0", "result": <value>, "id": 1 }`  
 All error responses: `{ "jsonrpc": "2.0", "error": { "code": <N>, "message": "<text>" }, "id": 1 }`
 
 **Primary error codes:** JSON-RPC standard `-32601` method not found, `-32602` invalid params, plus app codes `-1` connection failed, `-3` storage error, `-4` not found, `-5` unsupported capability, `-6` sync in progress, `-7` cross-server playlist conflict, `-8` selected server credential unauthorized.
 
-The daemon now exposes a provider-neutral media-server layer. Legacy `jellyfin_*` RPC names remain supported for compatibility, but active Subsonic/OpenSubsonic connections are routed through `MediaProvider` where possible.
+The daemon exposes a provider-neutral media-server layer. Legacy `jellyfin_*` RPC names remain supported for compatibility; selected Subsonic/OpenSubsonic and Audiobookshelf libraries are routed through `MediaProvider` where supported.
 
 Authenticated `daemon.health` includes a sanitized `audioRuntime` object with the
 loaded FFmpeg component versions, selected shared endpoint (when opened), and
@@ -24,7 +24,7 @@ headers, credentials, or provider response bodies.
 Detects a server type before authentication.
 
 **Params:** `{ url: string }`  
-**Returns:** `{ serverType: "jellyfin" | "subsonic" | "openSubsonic" | null }`
+**Returns:** `{ serverType: "jellyfin" | "subsonic" | "openSubsonic" | "audiobookshelf" | null }`
 
 ---
 
@@ -76,7 +76,18 @@ Multi-server management. Local server row IDs are used for management calls; det
 | `server.update` | `{ "id": string, "name"?: string, "icon"?: string | null }` | `{ "ok": true }` |
 | `server.remove` | `{ "id": string }` | `{ "removedServerId": string, "reselectedServerId": string | null }` |
 
-`ServerSummary = { id, serverId, url, serverType, username, name, icon, selected }`.
+`ServerSummary = { id, serverId, url, serverType, username, name, icon, selected, libraryRole? }`. `libraryRole` is `"audiobook"` or `"podcast"` for a scoped Audiobookshelf server.
+
+### Audiobookshelf setup and reauthentication
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `server.audiobookshelf.discover` | `{ url, username, password }` | `{ setupId, libraries: [{ choiceId, name, role }] }` |
+| `server.audiobookshelf.commit` | `{ setupId, choiceId, name?, icon? }` | Commits one selected library as a configured server |
+| `server.audiobookshelf.cancelSetup` | `{ setupId }` | `{ ok: true }` |
+| `server.reauthenticate` | `{ id, password }` | Refreshes credentials for the specified configured server |
+
+Discovery holds credentials only in a temporary daemon-side setup. Commit consumes that setup once, records immutable upstream library ID and role, and derives a portable server ID scoped to that library. Expired, replayed, or cancelled setups cannot be committed. Books and Podcasts are separate choices; the UI never receives an upstream library ID or authenticated URL.
 
 ---
 
@@ -131,7 +142,7 @@ Returns stored credentials.
 Lightweight health probe.
 
 **Params:** none  
-**Returns:** `{ "data": { "status": "ok" } }`
+**Returns:** `{ "data": { "status": "ok" | "stopping", "protocolVersion": number, "instanceId": string, "pid": number, "daemonVersion": string, "errorCode": string | null, "shutdown": object | null, "playback": object, "audioRuntime": object } }`. The native shell checks protocol and instance identity before using the owner.
 
 ---
 
@@ -1254,3 +1265,24 @@ active transport metadata, including paused restoration and Preview. Each paged
 region fences its own asynchronous reads and retains keyed action focus. Scoped
 cursor/locator conflicts reset to a bounded first page after an authoritative
 refresh; library and Playback mutations refresh without replaying the action.
+
+---
+
+## Audiobookshelf and current browse/playback additions (2026-09-27)
+
+The current dispatch table in `hifimule-daemon/src/rpc.rs` adds these role-aware methods. `browse.listModes` is the capability gate: a Books server advertises book/author/group modes, while a Podcasts server advertises podcast modes. Unsupported modes return the provider capability error rather than silently falling back to another server.
+
+| Method | Main params | Result |
+| --- | --- | --- |
+| `browse.listPodcastShows` | `{ startIndex?: number, limit?: number }` | `{ shows: PodcastShow[], total: number }` |
+| `browse.listRecentPodcastEpisodes` | `{ startIndex?: number, limit?: number }` | `{ episodes: PodcastEpisode[], total: number, sourceCount: number }` |
+| `browse.getPodcastShow` | `{ showId, startIndex?: number, limit?: number }` | `{ show, episodes, total, possiblyTruncated }` |
+| `browse.getPodcastEpisode` | `{ episodeId }` | `{ episode }` |
+| `browse.listSeries` / `browse.listCollections` | none | `{ playlists: BrowsePlaylist[] }` with ordered grouping identities |
+| `browse.search` | Provider-specific bounded query params | Neutral music/book results or Podcast show/episode results; possible truncation is reported |
+| `playback.playEpisode` | Playback session envelope plus `serverId` and `episodeId` | Updated playback session under `data` |
+| `playback.playPlaylist` | `{ schemaVersion, instanceId, sessionId, commandId, expectedQueueRevision, expectedGenerationId, source: { serverId, playlistId } }` | Updated playback session under `data` |
+
+Podcast show and recent-episode list requests use `limit` 1–100 and `startIndex` aligned to `limit`. A show detail request allows `limit` 1–5000 and slices the validated provider detail. `playback.playEpisode` verifies the selected provider is a Podcast library and that the episode resolves before creating a playback operation. `playback.playPlaylist` resolves the selected grouping or playlist, rejects empty or oversized source lists, then applies one ordered session mutation. Current sync and basket methods accept Book, Podcast Show, and Podcast Episode selections; `SyncedItem.mediaRole` and optional manifest `audiobookPath`/`podcastPath` carry their device policy.
+
+The full implementation path, including library-scoped IDs, progress ownership, and sync constraints, is in the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md).

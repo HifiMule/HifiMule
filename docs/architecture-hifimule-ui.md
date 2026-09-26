@@ -1,279 +1,33 @@
 # HifiMule UI — Architecture
 
-**Part:** `hifimule-ui` | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Exhaustive
+**Part:** `hifimule-ui` | **Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
 
----
+## Process structure
 
-## Overview
+The desktop part combines a Tauri 2 Rust shell (`src-tauri/`) with a TypeScript 5.6/Vite 6 WebView (`src/`) and Shoelace components. `src/main.ts` routes splash, login, library, playback, and shutdown views. The UI renders daemon-owned state and sends actions through native commands. The daemon handles media-server credentials, playback, device I/O, and sync.
 
-The UI is a **Tauri 2** desktop application that provides a thin shell around the daemon. All business logic lives in the daemon; the UI's responsibility is:
-1. Launching and monitoring the daemon process
-2. Rendering the library browser and basket using data from the daemon
-3. Providing an always-available playback bar and dedicated playback destination
-4. Proxying RPC calls and provider cover-art requests to the daemon
-5. Keeping browse, playback, and sync UI provider-neutral so Jellyfin, Subsonic, Navidrome, and OpenSubsonic share the same interaction model
+## Native lifecycle and IPC
 
----
+`src-tauri/src/lib.rs` uses `hifimule-lifecycle` to resolve a private profile runtime, find or start a compatible daemon, and hold one UI instance lock. A second launch requests activation of the existing window through the lifecycle mailbox. The startup coordinator uses an epoch to discard late results from abandoned attempts. It reports `starting`, `ready`, `failed`, `stopping`, or `stopped` status with stable error codes.
 
-## Process Structure
+The daemon listens on an available loopback port published in the private `owner.json` descriptor. The native `rpc_proxy` and `image_proxy` commands validate the observed owner and send the descriptor bearer token; they do not rely on a fixed port. `rpc_proxy` forwards JSON-RPC error `code`, `message`, and `data` to TypeScript. `image_proxy` returns authenticated provider artwork as a data URL. Additional commands include startup retry, UI close/reload, installed-smoke acknowledgements, and macOS launch-on-startup settings. See [Lifecycle Architecture](./architecture-hifimule-lifecycle.md) and [Integration Architecture](./integration-architecture.md).
 
-```
-Tauri 2 Shell (Rust)
-  ├─ Window: splashscreen (400×500, transparent, no decorations, always-on-top)
-  │   └─ splashscreen.html → main.ts → initSplashScreen()
-  └─ Window: main (1024×768, initially hidden)
-      └─ index.html → main.ts → init()
-           ├─ rpcCall('get_daemon_state') → serverConnected?
-           │   ├─ true  → initLibraryView()
-           │   └─ false → initLoginView()
-           └─ renderMainLayout()
-                ├─ sl-split-panel (70/30)
-                │   ├─ left: provider-neutral library-view → library.ts
-                │   └─ right: basket-view → BasketSidebar.ts
-                └─ statusbar-container → StatusBar.ts (not wired in current index.html)
-```
+## TypeScript RPC and state
 
----
+`src/rpc.ts` wraps `invoke('rpc_proxy')`, defines typed server/browse/playback/destination DTOs, and increments a browse generation when the active server changes. A late response from the previous server raises `StaleBrowseResponse`; an unauthorized browse result emits the scoped reauthentication event. `src/state/playback.ts` projects authoritative daemon snapshots and coalesces reads. `src/state/basket.ts` manages selected device items and hydrates/persists them through manifest RPCs. `src/state/autoFill.ts` models pipeline settings; `src/state/mediaSyncSelection.ts` constructs Book, Podcast Show, and Episode basket entries.
 
-## Tauri Shell (`src-tauri/src/lib.rs`)
+## Server setup and library browser
 
-### Exposed Tauri Commands
+`src/login.ts` probes servers and handles direct connection, Audiobookshelf discovery/choice/commit, and scoped reauthentication. The `audiobookshelfSetup.ts` helper validates provider and library-role choices. Each selected Audiobookshelf Books or Podcasts library appears as its own server in `ServerHub`.
 
-| Command | Params | Returns | Description |
-|---------|--------|---------|-------------|
-| `rpc_proxy` | `method: String, params: Value` | `Value` or `String` (error) | Forwards JSON-RPC to daemon; extracts `result` or surfaces `error.message` |
-| `image_proxy` | `id: String, maxHeight?, quality?` | `String` (data URL) | Fetches provider cover art from daemon → base64 data URL |
-| `get_sidecar_status` | — | `String` | Returns daemon launch status for splashscreen |
+`src/library.ts` displays only modes advertised by `browse.listModes`. Music views include artists, albums, tracks, playlists, genres, history, and favorites according to provider capabilities. Books views use Albums/Books, Authors, Series, and Collections; Podcasts use Shows and Recent Episodes with dedicated episode detail and play actions. `podcastRecents.ts` rejects stale pages and deduplicates by episode ID. Search uses bounded provider responses and can expose truncation. `MediaCard`, `TracksBrowseView`, and `PlaylistCurationView` render reusable browse and curation surfaces; provider-specific decisions come from typed metadata or capability flags.
 
-### Daemon Launch Strategy
+## Playback and device destinations
 
-Executed in a background thread on startup:
+`PlaybackControls` renders the floating transport bar, output picker, seek state, and recovery guidance. `PlaybackDestination` displays current, upcoming, and history occurrences. `AlbumPlayButton`, `PlaylistPlayButton`, `TrackPreviewButton`, and `TrackQueueButton` call daemon playback RPCs. The UI refreshes snapshots after mutations rather than maintaining a second player state. `DestinationHub` switches between the listening destination and connected devices.
 
-1. **Health check** — POST `get_daemon_state` to `http://127.0.0.1:19140`; if OK, daemon is running → status `"startup"`
-2. **Windows Service** (Windows only) — `sc start hifimule-daemon`; health check after 2s → status `"service"`
-3. **Sidecar spawn** — `app.shell().sidecar("hifimule-daemon").spawn()` → status `"running (pid=N)"`; monitors stdout/stderr/terminated events; kills child on `RunEvent::Exit`
+`BasketSidebar` orchestrates selected device basket, capacity, auto-fill, sync status, and manifest repair entry points. `InitDeviceModal` and `RepairModal` cover setup and dirty-manifest reconciliation. Audiobookshelf role-specific folder settings and sync policy are sent to the daemon, which remains the source of truth for actual device writes.
 
-Status strings exposed via `get_sidecar_status`:
-- `"starting"` — initial state
-- `"startup"` — existing running instance detected
-- `"service"` — Windows Service started successfully
-- `"running (pid=N)"` — sidecar spawned
-- `"spawn_failed: ..."` — sidecar spawn error
-- `"command_failed: ..."` — sidecar command creation error
-- `"terminated (code=N)"` — sidecar exited unexpectedly
+## Build and tests
 
-### Logging
-
-`ui_log(msg)` writes to `<AppData>/HifiMule/ui.log` (1 MB cap, truncated on overflow) in addition to `println!`. Windows only (uses `APPDATA` env var).
-
----
-
-## RPC Layer (`src/rpc.ts`)
-
-```typescript
-export const RPC_PORT = '19140';
-export const RPC_URL = `http://localhost:${RPC_PORT}`;
-
-export async function rpcCall(method: string, params: any = {}): Promise<any> {
-    return await invoke('rpc_proxy', { method, params });
-}
-
-export async function getImageUrl(id: string, maxHeight?: number, quality?: number): Promise<string> {
-    return await invoke('image_proxy', { id, maxHeight, quality });
-}
-```
-
-`rpcCall` passes through `invoke`'s error as an `Error` with `getErrorMessage()` normalization (handles plain strings, Error objects, and JSON serialized objects).
-
-### Provider-Neutral Browse API
-
-`rpc.ts` defines the TypeScript contracts and wrappers for the current browse surface:
-
-| Wrapper | RPC |
-|---------|-----|
-| `fetchBrowseModes()` | `browse.listModes` |
-| `fetchBrowseArtists()` / `fetchBrowseArtist()` | `browse.listArtists`, `browse.getArtist` |
-| `fetchBrowseAlbums()` / `fetchBrowseAlbum()` | `browse.listAlbums`, `browse.getAlbum` |
-| `fetchBrowsePlaylists()` / `fetchBrowsePlaylist()` | `browse.listPlaylists`, `browse.getPlaylist` |
-| `fetchBrowseGenres()` / `fetchBrowseGenre()` | `browse.listGenres`, `browse.getGenre` |
-| `fetchBrowseRecentlyAdded()` | `browse.listRecentlyAdded` |
-| `fetchBrowseFrequentlyPlayed()` | `browse.listFrequentlyPlayed` |
-| `fetchBrowseRecentlyPlayed()` | `browse.listRecentlyPlayed` |
-| `fetchBrowseFavorites()` / `fetchBrowseFavoriteItems()` | `browse.listFavorites`, `browse.listFavoriteItems` |
-
-The UI uses the returned `BrowseMode[]` to decide which buttons to render. Server-specific capability decisions stay in the daemon provider layer.
-
----
-
-## State Management
-
-### PlaybackStore (`state/playback.ts`)
-
-`PlaybackStore` is a singleton projection of the daemon-owned playback session. It coalesces reads of `playback.getSession`, accepts only strictly newer snapshots for the same session, exposes `connecting`/`fresh`/`stale`/`disconnected` connection state, and refreshes while one or more playback surfaces are subscribed. It does not keep an independent queue or playback engine in the WebView.
-
-### BasketStore (`state/basket.ts`)
-
-Singleton `BasketStore extends EventTarget`. Holds items selected for the next sync.
-
-```typescript
-class BasketStore {
-    private items: Map<string, BasketItem>;
-    private _dirty: boolean;          // true after any add/remove since last sync
-    private _syncingFromDaemon: bool; // prevents re-entrancy during hydration
-}
-```
-
-**Persistence strategy:**
-- `localStorage` for session persistence between page reloads
-- Daemon `manifest_save_basket` as the authoritative store (debounced 1s write)
-- On device connect: `manifest_get_basket` hydrates the local Map
-
-**Auto-fill slot:**  
-A virtual item with `id = "__auto_fill_slot__"` is inserted into the basket when auto-fill is enabled. It carries `sizeBytes` = the available capacity budget. This slot is never persisted to the daemon manifest; it is stripped on load.
-
-**Events:** emits `CustomEvent('update', { detail: items[] })` on every mutation.
-
-### Component-Level State
-
-The `BasketSidebar` component holds most UI state as instance fields:
-
-| Field | Description |
-|-------|-------------|
-| `storageInfo` | Latest device storage from `device_get_storage_info` |
-| `folderInfo` | Latest folders from `device_list_root_folders` |
-| `isDirtyManifest` | From `get_daemon_state.dirtyManifest` |
-| `connectedDevices` | Multi-device list from `get_daemon_state.connectedDevices` |
-| `selectedDevicePath` | From `get_daemon_state.selectedDevicePath` |
-| `autoFillEnabled` / `autoFillMaxBytes` | Auto-fill settings (synced to daemon manifest) |
-| `autoSyncOnConnect` | Per-device setting (synced to daemon via `device_set_auto_sync_on_connect`) |
-| `isSyncing` / `currentOperationId` / `currentOperation` | Active sync tracking |
-| `lastHydratedDeviceId` | Tracks which device's basket is currently loaded |
-
----
-
-## Component Architecture
-
-### `BasketSidebar` (orchestrator)
-
-The main sidebar component owns the UI's sync lifecycle. It runs two polling loops:
-
-- **`daemonStateInterval`** — every 2s: polls `get_daemon_state` to detect device connect/disconnect, dirty manifest, new active operation, and multi-device changes
-- **`pollingInterval`** — every 500ms during sync: polls `sync_get_operation_status` to update progress bar
-
-**Render states (mutually exclusive):**
-1. Locked (no device selected) → placeholder
-2. Empty basket → auto-fill controls + device folder info
-3. Basket items → item list + capacity bar + sync button
-4. Syncing (starting) → spinner
-5. Syncing (in progress) → progress bar + ETA
-6. Sync complete → success panel
-7. Sync error → error panel
-
-**ETA calculation:** `(totalBytes - bytesTransferred) / (bytesTransferred / elapsedSeconds)` — shown after first byte transferred.
-
-### `MediaCard`
-
-`sl-card`-based grid item. Loaded via `document.createElement('sl-card')`. Features:
-- Cover art loaded asynchronously via `getImageUrl(id, 300, 90)` as CSS `background-image`
-- `is-selected` CSS class when item is in basket
-- `synced` CSS class when item is in `syncedItemIds` from `sync_get_device_status_map`
-- Navigation click (on card body) vs. basket toggle click (on `basket-toggle-btn`) are distinguished via `composedPath()`
-- When adding to basket: fetches metadata via `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` concurrently
-
-### Playback components
-
-- **`AlbumPlayButton`** starts ordered album playback through `playback.playAlbum`.
-- **`TrackPreviewButton`** starts a full-track audition through `playback.previewTrack` without replacing the main queue.
-- **`TrackQueueButton`** adds a track to the daemon-owned upcoming queue.
-- **`PlaybackControls`** is the floating bar across library and playback views. It renders safe track metadata, transport controls, seek state, output selection, recovery guidance, and a switch to the dedicated playback destination.
-- **`PlaybackDestination`** renders the listening surface: current playback plus separately paged upcoming and history sections. It supports moving or removing upcoming entries and preserves focus through refreshes.
-
-The UI always treats the daemon snapshot as authoritative; after a transport or queue mutation it refreshes rather than predicting a local final state.
-
-### `StatusBar`
-
-Shows daemon health at the bottom of the window. Polls `get_daemon_state` every 3s via direct `fetch()` (Note: this uses fetch rather than invoke — works in dev mode but may be unreliable in release builds due to mixed content). Listens for `rpc:call`, `rpc:success`, `rpc:error`, `rpc:disconnect` custom window events.
-
-### `InitDeviceModal`
-
-`sl-dialog`-based wizard for initializing a new unrecognized device:
-- Loads profiles from `device_profiles.list` and credentials from `get_credentials`
-- Fields: device name (max 40 chars), tile icon picker (6 icons), music folder path (optional), playlist folder path (optional), transcoding profile
-- Calls `device_initialize(folderPath, playlistFolderPath?, profileId, transcodingProfileId?, name, icon?)` on confirm
-
-### `Device Settings`
-
-`sl-dialog` opened from the selected device card in the device hub:
-- Fields: device name, the same tile icon picker used by creation, music folder, playlist folder, and transcoding profile
-- Calls `device.update_manifest(deviceId, name, icon, transcodingProfileId, musicFolderPath, playlistFolderPath)` on save
-- Name, icon, and transcoding profile edits refresh the hub without requiring reconnect; folder edits mark the next sync preview for cleanup/resync
-
-### `RepairModal`
-
-`sl-dialog`-based manifest repair tool:
-- Loads `manifest_get_discrepancies` → shows two columns: missing (in manifest, not on device) and orphaned (on device, not in manifest)
-- Per-item: **Prune** removes from manifest (`manifest_prune`), **Re-link** associates orphan with missing item (`manifest_relink`)
-- Bulk: **Prune All Missing** removes all missing items at once
-- **Finish & Clear Dirty** calls `manifest_clear_dirty` and closes dialog
-
----
-
-## Navigation Flow (Library)
-
-```
-initLibraryView()
-  ├─ fetchBrowseModes() → capability-driven mode buttons
-  └─ loadModeRoot()
-       ├─ artists → list artists → artist albums → album tracks
-       ├─ albums → list albums → album tracks
-       ├─ playlists → list playlists → playlist tracks
-       ├─ genres → list genres → genre tracks
-       ├─ recentlyAdded → newest albums → album tracks
-       ├─ frequentlyPlayed / recentlyPlayed → flat track lists
-       └─ favorites → favorite artists → scoped favorite albums → scoped tracks
-```
-
-**Page/scroll cache:** `pageCache: Map<mode:parentId, {items, total}>` enables instant back-navigation across browse modes. `scrollCache: Map<mode:parentId, scrollTop>` restores scroll position after cache hit or fresh load.
-
-**Quick-nav bar:** visible for artists or albums when the current result count warrants it. Letter buttons call provider-neutral artist/album RPCs with `letter`; `#` maps to the non-alpha bucket.
-
----
-
-## Tauri Configuration (`tauri.conf.json`)
-
-```json
-{
-  "productName": "HifiMule",
-  "version": "0.15.0",
-  "identifier": "hifimule.github.io",
-  "bundle": {
-    "externalBin": ["sidecars/hifimule-daemon"],
-    "windows": {
-      "wix": { "fragmentPaths": ["wix/startup-fragment.wxs"] },
-      "nsis": { "installerHooks": "nsis/hooks.nsh" }
-    }
-  }
-}
-```
-
-- **`externalBin`**: the compiled daemon is bundled as a sidecar in `src-tauri/sidecars/` (copied by `scripts/prepare-sidecar.mjs` during build)
-- **WiX startup fragment**: registers the daemon (or UI) to run at Windows startup via a registry key
-- **NSIS hooks**: custom installer behavior on Windows
-- **`security.csp: null`**: CSP disabled (acceptable given daemon runs locally; no remote content)
-
----
-
-## Build Process
-
-```bash
-# Development
-cd hifimule-ui
-npm run dev          # Starts Vite dev server on :1420 + Tauri in dev mode
-
-# Production
-npm run build        # tsc + vite build → dist/
-node ../scripts/prepare-sidecar.mjs   # copies daemon binary to src-tauri/sidecars/
-npm run tauri build  # Tauri bundles: .dmg / .deb / .exe
-```
-
-`prepare-sidecar.mjs` finds the compiled daemon binary for the current platform and copies it to `hifimule-ui/src-tauri/sidecars/hifimule-daemon-<triple>` (Tauri sidecar naming convention).
+`package.json` provides `dev`, `build` (`tsc && vite build`), `preview`, and `tauri` scripts. The Tauri crate uses the shared workspace version. Run `rtk npm run build` from `hifimule-ui/` for the frontend and use the root build wrapper plus `scripts/prepare-sidecar.mjs` before packaging the desktop app. Node tests under `hifimule-ui/tests/` cover browse, playback, Audiobookshelf, and policy helpers; `scripts/tests/` covers UI and runtime contracts. See [Development Guide](./development-guide.md).

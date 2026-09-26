@@ -1,6 +1,6 @@
 # Data Models — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep
 
 ---
 
@@ -17,6 +17,8 @@ pub struct DeviceManifest {
     pub synced_items: Vec<SyncedItem>,             // files confirmed present on device
     pub basket_items: Vec<BasketItem>,             // user's curation for next sync
     pub managed_paths: Vec<String>,                // relative paths owned by HifiMule
+    pub audiobook_path: Option<String>,            // serialized as audiobookPath
+    pub podcast_path: Option<String>,              // serialized as podcastPath
     pub playlist_path: Option<String>,             // null = inherit first managed music path
     pub dirty: bool,                               // true if sync was interrupted mid-operation
     pub pending_item_ids: Vec<String>,             // Jellyfin IDs being processed when dirty was set
@@ -41,6 +43,7 @@ Represents a single file that has been successfully synced to the device.
 
 ```rust
 pub struct SyncedItem {
+    pub media_role: MediaRole,       // music, audiobook, or podcast
     pub jellyfin_id: String,       // provider item ID; serialized in .hifimule.json as providerItemId
     pub name: String,              // track title
     pub album: Option<String>,
@@ -69,7 +72,7 @@ An item in the user's current sync selection (stored in the manifest, also held 
 pub struct BasketItem {
     pub id: String,                    // provider item ID (or "__auto_fill_slot__" for the virtual slot)
     pub name: String,
-    pub item_type: String,             // "MusicAlbum", "Playlist", "MusicArtist", "MusicGenre", "Audio", "FavoriteArtist", "FavoriteAlbum", "AutoFillSlot"
+    pub item_type: String,             // music types plus "Book", "PodcastShow", "PodcastEpisode"
     pub server_id: Option<String>,
     pub artist: Option<String>,
     pub child_count: u32,              // recursive track count (0 for Audio items)
@@ -97,6 +100,7 @@ pub struct AutoFillConfig {
 
 pub struct AutoFillPipeline {
     pub enabled: bool,
+    pub podcast_retention: PodcastRetention, // Audiobookshelf Podcasts only
     pub filter: FilterStage,
     pub sources: Vec<SourceEntry>,
     pub unit: Unit,
@@ -135,6 +139,7 @@ Input to `calculate_delta` — represents an item the user wants on the device.
 
 ```rust
 pub struct DesiredItem {
+    pub media_role: MediaRole,
     pub jellyfin_id: String,
     pub name: String,
     pub album: Option<String>,
@@ -454,3 +459,15 @@ Credentials are split across two locations:
 | Legacy Jellyfin URL + User ID | `<AppData>/HifiMule/config.json` as `{ "url": "...", "user_id": "..." }` |
 | Current server metadata | SQLite `server_config` table |
 | Access token / provider secret | OS keyring, service name `"hifimule.github.io"`, username `"secrets"` |
+
+---
+
+## Audiobookshelf library scope and media roles (2026-09-27)
+
+`server_config` now has nullable `provider_library_id` and `provider_library_role` columns. Both are required for an Audiobookshelf row and absent for other providers. The role is `audiobook` or `podcast`; each selected upstream library is a distinct configured server. `derive_audiobookshelf_server_id` hashes normalized URL, username, immutable library ID, and role for the portable ID; `server_config.id` remains the machine-local UUID for vault, DB, and provider-cache operations.
+
+`MediaRole` is `Music`, `Audiobook`, or `Podcast` and is serialized in each `SyncedItem` as `mediaRole`. Missing values default to Music for older manifests. `DeviceManifest.audiobook_path` and `.podcast_path` serialize as `audiobookPath` and `podcastPath`; `media_path(role)` falls back to the first managed path when an override is absent. `DesiredItem` and sync add/delete entries preserve role during delta calculation.
+
+The neutral domain adds `PodcastShow { type, id, title, description, coverArtId, episodeCount }`, `PodcastEpisode { type, id, showId, showTitle, title, description, durationSeconds, publishedAt, coverArtId }`, `PodcastShowDetail`, and `PodcastSearchResult`. Books map into existing `Album`/`Song` fields, with `ProviderItemMetadata` carrying stable identity, ordered part IDs, chapter markers, and author/narrator presentation credits. Audiobookshelf IDs encode library, item, media, and part or episode identity; titles and local paths are display data only.
+
+`AutoFillPipeline.podcast_retention` stores the role-specific podcast selection policy with recent count, mode, and selected show IDs. It is ignored for music servers. Playback continuity and verified whole-book mapping are persisted in `playback_book_continuity` and `playback_book_mapping` by `playback/persistence.rs`; ordinary device sync does not write listening progress. See the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) for data flow and evidence boundaries.

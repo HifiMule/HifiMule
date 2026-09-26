@@ -1,12 +1,12 @@
 # HifiMule — Project Overview
 
-**Version:** 0.15.0 | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Deep
+**Version:** 0.15.0 | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep
 
 ---
 
 ## Purpose
 
-HifiMule is a cross-platform desktop music application for self-hosted media libraries. It plays music directly from a connected media server on the computer and synchronizes selected music to legacy portable audio players — primarily iPods running Rockbox firmware, but also any USB MSC device or MTP device.
+HifiMule is a cross-platform desktop application for self-hosted music, audiobook, and podcast libraries. It plays media directly from a connected server and synchronizes selected items to legacy portable audio players — primarily iPods running Rockbox firmware, but also USB MSC and MTP devices.
 
 The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic, and OpenSubsonic manage music libraries with rich metadata, but portable players like Rockbox iPods cannot connect to them directly. HifiMule bridges this gap by letting users browse and listen to that library on their computer, manage a listening queue, then curate a "basket" of albums/playlists/artists and copy them to a device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports played tracks back through the active provider when that provider supports scrobbling.
 
@@ -24,21 +24,22 @@ The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic
 
 ## Architecture Overview
 
-HifiMule is a **monorepo** containing two cooperating runtime parts plus a shared i18n crate:
+HifiMule is a **monorepo** containing two cooperating runtime processes and two shared Rust libraries:
 
 ```
 hifimule/
 ├── hifimule-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine
 ├── hifimule-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
-└── hifimule-i18n/       Shared translation catalog crate
+├── hifimule-i18n/       Shared translation catalog crate
+└── hifimule-lifecycle/  Shared process ownership and launch contract
 ```
 
-The UI is a thin shell. All business logic lives in the daemon. The UI communicates exclusively with the daemon via **JSON-RPC 2.0 over HTTP on `localhost:19140`**.
+The UI is a thin shell. All business logic lives in the daemon. The UI communicates through native Tauri commands with a bearer-authenticated daemon on an available loopback port published in the private lifecycle owner descriptor.
 
 The daemon keeps legacy `jellyfin_*` RPC names for compatibility with older UI code, but active non-Jellyfin connections are routed through the provider layer. New browse features use explicit provider-neutral `browse.*` RPCs and render only the modes advertised by the active provider's capabilities.
 
 The Tauri shell is responsible for:
-- Launching the daemon (as sidecar, Windows Service, or detecting a running instance)
+- Coordinating daemon startup or attachment through the shared lifecycle contract
 - Proxying JSON-RPC calls from the WebView (to bypass browser mixed-content restrictions)
 - Proxying provider cover-art requests (to base64 data URLs)
 
@@ -51,7 +52,7 @@ The Tauri shell is responsible for:
 | Daemon language | Rust 1.93+ (MSRV 1.93.0) |
 | Async runtime | Tokio (multi-thread) |
 | HTTP server | Axum 0.8 |
-| Provider abstraction | `MediaProvider` trait + Jellyfin/Subsonic/OpenSubsonic adapters |
+| Provider abstraction | `MediaProvider` trait + Jellyfin/Subsonic/OpenSubsonic/Audiobookshelf adapters |
 | Audio playback | FFmpeg 9 decoding, CPAL audio output, Souvlaki native media controls |
 | Database | SQLite via rusqlite (bundled) |
 | Keyring | `keyring` crate (OS credential store) |
@@ -63,6 +64,7 @@ The Tauri shell is responsible for:
 | Build tool | Vite 6 |
 | UI component library | Shoelace 2.19.1 |
 | Shared localization | `hifimule-i18n` crate (English, French, Spanish, German) |
+| Shared lifecycle | `hifimule-lifecycle` crate (OS locks, private descriptor, authenticated health, startup/Quit generation) |
 | Packaging | Tauri bundler (DMG, .deb, .exe WiX/NSIS) |
 
 ---
@@ -99,11 +101,19 @@ The Tauri shell is responsible for:
 - The daemon lazily connects provider instances on first use and caches them by machine-local server UUID
 - Playlist creation, rename, delete, add/remove tracks, and reorder are routed through provider capabilities for Jellyfin and Subsonic-compatible servers
 
+### Audiobookshelf Books and Podcasts
+- Discovery authenticates in the daemon, offers accessible libraries, and commits one Books or Podcasts library as a separate scoped server
+- Books browse as albums and ordered audio-file parts, with Authors, Series, and Collections; podcasts browse as Shows, Recent Episodes, and individual episodes
+- Direct book and episode playback uses the daemon session. Book progress is player-owned and verified against current part timing before write-back
+- Basket and manifest keep media roles. Optional `audiobookPath` and `podcastPath` keep device folders distinct; role-aware auto-fill includes podcast retention settings
+- See the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) for code paths and current boundaries
+
 ### Provider-Neutral Browse
-- Server probing detects Jellyfin, Subsonic, and OpenSubsonic-compatible servers before login
+- Server probing detects Jellyfin, Subsonic, OpenSubsonic-compatible, and Audiobookshelf servers before login
 - Browse modes are capability-driven: artists, albums, playlists, genres, recently added, frequently played, recently played, and favorites are shown only when the active provider supports them
 - Navidrome/OpenSubsonic history modes use server-provided newest/frequent/recent ordering; classic Subsonic hides unsupported history modes instead of synthesizing misleading data
 - Favorites are browsed hierarchically as favorite artists, albums, and tracks while preserving basket semantics for direct favorites and scoped favorite groups
+- Audiobookshelf modes are scoped by selected library role; Books and Podcasts have distinct models and UI flows
 
 ### Auto-sync on connect
 - If enabled per device, the daemon triggers a full sync automatically when the device is plugged in (no UI required)
@@ -131,6 +141,7 @@ The Tauri shell is responsible for:
 | SQLite DB | Same app data dir as `config.json` | `devices`, `scrobble_history`, `server_config`, `autofill_history`, `autofill_rotation`, and `autofill_pity` tables |
 | `device-profiles.json` | Same app data dir | Available transcoding profiles (seeded from embedded asset) |
 | `playback.json` | Same app data dir | Selected audio-output preference and playback configuration |
+| `runtime/` | Same app data dir | Private lifecycle locks, owner descriptor, launch generation/tickets, and UI activation mailbox |
 | Browser `localStorage` | Tauri WebView | Basket state (session persistence) |
 
 ---
@@ -147,4 +158,4 @@ The Tauri shell is responsible for:
 
 ## Project Status
 
-Active development (v0.15.0). Core sync, desktop playback, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization, and Jellyfin/Subsonic/OpenSubsonic media-server support are implemented.
+Active development (v0.15.0). Core sync, desktop playback, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization and lifecycle, and Jellyfin/Subsonic/OpenSubsonic/Audiobookshelf support are implemented. Audiobookshelf installed-app playback evidence remains distinct from controlled-server transport observations.

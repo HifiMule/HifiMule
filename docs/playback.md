@@ -1,21 +1,25 @@
 # HifiMule Playback Guide
 
-**Last Updated:** 2026-09-20 | **Version:** 0.15.0
+**Last Updated:** 2026-09-27 | **Version:** 0.15.0
 
 ## What playback adds
 
-HifiMule is now both a desktop player for a self-hosted music library and a sync tool for portable players. It follows an iTunes-like flow: browse music from a configured server, listen on the computer, organize what is next, then sync chosen music to a device when wanted.
+HifiMule is a desktop player for self-hosted music, audiobooks, and podcasts, and a sync tool for portable players. Browse a configured server, listen on the computer, organize what is next, then sync chosen media to a device when wanted.
 
 Playback does not download a second library or turn the WebView into an audio engine. The daemon streams from the configured provider, decodes audio locally, and owns the listening session even when the main window is closed.
 
 ## Listening from the library
 
 - **Play an album** to start its tracks in album order.
+- **Play a playlist or Audiobookshelf Series/Collection** to start its resolved tracks in source order.
+- **Play an Audiobookshelf book** as its ordered audio-file parts, or **play a podcast episode** from a scoped Podcasts library.
 - **Preview a track** to audition it without discarding the current album or queue.
 - **Add to queue** to place a track in the upcoming listening order.
 - Use the floating playback bar from library screens, or open the **Playback** destination for the full queue and history view.
 
 The main session and a preview are intentionally different. Starting a preview checkpoints the main session; a completed preview, an explicit return, or a safe restoration can resume the interrupted session. Starting ordinary playback replaces the listening context.
+
+Audiobookshelf Book progress is owned by the player. The daemon verifies current whole-book timing and identity before writing progress; device sync does not update listening progress. Podcast episodes use a dedicated episode browse model and `playback.playEpisode` entry point. Direct MP3 and AAC/MP4 streams are seek candidates only after authenticated range, container, and decoder checks. HLS/transcode responses are outside the direct byte-stream path. See the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) and [controlled integration contract](./audiobookshelf-integration-contract.md) for precise evidence limits.
 
 ## Controls and outputs
 

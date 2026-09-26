@@ -5,18 +5,19 @@
 <h1 align="center">HifiMule</h1>
 
 <p align="center">
-  Play music from your open source media servers and sync your library to portable devices — DAPs, iPods with Rockbox, USB players, and more.
+  Play music, audiobooks, and podcasts from your media servers and sync them to portable devices — DAPs, iPods with Rockbox, USB players, and more.
 </p>
 
 ---
 
-HifiMule is a desktop application that bridges open source media servers and portable music players — from legacy mass-storage MP3 players to modern DAPs, MTP phones, and Garmin smartwatches. It supports [Jellyfin](https://jellyfin.org/) and Subsonic-compatible servers such as [Navidrome](https://www.navidrome.org/), and can manage several servers at once. Browse your library, listen directly on your computer, preview tracks, and manage your playback queue. Pick what you want (or let auto-fill do it for you) and sync it to your device with delta transfers and resume support. Runs on Windows and macOS.
+HifiMule is a desktop application that bridges self-hosted media servers and portable players — from legacy mass-storage MP3 players to modern DAPs, MTP phones, and Garmin smartwatches. It supports [Jellyfin](https://jellyfin.org/), Subsonic-compatible servers such as [Navidrome](https://www.navidrome.org/), and [Audiobookshelf](https://audiobookshelf.org/) Books and Podcasts libraries. Browse, listen directly on your computer, manage a playback queue, then sync selected media to a device with delta transfers and resume support. Runs on Windows, macOS, and Linux.
 
 ## Features
 
-- **Multi-server hub** — Connect several media servers (any mix of Jellyfin, Subsonic, and Navidrome), name them, give them custom icons, and switch with a click. Your basket can hold music from multiple servers at once, syncing each item back to where it came from.
-- **Rich library browsing** — Nine browse modes: Artists, Albums, Playlists, Tracks, Genres, Recently Added, Frequently Played, Recently Played, and Favorites. Switch between grid and list views with an A–Z jump strip for large collections.
+- **Multi-server hub** — Connect Jellyfin, Subsonic/Navidrome, and individual Audiobookshelf Books or Podcasts libraries; name them, give them icons, and switch with a click. Basket items retain their source server.
+- **Rich library browsing** — Provider-specific modes include music Artists, Albums, Playlists, Tracks, Genres, history and Favorites; Audiobookshelf Books and Authors, Series and Collections; and Podcast Shows and Recent Episodes.
 - **Built-in audio playback** — Play albums directly from your media server on your computer, with pause/resume, previous/next, seeking, and audio output selection.
+- **Audiobooks and podcasts** — Play ordered book parts, podcast episodes, and playlists; sync Books and Podcasts with separate device folders and role-aware auto-fill policies.
 - **Track previews** — Preview a track while browsing, then return to your listening session.
 - **Playback queue** — Add tracks to the queue, view listening history and upcoming tracks, and reorder or remove upcoming tracks.
 - **Multi-select** — Tick checkboxes (or Ctrl/Cmd-click and Shift-click for ranges) to add many items to your basket or a playlist in one action.
@@ -69,14 +70,18 @@ This software was developed with the assistance of AI and the BMAD Method. As an
 
 ## Architecture
 
-```
-┌─────────────┐      JSON-RPC 2.0       ┌─────────────────┐      HTTP      ┌─────────────────────────┐
-│  Tauri UI   │ ◄──────────────────────►│  Rust Daemon    │ ◄────────────► │ Jellyfin / Navidrome /  │
-│  (Desktop)  │    127.0.0.1:19140      │  (System Tray)  │                │ Subsonic (one or more)  │
-└─────────────┘                         └─────────────────┘                └─────────────────────────┘
+```text
+Tauri UI (WebView + native shell)
+    │ JSON-RPC 2.0 via authenticated loopback
+    ▼
+Rust daemon (playback, sync, providers, system tray)
+    ├── HTTP/HTTPS → Jellyfin, Subsonic/OpenSubsonic, Audiobookshelf
+    └── MSC/MTP    → portable devices
 ```
 
-Two-process design: the daemon handles audio playback alongside sync, provider, and device operations while the UI is a detachable Tauri window. A pluggable provider layer abstracts Jellyfin and Subsonic-compatible servers, and a server manager keeps multiple configured servers with a stable identity that travels with your devices. The daemon continues working even if the UI is closed, with an idle memory footprint under 10 MB.
+Two-process design: the daemon handles audio playback alongside sync, provider, and device operations while the UI is a detachable Tauri window. A pluggable provider layer abstracts Jellyfin, Subsonic-compatible servers, and Audiobookshelf. The shared lifecycle library coordinates one daemon and one UI per profile and publishes the daemon's available loopback port in a private owner descriptor. Portable server identities travel with your devices.
+
+For code and feature maps, start with the [project documentation index](docs/index.md). The [Audiobookshelf implementation map](docs/audiobookshelf-implementation.md) covers Books and Podcasts behavior and boundaries.
 
 ## Tech Stack
 
@@ -87,6 +92,7 @@ Two-process design: the daemon handles audio playback alongside sync, provider, 
 | Devices | Mass-storage (USB), MTP via libmtp |
 | UI | TypeScript, Tauri 2, Vite, Shoelace web components |
 | i18n | Shared `hifimule-i18n` catalog crate (en, fr, es, de) |
+| Lifecycle | Shared `hifimule-lifecycle` crate for daemon/UI ownership and authenticated local discovery |
 | Communication | JSON-RPC 2.0 over HTTP |
 | Credentials | Machine-bound encrypted vault (ChaCha20-Poly1305) |
 | Build | Cargo workspaces, npm scripts, Tauri bundler |
@@ -199,13 +205,14 @@ HifiMule/
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss changes before submitting a PR.
-As I'm mostly using Windows as the development platform for HifiMule, I'm looking for feedback from Linux or Mac users.
+As I'm mostly using Windows and Mac OS for the development of HifiMule, I'm looking for feedback from Linux users.
 I'm also looking for feedback from owners of various devices, as my collection is quite limited.
 
 ## Acknowledgements
 
 - [Jellyfin](https://jellyfin.org/) — Free software media server
 - [Navidrome](https://www.navidrome.org/) — Open source music server, Subsonic-compatible
+- [Audiobookshelf](https://audiobookshelf.org/) - Self-hosted audiobook and podcast server
 - [Tauri](https://tauri.app/) — Build desktop apps with web tech and Rust
 - [Shoelace](https://shoelace.style/) — Web component library
 - [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - Breakthrough Method for Agile Ai Driven Development

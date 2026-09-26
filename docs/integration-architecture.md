@@ -1,372 +1,46 @@
 # HifiMule — Integration Architecture
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Exhaustive
+**Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
 
----
+## Runtime map
 
-## Overview
-
-HifiMule consists of two cooperating processes that run on the same machine. They communicate over a local HTTP connection using JSON-RPC 2.0.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Tauri 2 Desktop Shell (hifimule-ui)                    │
-│  ┌───────────────────────────────────┐                      │
-│  │  WebView (TypeScript / Shoelace)  │                      │
-│  │  - library.ts                     │                      │
-│  │  - BasketSidebar.ts               │                      │
-│  │  - rpc.ts: invoke('rpc_proxy')    │                      │
-│  └───────────────────────────────────┘                      │
-│           │ Tauri invoke IPC (rpc_proxy / image_proxy)      │
-│  ┌────────▼──────────────────────────┐                      │
-│  │  src-tauri/lib.rs                 │                      │
-│  │  - rpc_proxy command              │──── HTTP POST ──────►│
-│  │  - image_proxy command            │                      │
-│  └───────────────────────────────────┘                      │
-└────────────────────────────────────────────────────────────┬┘
-                                                             │
-                                                     localhost:19140
-                                                             │
-┌────────────────────────────────────────────────────────────▼┐
-│  Daemon (hifimule-daemon)                                │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  Axum HTTP Server (rpc.rs)                            │  │
-│  │  POST / → JSON-RPC 2.0 dispatch                      │  │
-│  │  GET /jellyfin/image/:id → provider-aware image proxy │  │
-│  └──────────────┬────────────────────────────────────────┘  │
-│                 │                                            │
-│  ┌──────────────▼────────────────────────────────────────┐  │
-│  │  AppState                                             │  │
-│  │  - JellyfinClient (legacy/direct Jellyfin API path)   │  │
-│  │  - provider (MediaProvider: Jellyfin/Subsonic/etc.)   │  │
-│  │  - DeviceManager (DeviceManifest + DeviceIO)          │  │
-│  │  - DatabaseHandle (SQLite via rusqlite)               │  │
-│  │  - SyncOperationManager                               │  │
-│  │  - size_cache (RwLock<HashMap>)                       │  │
-│  │  - last_connection_check (Mutex, 5s cache)            │  │
-│  │  - last_scrobbler_result (RwLock<Option>)             │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                                                              │
-│  Background tasks:                                           │
-│  - MSC device observer (1s polling, filesystem)             │
-│  - MTP device observer (3s polling, WPD/libmtp)             │
-│  - Sync executor (tokio::spawn, per-sync background task)   │
-│  - Playback session owner (FFmpeg decode → CPAL output)      │
-└──────────────────────────────────────────────────────────────┘
-                        │
-               ┌────────▼─────────┐
-               │ Media Server     │
-               │ Jellyfin /       │
-               │ Subsonic /       │
-               │ OpenSubsonic     │
-               └──────────────────┘
+```text
+WebView (TypeScript) → Tauri invoke → native Tauri shell
+                                      │ hifimule-lifecycle: owner descriptor + token
+                                      ▼
+                       loopback JSON-RPC / image route
+                                      ▼
+                   Rust daemon: RPC, playback, sync, SQLite
+                         ├─ MediaProvider → Jellyfin / Subsonic / Audiobookshelf
+                         └─ DeviceIO → MSC filesystem / WPD or libmtp MTP
 ```
 
----
+The two processes share `hifimule-lifecycle` as a Rust dependency, and the daemon shares `hifimule-i18n` with the UI's direct catalog import. The WebView calls `rpc_proxy` and `image_proxy`; the native shell performs HTTP on its behalf because the release WebView origin cannot directly fetch loopback HTTP as mixed content.
 
-## IPC: UI ↔ Daemon
+## Ownership before requests
 
-### Why not direct fetch?
+The daemon holds `runtime/owner.lock` and publishes a private owner descriptor after readiness. It binds an available `127.0.0.1` port, rather than the historical fixed port. The descriptor contains the port, instance ID, protocol version, launch generation, and bearer token. The Tauri shell reads it, authenticates `daemon.health`, and binds its startup epoch to that owner. Every RPC and image request uses the verified owner and token. If the owner changes during a request, the UI rejects the stale result. Port `19140` is reserved only as a legacy-daemon collision check during startup.
 
-Tauri 2 in release mode serves the WebView from `https://tauri.localhost`. A direct `fetch()` to `http://localhost:19140` is blocked by the browser as mixed-content. Instead, all calls go through a Tauri IPC command (`invoke`), which Rust handles and proxies to the daemon over plain HTTP from the Rust process.
+The shared library also coordinates generation-bound launch tickets, explicit Quit fencing, private runtime files, and one UI per profile. A duplicate UI uses an activation mailbox to focus the existing window. See [Lifecycle Architecture](./architecture-hifimule-lifecycle.md).
 
-### RPC Proxy
+## JSON-RPC and image flow
 
-```typescript
-// ui: src/rpc.ts
-export async function rpcCall(method: string, params: any = {}): Promise<any> {
-    return await invoke('rpc_proxy', { method, params });
-}
-```
+The native proxy posts JSON-RPC 2.0 requests to the descriptor port at `/` and returns the `result` value. Errors retain `code`, `message`, and optional `data`; the TypeScript wrapper turns them into `RpcError` and emits an unauthorized event for affected browse calls. `get_daemon_state` hydrates the UI's owner binding. The image proxy sends an authenticated `GET /jellyfin/image/:id` request and returns a data URL; the route name remains for compatibility while the daemon resolves current-provider artwork.
 
-```rust
-// ui: src-tauri/src/lib.rs
-#[tauri::command]
-async fn rpc_proxy(method: String, params: serde_json::Value) -> Result<serde_json::Value, String> {
-    // Constructs JSON-RPC 2.0 body, POSTs to http://127.0.0.1:19140
-    // Extracts result or surfaces error.message
-}
-```
+See [API Contracts](./api-contracts-hifimule-daemon.md) for method names and request shapes. Direct debugging calls require the current descriptor bearer token and should be made against its port. The [Development Guide](./development-guide.md) gives a safe local example.
 
-### Image Proxy
+## Provider and server identity
 
-Cover art images cannot use the same `invoke` path (CSS `background-image` needs a URL or data URL). Instead:
+`ServerManager` loads SQLite server rows and lazily instantiates `MediaProvider` adapters. `server_config.id` is a machine-local UUID for DB, vault, and cache operations; `serverId` is deterministic and portable for basket, manifest, playback source, and sync routing. Jellyfin and Subsonic-compatible IDs derive from server identity or URL/user. Audiobookshelf includes selected upstream library ID and `audiobook`/`podcast` role, so Books and Podcasts are separate configured servers.
 
-```typescript
-export async function getImageUrl(id: string, maxHeight?: number, quality?: number): Promise<string> {
-    return await invoke('image_proxy', { id, maxHeight, quality });
-    // Returns: "data:image/jpeg;base64,..."
-}
-```
+Jellyfin, Subsonic/OpenSubsonic/Navidrome, and Audiobookshelf traffic stays daemon-side. Authenticated URLs, credentials, and tokens do not enter the WebView. Provider capabilities decide browse modes and playlist write behavior. Audiobookshelf uses dedicated show/episode models alongside book-as-album mapping; see [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md).
 
-The Rust `image_proxy` command fetches `GET http://127.0.0.1:19140/jellyfin/image/:id` from the daemon. The daemon keeps the route name for compatibility, but if a non-Jellyfin provider is active it resolves cover art through `MediaProvider::cover_art_url`.
+## Playback and sync data flow
 
----
+For playback, the UI sends a source with portable server ID and track/episode ID. The daemon resolves the provider, obtains a playback description, verifies the media representation, decodes through FFmpeg, and sends samples to CPAL. The daemon owns queue state, output selection, continuity, and native media controls. Book progress is player-owned and does not flow through device sync.
 
-## JSON-RPC 2.0 Protocol
+For sync, the UI persists a basket in the selected device manifest. The daemon expands selections through the origin provider, calculates adds/deletes against existing manifest entries, stages media, writes through MSC/MTP `DeviceIO`, and updates the manifest. Media roles choose music, audiobook, or podcast paths. Per-server auto-fill configuration lives in the manifest while runtime history stays in SQLite. The device remains portable because IDs and manifest state are not tied to the machine-local server UUID.
 
-### Request Format
+## Error and test boundaries
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "method_name",
-  "params": { ... },
-  "id": 1
-}
-```
-
-### Response Format (success)
-
-```json
-{
-  "jsonrpc": "2.0",
-  "result": { ... },
-  "id": 1
-}
-```
-
-### Response Format (error)
-
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32003,
-    "message": "No device connected"
-  },
-  "id": 1
-}
-```
-
-### Error Codes
-
-| Code | Constant | Meaning |
-|------|----------|---------|
-| -32001 | `ERR_INVALID_CREDENTIALS` | Auth failed with the active media server |
-| -32002 | `ERR_INVALID_PARAMS` | Missing or invalid request parameters |
-| -32003 | `ERR_CONNECTION_FAILED` | Cannot reach the media server or no device connected |
-| -32004 | `ERR_STORAGE_ERROR` | Database, keyring, or filesystem write failed |
-| -32005 | `ERR_INTERNAL_ERROR` | Unexpected internal error |
-
-### CORS
-
-The Axum server allows requests from `https://tauri.localhost` and `http://localhost:1420` (dev Vite server). This is set via `tower-http` CORS middleware in `rpc.rs`.
-
----
-
-## Daemon ↔ Media Server
-
-The daemon communicates with media servers over HTTP through a provider layer. `JellyfinClient` in `api.rs` still owns the Jellyfin REST client and legacy compatibility path. The `MediaProvider` trait in `providers/mod.rs` normalizes Jellyfin, Subsonic, Navidrome, and OpenSubsonic behavior into common library, artist, album, playlist, song, genre, search, change, download, cover-art, transcoding, and scrobble operations.
-
-### Authentication Flow
-
-1. User enters server URL + credentials in the UI login form.
-2. UI probes the URL with `server.probe` and submits `server.connect` with `serverType: "auto"` unless the user chose a specific type.
-3. The daemon tries Subsonic/OpenSubsonic first for compatible servers, otherwise authenticates with Jellyfin.
-4. The daemon stores URL, server type, username, and server version in SQLite `server_config`; provider secrets live in the OS keyring. The legacy Jellyfin `config.json` path remains for compatibility.
-5. Subsequent browse/sync calls use the active `MediaProvider`. Legacy `jellyfin_*` RPCs fall through to `JellyfinClient` only when the active provider is Jellyfin.
-
-### Key Jellyfin API Calls
-
-| Purpose | Endpoint |
-|---------|----------|
-| Auth | `POST /Users/AuthenticateByName` |
-| Library views | `GET /Users/{userId}/Views` |
-| Browse items | `GET /Items?userId=...&parentId=...` |
-| Item details | `GET /Items/{itemId}` |
-| Item stream URL | `POST /Items/{itemId}/PlaybackInfo` |
-| Download stream | `GET <stream-url-from-PlaybackInfo>` |
-| Report played | `POST /Users/{userId}/PlayedItems/{itemId}` |
-| Image | `GET /Items/{itemId}/Images/Primary` |
-| Search | `GET /Items?SearchTerm=...` |
-
-### Key Subsonic/OpenSubsonic API Calls
-
-| Purpose | Endpoint |
-|---------|----------|
-| Probe/auth | `GET /rest/ping.view` |
-| Artists | `GET /rest/getArtists.view`, `GET /rest/getArtist.view` |
-| Albums | `GET /rest/getAlbumList2.view`, `GET /rest/getAlbum.view` |
-| Songs | `GET /rest/getSong.view`, `GET /rest/search3.view` |
-| Playlists | `GET /rest/getPlaylists.view`, `GET /rest/getPlaylist.view` |
-| Genres | `GET /rest/getGenres.view`, `GET /rest/getSongsByGenre.view` |
-| Favorites | `GET /rest/getStarred2.view` |
-| Downloads/streams | `GET /rest/download.view`, `GET /rest/stream.view` |
-| Cover art | `GET /rest/getCoverArt.view` |
-| Scrobble | `GET /rest/scrobble.view` |
-
-OpenSubsonic-capable servers expose additional reliable history semantics. HifiMule advertises `recentlyAdded`, `frequentlyPlayed`, and `recentlyPlayed` only when provider capabilities say those modes are reliable.
-
----
-
-## Daemon ↔ Device
-
-### Device Detection
-
-Two concurrent polling loops run in background tasks:
-
-| Observer | Interval | Protocol |
-|----------|----------|----------|
-| MSC observer (`run_observer`) | 1 second | Scans OS mount points; checks for `.hifimule.json` |
-| MTP observer (`run_mtp_observer`) | 3 seconds | Polls WPD (Windows) or libmtp (Unix) for connected MTP devices |
-
-When a device is detected:
-1. Check if a `.hifimule.json` manifest exists at the device root
-2. If yes: load manifest → add to `connected_devices` HashMap → notify UI via `DaemonState`
-3. If no: add to `unrecognized_device` pending slot → UI shows "Initialize" banner
-
-### DeviceManifest Location
-
-```
-<device-root>/
-└── .hifimule.json      DeviceManifest — source of truth for sync state
-```
-
-### DeviceIO Abstraction
-
-All device I/O goes through the `DeviceIO` async trait:
-
-```rust
-#[async_trait]
-pub trait DeviceIO: Send + Sync {
-    async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
-    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
-    async fn delete_file(&self, path: &str) -> Result<()>;
-    async fn create_dir(&self, path: &str) -> Result<()>;
-    async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
-    async fn file_exists(&self, path: &str) -> Result<bool>;
-}
-```
-
-Two implementations:
-- **`MscBackend`**: standard `std::fs` + write-temp-rename atomicity
-- **`MtpBackend`**: wraps an `Arc<dyn MtpHandle>` in `spawn_blocking` for sync-to-async bridging
-
----
-
-## UI State Management
-
-The UI has no global state store framework. State is managed at two levels:
-
-### `BasketStore` (singleton, `state/basket.ts`)
-
-- Holds the collection of items selected for sync
-- Backed by `localStorage` for session persistence
-- Syncs to daemon via `manifest_save_basket` (debounced 1s write)
-- Hydrates from daemon's `manifest_get_basket` when a device connects
-- Emits `CustomEvent('update')` for all subscribers
-
-### `BasketSidebar` (component, owns UI refresh lifecycle)
-
-- Polls `get_daemon_state` every **2 seconds** to detect:
-  - New device connected / disconnected
-  - Active sync operation (attach to progress)
-  - Dirty manifest flag
-  - Multi-device changes
-- Polls `sync_get_operation_status` every **500ms** during an active sync
-- `StatusBar` polls `get_daemon_state` every **3 seconds** independently via direct fetch (not invoke, because it was written before the mixed-content constraint was fully appreciated)
-
-### Playback flow
-
-Playback uses the same Tauri RPC proxy as browse and sync; audio bytes never enter the WebView. The UI requests a session mutation, then renders the authoritative snapshot returned by `playback.getSession`.
-
-```
-User chooses Play, Preview, Queue, transport, seek, or output
-        │
-        ▼
-UI component → rpc_proxy → daemon playback.* JSON-RPC
-        │
-        ▼
-PlaybackSession serializes admission and validates session/generation identity
-        │
-        ├─ Resolve authenticated stream via MediaProvider
-        ├─ FFmpeg decodes and resamples the stream
-        ├─ CPAL writes frames to the selected system output
-        └─ Persist authoritative queue/session state in SQLite
-        │
-        ▼
-PlaybackStore refreshes `playback.getSession` → controls and destination repaint
-```
-
-Native media-key commands enter the same daemon command path through Souvlaki. A preview is an audition, not a replacement of the main queue; the daemon checkpoints the main position and can return to it. See [Playback Guide](./playback.md) for the product behavior and [API Contracts](./api-contracts-hifimule-daemon.md) for exact RPC envelopes.
-
-## Provider-Neutral Browse Flow
-
-The current browser does not hard-code server type. On library initialization:
-
-1. `library.ts` calls `browse.listModes`.
-2. The daemon returns `MediaProvider::capabilities().browse.list_modes`.
-3. The UI renders mode buttons for only those modes.
-4. Each mode calls a provider-neutral RPC:
-   - `browse.listArtists` / `browse.getArtist`
-   - `browse.listAlbums` / `browse.getAlbum`
-   - `browse.listPlaylists` / `browse.getPlaylist`
-   - `browse.listGenres` / `browse.getGenre`
-   - `browse.listRecentlyAdded`
-   - `browse.listFrequentlyPlayed`
-   - `browse.listRecentlyPlayed`
-   - `browse.listFavorites` / `browse.listFavoriteItems`
-
-Jellyfin currently advertises the full mode set. OpenSubsonic/Navidrome advertises artists, albums, playlists, genres, favorites, and reliable history modes. Classic Subsonic keeps history modes hidden and returns `UnsupportedCapability` if a hidden mode is called directly.
-
----
-
-## Sync Flow (End-to-End)
-
-```
-User clicks "Start Sync"
-        │
-        ▼
-BasketSidebar.handleStartSync()
-  ├─ Extract manual item IDs from basket
-  ├─ Optionally add autoFill params
-  ├─ rpcCall('sync_calculate_delta', { itemIds, autoFill? })
-  │     │
-  │     ▼ Daemon: handle_sync_calculate_delta
-  │       ├─ Resolve the active provider
-  │       ├─ Expand containers (albums/playlists/artists/favorite groups) → tracks
-  │       ├─ If autoFill and Jellyfin-backed: run_auto_fill() → merge results
-  │       ├─ calculate_delta(desired_items, manifest) → SyncDelta
-  │       └─ Return SyncDelta {adds, deletes, id_changes, playlists}
-  │
-  ├─ rpcCall('sync_execute', { delta })
-  │     │
-  │     ▼ Daemon: handle_sync_execute
-  │       ├─ Generate operation_id (UUID)
-  │       ├─ Mark manifest dirty (pending_item_ids set)
-  │       ├─ tokio::spawn background sync task
-  │       └─ Return { operationId }
-  │
-  ├─ Start 500ms polling: rpcCall('sync_get_operation_status', { operationId })
-  │     │
-  │     ▼ Background sync task (sync.rs: execute_sync)
-  │       ├─ For each ADD: download from active provider → write to device → update manifest
-  │       ├─ For each DELETE: remove file from device → update manifest
-  │       ├─ For each ID_CHANGE: download new → delete old → update manifest
-  │       ├─ Generate M3U playlists
-  │       ├─ Process scrobbles (parse .scrobbler.log → submit through provider)
-  │       └─ Clear dirty flag on success
-  │
-  └─ On status=complete: reset basket dirty flag, show "Sync Complete"
-```
-
----
-
-## Auto-Sync Flow (No UI Required)
-
-```
-Device connected (MSC or MTP observer detects)
-        │
-        ▼
-DeviceManager.handle_device_detected()
-  └─ Check db.get_device_mapping().auto_sync_on_connect == true
-        │
-        ▼
-main.rs: run_auto_sync()
-  ├─ Load manifest (basket_items as desired_items)
-  ├─ Resolve desired sync items through the active provider
-  ├─ calculate_delta()
-  ├─ execute_sync() (same as manual sync)
-  └─ send_sync_complete_notification() → OS desktop notification
-```
+Lifecycle failures use stable codes from `hifimule-lifecycle`; provider errors are mapped to JSON-RPC codes and safe UI messages. `hifimule-lifecycle/tests/contract.rs` covers cross-process ownership, while daemon provider and RPC tests cover authenticated discovery and routing. Audiobookshelf controlled-server observations and installed-app evidence have different scopes; consult the [integration contract](./audiobookshelf-integration-contract.md).

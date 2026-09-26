@@ -1,6 +1,6 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-09-17 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep
 
 ---
 
@@ -50,6 +50,7 @@ hifimule/
 ├── Cargo.toml                 Cargo workspace root
 ├── hifimule-daemon/       Rust backend
 ├── hifimule-i18n/         Shared localization crate
+├── hifimule-lifecycle/    Shared daemon/UI ownership and launch contract
 └── hifimule-ui/           Tauri 2 + TypeScript frontend
 ```
 
@@ -133,12 +134,18 @@ rtk npm run build:daemon -- test -p hifimule-daemon
 rtk npm run build:daemon -- test -p hifimule-daemon --lib db::tests
 rtk npm run build:daemon -- test -p hifimule-daemon auto_fill
 rtk npm run build:daemon -- test -p hifimule-daemon providers::subsonic
+rtk npm run build:daemon -- test -p hifimule-daemon providers::audiobookshelf
+
+# Shared native lifecycle and localization contracts
+rtk cargo test -p hifimule-lifecycle
+rtk cargo test -p hifimule-i18n
 
 # With output (for debugging)
 rtk npm run build:daemon -- test -p hifimule-daemon -- --nocapture
 ```
 
 Tests in `api.rs` and `providers/*` use `mockito` (HTTP mock server). Tests in `db.rs` use in-memory SQLite. No external services are required for automated tests.
+Audiobookshelf's offline contract fixture test is `hifimule-daemon/tests/audiobookshelf_contract.rs`; UI Book/Podcast browse and policy tests are in `hifimule-ui/tests/`. Controlled-server observations in `docs/audiobookshelf-integration-contract.md` are separate from automated offline tests.
 
 ---
 
@@ -151,11 +158,8 @@ the private FFmpeg runtime remains available to the process:
 # Start daemon (interactive mode with system tray)
 rtk npm run build:daemon -- run -p hifimule-daemon
 
-# The daemon listens on localhost:19140
-# Test it with:
-curl -X POST http://localhost:19140 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"get_daemon_state","params":{},"id":1}'
+# The daemon binds an available loopback port. The current port and bearer
+# token are in the private <app-data>/runtime/owner.json descriptor.
 ```
 
 ---
@@ -305,17 +309,7 @@ SELECT COUNT(*) FROM scrobble_history;
 
 ### RPC Direct Calls
 
-```bash
-# Check daemon state
-curl -s -X POST http://localhost:19140 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"get_daemon_state","params":{},"id":1}' | python3 -m json.tool
-
-# List transcoding profiles
-curl -s -X POST http://localhost:19140 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"device_profiles.list","params":{},"id":1}' | python3 -m json.tool
-```
+Direct calls require the current private `owner.json` descriptor: POST JSON-RPC 2.0 to `http://127.0.0.1:<port>/` with `Authorization: Bearer <token>`. The descriptor is under the app-data `runtime/` folder returned by `hifimule_lifecycle::resolve_app_data_dir()`. Treat its token as a local secret; do not paste it into logs or issue reports. The Tauri `rpc_proxy` is the normal development path and verifies owner identity automatically. `daemon.health` also reports `protocolVersion` and `instanceId` for checking that a response came from the observed owner.
 
 ---
 
@@ -328,7 +322,7 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
-No `.github/workflows` files are present in this checkout. See `docs/release-guide.md` for the documented manual release workflow and artifact checklist.
+CI workflows are present at `.github/workflows/build.yml`, `release.yml`, and `smoke-test.yml`. See [Release Guide](./release-guide.md) for packaging and artifact checks.
 
 ---
 
@@ -353,16 +347,9 @@ WebKitGTK, libsoup, xdo, and librsvg development metadata, while the AppImage
 tooling may require the FUSE 2 runtime. The Tauri wrapper checks the metadata
 before starting a long release build and prints the exact missing modules.
 
-### Daemon port 19140 already in use
+### Legacy endpoint occupied
 
-Another instance of the daemon is running. Kill it:
-```bash
-# macOS/Linux
-pkill hifimule-daemon
-# or
-lsof -i :19140
-kill <pid>
-```
+The current daemon selects an available loopback port. It checks `127.0.0.1:19140` at startup only to detect an older HifiMule daemon or another process occupying that historical endpoint. Close the older daemon, then retry startup. For a current daemon, inspect its private owner descriptor and `daemon.health` instead of assuming port `19140`.
 
 ### Device not detected
 

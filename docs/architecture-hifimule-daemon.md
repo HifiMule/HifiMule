@@ -1,387 +1,45 @@
 # HifiMule Daemon — Architecture
 
-**Part:** `hifimule-daemon` | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-20 | **Scan depth:** Exhaustive
-
----
-
-## Process Architecture
-
-The daemon is a single-process Rust binary. Due to macOS requiring the main thread for GUI event loops, the architecture separates concerns:
-
-```
-OS Main Thread
-  ├─ (macOS) tao event loop for system tray
-  └─ start_daemon_core() ──► Spawns background OS thread
-                                  └─ Tokio multi-thread runtime
-                                       ├─ Axum HTTP server (port 19140)
-                                       ├─ MSC device observer loop (1s polling)
-                                       ├─ MTP device observer loop (3s polling)
-                                       └─ Auto-sync spawner (on device connect)
-```
-
-`start_daemon_core()` returns an `Arc<AtomicBool>` shutdown flag and a `watch::Receiver<DaemonState>` channel that the tray icon listener subscribes to for updating the tray menu.
-
-### DaemonState Enum
-
-```rust
-enum DaemonState {
-    Idle,
-    Syncing,
-    Error,
-    DeviceRecognized { name: String, profile_id: String },
-    DeviceConnected(String),
-    DeviceDisconnected,
-}
-```
-
-Transitions are published via `tokio::sync::watch::Sender<DaemonState>` stored in `AppState.state_tx`.
-
----
-
-## AppState
-
-The central state object, wrapped in `Arc<AppState>` and shared across all Axum route handlers:
-
-```rust
-pub struct AppState {
-    pub jellyfin_client: JellyfinClient,
-    pub provider: Arc<RwLock<Option<Arc<dyn MediaProvider>>>>,
-    pub server_type: Arc<RwLock<Option<String>>>,
-    pub device_manager: Arc<DeviceManager>,
-    pub db: DatabaseHandle,
-    pub sync_operation_manager: Arc<SyncOperationManager>,
-    pub last_scrobbler_result: RwLock<Option<ScrobblerResult>>,
-    pub last_connection_check: Mutex<Option<(Instant, bool)>>,  // 5s cache
-    pub size_cache: RwLock<HashMap<String, u64>>,               // item size cache
-    pub state_tx: watch::Sender<DaemonState>,
-}
-```
-
----
-
-## RPC Server (`rpc.rs`)
-
-- **Axum 0.8** HTTP server bound to `0.0.0.0:19140`
-- Single `POST /` handler dispatches on `method` field
-- `GET /jellyfin/image/:id` proxies cover art through Jellyfin or the active provider
-- CORS allows `https://tauri.localhost` and `http://localhost:1420`
-
-### Method Dispatch
-
-| Category | Methods |
-|----------|---------|
-| Server/Auth | `server.probe`, `server.connect`, `server.logout`, `test_connection`, `login`, `save_credentials`, `get_credentials` |
-| Daemon | `daemon.health`, `get_daemon_state` |
-| Device setup | `device_initialize`, `device_set_auto_sync_on_connect`, `device.set_transcoding_profile`, `device.select`, `device.list` |
-| Device info | `device_get_storage_info`, `device_list_root_folders`, `set_device_profile` |
-| Provider-neutral browse | `browse.listModes`, `browse.listArtists`, `browse.getArtist`, `browse.listAlbums`, `browse.getAlbum`, `browse.listPlaylists`, `browse.getPlaylist`, `browse.listGenres`, `browse.getGenre`, `browse.listRecentlyAdded`, `browse.listFrequentlyPlayed`, `browse.listRecentlyPlayed`, `browse.listFavorites`, `browse.listFavoriteItems` |
-| Legacy Jellyfin-compatible browse | `jellyfin_get_views`, `jellyfin_get_items`, `jellyfin_get_item_details`, `jellyfin_get_item_counts`, `jellyfin_get_item_sizes` |
-| Manifest | `manifest_get_basket`, `manifest_save_basket`, `manifest_get_discrepancies`, `manifest_prune`, `manifest_relink`, `manifest_clear_dirty` |
-| Sync | `sync_get_device_status_map`, `sync_calculate_delta`, `sync_detect_changes`, `sync_execute`, `sync_get_operation_status`, `sync_get_resume_state`, `sync.setAutoFill` |
-| Auto-fill | `basket.autoFill` |
-| Playback | `playback.getSession`, `playback.applySession`, `playback.playAlbum`, `playback.previewTrack`, `playback.control`, `playback.seek`, `playback.listOutputs`, `playback.selectOutput`, `playback.listOccurrences`, `playback.describeOccurrences`, `playback.retryRestore` |
-| Scrobbler | `scrobbler_get_last_result` |
-| Transcoding | `device_profiles.list` |
-
----
-
-## Provider Layer (`providers/`)
-
-The daemon's media-server boundary is the `MediaProvider` trait. It exists so sync, browse, scrobbling, cover art, and downloads do not call server-specific APIs directly.
-
-```rust
-#[async_trait]
-pub trait MediaProvider: Send + Sync {
-    async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
-    async fn list_artists(&self, library_id: Option<&str>, letter: Option<&str>, offset: u32, limit: u32) -> Result<(Vec<Artist>, u32), ProviderError>;
-    async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError>;
-    async fn list_albums(&self, library_id: Option<&str>, letter: Option<&str>, offset: u32, limit: u32) -> Result<(Vec<Album>, u32), ProviderError>;
-    async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError>;
-    async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError>;
-    async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistWithTracks, ProviderError>;
-    async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
-    async fn download_url(&self, song_id: &str, profile: Option<&TranscodeProfile>) -> Result<String, ProviderError>;
-    async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError>;
-    async fn changes_since_with_context(&self, token: Option<&str>, context: &ProviderChangeContext) -> Result<Vec<ChangeEvent>, ProviderError>;
-    async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
-    fn capabilities(&self) -> Capabilities;
-}
-```
+**Part:** `hifimule-daemon` | **Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
 
-### Implementations
-
-| Provider | File | Notes |
-|----------|------|-------|
-| Jellyfin | `providers/jellyfin.rs` | Wraps `JellyfinClient`, maps Jellyfin DTOs to provider-domain models, supports full browse mode set and Jellyfin change feed |
-| Subsonic/OpenSubsonic | `providers/subsonic.rs` | Signed Subsonic REST URLs, URL/error sanitization, Navidrome/OpenSubsonic detection, genres/favorites/history modes, album-level change fallback |
-
-`providers::connect()` uses `ServerTypeHint::Auto`, `Jellyfin`, or `Subsonic`. Auto mode tries Subsonic/OpenSubsonic first because compatible servers expose `/rest/ping.view`, then falls back to Jellyfin authentication.
-
-### Provider Capabilities
-
-The UI does not decide which server supports which browse surface. `Capabilities` advertises:
+## Process model
 
-- `open_subsonic`
-- `supports_changes_since`
-- `supports_server_transcoding`
-- `browse.list_modes`
+`src/main.rs` owns the interactive daemon process, tray event loop, startup and Quit coordination, device observers, and auto-sync. A background OS thread runs the Tokio runtime so the native event loop can stay on the required main thread. Windows service behavior is in `service.rs`. `hifimule-lifecycle` establishes one daemon owner per app-data profile through an OS lock, validates generation-bound launch tickets, and publishes a private descriptor only after readiness. The daemon binds `127.0.0.1` on an available port; the descriptor supplies that port and a bearer token. Port `19140` is checked only to reject a concurrently running legacy daemon or another occupant.
 
-Classic Subsonic exposes only reliable modes. OpenSubsonic/Navidrome exposes recently added, frequently played, and recently played when history support is reliable.
+The current `DaemonState` variants are `Idle`, `Syncing`, `Scanning`, `DeviceFound`, `DeviceRecognized`, and `Error`. Explicit Quit stops new mutations, drains or cancels active work, checkpoints playback, and advances the durable launch generation so older launch attempts cannot revive the daemon. See [Lifecycle Architecture](./architecture-hifimule-lifecycle.md).
 
-## Device Management (`device/mod.rs`)
+## Runtime state and RPC
 
-### DeviceManifest
+`rpc.rs` builds `AppState` around `ServerManager`, SQLite `Database`, `DeviceManager`, `SyncOperationManager`, daemon-owned `PlaybackSession`, state sender, caches, and pending Audiobookshelf setup choices. The manager loads server records from SQLite and connects provider instances lazily. The legacy `JellyfinClient` remains for compatibility paths. Axum exposes JSON-RPC 2.0 at `POST /` and an authenticated provider-aware image route at `GET /jellyfin/image/:id`. Local bearer authentication compares the descriptor token and binds health to the owner instance.
 
-The manifest is the source of truth for all sync state. It lives at `<device-root>/.hifimule.json`:
+The dispatch table contains server setup and management, browse/search, playback, device and destination, sync, manifest, auto-fill, playlist, and legacy Jellyfin-compatible methods. The current method list and selected request shapes are in [API Contracts](./api-contracts-hifimule-daemon.md). The native Tauri proxy forwards structured JSON-RPC errors, including `code` and `data`.
 
-```rust
-pub struct DeviceManifest {
-    pub device_id: String,                      // UUID v4
-    pub version: u32,                           // manifest schema version
-    pub name: Option<String>,                   // human-readable name (40 char max)
-    pub icon: Option<String>,                   // icon key ("usb-drive", "phone-fill", etc.)
-    pub synced_items: Vec<SyncedItem>,          // files confirmed on device
-    pub basket_items: Vec<BasketItem>,          // user's selection for next sync
-    pub managed_paths: Vec<String>,             // folders owned by HifiMule
-    pub playlist_path: Option<String>,          // null = inherit first managed music path
-    pub dirty: bool,                            // true if sync was interrupted
-    pub pending_item_ids: Vec<String>,          // IDs being synced when dirty was set
-    pub auto_fill: AutoFillPrefs,               // auto-fill configuration
-    pub auto_sync_on_connect: bool,
-    pub transcoding_profile_id: Option<String>,
-    pub last_synced_transcoding_profile_id: Option<String>,
-    pub transcoding_profile_dirty: bool,        // true = rewrite matching tracks next sync
-    pub playlists: Vec<PlaylistManifestEntry>,
-    pub storage_id: Option<String>,             // cached MTP storage object ID
-    pub folder_ids: HashMap<String, u32>,        // cached libmtp folder IDs by relative path
-}
-```
+## Provider boundary
 
-### Multi-Device Support
+`providers/mod.rs` defines `MediaProvider`, provider errors, capabilities, playback descriptions, sync media representations, book timing, and library roles. Consumers resolve the selected provider through `ServerManager` or a portable server ID. `domain/models.rs` holds neutral music DTOs plus dedicated `PodcastShow`, `PodcastEpisode`, and search models.
 
-`DeviceManager` maintains a single lock for connected-device map and selected path to avoid torn reads:
-```rust
-connected_devices: HashMap<PathBuf, ConnectedDevice>
-selected_device_path: Option<PathBuf>
-unrecognized_device: RwLock<Option<UnrecognizedDeviceState>>
-```
+| Adapter | Role |
+| --- | --- |
+| `providers/jellyfin.rs` | Jellyfin catalog, playlists, change feed, artwork and streams |
+| `providers/subsonic.rs` | Subsonic/OpenSubsonic/Navidrome catalog, signed requests, playlist and history capabilities |
+| `providers/audiobookshelf.rs` | One selected Books or Podcasts library per configured server; authenticated discovery, catalog, grouping, search, direct playback, sync media, and book progress |
 
-The "current device" concept maps to `selected_device_path` → lookup in `connected_devices`. The `device.select` RPC method changes `selected_device_path`.
+Capabilities decide the modes surfaced by the UI. The Audiobookshelf provider keeps upstream IDs scoped to its selected library and rejects cross-library or changed-role results. The [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) traces this adapter end to end.
 
-### Device Detection
+## Playback
 
-**MSC** (`run_observer`): polls `get_mounts()` every 1s. Per platform:
-- **Windows**: reads registry `HKLM\SYSTEM\MountedDevices` + `GetLogicalDrives`
-- **macOS**: scans `/Volumes/`
-- **Linux**: reads `/proc/mounts`
+`playback/` owns the session, queue/history, persistence, direct HTTP source, FFmpeg decoding, CPAL output routing, native media controls, and seek qualification. UI actions go through `playback.*` RPC methods and the daemon's command service; the WebView is never an audio engine. Book playback uses ordered audio-file parts, verified whole-book timing, and `book_progress.rs` for player-owned progress. Direct MP3 and AAC/MP4 are seek candidates only after transport and decoder qualification; an HLS response is not fed to the byte-stream decoder. See [Playback Guide](./playback.md).
 
-For each mount, checks for `.hifimule.json` to identify managed devices.
+## Device and sync
 
-**MTP** (`run_mtp_observer`): polls every 3s via `enumerate_mtp_devices()`. Platform dispatch:
-- **Windows**: WPD COM API (`IPortableDeviceManager`)
-- **Unix**: libmtp FFI `LIBMTP_Get_Connected_Devices()`
+`device/mod.rs` defines `DeviceManifest`, `BasketItem`, `SyncedItem`, `MediaRole`, and `DeviceManager`. The manifest at the device root (`.hifimule.json`) is authoritative for managed paths, basket, synced files, auto-fill settings, and repair state. `music`, `audiobook`, and `podcast` roles can use separate configured paths; absent role overrides fall back to the primary managed path. The manager tracks multiple connected MSC/MTP devices and a selected destination. Platform MTP implementations live in `device/mtp.rs`; `device_io.rs` abstracts MSC and MTP writes.
 
----
+`sync.rs` expands basket selections, computes a delta against manifest state, stages and transfers media, generates paths and playlists, and records durable results. Book parts and podcast episodes keep role and portable server identity in the plan. Non-music transfers ask the provider for a compatible direct media representation. Transfer staging uses bounded memory rather than holding a full downloaded file in RAM. Interrupted syncs mark the manifest dirty for repair. `auto_fill/` separates provider-bound candidate fetching from a pure pipeline engine; per-server configuration travels on the device, while rotation/history counters live in SQLite.
 
-## MTP Backends (`device/mtp.rs`)
+## Persistent data and trust
 
-### Windows: `WpdHandle`
+`db.rs` initializes and migrates SQLite tables for devices, scrobbles, server configuration, auto-fill runtime history, and book continuity. Server rows contain machine-local UUIDs plus deterministic portable IDs; Audiobookshelf rows additionally retain immutable upstream library ID and role. `api.rs` and `vault.rs` keep media-server credentials in native storage, outside the UI. `hifimule-i18n` provides daemon messages from the shared catalog.
 
-Uses `IPortableDevice` COM interface from WPD (Windows Portable Devices API):
-- Opens a new COM session per operation (session-per-operation pattern for reliability)
-- Garmin devices require a "shell copy" fallback due to WPD quirks
-- `split_path_components()` validates path segments to prevent traversal
+## Build and verification
 
-### Unix: `LibmtpHandle`
-
-Uses FFI to the C `libmtp` library:
-- Wraps a raw `LIBMTP_mtpdevice_t` pointer in a `Mutex` for thread safety
-- `spawn_blocking` used in `MtpBackend` to run blocking calls off the async thread pool
-
----
-
-## DeviceIO Abstraction (`device_io.rs`)
-
-```rust
-#[async_trait]
-pub trait DeviceIO: Send + Sync {
-    async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
-    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
-    async fn delete_file(&self, path: &str) -> Result<()>;
-    async fn create_dir(&self, path: &str) -> Result<()>;
-    async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
-    async fn file_exists(&self, path: &str) -> Result<bool>;
-}
-```
-
-Two production implementations:
-- **`MscBackend`**: `std::fs` operations; write uses `.tmp` → rename atomicity; `check_relative()` guards against path traversal
-- **`MtpBackend`**: wraps `Arc<dyn MtpHandle>`; all calls use `spawn_blocking` for sync→async bridging
-
----
-
-## Sync Engine (`sync.rs`)
-
-### Delta Calculation
-
-```rust
-pub fn calculate_delta(desired: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta
-```
-
-Produces three lists:
-- **`adds`**: items in `desired` not present in `synced_items` by provider item ID (`providerItemId` in the manifest; legacy internal name `jellyfin_id`)
-- **`deletes`**: items in `synced_items` not in `desired`
-- **`id_changes`**: items present by metadata match (name+artist+album) but with changed provider item ID (server re-scanned library)
-
-ID-change detection prevents unnecessary re-downloads when a provider regenerates item IDs.
-
-Provider metadata (`provider_album_id`, `provider_content_type`, `provider_suffix`) is carried through desired items, deltas, and manifest entries. This lets Subsonic/OpenSubsonic change detection compare album membership, content type, suffix, size, and version while preserving the existing manifest format.
-
-### Sync Execution
-
-`execute_sync()` runs as a `tokio::spawn` background task:
-
-1. For each **add**: active provider `download_url()` → stream bytes → `DeviceIO::write_file()` → per-file manifest update
-2. For each **delete**: `DeviceIO::delete_file()` → manifest update
-3. For each **id_change**: download new → delete old → manifest update
-4. Generate M3U playlists for Rockbox
-5. Process scrobbles (`scrobbler::process_device_scrobbles`)
-6. Clear dirty flag on success
-
-Progress is reported via `SyncOperationManager` — the operation object is updated per-file with `filesCompleted`, `bytesTransferred`, `currentFile`, etc.
-
-### Path Construction & Sanitization
-
-`construct_file_path()` builds paths in format `<managed-path>/<Artist>/<Album>/<Track>.<ext>`:
-- Removes or replaces FAT32-illegal characters: `\ / : * ? " < > |`
-- Truncates components to 255 bytes (FAT32 limit)
-- Ensures total path ≤ 250 characters (Windows MAX_PATH safety margin)
-
-### M3U Generation
-
-`generate_m3u_files()` writes one `.m3u` file per playlist basket item. Format matches Rockbox (relative paths, `#EXTINF` headers with duration in seconds).
-
----
-
-## API Client (`api.rs`)
-
-### `JellyfinClient`
-
-Async HTTP client wrapping `reqwest::Client`. It remains the direct Jellyfin implementation and the legacy compatibility path used by older `jellyfin_*` RPCs when the active provider is Jellyfin:
-
-| Method | Endpoint |
-|--------|----------|
-| `authenticate_by_name` | `POST /Users/AuthenticateByName` |
-| `test_connection` | `GET /System/Info/Public` |
-| `get_views` | `GET /Users/{userId}/Views` |
-| `get_items` | `GET /Items` (with filters) |
-| `get_items_by_ids` | `GET /Items?Ids=...` |
-| `get_child_items_with_sizes` | `GET /Items?parentId=...&Fields=MediaSources` |
-| `get_item_details` | `GET /Items/{itemId}` |
-| `get_item_sizes` | Parallel fetches of `get_item_details` for size extraction |
-| `get_item_stream` | `POST /Items/{itemId}/PlaybackInfo` → stream URL |
-| `get_image` | `GET /Items/{itemId}/Images/Primary` |
-| `report_item_played` | `POST /Users/{userId}/PlayedItems/{itemId}` |
-| `search_items` | `GET /Items?SearchTerm=...` |
-
-### `CredentialManager`
-
-- `save_credentials(url, token, user_id?)`: writes `url` + `user_id` to `config.json`; stores `token` in OS keyring
-- `get_credentials()` → `(url, token, user_id?)`
-- `validate_url(url)`: rejects non-HTTP/HTTPS or `localhost:19140` (SSRF guard)
-- `validate_token(token)`: enforces max length
-
----
-
-## Database (`db.rs`)
-
-SQLite via `rusqlite` (statically bundled):
-
-### Schema
-
-```sql
-CREATE TABLE devices (
-    device_id TEXT PRIMARY KEY,
-    device_profile_id TEXT,
-    auto_sync_on_connect INTEGER NOT NULL DEFAULT 0,
-    transcoding_profile_id TEXT,
-    sync_rules TEXT
-);
-
-CREATE TABLE scrobble_history (
-    item_id TEXT NOT NULL,
-    played_at TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    UNIQUE(item_id, played_at, device_id)
-);
-
-CREATE TABLE server_config (
-    id TEXT PRIMARY KEY,
-    url TEXT NOT NULL,
-    server_type TEXT NOT NULL,
-    username TEXT,
-    server_version TEXT,
-    updated_at TEXT NOT NULL
-);
-```
-
-Runtime migrations add new columns if absent (ALTER TABLE ADD COLUMN).
-
----
-
-## Auto-Fill (`auto_fill.rs`)
-
-Fetches Audio tracks from Jellyfin pre-sorted by:
-```
-SortBy=IsFavoriteOrLiked,PlayCount,DateCreated
-SortOrder=Descending,Descending,Descending
-```
-
-Pages in 500-item batches, stops as soon as cumulative bytes exceed `max_fill_bytes`. Max 200 pages guard.
-
-`rank_and_truncate()` — testable pure function — implements break-on-first-oversized semantics.
-
-`expand_exclude_ids()` expands container IDs to constituent track IDs for correct `ExcludeItemIds` filtering. The RPC layer rejects auto-fill for Subsonic/OpenSubsonic until ranking has a provider-neutral implementation. Provider-neutral sync calculation can still expand albums, playlists, artists, favorite artists, and favorite albums through `MediaProvider`.
-
----
-
-## Scrobbler (`scrobbler.rs`)
-
-Parses Rockbox `.scrobbler.log` (AudioScrobbler 1.1, tab-separated). Matching strategy:
-1. `GET /Items?SearchTerm=<title>&Artists=<artist>` → candidates
-2. Filter by duration ±10 seconds
-3. Submit the played event through the active provider (`PlayedItems` for Jellyfin, `scrobble.view` for Subsonic/OpenSubsonic)
-4. `INSERT OR IGNORE` into `scrobble_history` for deduplication
-
----
-
-## Playback (`playback/`)
-
-The daemon owns desktop audio playback independently of the UI. `PlaybackSession` is the authoritative serialized session owner: it admits album plays, single-track sessions, queue edits, previews, transport commands, output changes, and seeks without letting stale UI requests overwrite newer state.
-
-The playback pipeline resolves an authenticated source through `MediaProvider`, streams and decodes it with the controlled FFmpeg runtime, resamples as necessary, and writes audio to CPAL. Souvlaki forwards operating-system media-key events into the same command path, so transport remains available when the UI window is closed.
-
-- **Main session and audition**: a preview is an isolated audition that preserves the main queue and cursor; returning or finishing restores the main session when safe.
-- **Queue and history**: occurrences have stable identities, allowing the UI to page upcoming/history entries and edit only upcoming entries.
-- **Outputs and recovery**: the selected output is persisted in `playback.json`; unavailable or disconnected outputs pause safely rather than silently routing sound elsewhere.
-- **Durability**: the SQLite playback schema persists the session, queue, history, and preview outcomes. The daemon restores this state at launch and exposes recovery status through JSON-RPC.
-
-See [Playback Guide](./playback.md) and [API Contracts](./api-contracts-hifimule-daemon.md) for the public contract.
-
----
-
-## Windows Service (`service.rs`)
-
-Uses `windows-service` crate. Service name: `"hifimule-daemon"`.
-
-- `install()`: creates/updates SCM entry with `AutoStart`; starts immediately
-- `uninstall()`: stop + delete
-- `run()` → `daemon_service_main()` → `run_service()`: registers SCM handler, reports status transitions, calls `start_daemon_core()`, polls for shutdown
-
----
-
-## Logging
-
-- **Debug**: stdout/stderr
-- **Release**: `<AppData>/HifiMule/daemon.log` and `ui.log`, 1 MB cap, truncated on overflow
-- `daemon_log!` macro is aware of `#[cfg(debug_assertions)]`
+The root audio-runtime wrapper is required before daemon compilation because FFmpeg native libraries must be prepared before Cargo dependency build scripts. Use `rtk npm run build:daemon -- check -p hifimule-daemon` and `rtk npm run build:daemon -- test -p hifimule-daemon`. Provider tests, `tests/audiobookshelf_contract.rs`, sync/device tests, and installed smoke scripts cover separate boundaries. See [Development Guide](./development-guide.md) for platform prerequisites and commands.
