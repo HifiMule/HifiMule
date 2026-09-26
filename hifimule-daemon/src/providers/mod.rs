@@ -371,6 +371,16 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn list_recent_podcast_episodes(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<(Vec<PodcastEpisode>, u32, u32), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "recent podcast episodes unavailable".into(),
+        ))
+    }
+
     async fn get_podcast_show(&self, _id: &str) -> Result<PodcastShowDetail, ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "podcast show unavailable".into(),

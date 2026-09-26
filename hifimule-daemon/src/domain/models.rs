@@ -211,6 +211,8 @@ pub struct PodcastEpisode {
     pub item_type: PodcastEntityType,
     pub id: String,
     pub show_id: String,
+    #[serde(default)]
+    pub show_title: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub duration_seconds: Option<u32>,

@@ -9,6 +9,7 @@ import {
     PodcastShow,
     PodcastEpisode,
     fetchPodcastShows,
+    fetchRecentPodcastEpisodes,
     fetchPodcastShow,
     searchPodcasts,
     playbackPlayEpisode,
@@ -41,6 +42,7 @@ import { createTrackPreviewButton } from './components/TrackPreviewButton';
 import { createTrackQueueButton } from './components/TrackQueueButton';
 import { basketStore } from './state/basket';
 import { bookBasketItem, podcastEpisodeBasketItem, podcastShowBasketItem } from './state/mediaSyncSelection';
+import { acceptRecentEpisodePage } from './podcastRecents';
 import { t } from './i18n';
 import { showToast, ERROR_TOAST_DURATION } from './toast';
 
@@ -1775,6 +1777,13 @@ function loadTracksView(): void {
 }
 
 let podcastRequest = 0;
+let podcastTab: 'shows' | 'recent' = 'shows';
+let podcastRecentEpisodes: PodcastEpisode[] = [];
+let podcastRecentTotal = 0;
+let podcastRecentNextOffset = 0;
+let podcastRecentError: string | null = null;
+let podcastRecentLoading = false;
+let podcastShowsLoading = false;
 let podcastShows: PodcastShow[] = [];
 let podcastTotal = 0;
 let podcastNextOffset = 0;
@@ -1811,8 +1820,44 @@ function renderPodcastContent(): void {
         if (podcastCatalogTruncated) podcastStatus(container, t('library.podcast.truncated'));
         return;
     }
+    const tabs = document.createElement('div');
+    tabs.className = 'podcast-tabs';
+    for (const [tab, key] of [['shows', 'library.podcast.tab_shows'], ['recent', 'library.podcast.tab_recent']] as const) {
+        const button = document.createElement('sl-button') as any;
+        button.textContent = t(key);
+        button.variant = podcastTab === tab ? 'primary' : 'default';
+        button.setAttribute('aria-pressed', String(podcastTab === tab));
+        button.addEventListener('click', () => {
+            if (podcastTab === tab) return;
+            ++podcastRequest;
+            podcastTab = tab;
+            podcastRecentLoading = false;
+            podcastShowsLoading = false;
+            if (tab === 'recent') void loadRecentPodcastEpisodes();
+            else void loadPodcastView();
+        });
+        tabs.append(button);
+    }
+    container.append(tabs);
+    if (podcastTab === 'recent') {
+        if (podcastRecentLoading) podcastStatus(container, t('library.podcast.loading_recent'));
+        else if (podcastRecentError) {
+            podcastStatus(container, podcastRecentError);
+            container.append(podcastIconButton(t('library.podcast.retry'), 'arrow-clockwise', () => { void loadRecentPodcastEpisodes(podcastRecentEpisodes.length > 0); }));
+        }
+        else if (podcastRecentEpisodes.length === 0) podcastStatus(container, t('library.podcast.recent_empty'));
+        const items = document.createElement('div');
+        items.className = state.listViewMode === 'grid' ? 'media-grid' : 'podcast-list';
+        for (const episode of podcastRecentEpisodes) items.append(podcastEpisodeRow(episode));
+        container.append(items);
+        if (!podcastRecentLoading && !podcastRecentError && podcastRecentNextOffset < podcastRecentTotal) {
+            container.append(podcastIconButton(t('library.podcast.load_more_episodes'), 'arrow-down-circle', () => { void loadRecentPodcastEpisodes(true); }));
+        }
+        return;
+    }
     podcastSearchForm(container);
-    if (podcastShows.length === 0 && podcastSearchEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
+    if (podcastShowsLoading) podcastStatus(container, t('library.podcast.loading_shows'));
+    else if (podcastShows.length === 0 && podcastSearchEpisodes.length === 0) podcastStatus(container, t('library.podcast.empty'));
     const items = document.createElement('div');
     items.className = state.listViewMode === 'grid' ? 'media-grid' : 'podcast-list';
     for (const show of podcastShows) items.append(podcastShowRow(show));
@@ -1820,8 +1865,44 @@ function renderPodcastContent(): void {
     container.append(items);
     if (podcastQuery) {
         if (podcastSearchTruncated) podcastStatus(container, t('library.podcast.truncated'));
-    } else if (podcastNextOffset < podcastTotal) {
+    } else if (!podcastShowsLoading && podcastNextOffset < podcastTotal) {
         container.append(podcastIconButton(t('library.podcast.load_more'), 'arrow-down-circle', () => { void loadPodcastView(true); }));
+    }
+}
+
+async function loadRecentPodcastEpisodes(append = false): Promise<void> {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    const request = ++podcastRequest;
+    podcastRecentLoading = true;
+    if (!append) {
+        podcastRecentEpisodes = [];
+        podcastRecentNextOffset = 0;
+        podcastRecentError = null;
+    }
+    renderPodcastContent();
+    try {
+        const page = await fetchRecentPodcastEpisodes(append ? podcastRecentNextOffset : 0, 50);
+        const accepted = acceptRecentEpisodePage(
+            request, podcastRequest, state.browseMode === 'podcasts' && podcastTab === 'recent',
+            append ? podcastRecentEpisodes : [], append ? podcastRecentNextOffset : 0, 50, page,
+        );
+        if (!accepted) return;
+        podcastRecentEpisodes = accepted.episodes;
+        podcastRecentTotal = accepted.total;
+        podcastRecentNextOffset = accepted.nextOffset;
+        podcastRecentError = null;
+        podcastRecentLoading = false;
+        renderPodcastContent();
+    } catch (error) {
+        if (request !== podcastRequest || state.browseMode !== 'podcasts' || podcastTab !== 'recent') return;
+        const value = error as { code?: number; data?: { errorCode?: string } } | null;
+        const code = value?.data?.errorCode;
+        podcastRecentError = t(code === 'PROVIDER_FORBIDDEN' ? 'library.podcast.permission'
+            : code === 'STALE_CONFIGURATION' || value?.code === -4 ? 'library.podcast.stale'
+                : 'library.podcast.unavailable');
+        podcastRecentLoading = false;
+        renderPodcastContent();
     }
 }
 
@@ -1964,7 +2045,7 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
     const date = published && !Number.isNaN(published.getTime()) ? published.toLocaleDateString() : (episode.publishedAt ?? '');
     const metadata = document.createElement('div');
     metadata.className = grid ? 'card-subtitle' : 'media-list-row__subtitle';
-    metadata.textContent = date;
+    metadata.textContent = episode.showTitle ? [episode.showTitle, date].filter(Boolean).join(' · ') : date;
     content.append(metadata);
     row.append(content);
     row.append(podcastIconButton(t('library.podcast.play'), 'play-fill', () => {
@@ -2145,16 +2226,13 @@ async function loadPodcastView(append = false): Promise<void> {
     const container = document.getElementById('library-content');
     if (!container) return;
     const request = ++podcastRequest;
+    podcastShowsLoading = true;
     podcastCurrentShow = null;
     if (!append) {
         podcastSearchEpisodes = [];
         podcastSearchTruncated = false;
     }
-    if (!append) {
-        container.replaceChildren();
-        podcastSearchForm(container);
-        podcastStatus(container, t('library.podcast.show') + '…');
-    }
+    if (!append) renderPodcastContent();
     try {
         if (podcastQuery) {
             const result = await searchPodcasts(podcastQuery);
@@ -2162,6 +2240,7 @@ async function loadPodcastView(append = false): Promise<void> {
             podcastShows = result.shows;
             podcastSearchEpisodes = result.episodes;
             podcastSearchTruncated = result.possiblyTruncated;
+            podcastShowsLoading = false;
             renderPodcastContent();
             return;
         }
@@ -2170,9 +2249,13 @@ async function loadPodcastView(append = false): Promise<void> {
         podcastShows = append ? [...podcastShows, ...page.shows] : page.shows;
         podcastTotal = page.total;
         podcastNextOffset = (append ? podcastNextOffset : 0) + 50;
+        podcastShowsLoading = false;
         renderPodcastContent();
     } catch (error) {
-        if (request === podcastRequest) renderPodcastError(error, append);
+        if (request === podcastRequest) {
+            podcastShowsLoading = false;
+            renderPodcastError(error, append);
+        }
     }
 }
 
@@ -3066,6 +3149,8 @@ async function loadMore() {
 export async function initLibraryView() {
     console.log('Initializing library view...');
 
+    ++podcastRequest;
+
     clearNavigationCache();
     teardownListScrollHandler();
 
@@ -3089,6 +3174,13 @@ export async function initLibraryView() {
         podcastTotal = 0;
         podcastNextOffset = 0;
         podcastQuery = '';
+        podcastTab = 'shows';
+        podcastRecentEpisodes = [];
+        podcastRecentTotal = 0;
+        podcastRecentNextOffset = 0;
+        podcastRecentError = null;
+        podcastRecentLoading = false;
+        podcastShowsLoading = false;
         podcastEpisodes = [];
         podcastEpisodeNextOffset = 0;
         podcastCurrentShow = null;

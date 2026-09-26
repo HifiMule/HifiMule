@@ -627,6 +627,9 @@ async fn handler(
         "browse.listAlbums" => handle_browse_list_albums(&state, payload.params).await,
         "browse.getAlbum" => handle_browse_get_album(&state, payload.params).await,
         "browse.listPodcastShows" => handle_browse_list_podcast_shows(&state, payload.params).await,
+        "browse.listRecentPodcastEpisodes" => {
+            handle_browse_list_recent_podcast_episodes(&state, payload.params).await
+        }
         "browse.getPodcastShow" => handle_browse_get_podcast_show(&state, payload.params).await,
         "browse.getPodcastEpisode" => {
             handle_browse_get_podcast_episode(&state, payload.params).await
@@ -2068,6 +2071,33 @@ async fn handle_browse_list_podcast_shows(
         .await
         .map_err(provider_error_to_rpc)?;
     Ok(serde_json::json!({ "shows": shows, "total": total }))
+}
+
+async fn handle_browse_list_recent_podcast_episodes(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let offset = params
+        .as_ref()
+        .and_then(|p| p["startIndex"].as_u64())
+        .unwrap_or(0);
+    let limit = params
+        .as_ref()
+        .and_then(|p| p["limit"].as_u64())
+        .unwrap_or(50);
+    if offset > u32::MAX as u64 || !(1..=100).contains(&limit) || offset % limit != 0 {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid podcast page".into(),
+            data: None,
+        });
+    }
+    let provider = podcast_browse_provider(state).await?;
+    let (episodes, total, source_count) = provider
+        .list_recent_podcast_episodes(offset as u32, limit as u32)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "episodes": episodes, "total": total, "sourceCount": source_count }))
 }
 
 async fn handle_browse_get_podcast_show(
@@ -15599,6 +15629,7 @@ mod tests {
                 item_type: crate::domain::models::PodcastEntityType::Episode,
                 id: id.into(),
                 show_id: "show-opaque".into(),
+                show_title: Some("Talks".into()),
                 title: "First".into(),
                 description: None,
                 duration_seconds: Some(60),
@@ -15626,6 +15657,19 @@ mod tests {
             };
             Ok((shows, 1))
         }
+        async fn list_recent_podcast_episodes(
+            &self,
+            offset: u32,
+            _limit: u32,
+        ) -> Result<(Vec<crate::domain::models::PodcastEpisode>, u32, u32), ProviderError> {
+            let episodes = if offset == 0 {
+                vec![self.get_podcast_episode("episode-opaque").await?]
+            } else {
+                vec![]
+            };
+            let source_count = episodes.len() as u32;
+            Ok((episodes, 1, source_count))
+        }
         async fn get_podcast_show(
             &self,
             id: &str,
@@ -15649,6 +15693,7 @@ mod tests {
                     item_type: crate::domain::models::PodcastEntityType::Episode,
                     id: "episode-opaque".into(),
                     show_id: id.into(),
+                    show_title: Some("Talks".into()),
                     title: "First".into(),
                     description: None,
                     duration_seconds: Some(60),
@@ -15961,6 +16006,25 @@ mod tests {
         assert_eq!(listing["shows"][0]["title"], "Talks");
         assert_eq!(listing["shows"][0]["type"], "show");
         assert!(listing.get("albums").is_none());
+        let recent = handle_browse_list_recent_podcast_episodes(
+            &state,
+            Some(json!({"startIndex":0,"limit":50})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(recent["episodes"][0]["id"], "episode-opaque");
+        assert_eq!(recent["total"], 1);
+        assert_eq!(recent["sourceCount"], 1);
+        assert_eq!(
+            handle_browse_list_recent_podcast_episodes(
+                &state,
+                Some(json!({"startIndex":1,"limit":50})),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ERR_INVALID_PARAMS
+        );
         let detail = handle_browse_get_podcast_show(&state, Some(json!({"showId":"show-opaque"})))
             .await
             .unwrap();

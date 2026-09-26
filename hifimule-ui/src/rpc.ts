@@ -227,6 +227,7 @@ export interface PodcastEpisode {
     type: 'episode';
     id: string;
     showId: string;
+    showTitle?: string | null;
     title: string;
     description: string | null;
     durationSeconds: number | null;
@@ -605,6 +606,10 @@ export async function fetchBrowseAlbum(
 
 export async function fetchPodcastShows(startIndex = 0, limit = 50): Promise<{ shows: PodcastShow[]; total: number }> {
     return rpcCall('browse.listPodcastShows', { startIndex, limit });
+}
+
+export async function fetchRecentPodcastEpisodes(startIndex = 0, limit = 50): Promise<{ episodes: PodcastEpisode[]; total: number; sourceCount: number }> {
+    return rpcCall('browse.listRecentPodcastEpisodes', { startIndex, limit });
 }
 
 export async function fetchPodcastShow(showId: string, startIndex = 0, limit = 50): Promise<{ show: PodcastShow; episodes: PodcastEpisode[]; total: number; possiblyTruncated: boolean }> {
