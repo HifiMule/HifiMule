@@ -167,7 +167,26 @@ where
 #[derive(Deserialize)]
 struct BookSearchDto {
     #[serde(default)]
-    book: Vec<BookDto>,
+    book: Vec<BookSearchHit>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BookSearchHit {
+    Wrapped {
+        #[serde(rename = "libraryItem")]
+        library_item: BookDto,
+    },
+    Item(BookDto),
+}
+
+impl BookSearchHit {
+    fn into_item(self) -> BookDto {
+        match self {
+            Self::Wrapped { library_item } => library_item,
+            Self::Item(item) => item,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -216,7 +235,7 @@ struct PodcastDto {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PodcastMediaDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
+    #[serde(alias = "libraryItemId", deserialize_with = "deserialize_nonempty")]
     id: String,
     #[serde(default)]
     cover_path: Option<String>,
@@ -377,7 +396,7 @@ struct BookDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookMediaDto {
-    #[serde(deserialize_with = "deserialize_nonempty")]
+    #[serde(alias = "libraryItemId", deserialize_with = "deserialize_nonempty")]
     id: String,
     #[serde(default)]
     cover_path: Option<String>,
@@ -1222,6 +1241,7 @@ impl AudiobookshelfProvider {
         let albums = results
             .book
             .into_iter()
+            .map(BookSearchHit::into_item)
             .filter(|book| book.media_type == "book")
             .map(|book| book_album(library, book))
             .collect::<Result<Vec<_>, _>>()?;
@@ -4166,6 +4186,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_accepts_wrapped_book_with_library_item_media_id() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        server.mock("GET", "/api/libraries/book-id/search")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("q".into(), "result".into()),
+                Matcher::UrlEncoded("limit".into(), "50".into()),
+            ]))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"book":[{"libraryItem":{"id":"book-1","libraryId":"book-id","mediaType":"book","media":{"libraryItemId":"book-1","metadata":{"title":"Result"}}},"matchKey":"title"}]}"#)
+            .create_async().await;
+        let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
+            .await
+            .unwrap()
+            .scope_to("book-id".into(), ProviderLibraryRole::Audiobook)
+            .unwrap();
+        let result = provider.search("result").await.unwrap();
+        assert_eq!(result.albums.len(), 1);
+        assert_eq!(result.albums[0].title, "Result");
+    }
+
+    #[tokio::test]
     async fn search_truncation_uses_upstream_category_count_before_filtering() {
         let mut server = Server::new_async().await;
         server
@@ -5079,7 +5127,7 @@ mod tests {
             .with_body(login_body())
             .create_async()
             .await;
-        let hits = (0..50).map(|index| format!(r#"{{"libraryItem":{{"id":"show-{index}","libraryId":"pod-id","mediaType":"podcast","media":{{"id":"media-{index}","metadata":{{"title":"Talks"}}}}}}}}"#)).collect::<Vec<_>>().join(",");
+        let hits = (0..50).map(|index| format!(r#"{{"libraryItem":{{"id":"show-{index}","libraryId":"pod-id","mediaType":"podcast","media":{{"libraryItemId":"media-{index}","metadata":{{"title":"Talks"}}}}}}}}"#)).collect::<Vec<_>>().join(",");
         let search = server
             .mock("GET", "/api/libraries/pod-id/search")
             .match_query(Matcher::AllOf(vec![
@@ -5117,7 +5165,7 @@ mod tests {
         server.mock("GET", "/api/libraries/pod-id/search")
             .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("q".into(), "first".into()), Matcher::UrlEncoded("limit".into(), "50".into())]))
             .with_status(200).with_header("content-type", "application/json")
-            .with_body(r#"{"podcast":[],"episodes":[{"libraryItem":{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"}}},"episode":{"id":"episode-1","title":"First","publishedAt":1767225600000}}]}"#)
+            .with_body(r#"{"podcast":[],"episodes":[{"libraryItem":{"id":"show-1","libraryId":"pod-id","mediaType":"podcast","media":{"libraryItemId":"media-1","metadata":{"title":"Talks"}}},"episode":{"id":"episode-1","title":"First","publishedAt":1767225600000}}]}"#)
             .create_async().await;
         let provider = AudiobookshelfProvider::login(&server.url(), "user", "password")
             .await

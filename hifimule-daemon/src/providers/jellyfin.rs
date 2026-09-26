@@ -490,19 +490,47 @@ impl MediaProvider for JellyfinProvider {
     }
 
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
+        if query.trim().is_empty() {
+            return Ok(SearchResult::default());
+        }
+        let artists = self
+            .client
+            .search_audio_items(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                query,
+                "MusicArtist",
+            )
+            .await
+            .map_err(Self::map_error)?;
+        let albums = self
+            .client
+            .search_audio_items(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                query,
+                "MusicAlbum",
+            )
+            .await
+            .map_err(Self::map_error)?;
         let songs = self
             .client
-            .search_audio_items(self.url(), self.token(), self.user_id(), query)
+            .search_audio_items(self.url(), self.token(), self.user_id(), query, "Audio")
             .await
-            .map_err(Self::map_error)?
-            .into_iter()
-            .map(song_from_item)
-            .collect();
-
-        Ok(SearchResult {
-            songs,
+            .map_err(Self::map_error)?;
+        let possibly_truncated = artists.total_record_count > artists.items.len() as u32
+            || albums.total_record_count > albums.items.len() as u32
+            || songs.total_record_count > songs.items.len() as u32;
+        let result = SearchResult {
+            artists: artists.items.into_iter().map(artist_from_item).collect(),
+            albums: albums.items.into_iter().map(album_from_item).collect(),
+            songs: songs.items.into_iter().map(song_from_item).collect(),
+            possibly_truncated,
             ..SearchResult::default()
-        })
+        };
+        Ok(result)
     }
 
     async fn download_url(
@@ -1336,25 +1364,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_search_maps_song_results() {
+    async fn provider_search_maps_artist_album_and_song_results() {
         let mut server = Server::new_async().await;
         let url = server.url();
-        let _mock = server
-            .mock("GET", "/Items")
-            .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
-                Matcher::UrlEncoded("SearchTerm".into(), "Track".into()),
-                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
-                Matcher::UrlEncoded("Recursive".into(), "true".into()),
-                Matcher::UrlEncoded("Limit".into(), "25".into()),
-                Matcher::UrlEncoded("Fields".into(), "Id,Name,Album,AlbumArtist,Artists,AlbumId".into()),
-            ]))
-            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","Album":"Album","AlbumArtist":"Artist","RunTimeTicks":100000000}],"TotalRecordCount":1,"StartIndex":0}"#)
-            .create_async()
-            .await;
+        for (item_type, body) in [
+            (
+                "MusicArtist",
+                r#"{"Items":[{"Id":"artist1","Name":"Artist","Type":"MusicArtist"}],"TotalRecordCount":1,"StartIndex":0}"#,
+            ),
+            (
+                "MusicAlbum",
+                r#"{"Items":[{"Id":"album1","Name":"Album","Type":"MusicAlbum","AlbumArtist":"Artist"}],"TotalRecordCount":1,"StartIndex":0}"#,
+            ),
+            (
+                "Audio",
+                r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","Album":"Album","AlbumArtist":"Artist","RunTimeTicks":100000000}],"TotalRecordCount":90,"StartIndex":0}"#,
+            ),
+        ] {
+            server
+                .mock("GET", "/Items")
+                .match_query(Matcher::AllOf(vec![
+                    Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                    Matcher::UrlEncoded("SearchTerm".into(), "Track".into()),
+                    Matcher::UrlEncoded("IncludeItemTypes".into(), item_type.into()),
+                    Matcher::UrlEncoded("Recursive".into(), "true".into()),
+                    Matcher::UrlEncoded("Limit".into(), "50".into()),
+                ]))
+                .match_header(
+                    "Authorization",
+                    format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+                )
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                .expect(1)
+                .create_async()
+                .await;
+        }
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
 
@@ -1362,8 +1408,9 @@ mod tests {
 
         assert_eq!(result.songs.len(), 1);
         assert_eq!(result.songs[0].title, "Track");
-        assert!(result.artists.is_empty());
-        assert!(result.albums.is_empty());
+        assert_eq!(result.artists[0].name, "Artist");
+        assert_eq!(result.albums[0].title, "Album");
+        assert!(result.possibly_truncated);
     }
 
     #[tokio::test]

@@ -474,14 +474,20 @@ impl MediaProvider for SubsonicProvider {
     }
 
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
+        if query.trim().is_empty() {
+            return Ok(SearchResult::default());
+        }
         let result = self.client.search3(query).await?.search_result3;
+
+        let possibly_truncated =
+            result.artist.len() >= 50 || result.album.len() >= 50 || result.song.len() >= 50;
 
         Ok(SearchResult {
             artists: result.artist.into_iter().map(artist_from_dto).collect(),
             albums: result.album.into_iter().map(album_from_dto).collect(),
             songs: result.song.into_iter().map(song_from_dto).collect(),
             playlists: result.playlist.into_iter().map(playlist_from_dto).collect(),
-            possibly_truncated: false,
+            possibly_truncated,
         })
     }
 
@@ -1145,7 +1151,16 @@ impl SubsonicClient {
     }
 
     async fn search3(&self, query: &str) -> Result<Search3Body, ProviderError> {
-        self.search3_paged(query, None, None).await
+        self.get(
+            "search3",
+            &[
+                ("query", query),
+                ("artistCount", "50"),
+                ("albumCount", "50"),
+                ("songCount", "50"),
+            ],
+        )
+        .await
     }
 
     async fn search3_paged(

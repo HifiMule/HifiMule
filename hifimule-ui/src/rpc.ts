@@ -212,7 +212,7 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 
 // --- Provider-neutral browse types ---
 
-export type BrowseMode = "artists" | "albums" | "podcasts" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
+export type BrowseMode = "artists" | "albums" | "podcasts" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites" | "search";
 
 export interface PodcastShow {
     type: 'show';
@@ -722,7 +722,7 @@ export async function fetchBrowseFavoriteItems(
 
 export async function fetchBrowseSearch(
     query: string,
-): Promise<{ tracks: BrowseTrack[]; albums?: BrowseAlbum[]; possiblyTruncated?: boolean }> {
+): Promise<{ artists: BrowseArtist[]; tracks: BrowseTrack[]; albums: BrowseAlbum[]; possiblyTruncated: boolean }> {
     return await rpcCall('browse.search', { query });
 }
 

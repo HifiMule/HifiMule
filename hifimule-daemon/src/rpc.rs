@@ -2412,6 +2412,13 @@ async fn handle_browse_search(
             data: None,
         })?
         .to_owned();
+    if query.len() > 256 {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Search query too long".into(),
+            data: None,
+        });
+    }
     if provider
         .capabilities()
         .browse
@@ -2437,13 +2444,16 @@ async fn handle_browse_search(
     // An empty/whitespace query would be forwarded to the provider as an
     // unbounded search; short-circuit to an empty result set instead.
     if query.trim().is_empty() {
-        return Ok(serde_json::json!({ "tracks": [] }));
+        return Ok(
+            serde_json::json!({ "artists": [], "albums": [], "tracks": [], "possiblyTruncated": false }),
+        );
     }
     let result = provider
         .search(&query)
         .await
         .map_err(provider_error_to_rpc)?;
     Ok(serde_json::json!({
+        "artists": result.artists,
         "tracks": playback_tagged_tracks(server_id.as_deref(), result.songs),
         "albums": playback_tagged_albums(server_id.as_deref(), result.albums),
         "possiblyTruncated": result.possibly_truncated,

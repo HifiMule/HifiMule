@@ -78,6 +78,10 @@ interface AppState {
     isBookLibrary: boolean;
     bookSearchQuery: string;
     bookSearchTruncated: boolean;
+    musicSearchQuery: string;
+    musicSearchResults: { artists: BrowseArtist[]; albums: BrowseAlbum[]; tracks: BrowseTrack[]; possiblyTruncated: boolean } | null;
+    musicSearchError: string | null;
+    searchNavigationRoot: 'artist' | 'album' | null;
     bookChapters: Array<{ startSeconds: number; endSeconds: number }>;
     podcastServerId: string | null;
 }
@@ -110,9 +114,14 @@ let state: AppState = {
     isBookLibrary: false,
     bookSearchQuery: '',
     bookSearchTruncated: false,
+    musicSearchQuery: '',
+    musicSearchResults: null,
+    musicSearchError: null,
+    searchNavigationRoot: null,
     bookChapters: [],
     podcastServerId: null,
 };
+let musicSearchRequest = 0;
 
 let _tracksBrowseView: TracksBrowseView | null = null;
 
@@ -146,6 +155,8 @@ function updatePlaylistNameInCache(playlistId: string, name: string): void {
 }
 
 export function clearNavigationCache() {
+    ++musicSearchRequest;
+    state.loading = false;
     state.scrollCache = new Map();
     state.pageCache = new Map();
     state.breadcrumbStack = [];
@@ -158,6 +169,10 @@ export function clearNavigationCache() {
     state.favoriteTree = null;
     state.bookSearchQuery = '';
     state.bookSearchTruncated = false;
+    state.musicSearchQuery = '';
+    state.musicSearchResults = null;
+    state.musicSearchError = null;
+    state.searchNavigationRoot = null;
     state.bookChapters = [];
     state.podcastServerId = null;
     state.listLoading = false;
@@ -484,6 +499,7 @@ function favoriteTracksForAlbum(tree: FavoriteTree, albumId: string): BrowseTrac
 // --- UI rendering ---
 
 const browseModeIcons: Record<BrowseMode, string> = {
+    search: 'search',
     artists: 'mic',
     albums: 'disc',
     podcasts: 'broadcast',
@@ -863,7 +879,7 @@ function renderViewToggle() {
         }
         container.appendChild(group);
     }
-    const shouldHide = state.loading || state.browseMode === 'tracks' || state.availableModes.length === 0;
+    const shouldHide = state.loading || state.browseMode === 'tracks' || state.browseMode === 'search' || state.availableModes.length === 0;
     if (shouldHide && document.activeElement && group.contains(document.activeElement)) {
         const fallback = container.querySelector<SlButton>(
             `sl-button[data-mode="${state.browseMode}"]`,
@@ -1530,6 +1546,10 @@ async function loadMoreForListView() {
 }
 
 function renderCurrentView() {
+    if (state.browseMode === 'search' && state.breadcrumbStack.length === 0) {
+        renderMusicSearch();
+        return;
+    }
     document.getElementById('library-content')?.classList.remove('podcast-list-view');
     const mode = state.listViewMode;
     const onCurate = state.browseMode === 'playlists' && _supportsPlaylistWrite
@@ -1539,6 +1559,110 @@ function renderCurrentView() {
         renderList(state.items, onCurate);
     } else {
         renderGrid(state.items, onCurate);
+    }
+}
+
+function renderMusicSearch(): void {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    teardownListScrollHandler();
+    container.replaceChildren();
+    const form = document.createElement('form');
+    form.className = 'music-search-form';
+    form.setAttribute('role', 'search');
+    const input = document.createElement('sl-input') as any;
+    input.placeholder = t('library.search.placeholder');
+    input.setAttribute('aria-label', t('library.search.placeholder'));
+    input.value = state.musicSearchQuery;
+    const submit = document.createElement('sl-button') as any;
+    submit.type = 'submit';
+    submit.textContent = t('library.search.button');
+    form.append(input, submit);
+    form.addEventListener('submit', event => {
+        event.preventDefault();
+        void loadMusicSearch(String(input.value ?? '').trim());
+    });
+    container.append(form);
+    const results = state.musicSearchResults;
+    if (state.musicSearchError) {
+        const error = document.createElement('p');
+        error.className = 'error-message-detail';
+        error.setAttribute('role', 'alert');
+        error.textContent = `${t('library.search.error')} ${state.musicSearchError}`;
+        container.append(error);
+        return;
+    }
+    if (!results) {
+        const hint = document.createElement('p');
+        hint.className = 'library-empty-state';
+        hint.textContent = t('library.search.prompt');
+        container.append(hint);
+        return;
+    }
+    const groups: Array<[string, BrowseDisplayItem[]]> = [
+        [t('library.mode.artists'), mapArtists(results.artists)],
+        [t('library.mode.albums'), mapAlbums(results.albums)],
+        [t('library.mode.tracks'), mapFlatTracks(results.tracks)],
+    ];
+    if (groups.every(([, items]) => items.length === 0)) {
+        const empty = document.createElement('p');
+        empty.className = 'library-empty-state';
+        empty.textContent = t('library.search.no_matches');
+        container.append(empty);
+    }
+    for (const [label, items] of groups) {
+        if (!items.length) continue;
+        const section = document.createElement('section');
+        section.className = 'music-search-section';
+        const heading = document.createElement('h2');
+        heading.textContent = label;
+        const grid = document.createElement('div');
+        grid.className = 'media-grid';
+        for (const item of items) {
+            grid.append(MediaCard.create(item, 'items', false, () => {
+                state.searchNavigationRoot = item.type === 'MusicArtist' ? 'artist' : 'album';
+                return navigateToBrowseItem(item);
+            }, true, _supportsPlaylistWrite));
+        }
+        section.append(heading, grid);
+        container.append(section);
+    }
+    if (results.possiblyTruncated) {
+        const note = document.createElement('p');
+        note.textContent = t('library.search.truncated');
+        container.append(note);
+    }
+    const handler = () => MediaCard.refreshSelection(container);
+    basketStore.addEventListener('update', handler);
+    (container as any).__gridBasketHandler = handler;
+}
+
+async function loadMusicSearch(query: string): Promise<void> {
+    const container = document.getElementById('library-content');
+    if (!container || state.loading || state.browseMode !== 'search') return;
+    const request = ++musicSearchRequest;
+    state.musicSearchQuery = query;
+    state.musicSearchError = null;
+    if (!query) {
+        state.musicSearchResults = null;
+        renderMusicSearch();
+        return;
+    }
+    state.loading = true;
+    showSpinner(container);
+    try {
+        const results = await fetchBrowseSearch(query);
+        if (request !== musicSearchRequest || state.browseMode !== 'search' || !container.isConnected) return;
+        state.musicSearchResults = results;
+    } catch (error) {
+        if (request !== musicSearchRequest || state.browseMode !== 'search' || !container.isConnected) return;
+        state.musicSearchResults = null;
+        state.musicSearchError = error instanceof Error ? error.message : String(error);
+    } finally {
+        if (request !== musicSearchRequest || state.browseMode !== 'search' || !container.isConnected) return;
+        state.loading = false;
+        renderModeBar();
+        renderMusicSearch();
     }
 }
 
@@ -1578,6 +1702,7 @@ function renderError(error: Error) {
 
 async function switchMode(mode: BrowseMode) {
     if (mode === state.browseMode || state.loading || !state.availableModes.includes(mode)) return;
+    ++musicSearchRequest;
 
     clearSelection();
     if (state.browseMode === 'podcasts') ++podcastRequest;
@@ -1614,6 +1739,7 @@ async function loadModeRoot() {
     state.parentId = undefined;
 
     switch (state.browseMode) {
+        case 'search': renderMusicSearch(); break;
         case 'artists': await loadArtists(true); break;
         case 'albums':
             if (state.isBookLibrary && state.bookSearchQuery) await loadBookSearch(state.bookSearchQuery);
@@ -2844,6 +2970,10 @@ async function reloadCurrentLevel() {
     }
 
     switch (state.browseMode) {
+        case 'search':
+            if (state.searchNavigationRoot === 'artist' && depth === 1) await loadArtistAlbums(parentId);
+            else await loadAlbumTracks(parentId);
+            break;
         case 'artists':
             if (depth === 1) await loadArtistAlbums(parentId);
             else await loadAlbumTracks(parentId);
@@ -2960,7 +3090,8 @@ export async function initLibraryView() {
         podcastEpisodeNextOffset = 0;
         podcastCurrentShow = null;
 
-        state.availableModes = modesResult;
+        state.availableModes = selected && (selected.serverType === 'jellyfin' || selected.serverType === 'subsonic')
+            ? [...modesResult, 'search'] : modesResult;
         const defaultMode: BrowseMode = modesResult.includes('artists')
             ? 'artists'
             : (modesResult[0] ?? 'artists');

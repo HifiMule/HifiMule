@@ -797,7 +797,8 @@ impl JellyfinClient {
         token: &str,
         user_id: &str,
         title: &str,
-    ) -> Result<Vec<JellyfinItem>> {
+        item_type: &str,
+    ) -> Result<JellyfinItemsResponse> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -805,10 +806,11 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Recursive=true&Limit=25&Fields=Id,Name,Album,AlbumArtist,Artists,AlbumId",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes={}&Recursive=true&Limit=50&Fields=Id,Name,Album,AlbumArtist,Artists,ArtistItems,AlbumId,RecursiveItemCount,CumulativeRunTimeTicks",
             url.trim_end_matches('/'),
             user_id,
-            encoded_title
+            encoded_title,
+            item_type
         );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
@@ -820,7 +822,7 @@ impl JellyfinClient {
         }
 
         let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-        Ok(items_response.items)
+        Ok(items_response)
     }
 
     pub async fn report_item_played(
