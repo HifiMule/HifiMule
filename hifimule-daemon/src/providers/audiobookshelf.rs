@@ -291,9 +291,9 @@ impl<'de> Deserialize<'de> for BoundedPodcastEpisodes {
                     let published = episode
                         .pub_date
                         .as_deref()
-                        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-                        .map(|date| date.timestamp_millis())
+                        .and_then(podcast_pub_date_millis)
                         .or(episode.published_at)
+                        .or(episode.updated_at)
                         .unwrap_or(i64::MIN);
                     newest.insert((published, std::cmp::Reverse(episode.id.clone())), episode);
                     if newest.len() > MAX_PODCAST_BROWSE_EPISODES {
@@ -333,7 +333,24 @@ struct PodcastEpisodeDto {
     #[serde(default)]
     published_at: Option<i64>,
     #[serde(default)]
+    updated_at: Option<i64>,
+    #[serde(default)]
     audio_file: Option<PodcastAudioFileDto>,
+}
+
+fn podcast_pub_date_millis(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|date| date.timestamp_millis())
+        .or_else(|| {
+            Some(
+                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                    .ok()?
+                    .and_hms_opt(0, 0, 0)?
+                    .and_utc()
+                    .timestamp_millis(),
+            )
+        })
 }
 
 #[derive(Clone, Deserialize)]
@@ -1894,12 +1911,22 @@ fn podcast_episode(
                     None
                 }
             }),
-        published_at: episode.pub_date.clone().or_else(|| {
-            episode
-                .published_at
-                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-                .map(|date| date.to_rfc3339())
-        }),
+        published_at: episode
+            .pub_date
+            .as_deref()
+            .filter(|date| podcast_pub_date_millis(date).is_some())
+            .map(str::to_owned)
+            .or_else(|| {
+                episode
+                    .published_at
+                    .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                    .or_else(|| {
+                        episode
+                            .updated_at
+                            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                    })
+                    .map(|date| date.to_rfc3339())
+            }),
         cover_art_id: show.cover_art_id.clone(),
     }
 }
@@ -4620,6 +4647,37 @@ mod tests {
                 .episodes
                 .iter()
                 .any(|episode| episode.id == "episode-0")
+        );
+    }
+
+    #[test]
+    fn podcast_episode_uses_updated_at_when_publication_date_is_missing() {
+        let episode: PodcastEpisodeDto = serde_json::from_value(serde_json::json!({
+            "id": "episode-1",
+            "title": "First",
+            "updatedAt": 1767225600000i64
+        }))
+        .unwrap();
+        assert_eq!(episode.updated_at, Some(1767225600000));
+        assert_eq!(podcast_pub_date_millis("2026-01-02"), Some(1767312000000));
+        let show = PodcastShow {
+            item_type: PodcastEntityType::Show,
+            id: "show-1".into(),
+            title: "Talks".into(),
+            description: None,
+            cover_art_id: None,
+            episode_count: Some(1),
+        };
+        let item: PodcastDto = serde_json::from_value(serde_json::json!({
+            "id": "show-1",
+            "libraryId": "pod-id",
+            "mediaType": "podcast",
+            "media": { "id": "media-1" }
+        }))
+        .unwrap();
+        assert_eq!(
+            podcast_episode(&show, "pod-id", &item, &episode).published_at,
+            Some("2026-01-01T00:00:00+00:00".into())
         );
     }
 

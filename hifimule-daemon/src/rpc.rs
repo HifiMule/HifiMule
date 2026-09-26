@@ -4535,7 +4535,12 @@ fn podcast_date_number(value: &Option<String>) -> Option<u32> {
     use chrono::Datelike;
     value
         .as_deref()
-        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+        .and_then(|date| {
+            chrono::DateTime::parse_from_rfc3339(date)
+                .ok()
+                .map(|date| date.date_naive())
+                .or_else(|| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        })
         .and_then(|date| {
             (1..=9999)
                 .contains(&date.year())
@@ -4551,6 +4556,10 @@ fn podcast_publication_date_uses_source_calendar_day() {
         Some(20260924)
     );
     assert_eq!(podcast_date_number(&None), None);
+    assert_eq!(
+        podcast_date_number(&Some("2026-01-02".into())),
+        Some(20260102)
+    );
     assert_eq!(podcast_date_number(&Some("invalid".into())), None);
 }
 
@@ -5970,7 +5979,7 @@ fn autofill_playlist_item(
 /// exactly one place. When `pipeline` is a configured NON-default pipeline, materialize
 /// its pools and run the pure engine (`expand_with_pipeline`); otherwise keep the smart
 /// incremental default path (`run_auto_fill_provider`) — byte-for-byte unchanged (AC 8).
-async fn expand_auto_fill_slot(
+pub(crate) async fn expand_auto_fill_slot(
     provider: Arc<dyn MediaProvider>,
     pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
     params: crate::auto_fill::AutoFillParams,
@@ -5978,12 +5987,65 @@ async fn expand_auto_fill_slot(
     if provider.library_role() == Some(crate::providers::ProviderLibraryRole::Podcast) {
         return expand_podcast_auto_fill(provider, pipeline, params).await;
     }
+    if provider.library_role() == Some(crate::providers::ProviderLibraryRole::Audiobook) {
+        return expand_audiobook_auto_fill(provider, params).await;
+    }
     match pipeline {
         Some(p) if crate::auto_fill::needs_configurable_expansion(p) => {
             crate::auto_fill::expand_with_pipeline(provider, p, params).await
         }
         _ => crate::auto_fill::run_auto_fill_provider(provider, params).await,
     }
+}
+
+async fn expand_audiobook_auto_fill(
+    provider: Arc<dyn MediaProvider>,
+    params: crate::auto_fill::AutoFillParams,
+) -> anyhow::Result<Vec<crate::auto_fill::AutoFillItem>> {
+    if params.max_fill_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let excluded: std::collections::HashSet<&str> =
+        params.exclude_item_ids.iter().map(String::as_str).collect();
+    let mut result = Vec::new();
+    let mut remaining = params.max_fill_bytes;
+    let mut offset = 0u32;
+    for _ in 0..200 {
+        let (albums, total) = provider.list_albums(None, None, offset, 100).await?;
+        offset = offset.saturating_add(100);
+        for album in albums {
+            let detail = provider.get_album(&album.id).await?;
+            let parts: Vec<_> = detail
+                .tracks
+                .into_iter()
+                .filter(|track| !excluded.contains(track.id.as_str()))
+                .collect();
+            let book_size: u64 = parts.iter().map(provider_track_size).sum();
+            if book_size == 0 || book_size > remaining {
+                continue;
+            }
+            for part in parts {
+                result.push(crate::auto_fill::AutoFillItem {
+                    id: part.id.clone(),
+                    name: part.title.clone(),
+                    album: part.album_title.clone(),
+                    artist: part.artist_name.clone(),
+                    provider_album_id: part.album_id.clone(),
+                    provider_content_type: part.content_type.clone(),
+                    provider_suffix: part.suffix.clone(),
+                    track_number: part.track_number,
+                    size_bytes: provider_track_size(&part),
+                    priority_reason: "audiobook".into(),
+                    tier: None,
+                });
+            }
+            remaining -= book_size;
+        }
+        if offset >= total {
+            break;
+        }
+    }
+    Ok(result)
 }
 
 async fn expand_podcast_auto_fill(
@@ -5997,6 +6059,13 @@ async fn expand_podcast_auto_fill(
         .unwrap_or_default();
     let limit = retention.recent_count.min(100);
     if limit == 0 || params.max_fill_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let selected_shows: std::collections::HashSet<&str> =
+        retention.show_ids.iter().map(String::as_str).collect();
+    if retention.mode == crate::auto_fill::PodcastSelectionMode::SelectedShows
+        && selected_shows.is_empty()
+    {
         return Ok(Vec::new());
     }
     let mut shows = Vec::new();
@@ -6023,6 +6092,11 @@ async fn expand_podcast_auto_fill(
         params.exclude_item_ids.iter().map(String::as_str).collect();
     let mut candidates = Vec::new();
     for show in shows {
+        if retention.mode == crate::auto_fill::PodcastSelectionMode::SelectedShows
+            && !selected_shows.contains(show.id.as_str())
+        {
+            continue;
+        }
         let detail = provider.get_podcast_show(&show.id).await?;
         if detail.possibly_truncated {
             anyhow::bail!("Podcast episode list is truncated; retention cannot safely reconcile");
@@ -6034,10 +6108,11 @@ async fn expand_podcast_auto_fill(
                 .cmp(&podcast_published_at(&a.published_at))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        for episode in episodes.into_iter().take(limit) {
-            if excluded.contains(episode.id.as_str()) {
-                continue;
-            }
+        for episode in episodes
+            .into_iter()
+            .filter(|episode| !excluded.contains(episode.id.as_str()))
+            .take(limit)
+        {
             let size_bytes = podcast_estimated_size_bytes(episode.duration_seconds);
             candidates.push((
                 podcast_published_at(&episode.published_at),
@@ -6064,6 +6139,9 @@ async fn expand_podcast_auto_fill(
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let mut remaining = params.max_fill_bytes;
+    if retention.mode == crate::auto_fill::PodcastSelectionMode::Latest {
+        candidates.truncate(limit);
+    }
     Ok(candidates
         .into_iter()
         .filter_map(|(_, _, item)| {
@@ -6078,10 +6156,20 @@ async fn expand_podcast_auto_fill(
 }
 
 fn podcast_published_at(value: &Option<String>) -> Option<i64> {
-    value
-        .as_deref()
-        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-        .map(|date| date.timestamp())
+    value.as_deref().and_then(|date| {
+        chrono::DateTime::parse_from_rfc3339(date)
+            .ok()
+            .map(|date| date.timestamp())
+            .or_else(|| {
+                Some(
+                    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                        .ok()?
+                        .and_hms_opt(0, 0, 0)?
+                        .and_utc()
+                        .timestamp(),
+                )
+            })
+    })
 }
 
 /// Story 13.1: current time as Unix seconds — the single clock read for auto-fill. The pure engine
@@ -15603,10 +15691,24 @@ mod tests {
             &self,
             _: Option<&str>,
             _: Option<&str>,
-            _: u32,
-            _: u32,
+            offset: u32,
+            limit: u32,
         ) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
-            unimplemented!()
+            let mut albums: Vec<_> = self
+                .albums
+                .values()
+                .map(|detail| detail.album.clone())
+                .collect();
+            albums.sort_by(|a, b| a.id.cmp(&b.id));
+            let total = albums.len() as u32;
+            Ok((
+                albums
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect(),
+                total,
+            ))
         }
         async fn get_album(
             &self,
@@ -15995,6 +16097,115 @@ mod tests {
         assert_eq!(items[0].id, "episode-opaque");
         assert!(items[0].priority_reason.contains("play state unavailable"));
         assert_eq!(items[0].size_bytes, 960_000);
+    }
+
+    #[tokio::test]
+    async fn podcast_autofill_selected_shows_does_not_expand_other_shows() {
+        let mut provider =
+            FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
+        Arc::get_mut(&mut provider).unwrap().podcast_complete = true;
+        let params = || crate::auto_fill::AutoFillParams {
+            exclude_item_ids: vec![],
+            max_fill_bytes: 1_000_000,
+            device_id: "device".into(),
+            server_id: "server".into(),
+            now_unix: 0,
+            history: Default::default(),
+            rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
+            local: now_civil(),
+        };
+        let mut pipeline = crate::auto_fill::AutoFillPipeline::default_legacy(None);
+        pipeline.podcast_retention.mode = crate::auto_fill::PodcastSelectionMode::SelectedShows;
+        pipeline.podcast_retention.show_ids = vec!["different-show".into()];
+        assert!(
+            expand_podcast_auto_fill(
+                provider.clone() as Arc<dyn MediaProvider>,
+                Some(&pipeline),
+                params()
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        pipeline.podcast_retention.show_ids = vec!["show-opaque".into()];
+        let selected = expand_podcast_auto_fill(
+            provider as Arc<dyn MediaProvider>,
+            Some(&pipeline),
+            params(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "episode-opaque");
+    }
+
+    #[tokio::test]
+    async fn audiobook_autofill_selects_complete_books_within_budget() {
+        let mut provider =
+            FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Albums], vec![]);
+        let mut part_a = make_fake_song("part-a", "Part A");
+        part_a.size_bytes = Some(400_000);
+        let mut part_b = make_fake_song("part-b", "Part B");
+        part_b.size_bytes = Some(400_000);
+        Arc::get_mut(&mut provider).unwrap().albums.insert(
+            "book-a".into(),
+            crate::domain::models::AlbumWithTracks {
+                album: crate::domain::models::Album {
+                    id: "book-a".into(),
+                    title: "Book A".into(),
+                    artist_id: None,
+                    artist_name: None,
+                    year: None,
+                    song_count: Some(2),
+                    duration_seconds: None,
+                    cover_art_id: None,
+                    provider_metadata: Default::default(),
+                },
+                tracks: vec![part_a, part_b],
+                provider_metadata: Default::default(),
+            },
+        );
+        let params = crate::auto_fill::AutoFillParams {
+            exclude_item_ids: vec![],
+            max_fill_bytes: 1_000_000,
+            device_id: "device".into(),
+            server_id: "server".into(),
+            now_unix: 0,
+            history: Default::default(),
+            rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
+            local: now_civil(),
+        };
+        let items = expand_audiobook_auto_fill(provider.clone() as Arc<dyn MediaProvider>, params)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items.iter().map(|item| item.size_bytes).sum::<u64>(),
+            800_000
+        );
+
+        let tight = crate::auto_fill::AutoFillParams {
+            exclude_item_ids: vec![],
+            max_fill_bytes: 700_000,
+            device_id: "device".into(),
+            server_id: "server".into(),
+            now_unix: 0,
+            history: Default::default(),
+            rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
+            local: now_civil(),
+        };
+        assert!(
+            expand_audiobook_auto_fill(provider as Arc<dyn MediaProvider>, tight)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // Displays the list of items selected for synchronization.
 
 import { basketStore, BasketItem, autoFillSlotId, isAutoFillSlotId } from '../state/basket';
-import { rpcCall, getImageUrl, fetchBrowseModes, fetchBrowsePlaylists } from '../rpc';
+import { rpcCall, getImageUrl, fetchBrowseModes, fetchBrowsePlaylists, fetchPodcastShows } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 import { AutoFillPanel } from './AutoFillPanel';
@@ -10,7 +10,7 @@ import { AutoFillPipeline, defaultLegacyPipeline, normalizePipeline } from '../s
 import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 import { formatServerIdentity } from '../serverIdentity';
-import type { ServerSummary } from '../rpc';
+import type { ServerSummary, PodcastShow } from '../rpc';
 
 interface StorageInfo {
     totalBytes: number;
@@ -457,6 +457,19 @@ export class BasketSidebar {
                 console.error('[AutoFill] Failed to fetch playlists:', err);
             }
         }
+        const podcastShows: PodcastShow[] = [];
+        if (modes.includes('podcasts')) {
+            try {
+                for (let offset = 0; offset < 10_000;) {
+                    const page = await fetchPodcastShows(offset, 100);
+                    podcastShows.push(...page.shows);
+                    offset += page.shows.length;
+                    if (page.shows.length === 0 || offset >= page.total) break;
+                }
+            } catch (err) {
+                console.error('[AutoFill] Failed to fetch podcast shows:', err);
+            }
+        }
 
         // Capacity available for this fill (free − manual), derived identically to slotSizeBytes so
         // the preview's capped maxBytes matches the slot-card readout. Undefined when no device is
@@ -471,6 +484,7 @@ export class BasketSidebar {
             pipeline: initial,
             modes,
             playlists,
+            podcastShows,
             onSave: (pipeline) => { void this.persistPipeline(serverId, pipeline); },
             excludeItemIds: basketStore.getManualItemIdsForServer(serverId),
             availableBytes,
@@ -1276,7 +1290,7 @@ export class BasketSidebar {
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
             const blocked = Array.isArray((delta as any)?.blocked) ? (delta as any).blocked as Array<{ name?: string; reason?: string; reasonCode?: string }> : [];
             const eligible = Array.isArray((delta as any)?.adds)
-                ? (delta as any).adds.filter((item: any) => item.mediaRole === 'audiobook' || item.mediaRole === 'podcast') as Array<{ name?: string; reason?: string; reasonCode?: string }>
+                ? (delta as any).adds.filter((item: any) => item.mediaRole === 'audiobook') as Array<{ name?: string; reason?: string; reasonCode?: string }>
                 : [];
             if ((blocked.length > 0 || eligible.length > 0) && !await this.confirmMediaCompatibility(eligible, blocked)) {
                 this.stopPolling();

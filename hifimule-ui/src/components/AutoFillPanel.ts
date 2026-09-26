@@ -8,7 +8,7 @@
 // behind an "Advanced" disclosure so the simple path stays one-click (AC6, AC7).
 
 import { t } from '../i18n';
-import type { BrowseMode, BrowsePlaylist } from '../rpc';
+import type { BrowseMode, BrowsePlaylist, PodcastShow } from '../rpc';
 import { previewAutoFill } from '../rpc';
 import {
     AutoFillPipeline,
@@ -98,6 +98,7 @@ export interface AutoFillPanelOptions {
     modes: BrowseMode[];
     /** Playlists for the playlist-source picker (empty when `playlists` mode unsupported). */
     playlists: BrowsePlaylist[];
+    podcastShows?: PodcastShow[];
     onSave: (pipeline: AutoFillPipeline) => void;
     /** Manual (non-slot) item ids for this server — passed to the preview as `excludeItemIds` so it
      * dedups against manual selections exactly as sync-time fill does (Story 12.7). */
@@ -206,7 +207,21 @@ export class AutoFillPanel {
                     </sl-switch>
                 </div>
                 ${this.opts.modes.includes('podcasts') ? `
-                    <sl-input id="af-podcast-recent" type="number" min="0" max="100" label="${t('basket.autofill.podcast_recent')}" value="${p.podcastRetention.recentCount}"></sl-input>
+                    <sl-select id="af-podcast-mode" label="${t('basket.autofill.podcast_mode')}" value="${p.podcastRetention.mode}">
+                        <sl-option value="latest">${t('basket.autofill.podcast_latest')}</sl-option>
+                        <sl-option value="selectedShows">${t('basket.autofill.podcast_selected')}</sl-option>
+                    </sl-select>
+                    ${p.podcastRetention.mode === 'selectedShows' ? `
+                        <div class="auto-fill-stage-body" id="af-podcast-shows">
+                            <strong>${t('basket.autofill.podcast_pick_shows')}</strong>
+                            <div class="auto-fill-source-list">
+                                ${(this.opts.podcastShows ?? []).map((show) => `
+                                    <sl-checkbox class="af-podcast-show" value="${escapeHtml(show.id)}" ${p.podcastRetention.showIds.includes(show.id) ? 'checked' : ''}>${escapeHtml(show.title)}</sl-checkbox>
+                                `).join('') || `<span>${t('basket.autofill.podcast_no_shows')}</span>`}
+                            </div>
+                        </div>
+                    ` : ''}
+                    <sl-input id="af-podcast-recent" type="number" min="0" max="100" label="${t(p.podcastRetention.mode === 'latest' ? 'basket.autofill.podcast_latest_count' : 'basket.autofill.podcast_recent')}" value="${p.podcastRetention.recentCount}"></sl-input>
                     <sl-switch id="af-podcast-unplayed" ${p.podcastRetention.unplayedOnly ? 'checked' : ''}>${t('basket.autofill.podcast_unplayed')}</sl-switch>
                     <div class="device-settings-description">${t('basket.autofill.podcast_progress_fallback')}</div>
                 ` : ''}
@@ -716,6 +731,15 @@ export class AutoFillPanel {
         d.querySelector('#af-enabled')?.addEventListener('sl-change', (e: Event) => {
             this.pipeline.enabled = (e.target as HTMLInputElement).checked;
         });
+        d.querySelector('#af-podcast-mode')?.addEventListener('sl-change', () => {
+            this.buildPipeline();
+            this.renderBody();
+        });
+        d.querySelector('#af-podcast-recent')?.addEventListener('sl-change', () => this.invalidatePreview());
+        d.querySelector('#af-podcast-unplayed')?.addEventListener('sl-change', () => this.invalidatePreview());
+        d.querySelectorAll('.af-podcast-show').forEach((el: Element) => {
+            el.addEventListener('sl-change', () => this.invalidatePreview());
+        });
         this.bindTextState('#af-budget-gb', (value) => { this.budgetGbInput = value; });
         this.bindTextState('#af-exclude-genres', (value) => { this.excludeGenresInput = value; });
         this.bindTextState('#af-cooldown', (value) => { this.cooldownInput = value; });
@@ -1132,8 +1156,15 @@ export class AutoFillPanel {
         if (this.opts.modes.includes('podcasts')) {
             const recent = this.dialog?.querySelector('#af-podcast-recent') as any;
             const unplayed = this.dialog?.querySelector('#af-podcast-unplayed') as any;
+            const mode = this.dialog?.querySelector('#af-podcast-mode') as any;
             this.pipeline.podcastRetention.recentCount = clampInt(Number(recent?.value ?? 10), 0, 100);
             this.pipeline.podcastRetention.unplayedOnly = !!unplayed?.checked;
+            this.pipeline.podcastRetention.mode = mode?.value === 'selectedShows' ? 'selectedShows' : 'latest';
+            if (this.pipeline.podcastRetention.mode === 'selectedShows') {
+                this.pipeline.podcastRetention.showIds = Array.from(this.dialog?.querySelectorAll('.af-podcast-show') ?? [])
+                    .filter((el: any) => !!el.checked)
+                    .map((el: any) => String(el.value));
+            }
         }
         // Budget (GB → bytes); empty clears the ceiling.
         this.pipeline.budget.maxBytes = this.bytesFromGbInput(
@@ -1173,6 +1204,10 @@ export class AutoFillPanel {
     /** Reads the free-text/number inputs into the model, then serializes and hands back. */
     private handleSave(): void {
         const out = this.buildPipeline();
+        if (this.opts.modes.includes('podcasts') && out.podcastRetention.mode === 'selectedShows' && out.podcastRetention.showIds.length === 0) {
+            window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: t('basket.autofill.podcast_select_required') } }));
+            return;
+        }
         this.opts.onSave(out);
         this.dialog.hide();
     }

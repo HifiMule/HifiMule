@@ -98,10 +98,20 @@ pub struct AutoFillPipeline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PodcastRetention {
-    /// Maximum newest episodes retained per show, including episodes with unknown dates.
+    /// Maximum newest episodes retained, globally or per selected show.
     pub recent_count: usize,
     /// Playback state is not available in the typed catalog. Unknown state falls back to recent.
     pub unplayed_only: bool,
+    pub mode: PodcastSelectionMode,
+    pub show_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PodcastSelectionMode {
+    #[default]
+    Latest,
+    SelectedShows,
 }
 
 impl Default for PodcastRetention {
@@ -109,6 +119,8 @@ impl Default for PodcastRetention {
         Self {
             recent_count: 10,
             unplayed_only: false,
+            mode: PodcastSelectionMode::Latest,
+            show_ids: Vec::new(),
         }
     }
 }

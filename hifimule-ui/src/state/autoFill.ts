@@ -135,7 +135,7 @@ export interface PromotionStage {
 
 export interface AutoFillPipeline {
     enabled: boolean;
-    podcastRetention: { recentCount: number; unplayedOnly: boolean };
+    podcastRetention: { recentCount: number; unplayedOnly: boolean; mode: 'latest' | 'selectedShows'; showIds: string[] };
     filter: FilterStage;
     sources: SourceEntry[];
     unit: Unit;
@@ -171,7 +171,7 @@ export function emptyFilter(): FilterStage {
 export function defaultLegacyPipeline(maxBytes?: number): AutoFillPipeline {
     return {
         enabled: true,
-        podcastRetention: { recentCount: 10, unplayedOnly: false },
+        podcastRetention: { recentCount: 10, unplayedOnly: false, mode: 'latest', showIds: [] },
         filter: emptyFilter(),
         sources: [{ kind: 'library' }],
         unit: 'track',
@@ -194,7 +194,12 @@ export function normalizePipeline(raw: Partial<AutoFillPipeline> | null | undefi
     if (!raw) return base;
     return {
         enabled: raw.enabled ?? false,
-        podcastRetention: { recentCount: raw.podcastRetention?.recentCount ?? 10, unplayedOnly: raw.podcastRetention?.unplayedOnly ?? false },
+        podcastRetention: {
+            recentCount: raw.podcastRetention?.recentCount ?? 10,
+            unplayedOnly: raw.podcastRetention?.unplayedOnly ?? false,
+            mode: raw.podcastRetention?.mode === 'selectedShows' ? 'selectedShows' : 'latest',
+            showIds: Array.isArray(raw.podcastRetention?.showIds) ? raw.podcastRetention.showIds.filter((id) => typeof id === 'string') : [],
+        },
         filter: { ...emptyFilter(), ...(raw.filter ?? {}) },
         sources: Array.isArray(raw.sources) && raw.sources.length > 0
             ? raw.sources.map((s) => ({ ...s }))
@@ -334,7 +339,12 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
     }
     return {
         enabled: p.enabled,
-        podcastRetention: { recentCount: Math.max(0, Math.min(100, Math.floor(p.podcastRetention?.recentCount ?? 10))), unplayedOnly: !!p.podcastRetention?.unplayedOnly },
+        podcastRetention: {
+            recentCount: Math.max(0, Math.min(100, Math.floor(p.podcastRetention?.recentCount ?? 10))),
+            unplayedOnly: !!p.podcastRetention?.unplayedOnly,
+            mode: p.podcastRetention?.mode === 'selectedShows' ? 'selectedShows' : 'latest',
+            showIds: [...new Set(p.podcastRetention?.showIds ?? [])],
+        },
         filter: {
             includeTags: p.filter.includeTags ?? [],
             excludeTags: p.filter.excludeTags ?? [],

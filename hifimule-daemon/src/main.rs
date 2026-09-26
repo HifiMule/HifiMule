@@ -1455,7 +1455,10 @@ async fn run_auto_sync_via_provider(
                 // Story 13.5: legacy auto-sync path — civil time inert (Context stage never runs here).
                 local: auto_fill::CivilTime::default(),
             };
-            match auto_fill::run_auto_fill_provider(provider.clone(), fill_params).await {
+            let pipeline = (manifest.auto_fill.pipelines.len() == 1)
+                .then(|| manifest.auto_fill.pipelines.values().next())
+                .flatten();
+            match rpc::expand_auto_fill_slot(provider.clone(), pipeline, fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {
                     daemon_log!("[AutoSync] Provider auto-fill returned no items, skipping");
                     let _ = state_tx.send(DaemonState::Idle);

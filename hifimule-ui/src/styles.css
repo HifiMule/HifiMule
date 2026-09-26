@@ -1520,6 +1520,11 @@ h2 {
   gap: var(--space-xs);
 }
 
+#af-podcast-shows .auto-fill-source-list {
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
 .auto-fill-substage-label {
   font-size: 0.75rem;
   font-weight: 600;
