@@ -477,8 +477,14 @@ fn podcast_media_identity(value: &mut serde_json::Value) {
             .get_mut("media")
             .and_then(serde_json::Value::as_object_mut),
     ) {
-        if !media.contains_key("id") && !media.contains_key("libraryItemId") {
-            media.insert("id".into(), serde_json::Value::String(id));
+        if !media.contains_key("id") {
+            let media_id = media
+                .get("libraryItemId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&id)
+                .to_owned();
+            media.insert("id".into(), serde_json::Value::String(media_id));
         }
     }
 }
@@ -518,7 +524,7 @@ impl<'de> Deserialize<'de> for PodcastDto {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PodcastMediaDto {
-    #[serde(alias = "libraryItemId", deserialize_with = "deserialize_nonempty")]
+    #[serde(deserialize_with = "deserialize_nonempty")]
     id: String,
     #[serde(default)]
     cover_path: Option<String>,
@@ -4798,6 +4804,36 @@ mod tests {
             r#"{"id":"show-1","libraryId":"podcasts","mediaType":"podcast","media":{"metadata":{"title":"Show"},"episodes":[]}}"#,
         ).unwrap();
         assert_eq!(show.media.id, "show-1");
+    }
+
+    #[test]
+    fn podcast_detail_accepts_media_id_alongside_library_item_id() {
+        let detail = serde_json::json!({
+            "id": "show-1",
+            "libraryId": "pod-id",
+            "mediaType": "podcast",
+            "media": {
+                "id": "media-1",
+                "libraryItemId": "show-1",
+                "metadata": {"title": "Talks"},
+                "episodes": [{"id": "ep-1", "title": "First"}]
+            }
+        });
+        let playback: PodcastDto = serde_json::from_value(detail.clone()).unwrap();
+        let browse: PodcastBrowseDto = serde_json::from_value(detail).unwrap();
+        assert_eq!(playback.media.id, "media-1");
+        assert_eq!(browse.media.id, "media-1");
+
+        let fallback = serde_json::json!({
+            "id": "show-1",
+            "libraryId": "pod-id",
+            "mediaType": "podcast",
+            "media": {"libraryItemId": "show-1", "episodes": []}
+        });
+        let playback: PodcastDto = serde_json::from_value(fallback.clone()).unwrap();
+        let browse: PodcastBrowseDto = serde_json::from_value(fallback).unwrap();
+        assert_eq!(playback.media.id, "show-1");
+        assert_eq!(browse.media.id, "show-1");
     }
 
     #[tokio::test]
