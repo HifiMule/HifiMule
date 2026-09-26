@@ -3090,7 +3090,7 @@ export async function initLibraryView() {
         podcastEpisodeNextOffset = 0;
         podcastCurrentShow = null;
 
-        state.availableModes = selected && (selected.serverType === 'jellyfin' || selected.serverType === 'subsonic')
+        state.availableModes = selected && (selected.serverType === 'jellyfin' || selected.serverType === 'subsonic' || selected.serverType === 'openSubsonic')
             ? [...modesResult, 'search'] : modesResult;
         const defaultMode: BrowseMode = modesResult.includes('artists')
             ? 'artists'
