@@ -170,7 +170,7 @@ export class PlaybackControls {
         this.surfaceToggle.addEventListener('click', () => this.onSurfaceChange(this.surface === 'library' ? 'playback' : 'library'));
         const actions = document.createElement('div');
         actions.className = 'playback-controls__actions';
-        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh));
+        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
         this.messages.className = 'playback-controls__messages';
         this.messages.append(this.status, this.seekStatus, this.error);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
