@@ -205,7 +205,7 @@ development_status:
 
   # Epic 16 — Radio/Recommendations (moved from old 15.15–15.28)
   epic-16: in-progress
-  16-1-configure-playback-selection-and-start-its-first-selected-track: ready-for-dev
+  16-1-configure-playback-selection-and-start-its-first-selected-track: in-progress
   16-2-replenish-radio-within-a-bounded-upcoming-queue: backlog
   16-3-continue-radio-through-meaningful-artist-connections: backlog
   16-4-avoid-duplicate-radio-recordings-across-configured-servers: backlog

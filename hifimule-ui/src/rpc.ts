@@ -417,6 +417,30 @@ export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
     return result.data;
 }
 
+export type PlaybackSelectionKind = 'playlist' | 'artist' | 'genre';
+export type PlaybackSelectionOrdering = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery' | 'rarity';
+export interface PlaybackSelectionSource { serverId: string; kind: PlaybackSelectionKind; ref: string }
+export interface PlaybackSelectionConfig {
+    schemaVersion: 1; sources: PlaybackSelectionSource[];
+    ordering: PlaybackSelectionOrdering[]; seed: number; maxTracks: number;
+}
+export interface PlaybackSelectionOption { id: string; name: string }
+export async function playbackGetSelectionConfig(): Promise<PlaybackSelectionConfig> {
+    return (await rpcCall('playback.getSelectionConfig', { schemaVersion: 1 })).data;
+}
+export async function playbackSelectionOptions(serverId: string, kind: PlaybackSelectionKind): Promise<{ supported: boolean; options: PlaybackSelectionOption[]; reason?: string }> {
+    return (await rpcCall('playback.selectionOptions', { schemaVersion: 1, serverId, kind })).data;
+}
+export async function playbackSaveSelectionConfig(config: PlaybackSelectionConfig): Promise<void> {
+    await rpcCall('playback.saveSelectionConfig', config);
+}
+export async function playbackStartSelection(): Promise<void> {
+    await rpcCall('playback.startSelection', { schemaVersion: 1 });
+}
+export async function playbackCancelSelectionStart(): Promise<void> {
+    await rpcCall('playback.cancelSelectionStart', { schemaVersion: 1 });
+}
+
 export async function playbackListOccurrences(
     observed: Pick<PlaybackSessionSnapshot, 'sessionId' | 'queueRevision'> & Partial<Pick<PlaybackSessionSnapshot, 'mainCurrent'>>,
     cursor: string | null = null,

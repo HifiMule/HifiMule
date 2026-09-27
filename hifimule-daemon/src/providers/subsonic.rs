@@ -757,6 +757,24 @@ impl MediaProvider for SubsonicProvider {
         Ok((page, total))
     }
 
+    async fn get_genre_tracks_bounded(
+        &self,
+        genre_id_or_name: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let body = self
+            .client
+            .get_songs_by_genre(genre_id_or_name, offset, limit)
+            .await?;
+        Ok(body
+            .songs_by_genre
+            .song
+            .into_iter()
+            .map(song_from_dto)
+            .collect())
+    }
+
     async fn list_favorites(
         &self,
         _library_id: Option<&str>,
@@ -3475,6 +3493,35 @@ mod tests {
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "song1");
         assert_eq!(tracks[0].title, "Rock Track");
+    }
+
+    #[tokio::test]
+    async fn playback_genre_fetch_uses_server_side_page_bounds() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/rest/getSongsByGenre.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("genre".into(), "Rock".into()));
+                matchers.push(Matcher::UrlEncoded("count".into(), "100".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "100".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""songsByGenre":{"song":[{"id":"song2","title":"More Rock","duration":180}]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+        let tracks = provider
+            .get_genre_tracks_bounded("Rock", 100, 100)
+            .await
+            .unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "song2");
+        mock.assert_async().await;
     }
 
     #[tokio::test]

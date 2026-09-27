@@ -108,6 +108,27 @@ jobs:
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/macos-audio-runtime.mjs env "$TARGET_TRIPLE" "$GITHUB_ENV"
 
+      - name: Verify Playback selector
+        run: npm run build:daemon -- test -p hifimule-daemon playback::selection
+
+      - name: Verify bounded genre retrieval
+        run: npm run build:daemon -- test -p hifimule-daemon playback_genre_fetch_uses_server_side_page_bounds
+
+      - name: Verify Playback start failures preserve the session
+        run: npm run build:daemon -- test -p hifimule-daemon playback_selection_setup_and_unavailable_source_preserve_current_session
+
+      - name: Verify source error distinctions
+        run: npm run build:daemon -- test -p hifimule-daemon playback_genre_source_distinguishes_removed_source_from_empty_result
+
+      - name: Verify existing auto-fill behavior
+        run: npm run build:daemon -- test -p hifimule-daemon auto_fill
+
+      - name: Verify localization
+        run: cargo test -p hifimule-i18n
+
+      - name: Verify Playback settings UI
+        run: npm run build --prefix hifimule-ui
+
       - name: Run isolated playback restoration evidence
         env:
           HIFIMULE_EVIDENCE_PATH: playback-evidence/${{ matrix.label }}.json

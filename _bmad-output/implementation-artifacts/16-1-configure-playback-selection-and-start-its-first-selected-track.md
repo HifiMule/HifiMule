@@ -1,6 +1,9 @@
+---
+baseline_commit: 30209880f64c5382cbd10537e27c30a20d0fe2cb
+---
 # Story 16.1: Configure Playback selection and start its first selected track
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -22,22 +25,22 @@ so that I can start listening from my curated music without choosing the first t
 
 ## Tasks / Subtasks
 
-- [ ] Define the implementation contract before editing behavior (AC: 2, 3, 5, 7, 8).
-  - [ ] Record pure selector input/output, portable source identity, per-consumer eligibility, deterministic seed, defaults, invalid-setting handling, and candidate/page/cache bounds.
-  - [ ] Specify a versioned Playback-only settings schema and wire shape; preserve existing output preference and migration behavior.
-- [ ] Extend the shared selection boundary for Playback (AC: 3, 5, 7, 8).
-  - [ ] Carry source server identity through candidate and result types without altering the ordering or sync path for existing inputs.
-  - [ ] Reuse `run_pipeline` and provider candidate retrieval; adapt device-shaped budget/history inputs into Playback-owned eligibility and track-count limits.
-  - [ ] Route each source through its own provider, with bounded retrieval and no dependency on currently browsed server.
-- [ ] Add Playback settings persistence and RPCs (AC: 1, 2, 6, 8).
-  - [ ] Validate servers, capabilities, input references, bounds and schema version at the daemon boundary; return distinguishable setup, source and empty errors.
-  - [ ] Make saved settings available in authoritative reconnect state without touching `autoFill.setPipeline`, device manifests or sync defaults.
+- [x] Define the implementation contract before editing behavior (AC: 2, 3, 5, 7, 8).
+  - [x] Record pure selector input/output, portable source identity, per-consumer eligibility, deterministic seed, defaults, invalid-setting handling, and candidate/page/cache bounds.
+  - [x] Specify a versioned Playback-only settings schema and wire shape; preserve existing output preference and migration behavior.
+- [x] Extend the shared selection boundary for Playback (AC: 3, 5, 7, 8).
+  - [x] Carry source server identity through candidate and result types without altering the ordering or sync path for existing inputs.
+  - [x] Reuse `run_pipeline` and provider candidate retrieval; adapt device-shaped budget/history inputs into Playback-owned eligibility and track-count limits.
+  - [x] Route each source through its own provider, with bounded retrieval and no dependency on currently browsed server.
+- [x] Add Playback settings persistence and RPCs (AC: 1, 2, 6, 8).
+  - [x] Validate servers, capabilities, input references, bounds and schema version at the daemon boundary; return distinguishable setup, source and empty errors.
+  - [x] Make saved settings available in authoritative reconnect state without touching `autoFill.setPipeline`, device manifests or sync defaults.
 - [ ] Add settings UI and explicit first-track action (AC: 1, 4, 6, 7, 9).
-  - [ ] Reuse appropriate selection controls and localization patterns, omitting device-only fields.
+  - [x] Reuse appropriate selection controls and localization patterns, omitting device-only fields.
   - [ ] Fence/cancel pending requests and only commit a prepared result through the main-session Play command. Preserve current session on every failure.
   - [ ] Provide keyboard operation, visible focus, accessible names and status/error feedback at responsive sizes.
 - [ ] Verify behavior (AC: 2–9).
-  - [ ] Test stable ordering equivalence, identity collisions, settings isolation/round trip, stale completion, cancellation, empty/unavailable sources, current-session preservation and simultaneous sync selection.
+  - [x] Test stable ordering equivalence, identity collisions, settings isolation/round trip, stale completion, cancellation, empty/unavailable sources, current-session preservation and simultaneous sync selection.
   - [ ] Run relevant Rust/UI tests and cross-platform checks; document any platform not actually verified.
 
 ## Dev Notes
@@ -72,16 +75,48 @@ Likely updates: `hifimule-daemon/src/auto_fill/{pipeline,fetch,mod}.rs`, `hifimu
 
 ## Dev Agent Record
 
+### Implementation Plan
+
+- Playback settings use a separate versioned local `playback-selection.json` file so output preference saves and migrations remain intact. The wire carries `schemaVersion: 1`, bounded source entries with portable `serverId`, source kind and optional `ref`, a constrained `AutoFillPipeline` selector, and an explicit `seed: u64`. Defaults are no sources, track unit, no device budget, no memory, and a fixed seed of zero. Invalid versions, IDs, references, unsupported stages, or limits are rejected at the daemon boundary; no device defaults are imported.
+- The pure selector input is one bounded, merged candidate pool assembled from typed source pools. A request-scoped map carries each candidate's portable `(serverId, trackId)` identity through normalization and converts the ordered selector result back to those identities. Sync's existing single-server input retains its existing ordering and output. Playback supplies empty per-request history and its own track-count eligibility, without device capacity or durable taste state. The seed is passed to `PipelineInput.seed` unchanged.
+- Playback retrieval is capped at 100 genre tracks per page, 4 genre pages, 32 artist albums, 400 candidates per source, 8 sources, 3,200 candidates across sources, and a 15-second fetch deadline plus a separate 15-second preparation deadline. Playlist and album provider APIs return a complete source response; Playback truncates their candidate cache to 400, while the request deadline bounds their retrieval time. The cache is request-scoped and dropped after selection; the Playback queue receives only one selected track. A request generation fences every asynchronous fetch and preparation before main-session admission. The Play command is the sole commit path. New requests and cancellation revoke older generations; failures preserve the main session.
+
 ### Agent Model Used
 
-GPT-6 Codex (story preparation)
+GPT-6 Codex (story preparation and implementation)
 
 ### Debug Log References
 
+- Windows: `scripts/build-daemon.mjs test -p hifimule-daemon` through the controlled native-runtime wrapper — 1,179 passed, 6 ignored, 5 Audiobookshelf contract tests passed. The first direct `cargo test` attempt could not find FFmpeg; the documented wrapper supplied it.
+- Windows: focused Playback selector, RPC failure-preservation, removed/empty genre, and bounded Subsonic genre-page tests passed.
+- Windows: TypeScript `tsc --noEmit`, Vite production build, 7 localization tests, `cargo fmt --check`, and ordinary daemon Clippy passed. `clippy -D warnings` is blocked by existing warnings elsewhere in the daemon; no new warning was reported in the touched modules.
+- macOS and Linux checks are wired into `.github/workflows/build.yml` but have not run in this workspace. Story 15.17 packaged playback verification remains in progress.
+
 ### Completion Notes List
 
-- Comprehensive story context prepared; implementation remains pending.
+- Comprehensive story context prepared before implementation.
+- Added an isolated versioned Playback selection file and RPCs for saved settings, server-scoped options, start and cancel. Output preference, device manifests, sync defaults and taste history use their existing storage.
+- Added a typed portable `(serverId, trackId)` boundary around the shared pure selector. Playback combines at most eight source pools, preserves colliding provider-local IDs, and admits only one resolved track through the main-session Play path.
+- Added Playback destination controls, status feedback, focus styles and English/French/Spanish/German strings. Added Windows-focused regressions and cross-platform CI commands.
+- Remaining before `review`: verify keyboard and responsive behavior in the running app; run the new CI checks on macOS/Linux; confirm the full audio preparation failure path preserves the current main session. Do not mark the remaining UI and verification subtasks complete until these gates pass.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/16-1-configure-playback-selection-and-start-its-first-selected-track.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `.github/workflows/build.yml`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_selection.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/components/PlaybackSelectionSettings.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+
+### Change Log
+
+- 2026-09-27: Added Playback-owned finite selection, settings persistence, source-scoped RPCs, explicit start/cancel, localized UI and platform CI verification commands. Windows tests and builds pass; story remains in progress pending the recorded gates.

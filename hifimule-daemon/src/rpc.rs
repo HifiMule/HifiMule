@@ -23,6 +23,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
+mod playback_selection;
+
 // JSON-RPC 2.0 Error Codes
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
 const ERR_INVALID_PARAMS: i32 = -32602;
@@ -583,6 +585,15 @@ async fn handler(
         }
         "playback.retryCheckpoint" => handle_playback_retry_checkpoint(&state, payload.params),
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
+        "playback.getSelectionConfig" => playback_selection::get_config(payload.params).await,
+        "playback.saveSelectionConfig" => {
+            playback_selection::save_config(&state, payload.params).await
+        }
+        "playback.selectionOptions" => playback_selection::options(&state, payload.params).await,
+        "playback.startSelection" => {
+            playback_selection::start(&state, payload.params, mutation_guard.take()).await
+        }
+        "playback.cancelSelectionStart" => playback_selection::cancel(payload.params).await,
         "playback.listOccurrences" => {
             handle_playback_list_occurrences(&state, payload.params).await
         }
@@ -731,6 +742,9 @@ fn is_mutating_method(method: &str) -> bool {
             | "destination.select"
             | "playlist.create"
             | "playback.applySession"
+            | "playback.saveSelectionConfig"
+            | "playback.startSelection"
+            | "playback.cancelSelectionStart"
             | "playback.playEpisode"
             | "playback.playAlbum"
             | "playback.playPlaylist"
@@ -1075,6 +1089,17 @@ async fn handle_playback_apply_session_parsed(
     mutation_guard: Option<crate::sync::MutationGuard>,
     allow_podcast_episode: bool,
 ) -> Result<Value, JsonRpcError> {
+    handle_playback_apply_session_prepared(state, p, mutation_guard, allow_podcast_episode, None)
+        .await
+}
+
+async fn handle_playback_apply_session_prepared(
+    state: &AppState,
+    p: crate::playback::model::ApplySessionParams,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+    allow_podcast_episode: bool,
+    prepared: Option<crate::providers::PlaybackDescription>,
+) -> Result<Value, JsonRpcError> {
     let added_sources: Vec<_> = match &p.operation {
         crate::playback::model::SessionOperation::PlayTrack { source } => vec![source],
         crate::playback::model::SessionOperation::ReplaceQueue { sources }
@@ -1138,6 +1163,9 @@ async fn handle_playback_apply_session_parsed(
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             let resolved =
                 tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                    if let Some(description) = prepared {
+                        return Ok(description);
+                    }
                     match crate::server_manager::get_provider_by_server_id(
                         &manager,
                         &db,
@@ -4127,6 +4155,14 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
             _ => false,
         };
 
+    let playback_selection = crate::paths::get_app_data_dir()
+        .map_err(|_| ())
+        .and_then(|dir| {
+            crate::playback::selection::load(&dir.join("playback-selection.json")).map_err(|_| ())
+        })
+        .map(|config| serde_json::json!({"status": "ready", "config": config}))
+        .unwrap_or_else(|_| serde_json::json!({"status": "invalid"}));
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
@@ -4143,6 +4179,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "pendingDevices": pending_devices,
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
+        "playbackSelection": playback_selection,
         "activeOperationId": active_operation_id,
         "syncPipelineActive": state.sync_operation_manager.is_pipeline_active(),
         "connectedDevices": connected_devices_json,
@@ -17516,5 +17553,88 @@ mod tests {
         assert!(append_bounded_image_chunk(&mut body, &[3], 3));
         assert!(!append_bounded_image_chunk(&mut body, &[4], 3));
         assert_eq!(body, &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn playback_selection_setup_and_unavailable_source_preserve_current_session() {
+        use crate::playback::selection::{PlaybackSelectionConfig, SelectionKind, SelectionSource};
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let before = state.playback.snapshot().unwrap();
+        let empty = playback_selection::start_with_config(
+            &state,
+            PlaybackSelectionConfig::default(),
+            playback_selection::test_ticket().await,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(empty.data.unwrap()["code"], "PLAYBACK_SELECTION_SETUP");
+        let config = PlaybackSelectionConfig {
+            sources: vec![SelectionSource {
+                server_id: "missing-portable".into(),
+                kind: SelectionKind::Playlist,
+                ref_id: "playlist".into(),
+            }],
+            ..Default::default()
+        };
+        let old_ticket = playback_selection::test_ticket().await;
+        let _new_ticket = playback_selection::test_ticket().await;
+        let cancelled =
+            playback_selection::start_with_config(&state, config.clone(), old_ticket, None)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            cancelled.data.unwrap()["code"],
+            "PLAYBACK_SELECTION_CANCELLED"
+        );
+        let unavailable = playback_selection::start_with_config(
+            &state,
+            config,
+            playback_selection::test_ticket().await,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            unavailable.data.unwrap()["code"],
+            "PLAYBACK_SELECTION_SOURCE_UNAVAILABLE"
+        );
+        let after = state.playback.snapshot().unwrap();
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.queue_revision, before.queue_revision);
+        assert_eq!(after.generation_id, before.generation_id);
+    }
+
+    #[tokio::test]
+    async fn playback_genre_source_distinguishes_removed_source_from_empty_result() {
+        use crate::playback::selection::{self, SelectionKind, SelectionSource};
+        let genre = crate::domain::models::Genre {
+            id: "genre-rock".into(),
+            name: "Rock".into(),
+            song_count: Some(0),
+            cover_art_id: None,
+        };
+        let mut provider = FakeBrowseProvider::new(vec![BrowseMode::Genres], vec![genre]);
+        Arc::get_mut(&mut provider)
+            .unwrap()
+            .genre_tracks
+            .insert("genre-rock".into(), vec![]);
+        let source = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Genre,
+            ref_id: "genre-rock".into(),
+        };
+        let empty = selection::fetch_source(provider.as_ref(), &source)
+            .await
+            .unwrap();
+        assert!(empty.tracks.is_empty());
+        let missing = SelectionSource {
+            ref_id: "removed".into(),
+            ..source
+        };
+        assert!(matches!(
+            selection::fetch_source(provider.as_ref(), &missing).await,
+            Err(selection::SelectionError::SourceUnavailable)
+        ));
     }
 }

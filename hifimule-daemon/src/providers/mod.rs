@@ -560,6 +560,20 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    /// Bounded retrieval for finite Playback selection. Implementations whose normal
+    /// browse API computes an exact total by materializing every track may override
+    /// this with the provider's native count/offset request.
+    async fn get_genre_tracks_bounded(
+        &self,
+        genre_id_or_name: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        self.get_genre_tracks(genre_id_or_name, offset, limit)
+            .await
+            .map(|(tracks, _)| tracks)
+    }
+
     async fn list_recently_added(
         &self,
         _library_id: Option<&str>,

@@ -6,6 +6,7 @@ import {
 import { t } from '../i18n';
 import { playbackStore } from '../state/playback';
 import { formatServerIdentity } from '../serverIdentity';
+import { PlaybackSelectionSettings } from './PlaybackSelectionSettings';
 
 type Section = 'upcoming' | 'history';
 interface PageLocation { cursor: string | null; aroundOccurrenceId: string | null }
@@ -36,6 +37,7 @@ export class PlaybackDestination {
     private labelAttempts = 0;
     private labelTimer?: ReturnType<typeof setTimeout>;
     private focusAfterLoad?: { occurrenceId: string | null; action: string };
+    private readonly selectionSettings: PlaybackSelectionSettings;
 
     constructor(container: HTMLElement) {
         container.classList.add('playback-destination');
@@ -53,7 +55,8 @@ export class PlaybackDestination {
         this.status.setAttribute('role', 'status');
         this.status.setAttribute('aria-live', 'polite');
         this.regions = { upcoming: this.createRegion('upcoming'), history: this.createRegion('history') };
-        this.body.append(this.status, this.error, this.retry,
+        this.selectionSettings = new PlaybackSelectionSettings();
+        this.body.append(this.selectionSettings.element, this.status, this.error, this.retry,
             this.regionElement(this.regions.upcoming), this.regionElement(this.regions.history));
         container.replaceChildren(this.body);
         this.unsubscribe = playbackStore.subscribe(snapshot => void this.receive(snapshot));
@@ -66,6 +69,7 @@ export class PlaybackDestination {
 
     destroy(): void {
         this.disposed = true; this.unsubscribe?.();
+        this.selectionSettings.destroy();
         for (const region of Object.values(this.regions)) this.cancelRetry(region);
         if (this.labelTimer !== undefined) clearTimeout(this.labelTimer);
     }
