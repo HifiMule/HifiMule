@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-25  # Story 17.9 created
+last_updated: 2026-09-27  # Story 16.1 created
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -204,8 +204,8 @@ development_status:
   epic-15-retrospective: optional
 
   # Epic 16 — Radio/Recommendations (moved from old 15.15–15.28)
-  epic-16: backlog
-  16-1-configure-playback-selection-and-start-its-first-selected-track: backlog
+  epic-16: in-progress
+  16-1-configure-playback-selection-and-start-its-first-selected-track: ready-for-dev
   16-2-replenish-radio-within-a-bounded-upcoming-queue: backlog
   16-3-continue-radio-through-meaningful-artist-connections: backlog
   16-4-avoid-duplicate-radio-recordings-across-configured-servers: backlog
