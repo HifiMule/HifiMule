@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.1 - 2026-09-27
+
+On Windows, HifiMule's background service now starts when you sign in after a fresh installation, so it can watch for your devices without requiring you to open the app first. An uninstall now asks the service to finish its work and waits for it to close before removing its files.
+
+This release also fixes the same-version uninstall option in the Windows installer. The MSI installer now sets the Start menu shortcut identity without the shortcut property warning.
+
 ## v0.16.0 - 2026-09-27
 
 HifiMule now supports **Audiobookshelf**. You can add a Books or Podcasts library to the Server Hub, browse and search its contents, and listen directly on your computer. Books appear with their authors, series, and collections; Podcasts adds a Recent Episodes view so you can find unfinished episodes across shows. Audiobooks play in part order, and supported direct streams let you seek within a book part or episode. Your audiobook listening position is kept with Audiobookshelf.
