@@ -63,7 +63,14 @@ function load(relative, mocks, runtime = {}) {
   }).outputText;
   vm.runInNewContext(source, { exports, document, window: { addEventListener() {}, removeEventListener() {} }, console,
     CSS: { escape: value => String(value) },
-    setTimeout: () => 1, clearTimeout() {}, require: name => name === '../rpc' ? { isPlaybackQueueConflict: () => false, ...mocks[name] } : mocks[name] ?? {}, ...runtime });
+    setTimeout: () => 1, clearTimeout() {}, require: name => name === '../rpc'
+      ? { isPlaybackQueueConflict: () => false, ...mocks[name] }
+      : name === './PlaybackSelectionSettings'
+        ? { PlaybackSelectionSettings: class {
+          element = document.createElement('section');
+          destroy() {}
+        } }
+        : mocks[name] ?? {}, ...runtime });
   return exports;
 }
 
