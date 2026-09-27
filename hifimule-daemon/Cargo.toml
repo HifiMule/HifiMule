@@ -45,7 +45,7 @@ bytes = "1.0"
 md-5 = "0.10"
 tracing = "0.1"
 tempfile = "3"
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation", "Win32_System_Threading"] }
 notify-rust.workspace = true
 cpal.workspace = true
 ffmpeg-next.workspace = true

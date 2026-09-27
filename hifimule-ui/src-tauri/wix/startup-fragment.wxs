@@ -1,13 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
-    <Property Id="HIFIMULE_STARTUP_ENABLED">
-      <RegistrySearch Id="FindExistingHifiMuleStartup"
-                      Root="HKCU"
-                      Key="Software\Microsoft\Windows\CurrentVersion\Run"
-                      Name="HifiMule"
-                      Type="raw" />
-    </Property>
+    <CustomAction Id="StopHifiMuleDaemon"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[INSTALLDIR]hifimule-daemon.exe&quot; --quit"
+                  Execute="immediate"
+                  Return="check" />
+    <CustomAction Id="RegisterHifiMuleShortcutIdentity"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[INSTALLDIR]hifimule-daemon.exe&quot; --set-shortcut-appid &quot;[ApplicationProgramsFolder]HifiMule.lnk&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="StopHifiMuleDaemon" Before="InstallValidate">Installed</Custom>
+      <Custom Action="RegisterHifiMuleShortcutIdentity" After="CreateShortcuts">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
     <!--
       Register hifimule-daemon as a startup application via Registry Run key.
       Runs in the user's interactive session (HKCU) for full tray icon support.
@@ -17,7 +25,6 @@
       <Component Id="StartupRegistryComponent"
                  Directory="INSTALLDIR"
                  Guid="1ba6130d-4fab-4dd0-b5cb-35477b1b5f4e">
-        <Condition>HIFIMULE_STARTUP_ENABLED</Condition>
         <RegistryValue
           Root="HKCU"
           Key="Software\Microsoft\Windows\CurrentVersion\Run"

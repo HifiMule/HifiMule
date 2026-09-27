@@ -183,6 +183,18 @@ fn main() -> Result<()> {
     let install_service = args.iter().any(|arg| arg == "--install-service");
     let uninstall_service = args.iter().any(|arg| arg == "--uninstall-service");
 
+    #[cfg(windows)]
+    if args.iter().any(|arg| arg == "--quit") {
+        return request_installed_daemon_quit();
+    }
+    #[cfg(windows)]
+    if let Some(path) = args
+        .windows(2)
+        .find(|pair| pair[0] == "--set-shortcut-appid")
+    {
+        return set_shortcut_app_id_with_retry(std::path::Path::new(&path[1]));
+    }
+
     daemon_log!(
         "Daemon process starting (release={}, service={})",
         !cfg!(debug_assertions),
@@ -210,6 +222,117 @@ fn main() -> Result<()> {
     }
 
     run_interactive(&args)
+}
+
+#[cfg(windows)]
+fn request_installed_daemon_quit() -> Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+
+    let app_data = hifimule_lifecycle::resolve_app_data_dir()?;
+    match std::fs::metadata(app_data.join("runtime").join("owner.json")) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let descriptor = hifimule_lifecycle::read_descriptor(&app_data)?;
+    // Hold a handle to the exact owner before asking it to quit, so a later
+    // process with the same PID cannot be mistaken for this installation.
+    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, descriptor.pid) };
+    if process.is_null() {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(87) {
+            return Ok(()); // The descriptor outlived the process.
+        }
+        anyhow::bail!("Cannot inspect the running daemon process: {error}");
+    }
+    let result = (|| -> Result<()> {
+        if unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0 {
+            return Ok(());
+        }
+        hifimule_lifecycle::check_owner_health(&descriptor, Duration::from_secs(5))?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        let response: serde_json::Value = client
+            .post(format!("http://127.0.0.1:{}", descriptor.port))
+            .bearer_auth(&descriptor.token)
+            .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"daemon.quit","params":{}}))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        if !response["error"].is_null() || response["result"]["data"]["accepted"] != true {
+            anyhow::bail!("The running daemon rejected the quit request");
+        }
+        if unsafe { WaitForSingleObject(process, 30_000) } != WAIT_OBJECT_0 {
+            anyhow::bail!("The running daemon did not exit within 30 seconds");
+        }
+        Ok(())
+    })();
+    unsafe { CloseHandle(process) };
+    result
+}
+
+#[cfg(windows)]
+fn set_shortcut_app_id_with_retry(path: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize, IPersistFile, STGM_READWRITE,
+    };
+    use windows::Win32::UI::Shell::{
+        IShellLinkW,
+        PropertiesSystem::{IPropertyStore, PROPERTYKEY},
+        ShellLink,
+    };
+    use windows::core::{GUID, Interface, PCWSTR, PROPVARIANT};
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    if !initialized {
+        anyhow::bail!("Could not initialize COM to register the Start menu shortcut");
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let key = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 5,
+    };
+    let value = PROPVARIANT::from("hifimule.github.io");
+    let mut last_error = None;
+    for _ in 0..50 {
+        let result = (|| -> windows::core::Result<()> {
+            let link: IShellLinkW =
+                unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
+            let persist: IPersistFile = link.cast()?;
+            unsafe { persist.Load(PCWSTR(wide.as_ptr()), STGM_READWRITE)? };
+            let properties: IPropertyStore = link.cast()?;
+            unsafe { properties.SetValue(&key, &value)? };
+            unsafe { properties.Commit()? };
+            unsafe { persist.Save(PCWSTR::null(), true)? };
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                unsafe { CoUninitialize() };
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+    unsafe { CoUninitialize() };
+    anyhow::bail!(
+        "Could not register Start menu shortcut {}: {:?}",
+        path.display(),
+        last_error
+    )
 }
 
 /// Starts the core daemon logic (RPC server, device observer, event handling)
@@ -943,7 +1066,7 @@ fn run_candidate(
             }
         });
 
-        if shutdown_operations.take_quit_retry()
+        if (shutdown_operations.take_quit_request() || shutdown_operations.take_quit_retry())
             && !shutdown_pending
             && quit_reply.is_none()
             && fence_reply.is_none()

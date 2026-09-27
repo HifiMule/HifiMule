@@ -78,12 +78,16 @@ if (-not $msi) {
 }
 Write-Host "  Installer: $($msi.Name)"
 Write-Host "  SHA256: $((Get-FileHash $msi.FullName -Algorithm SHA256).Hash)"
+$installLog = Join-Path (Get-Location) 'hifimule-msi-install.log'
 
 $proc = Start-Process msiexec.exe `
-    -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" `
+    -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$installLog`"" `
     -Wait -PassThru -NoNewWindow
 if ($proc.ExitCode -ne 0) {
     Fail $Platform "install" "msiexec returned exit code $($proc.ExitCode)"
+}
+if (Select-String -LiteralPath $installLog -Pattern 'Warning 1946' -Quiet) {
+    Fail $Platform "install-shortcut" "MSI could not set a shortcut property; inspect $installLog"
 }
 Write-Host "  Install OK"
 
@@ -248,12 +252,14 @@ if ($appProc -and -not $appProc.HasExited) {
     Stop-Process -Id $appProc.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
 }
-Stop-Process -Id $initialPid -Force -ErrorAction SilentlyContinue
 $proc = Start-Process msiexec.exe `
     -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" `
     -Wait -PassThru -NoNewWindow
 if ($proc.ExitCode -ne 0) {
     Fail $Platform "uninstall" "msiexec /x returned exit code $($proc.ExitCode)"
+}
+if (Get-Process -Id $initialPid -ErrorAction SilentlyContinue) {
+    Fail $Platform "uninstall" "Daemon PID $initialPid remains after uninstall"
 }
 Write-Host "  Uninstall OK"
 

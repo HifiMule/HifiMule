@@ -593,6 +593,7 @@ pub struct SyncOperationManager {
     shutdown_committed: Arc<AtomicBool>,
     shutdown: Mutex<Option<ShutdownTracker>>,
     quit_retry_requested: AtomicBool,
+    quit_requested: AtomicBool,
     checkpoint_retry_requested: AtomicBool,
     finalization_gate: tokio::sync::Mutex<()>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
@@ -612,6 +613,7 @@ impl SyncOperationManager {
             shutdown_committed: Arc::new(AtomicBool::new(false)),
             shutdown: Mutex::new(None),
             quit_retry_requested: AtomicBool::new(false),
+            quit_requested: AtomicBool::new(false),
             checkpoint_retry_requested: AtomicBool::new(false),
             finalization_gate: tokio::sync::Mutex::new(()),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
@@ -721,6 +723,14 @@ impl SyncOperationManager {
 
     pub fn take_quit_retry(&self) -> bool {
         self.quit_retry_requested.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn request_quit(&self) {
+        self.quit_requested.store(true, Ordering::Release);
+    }
+
+    pub fn take_quit_request(&self) -> bool {
+        self.quit_requested.swap(false, Ordering::AcqRel)
     }
 
     pub fn begin_session_checkpoint(&self) {

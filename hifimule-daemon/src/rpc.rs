@@ -577,6 +577,10 @@ async fn handler(
         "daemon.health" => {
             Ok(daemon_health_result(&state.sync_operation_manager, &state.playback).await)
         }
+        "daemon.quit" => {
+            state.sync_operation_manager.request_quit();
+            Ok(serde_json::json!({ "data": { "accepted": true } }))
+        }
         "playback.retryCheckpoint" => handle_playback_retry_checkpoint(&state, payload.params),
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
         "playback.listOccurrences" => {
@@ -699,6 +703,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "server.audiobookshelf.cancelSetup"
             | "server.reauthenticate"
             | "daemon.retryQuit"
+            | "daemon.quit"
             | "server.logout"
             | "server.select"
             | "server.update"

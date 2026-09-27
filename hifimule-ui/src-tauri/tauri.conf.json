@@ -74,10 +74,12 @@
     "windows": {
       "wix": {
         "fragmentPaths": ["wix/startup-fragment.wxs"],
-        "componentGroupRefs": ["StartupRegistryGroup"]
+        "componentGroupRefs": ["StartupRegistryGroup"],
+        "template": "wix/main.wxs"
       },
       "nsis": {
-        "installerHooks": "nsis/hooks.nsh"
+        "installerHooks": "nsis/hooks.nsh",
+        "template": "nsis/installer.nsi"
       }
     }
   }
