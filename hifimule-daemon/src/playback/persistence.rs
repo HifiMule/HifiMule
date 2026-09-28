@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 7;
+pub const PERSISTENCE_VERSION: i64 = 8;
 
 fn planned_book_successor(
     tx: &rusqlite::Transaction<'_>,
@@ -120,12 +120,26 @@ impl Database {
         {
             return Err(anyhow!("UNSUPPORTED_PLAYBACK_VERSION"));
         }
+        if version == Some(PERSISTENCE_VERSION) {
+            let radio_tables: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('playback_radio','playback_radio_origin','playback_radio_membership')",
+                [], |row| row.get(0))?;
+            if radio_tables != 3 {
+                return Err(anyhow!("INVALID_RADIO_STATE"));
+            }
+        }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_schema (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0), album_context_json TEXT, queue_kind TEXT NOT NULL DEFAULT 'manual' CHECK(queue_kind IN ('album','manual')), current_gain_bits INTEGER NOT NULL DEFAULT 1065353216 CHECK(current_gain_bits>=0 AND current_gain_bits<=4294967295), current_qualified_suffix TEXT, active_attempt_id TEXT);
             CREATE TABLE IF NOT EXISTS playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL CHECK(ordinal>=0), server_id TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(session_id, ordinal));
+            CREATE INDEX IF NOT EXISTS playback_occurrences_source ON playback_occurrences(session_id,server_id,track_id);
             CREATE TABLE IF NOT EXISTS playback_attempts (attempt_seq INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT CHECK(disposition IN ('naturalCompletion','explicitSkip','technicalFailure','restarted','backNavigation','superseded','interrupted') OR disposition IS NULL), failure_code TEXT, terminal_position_ms INTEGER CHECK(terminal_position_ms>=0), legacy INTEGER NOT NULL DEFAULT 0 CHECK(legacy IN (0,1)));
             CREATE INDEX IF NOT EXISTS playback_attempts_page ON playback_attempts(session_id,attempt_seq);
             CREATE INDEX IF NOT EXISTS playback_attempts_occurrence ON playback_attempts(session_id,occurrence_id,attempt_seq);
+            CREATE TABLE IF NOT EXISTS playback_radio (session_id TEXT PRIMARY KEY, logical_id TEXT NOT NULL, center_server_id TEXT, center_artist_id TEXT, status TEXT NOT NULL CHECK(status IN ('filling','ready','waiting','stopped')), reason TEXT, CHECK((center_server_id IS NULL) = (center_artist_id IS NULL)));
+            CREATE TABLE IF NOT EXISTS playback_radio_origin (occurrence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal>=0));
+            CREATE INDEX IF NOT EXISTS playback_radio_origin_session ON playback_radio_origin(session_id,ordinal);
+            CREATE TABLE IF NOT EXISTS playback_radio_membership (session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('heard','excluded')), PRIMARY KEY(session_id,server_id,track_id,kind));
+            CREATE INDEX IF NOT EXISTS playback_radio_membership_lookup ON playback_radio_membership(session_id,server_id,track_id);
             CREATE TABLE IF NOT EXISTS playback_audition (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, position_ms INTEGER NOT NULL CHECK(position_ms>=0), transport_state TEXT NOT NULL, saved_main_occurrence_id TEXT, saved_main_position_ms INTEGER NOT NULL CHECK(saved_main_position_ms>=0), saved_main_intent TEXT NOT NULL, resume_inhibited INTEGER NOT NULL CHECK(resume_inhibited IN (0,1)), contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)));
             CREATE TABLE IF NOT EXISTS playback_audition_outcomes (outcome_id INTEGER PRIMARY KEY AUTOINCREMENT, audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT NOT NULL CHECK(disposition IN ('naturalCompletion','stopped','returned','replaced','superseded','technicalFailure','interrupted')), terminal_position_ms INTEGER NOT NULL CHECK(terminal_position_ms>=0), duration_ms INTEGER CHECK(duration_ms>=0), failure_code TEXT, contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)), fully_heard INTEGER NOT NULL CHECK(fully_heard IN (0,1)));
             CREATE INDEX IF NOT EXISTS playback_audition_outcomes_page ON playback_audition_outcomes(outcome_id);
@@ -271,15 +285,60 @@ impl Database {
     pub fn load_playback_session(&self) -> Result<Option<PersistedSession>> {
         self.init_playback()?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix FROM playback_sessions WHERE singleton_id=1", [], |r| {
+        let mut loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix FROM playback_sessions WHERE singleton_id=1", [], |r| {
             let state: String = r.get(3)?;
             let state = match state.as_str() { "idle"=>TransportState::Idle, "paused"=>TransportState::Paused, "buffering"=>TransportState::Buffering, "playing"=>TransportState::Playing, "stopping"=>TransportState::Stopping, _=>return Err(rusqlite::Error::InvalidQuery) };
             let context_json: Option<String> = r.get(6)?;
             let album_context = context_json.map(|json| serde_json::from_str(&json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))).transpose()?;
             let queue_kind = match r.get::<_, String>(7)?.as_str() { "album" => super::model::QueueKind::Album, "manual" => super::model::QueueKind::Manual, _ => return Err(rusqlite::Error::InvalidQuery) };
             let current_gain_bits = u32::try_from(r.get::<_, i64>(8)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)?, queue_kind, current_gain_bits, current_qualified_suffix:r.get(9)?, album_context })
+            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)?, queue_kind, radio: None, current_gain_bits, current_qualified_suffix:r.get(9)?, album_context })
         }).optional()?;
+        if let Some(session) = loaded.as_mut() {
+            let radio: Option<(String, Option<String>, Option<String>, String, Option<String>)> = conn
+                .query_row(
+                    "SELECT logical_id,center_server_id,center_artist_id,status,reason FROM playback_radio WHERE session_id=?1",
+                    [&session.session_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .optional()?;
+            if let Some((logical_id, server_id, artist_id, status, reason)) = radio {
+                if uuid::Uuid::parse_str(&logical_id).is_err() {
+                    return Err(anyhow!("INVALID_RADIO_STATE"));
+                }
+                use super::radio::{ArtistIdentity, RadioState, RadioStatus};
+                let center = match (server_id, artist_id) {
+                    (Some(server_id), Some(artist_id))
+                        if !server_id.is_empty() && !artist_id.is_empty() =>
+                    {
+                        Some(ArtistIdentity {
+                            server_id,
+                            artist_id,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => return Err(anyhow!("INVALID_RADIO_STATE")),
+                };
+                let status = match status.as_str() {
+                    "filling" => RadioStatus::Filling,
+                    "ready" => RadioStatus::Ready,
+                    "waiting" => RadioStatus::Waiting,
+                    "stopped" => RadioStatus::Stopped,
+                    _ => return Err(anyhow!("INVALID_RADIO_STATE")),
+                };
+                session.queue_kind = super::model::QueueKind::Radio;
+                let radio = RadioState {
+                    logical_id,
+                    center,
+                    status,
+                    reason,
+                };
+                radio
+                    .validate()
+                    .map_err(|_| anyhow!("INVALID_RADIO_STATE"))?;
+                session.radio = Some(radio);
+            }
+        }
         if loaded.is_none() {
             let occurrence_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM playback_occurrences", [], |r| {
@@ -609,6 +668,125 @@ impl Database {
         }
     }
 
+    pub fn radio_has_membership(&self, session_id: &str, source: &TrackSource) -> Result<bool> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playback_radio_membership WHERE session_id=?1 AND server_id=?2 AND track_id=?3)",
+            params![session_id, source.server_id, source.track_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn radio_has_occurrence(&self, session_id: &str, source: &TrackSource) -> Result<bool> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playback_occurrences WHERE session_id=?1 AND server_id=?2 AND track_id=?3)",
+            params![session_id,source.server_id,source.track_id], |row| row.get(0))?)
+    }
+
+    pub fn checkpoint_radio_state(&self, session: &PersistedSession) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let tx = conn.transaction()?;
+        let revision: i64 = tx.query_row(
+            "SELECT queue_revision FROM playback_sessions WHERE singleton_id=1 AND session_id=?1",
+            [&session.session_id],
+            |row| row.get(0),
+        )?;
+        if revision != i64::try_from(session.queue_revision)? {
+            return Err(anyhow!("RADIO_REVISION_CHANGED"));
+        }
+        store_radio_state(&tx, session)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn radio_auto_upcoming_count(&self, session_id: &str, current_ordinal: u64) -> Result<u64> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM playback_radio_origin INDEXED BY playback_radio_origin_session WHERE session_id=?1 AND ordinal>?2",
+            params![session_id, i64::try_from(current_ordinal)?],
+            |row| row.get::<_, i64>(0),
+        )? as u64)
+    }
+
+    pub fn append_radio_occurrences(
+        &self,
+        session: &PersistedSession,
+        prior_current_id: &str,
+        occurrences: &[Occurrence],
+    ) -> Result<()> {
+        if session.queue_kind != super::model::QueueKind::Radio
+            || occurrences.len() > super::radio::AUTO_UPCOMING_TARGET
+        {
+            return Err(anyhow!("INVALID_RADIO_STATE"));
+        }
+        let mut conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let tx = conn.transaction()?;
+        let (stored_revision,stored_current): (i64,Option<String>) = tx.query_row(
+            "SELECT queue_revision,current_occurrence_id FROM playback_sessions WHERE singleton_id=1 AND session_id=?1",
+            [&session.session_id], |row|Ok((row.get(0)?,row.get(1)?)))?;
+        if stored_revision
+            != i64::try_from(
+                session
+                    .queue_revision
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow!("RADIO_REVISION_CHANGED"))?,
+            )?
+            || stored_current.as_deref() != Some(prior_current_id)
+        {
+            return Err(anyhow!("RADIO_REVISION_CHANGED"));
+        }
+        let current_ordinal: i64 = tx.query_row(
+            "SELECT ordinal FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+            params![session.session_id, prior_current_id],
+            |row| row.get(0),
+        )?;
+        if session.current_occurrence_id.as_deref() != Some(prior_current_id) {
+            let completed: bool = tx.query_row(
+                "SELECT outcome='naturalCompletion' FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+                params![session.session_id,prior_current_id], |row|row.get(0))?;
+            if !completed
+                || session.current_occurrence_id.as_deref()
+                    != occurrences.first().map(|item| item.occurrence_id.as_str())
+            {
+                return Err(anyhow!("RADIO_CURRENT_CHANGED"));
+            }
+        }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM playback_radio_origin INDEXED BY playback_radio_origin_session WHERE session_id=?1 AND ordinal>?2",
+            params![session.session_id,current_ordinal], |row| row.get(0))?;
+        if count >= super::radio::AUTO_UPCOMING_TRIGGER as i64
+            || count + occurrences.len() as i64 > super::radio::AUTO_UPCOMING_TARGET as i64
+        {
+            return Err(anyhow!("RADIO_CAPACITY_CHANGED"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for occurrence in occurrences {
+            occurrence
+                .source
+                .validate()
+                .map_err(|_| anyhow!("INVALID_RADIO_SOURCE"))?;
+            if !seen.insert((&occurrence.source.server_id, &occurrence.source.track_id)) {
+                return Err(anyhow!("DUPLICATE_RADIO_SOURCE"));
+            }
+            let used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_membership WHERE session_id=?1 AND server_id=?2 AND track_id=?3 UNION SELECT 1 FROM playback_occurrences WHERE session_id=?1 AND server_id=?2 AND track_id=?3)", params![session.session_id,occurrence.source.server_id,occurrence.source.track_id], |row| row.get(0))?;
+            if used {
+                return Err(anyhow!("RADIO_SOURCE_ALREADY_USED"));
+            }
+        }
+        update_session(&tx, session)?;
+        insert_occurrences(&tx, &session.session_id, occurrences)?;
+        for occurrence in occurrences {
+            tx.execute(
+                "INSERT INTO playback_radio_origin(occurrence_id,session_id,ordinal) VALUES(?1,?2,?3)",
+                params![occurrence.occurrence_id, session.session_id, i64::try_from(occurrence.ordinal)?],
+            )?;
+        }
+        ensure_active_attempt(&tx, session, "superseded")?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn persist_playback_structure(
         &self,
         session: &PersistedSession,
@@ -638,6 +816,7 @@ impl Database {
         close_active_attempt(&tx, &session.session_id, "superseded")?;
         let album_context_json = album_context_json(session)?;
         tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json,queue_kind=excluded.queue_kind,current_gain_bits=excluded.current_gain_bits,current_qualified_suffix=excluded.current_qualified_suffix", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json,queue_kind_name(session.queue_kind),i64::from(session.current_gain_bits),session.current_qualified_suffix])?;
+        replace_radio_state(&tx, session)?;
         tx.execute(
             "DELETE FROM playback_occurrences WHERE session_id=?1",
             [&session.session_id],
@@ -659,6 +838,7 @@ impl Database {
         close_active_attempt(&tx, &session.session_id, "superseded")?;
         let album_context_json = album_context_json(session)?;
         tx.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms,album_context_json,queue_kind,current_gain_bits,current_qualified_suffix) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(singleton_id) DO UPDATE SET session_id=excluded.session_id,queue_revision=excluded.queue_revision,checkpoint_sequence=excluded.checkpoint_sequence,transport_state=excluded.transport_state,current_occurrence_id=excluded.current_occurrence_id,position_ms=excluded.position_ms,album_context_json=excluded.album_context_json,queue_kind=excluded.queue_kind,current_gain_bits=excluded.current_gain_bits,current_qualified_suffix=excluded.current_qualified_suffix", params![session.session_id,session.queue_revision as i64,session.checkpoint_sequence as i64,state_name(session.state),session.current_occurrence_id,session.position_ms as i64,album_context_json,queue_kind_name(session.queue_kind),i64::from(session.current_gain_bits),session.current_qualified_suffix])?;
+        replace_radio_state(&tx, session)?;
         tx.execute(
             "DELETE FROM playback_occurrences WHERE session_id=?1",
             [&session.session_id],
@@ -784,6 +964,10 @@ impl Database {
             if changed != 1 {
                 return Err(anyhow!("removed occurrence is no longer upcoming"));
             }
+            tx.execute(
+                "DELETE FROM playback_radio_origin WHERE occurrence_id=?1 AND session_id=?2",
+                params![occurrence_id, session.session_id],
+            )?;
         }
         if !ordered_upcoming.is_empty() {
             let max_ordinal: i64 = tx.query_row(
@@ -827,6 +1011,12 @@ impl Database {
         let tx = conn.transaction()?;
         validate_edit_baseline(&tx, session)?;
         for occurrence_id in occurrence_ids {
+            if session.queue_kind == super::model::QueueKind::Radio {
+                tx.execute(
+                    "INSERT OR IGNORE INTO playback_radio_membership(session_id,server_id,track_id,kind) SELECT o.session_id,o.server_id,o.track_id,'excluded' FROM playback_occurrences o JOIN playback_radio_origin r ON r.occurrence_id=o.occurrence_id WHERE o.session_id=?1 AND o.occurrence_id=?2 AND o.ordinal>?3",
+                    params![session.session_id,occurrence_id,i64::try_from(current_ordinal)?],
+                )?;
+            }
             let changed = tx.execute(
                 "DELETE FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2 AND ordinal>?3",
                 params![session.session_id, occurrence_id, i64::try_from(current_ordinal)?],
@@ -885,6 +1075,10 @@ impl Database {
             params![session.session_id, current_ordinal],
         )?;
         tx.execute_batch("DROP TABLE temp.playback_move_rows")?;
+        tx.execute(
+            "UPDATE playback_radio_origin SET ordinal=(SELECT ordinal FROM playback_occurrences WHERE occurrence_id=playback_radio_origin.occurrence_id) WHERE session_id=?1 AND ordinal>?2",
+            params![session.session_id,current_ordinal],
+        )?;
         update_session(&tx, session)?;
         tx.commit()?;
         Ok(())
@@ -957,6 +1151,19 @@ impl Database {
             "UPDATE playback_occurrences SET outcome=?1,failure_code=?4 WHERE session_id=?2 AND occurrence_id=?3 AND outcome IS NULL",
             params![outcome, session.session_id, departed_occurrence_id, failure_code],
         )?;
+        if session.queue_kind == super::model::QueueKind::Radio
+            && matches!(outcome, "naturalCompletion" | "explicitSkip")
+        {
+            let kind = if outcome == "naturalCompletion" {
+                "heard"
+            } else {
+                "excluded"
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO playback_radio_membership(session_id,server_id,track_id,kind) SELECT session_id,server_id,track_id,?3 FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+                params![session.session_id,departed_occurrence_id,kind],
+            )?;
+        }
         update_session(&tx, session)?;
         if let Some(record) = book_successor {
             tx.execute(
@@ -1140,6 +1347,14 @@ impl Database {
     pub fn clear_playback_session(&self, session: &PersistedSession) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playback_radio_membership WHERE session_id=?1",
+            [&session.session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM playback_radio_origin WHERE session_id=?1",
+            [&session.session_id],
+        )?;
         tx.execute(
             "DELETE FROM playback_occurrences WHERE session_id=?1",
             [&session.session_id],
@@ -1953,6 +2168,42 @@ fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) ->
     if changed != 1 {
         return Err(anyhow!("playback session is absent"));
     }
+    store_radio_state(tx, session)?;
+    Ok(())
+}
+
+fn replace_radio_state(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
+    tx.execute("DELETE FROM playback_radio_membership", [])?;
+    tx.execute("DELETE FROM playback_radio_origin", [])?;
+    tx.execute("DELETE FROM playback_radio", [])?;
+    store_radio_state(tx, session)
+}
+
+fn store_radio_state(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
+    use super::radio::RadioStatus;
+    let Some(radio) = session.radio.as_ref() else {
+        tx.execute(
+            "DELETE FROM playback_radio WHERE session_id=?1",
+            [&session.session_id],
+        )?;
+        return Ok(());
+    };
+    if session.queue_kind != super::model::QueueKind::Radio {
+        return Err(anyhow!("INVALID_RADIO_STATE"));
+    }
+    radio
+        .validate()
+        .map_err(|_| anyhow!("INVALID_RADIO_STATE"))?;
+    let status = match radio.status {
+        RadioStatus::Filling => "filling",
+        RadioStatus::Ready => "ready",
+        RadioStatus::Waiting => "waiting",
+        RadioStatus::Stopped => "stopped",
+    };
+    tx.execute(
+        "INSERT INTO playback_radio(session_id,logical_id,center_server_id,center_artist_id,status,reason) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id) DO UPDATE SET logical_id=excluded.logical_id,center_server_id=excluded.center_server_id,center_artist_id=excluded.center_artist_id,status=excluded.status,reason=excluded.reason",
+        params![session.session_id, radio.logical_id, radio.center.as_ref().map(|center| &center.server_id), radio.center.as_ref().map(|center| &center.artist_id), status, radio.reason],
+    )?;
     Ok(())
 }
 
@@ -2020,6 +2271,9 @@ fn queue_kind_name(kind: super::model::QueueKind) -> &'static str {
     match kind {
         super::model::QueueKind::Album => "album",
         super::model::QueueKind::Manual => "manual",
+        // Older SQLite rows constrain this column to album/manual; the versioned
+        // playback_radio row is the durable authority for the Radio kind.
+        super::model::QueueKind::Radio => "manual",
     }
 }
 
@@ -2027,6 +2281,45 @@ fn queue_kind_name(kind: super::model::QueueKind) -> &'static str {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn radio_membership_uses_indexed_source_qualified_lookup_with_long_history() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let session_id = Uuid::new_v4().to_string();
+        {
+            let mut conn = db.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            for index in 0..10_000 {
+                tx.execute("INSERT INTO playback_radio_membership(session_id,server_id,track_id,kind) VALUES(?1,'one',?2,'heard')",params![session_id,format!("track-{index}")]).unwrap();
+            }
+            tx.commit().unwrap();
+            let detail: String = conn.query_row(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM playback_radio_membership WHERE session_id=?1 AND server_id='one' AND track_id='track-9999'",
+                [&session_id], |row|row.get(3)).unwrap();
+            assert!(detail.contains("INDEX"), "{detail}");
+        }
+        assert!(
+            db.radio_has_membership(
+                &session_id,
+                &TrackSource {
+                    server_id: "one".into(),
+                    track_id: "track-9999".into()
+                }
+            )
+            .unwrap()
+        );
+        assert!(
+            !db.radio_has_membership(
+                &session_id,
+                &TrackSource {
+                    server_id: "two".into(),
+                    track_id: "track-9999".into()
+                }
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn book_continuity_is_checkpointed_and_invalidated_with_occurrence_transition() {
@@ -2112,7 +2405,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 7);
+        assert_eq!(PERSISTENCE_VERSION, 8);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);
@@ -2227,6 +2520,7 @@ mod tests {
             current_occurrence_id: current,
             position_ms,
             queue_kind: super::super::model::QueueKind::Manual,
+            radio: None,
             current_gain_bits: 1.0f32.to_bits(),
             current_qualified_suffix: None,
             album_context: None,

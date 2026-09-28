@@ -1,4 +1,5 @@
 //! Playback selection RPCs. This state is local and independent of device auto-fill.
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -226,7 +227,7 @@ pub(super) async fn start_with_config(
     if START_EPOCH.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
-    let selected = selection::select(&config, pools).map_err(error)?;
+    let selected = selection::select(&config, pools.clone()).map_err(error)?;
     // Resolve before touching the owner. A missing or expired source leaves the current
     // listening session intact and generates no skip/taste signal. Try the next
     // bounded selected result if a track vanished after candidate retrieval.
@@ -240,12 +241,13 @@ pub(super) async fn start_with_config(
                 && let Ok(prepared) =
                     crate::playback::audio::prepare_selection_source(description).await
             {
-                return Ok((source, prepared));
+                let artist_id = selection::artist_for_source(&pools, &source);
+                return Ok((source, artist_id, prepared));
             }
         }
         Err(error(SelectionError::SourceUnavailable))
     };
-    let (first, prepared) = tokio::time::timeout(DEADLINE, preflight)
+    let (first, artist_id, prepared) = tokio::time::timeout(DEADLINE, preflight)
         .await
         .map_err(|_| error(SelectionError::SourceUnavailable))??;
     if START_EPOCH.load(Ordering::Acquire) != ticket {
@@ -258,7 +260,10 @@ pub(super) async fn start_with_config(
         session_id: snapshot.session_id,
         command_id: uuid::Uuid::new_v4().to_string(),
         expected_queue_revision: snapshot.queue_revision,
-        operation: SessionOperation::PlayTrack { source: first },
+        operation: SessionOperation::StartRadio {
+            center: crate::playback::radio::center_for(&first, artist_id.as_deref()),
+            source: first,
+        },
     };
     handle_playback_apply_session_prepared_fenced(
         state,
@@ -273,4 +278,185 @@ pub(super) async fn start_with_config(
         }),
     )
     .await
+}
+
+/// A single listener serializes bounded Radio fetches. Owner wakeups are
+/// coalesced; no polling timer or full-library cache is kept.
+pub(super) async fn run_radio_worker(
+    state: std::sync::Arc<AppState>,
+    mut wake: tokio::sync::mpsc::Receiver<()>,
+) {
+    while wake.recv().await.is_some() {
+        let owner = state.playback.clone();
+        let lease = match tokio::task::spawn_blocking(move || owner.reserve_radio_refill()).await {
+            Ok(Ok(Some(lease))) => lease,
+            _ => continue,
+        };
+        let (candidates, reason) = gather_radio_candidates(&state, &lease).await;
+        let owner = state.playback.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            owner.admit_radio_refill(lease, candidates, reason)
+        })
+        .await;
+    }
+}
+
+async fn gather_radio_candidates(
+    state: &AppState,
+    lease: &crate::playback::radio::RefillLease,
+) -> (Vec<selection::SelectionCandidate>, Option<String>) {
+    let config = match path().ok().and_then(|path| selection::load(&path).ok()) {
+        Some(config) => config,
+        None => return (Vec::new(), Some("radio.settingsUnavailable".into())),
+    };
+    let mut failed_source = false;
+    let retrieve = async {
+        let mut pools = Vec::new();
+        for source in config
+            .sources
+            .iter()
+            .filter(|source| source.server_id == lease.center.server_id)
+            .take(selection::MAX_SOURCES)
+        {
+            if !state.playback.radio_lease_current(lease) {
+                break;
+            }
+            let Ok(provider) = provider(state, &source.server_id).await else {
+                failed_source = true;
+                continue;
+            };
+            if !state.playback.radio_lease_current(lease) {
+                break;
+            }
+            match selection::fetch_source(provider.as_ref(), source).await {
+                Ok(mut pool) => {
+                    if !state.playback.radio_lease_current(lease) {
+                        break;
+                    }
+                    let mut eligible = Vec::new();
+                    for song in pool.tracks.drain(..) {
+                        if song.provider_metadata.ambiguous_music_artist {
+                            continue;
+                        }
+                        if !lease
+                            .center
+                            .matches(&source.server_id, song.artist_id.as_deref())
+                        {
+                            continue;
+                        }
+                        let identity = crate::playback::model::TrackSource {
+                            server_id: source.server_id.clone(),
+                            track_id: song.id.clone(),
+                        };
+                        if state
+                            .db
+                            .radio_has_membership(&lease.session_id, &identity)
+                            .unwrap_or(true)
+                            || state
+                                .db
+                                .radio_has_occurrence(&lease.session_id, &identity)
+                                .unwrap_or(true)
+                        {
+                            continue;
+                        }
+                        eligible.push(song);
+                    }
+                    pool.tracks = eligible;
+                    pools.push(pool);
+                }
+                Err(_) => failed_source = true,
+            }
+        }
+        pools
+    };
+    let pools = match tokio::time::timeout(
+        Duration::from_secs(crate::playback::radio::RETRIEVAL_DEADLINE_SECS),
+        retrieve,
+    )
+    .await
+    {
+        Ok(pools) => pools,
+        Err(_) => return (Vec::new(), Some("radio.sourceFailure".into())),
+    };
+    let ordered = match selection::select_radio_order(&config, pools.clone()) {
+        Ok(ordered) => ordered,
+        Err(_) => {
+            return (
+                Vec::new(),
+                Some(
+                    if failed_source {
+                        "radio.sourceFailure"
+                    } else {
+                        "radio.exhausted"
+                    }
+                    .into(),
+                ),
+            );
+        }
+    };
+    let mut evidence = HashMap::new();
+    for pool in pools {
+        for song in pool.tracks {
+            evidence
+                .entry((pool.source.server_id.clone(), song.id.clone()))
+                .or_insert(song);
+        }
+    }
+    let prepare = async {
+        let mut selected = Vec::new();
+        let mut failures = 0;
+        for source in ordered {
+            if !state.playback.radio_lease_current(lease) {
+                break;
+            }
+            if selected.len() >= lease.capacity
+                || failures >= crate::playback::radio::MAX_PREPARATION_FAILURES
+            {
+                break;
+            }
+            let Ok(provider) = provider(state, &source.server_id).await else {
+                failures += 1;
+                continue;
+            };
+            if !state.playback.radio_lease_current(lease) {
+                break;
+            }
+            if let Ok(description) = provider.resolve_playback(&source.track_id).await {
+                if !state.playback.radio_lease_current(lease) {
+                    break;
+                }
+                if crate::playback::audio::prepare_selection_source(description)
+                    .await
+                    .is_ok()
+                {
+                    if !state.playback.radio_lease_current(lease) {
+                        break;
+                    }
+                    if let Some(song) =
+                        evidence.get(&(source.server_id.clone(), source.track_id.clone()))
+                    {
+                        selected.push(selection::SelectionCandidate {
+                            source,
+                            song: song.clone(),
+                        });
+                    }
+                    continue;
+                }
+            }
+            failures += 1;
+        }
+        (selected, failures)
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(crate::playback::radio::PREPARATION_DEADLINE_SECS),
+        prepare,
+    )
+    .await
+    {
+        Ok((selected, failures)) => (
+            selected,
+            (failed_source || failures > 0).then(|| "radio.sourceFailure".into()),
+        ),
+        Err(_) => (Vec::new(), Some("radio.sourceFailure".into())),
+    }
 }

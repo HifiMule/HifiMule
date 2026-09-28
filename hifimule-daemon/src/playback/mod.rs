@@ -12,6 +12,7 @@ pub mod model;
 pub mod native;
 mod output;
 pub mod persistence;
+pub mod radio;
 pub mod selection;
 pub mod session;
 pub mod streaming;

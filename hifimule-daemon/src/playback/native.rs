@@ -742,6 +742,7 @@ mod tests {
             generation_id: "generation".into(),
             mode: PlaybackMode::Main,
             queue_kind: QueueKind::Manual,
+            radio: None,
             preview: None,
             state,
             current: Some(Occurrence {

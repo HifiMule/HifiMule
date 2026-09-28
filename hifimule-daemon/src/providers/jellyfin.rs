@@ -1065,6 +1065,10 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         .or_else(|| item.media_sources.as_ref()?.first()?.bitrate)
         .map(|bps| u32::from(Kbps::from(Bps(bps))));
     let artist = item.artist_items.as_ref().and_then(|items| items.first());
+    let ambiguous_music_artist = item
+        .artist_items
+        .as_ref()
+        .is_some_and(|items| items.len() > 1);
     let suffix = item
         .media_sources
         .as_ref()
@@ -1109,7 +1113,10 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
             .and_then(|source| source.size)
             .and_then(|s| u64::try_from(s).ok()),
         album_loudness: Default::default(),
-        provider_metadata: Default::default(),
+        provider_metadata: crate::domain::models::ProviderItemMetadata {
+            ambiguous_music_artist,
+            ..Default::default()
+        },
     }
 }
 
@@ -1252,6 +1259,19 @@ mod tests {
             playlist_item_id: None,
         };
 
+        let mut duet = item.clone();
+        duet.artist_items
+            .as_mut()
+            .unwrap()
+            .push(crate::api::NameIdPair {
+                id: "second-artist".into(),
+                name: "Artist B".into(),
+            });
+        assert!(
+            song_from_item(duet)
+                .provider_metadata
+                .ambiguous_music_artist
+        );
         let song = song_from_item(item);
 
         assert_eq!(song.id, "song-uuid");

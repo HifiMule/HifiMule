@@ -313,6 +313,12 @@ pub async fn run_server(
         eprintln!("[Startup] Vault migration failed: {}", e);
     }
     state.server_manager.write().await.load_from_db(&state.db);
+    let (radio_wake, radio_receiver) = tokio::sync::mpsc::channel(1);
+    state.playback.register_radio_wake(radio_wake);
+    tokio::spawn(playback_selection::run_radio_worker(
+        state.clone(),
+        radio_receiver,
+    ));
     let _book_reporter = tokio::spawn(crate::playback::book_progress::run_reporter(
         state.playback.clone(),
         state.db.clone(),
@@ -1120,7 +1126,8 @@ async fn handle_playback_apply_session_prepared_fenced(
     selection_fence: Option<crate::playback::session::ApplyFence>,
 ) -> Result<Value, JsonRpcError> {
     let added_sources: Vec<_> = match &p.operation {
-        crate::playback::model::SessionOperation::PlayTrack { source } => vec![source],
+        crate::playback::model::SessionOperation::PlayTrack { source }
+        | crate::playback::model::SessionOperation::StartRadio { source, .. } => vec![source],
         crate::playback::model::SessionOperation::ReplaceQueue { sources }
         | crate::playback::model::SessionOperation::AppendQueue { sources }
         | crate::playback::model::SessionOperation::PlayAlbum { sources }
@@ -1151,7 +1158,10 @@ async fn handle_playback_apply_session_prepared_fenced(
         }
     }
     let source = match &p.operation {
-        crate::playback::model::SessionOperation::PlayTrack { source } => Some(source.clone()),
+        crate::playback::model::SessionOperation::PlayTrack { source }
+        | crate::playback::model::SessionOperation::StartRadio { source, .. } => {
+            Some(source.clone())
+        }
         crate::playback::model::SessionOperation::PlayAlbum { sources } => sources.first().cloned(),
         crate::playback::model::SessionOperation::PlayPlaylist { sources, .. } => {
             sources.first().cloned()

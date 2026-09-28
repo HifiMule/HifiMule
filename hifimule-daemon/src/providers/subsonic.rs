@@ -1582,6 +1582,10 @@ fn playlist_from_with_songs_dto(playlist: PlaylistWithSongsDto) -> Playlist {
 
 fn song_from_dto(song: SongDto) -> Song {
     let artist = song.artists.as_ref().and_then(|artists| artists.first());
+    let ambiguous_music_artist = song
+        .artists
+        .as_ref()
+        .is_some_and(|artists| artists.len() > 1);
     let album_loudness = parse_album_loudness(song.replay_gain.as_deref());
 
     Song {
@@ -1610,7 +1614,10 @@ fn song_from_dto(song: SongDto) -> Song {
         suffix: song.suffix,
         size_bytes: song.size,
         album_loudness,
-        provider_metadata: Default::default(),
+        provider_metadata: crate::domain::models::ProviderItemMetadata {
+            ambiguous_music_artist,
+            ..Default::default()
+        },
     }
 }
 
@@ -2201,6 +2208,18 @@ mod tests {
         assert_eq!(song.duration_seconds, 0);
         assert_eq!(song.bitrate_kbps, None);
         assert_eq!(song.cover_art_id, None);
+    }
+
+    #[test]
+    fn multiple_music_artists_are_flagged_for_radio_even_with_a_primary_id() {
+        let dto: SongDto = serde_json::from_value(serde_json::json!({
+            "id":"track", "title":"Duet", "artistId":"first",
+            "artists":[{"id":"first","name":"First"},{"id":"second","name":"Second"}]
+        }))
+        .unwrap();
+        let song = song_from_dto(dto);
+        assert_eq!(song.artist_id.as_deref(), Some("first"));
+        assert!(song.provider_metadata.ambiguous_music_artist);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import {
-    isPlaybackQueueConflict, playbackDescribeOccurrences, playbackListOccurrences,
+    isPlaybackQueueConflict, playbackControl, playbackDescribeOccurrences, playbackListOccurrences,
     playbackMoveUpcoming, playbackRemoveUpcoming, serverList,
     type OccurrenceDisplay, type PlaybackOccurrencePage, type PlaybackSessionSnapshot,
 } from '../rpc';
@@ -30,6 +30,8 @@ export class PlaybackDestination {
     private readonly error = document.createElement('p');
     private readonly retry = document.createElement('button');
     private readonly status = document.createElement('p');
+    private readonly radioStatus = document.createElement('p');
+    private readonly radioRetry = document.createElement('button');
     private readonly regions: Record<Section, Region>;
     private mutating = false;
     private deferPageLoads = false;
@@ -54,9 +56,21 @@ export class PlaybackDestination {
         this.status.className = 'playback-destination__mutation-status';
         this.status.setAttribute('role', 'status');
         this.status.setAttribute('aria-live', 'polite');
+        this.radioStatus.setAttribute('role', 'status');
+        this.radioStatus.setAttribute('aria-live', 'polite');
+        this.radioRetry.type = 'button';
+        this.radioRetry.textContent = t('playback.radio.retry');
+        this.radioRetry.addEventListener('click', async () => {
+            const observed = this.snapshot;
+            if (!observed?.current || observed.radio?.status !== 'waiting') return;
+            this.radioRetry.disabled = true;
+            try { await playbackControl('retry', observed); await playbackStore.refresh(); }
+            catch { this.status.textContent = t('playback.radio.retryFailed'); }
+            finally { this.radioRetry.disabled = false; }
+        });
         this.regions = { upcoming: this.createRegion('upcoming'), history: this.createRegion('history') };
         this.selectionSettings = new PlaybackSelectionSettings();
-        this.body.append(this.selectionSettings.element, this.status, this.error, this.retry,
+        this.body.append(this.selectionSettings.element, this.radioStatus, this.radioRetry, this.status, this.error, this.retry,
             this.regionElement(this.regions.upcoming), this.regionElement(this.regions.history));
         container.replaceChildren(this.body);
         this.unsubscribe = playbackStore.subscribe(snapshot => void this.receive(snapshot));
@@ -134,6 +148,12 @@ export class PlaybackDestination {
         const identity = this.identity(snapshot);
         const changed = identity !== this.loadIdentity;
         this.snapshot = snapshot;
+        const radio = snapshot.radio;
+        this.radioStatus.hidden = snapshot.queueKind !== 'radio' || !radio;
+        this.radioRetry.hidden = snapshot.queueKind !== 'radio' || radio?.status !== 'waiting' || snapshot.playback?.status === 'error';
+        this.radioStatus.textContent = radio
+            ? t(radio.reason && radio.status === 'waiting' ? `playback.${radio.reason}` : `playback.radio.${radio.status}`)
+            : '';
         if (!changed) return;
         this.loadIdentity = identity;
         for (const region of Object.values(this.regions)) this.resetRegion(region);

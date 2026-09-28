@@ -173,6 +173,43 @@ pub struct SelectionCandidate {
     pub song: Song,
 }
 
+/// Return a single stable provider artist ID for a selected source. Multiple
+/// configured pools may contain the same track; conflicting or missing evidence
+/// must not silently choose a center.
+pub fn artist_for_source(pools: &[SelectionPool], source: &TrackSource) -> Option<String> {
+    let mut observed: Option<&str> = None;
+    let mut found = false;
+    for pool in pools
+        .iter()
+        .filter(|pool| pool.source.server_id == source.server_id)
+    {
+        for song in pool.tracks.iter().filter(|song| song.id == source.track_id) {
+            found = true;
+            if song.provider_metadata.ambiguous_music_artist {
+                return None;
+            }
+            let artist_id = song.artist_id.as_deref().filter(|id| !id.is_empty())?;
+            if observed.is_some_and(|previous| previous != artist_id) {
+                return None;
+            }
+            observed = Some(artist_id);
+        }
+    }
+    found.then(|| observed.map(str::to_owned)).flatten()
+}
+
+/// Radio needs enough ranked candidates for five admissions plus its bounded
+/// preparation-failure budget, regardless of the first-track setting.
+pub fn select_radio_order(
+    config: &PlaybackSelectionConfig,
+    pools: Vec<SelectionPool>,
+) -> Result<Vec<TrackSource>, SelectionError> {
+    let mut request = config.clone();
+    request.max_tracks =
+        (super::radio::AUTO_UPCOMING_TARGET + super::radio::MAX_PREPARATION_FAILURES) as u16;
+    select(&request, pools)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionOption {
@@ -478,6 +515,86 @@ mod tests {
             kind: SelectionKind::Playlist,
             ref_id: "playlist".into(),
         }
+    }
+
+    #[test]
+    fn radio_order_overrides_first_track_cap_without_changing_saved_settings() {
+        let mut config = PlaybackSelectionConfig {
+            sources: vec![source("server")],
+            max_tracks: 1,
+            ..Default::default()
+        };
+        config.seed = 11;
+        let pool = SelectionPool {
+            source: source("server"),
+            tracks: (0..12)
+                .map(|n| song(&format!("track-{n}"), "track"))
+                .collect(),
+        };
+        assert_eq!(select(&config, vec![pool.clone()]).unwrap().len(), 1);
+        assert_eq!(select_radio_order(&config, vec![pool]).unwrap().len(), 10);
+        assert_eq!(config.max_tracks, 1);
+    }
+
+    #[test]
+    fn artist_evidence_rejects_missing_or_conflicting_metadata() {
+        let mut known = song("track", "Track");
+        known.artist_id = Some("artist".into());
+        let source_id = TrackSource {
+            server_id: "server".into(),
+            track_id: "track".into(),
+        };
+        let pool = SelectionPool {
+            source: source("server"),
+            tracks: vec![known.clone()],
+        };
+        assert_eq!(
+            artist_for_source(&[pool.clone()], &source_id).as_deref(),
+            Some("artist")
+        );
+        let mut missing = known.clone();
+        missing.artist_id = None;
+        assert_eq!(
+            artist_for_source(
+                &[
+                    pool.clone(),
+                    SelectionPool {
+                        source: source("server"),
+                        tracks: vec![missing]
+                    }
+                ],
+                &source_id
+            ),
+            None
+        );
+        let mut different = known;
+        different.artist_id = Some("other".into());
+        assert_eq!(
+            artist_for_source(
+                &[
+                    pool,
+                    SelectionPool {
+                        source: source("server"),
+                        tracks: vec![different]
+                    }
+                ],
+                &source_id
+            ),
+            None
+        );
+        let mut ambiguous = song("track", "Track");
+        ambiguous.artist_id = Some("artist".into());
+        ambiguous.provider_metadata.ambiguous_music_artist = true;
+        assert_eq!(
+            artist_for_source(
+                &[SelectionPool {
+                    source: source("server"),
+                    tracks: vec![ambiguous]
+                }],
+                &source_id
+            ),
+            None
+        );
     }
 
     #[test]

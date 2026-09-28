@@ -111,6 +111,14 @@ jobs:
       - name: Verify Playback selector
         run: npm run build:daemon -- test -p hifimule-daemon playback::selection
 
+      - name: Verify bounded Radio session and restoration
+        run: npm run build:daemon -- test -p hifimule-daemon playback::radio::tests
+
+      - name: Verify provider artist ambiguity mapping
+        run: |
+          npm run build:daemon -- test -p hifimule-daemon jellyfin_item_maps_song_normalized_fields
+          npm run build:daemon -- test -p hifimule-daemon multiple_music_artists_are_flagged_for_radio_even_with_a_primary_id
+
       - name: Verify bounded genre retrieval
         run: npm run build:daemon -- test -p hifimule-daemon playback_genre_fetch_uses_server_side_page_bounds
 

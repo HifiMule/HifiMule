@@ -1,6 +1,10 @@
+---
+baseline_commit: 5b93cbe5221293a662e7b550c8094f9b62d7b5dc
+---
+
 # Story 16.2: Replenish Radio within a bounded upcoming queue
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -22,24 +26,24 @@ so that music can continue without assembling the whole library into a playlist 
 
 ## Tasks / Subtasks
 
-- [ ] Finalize the Radio contract before behavior changes (AC: 1–8).
-  - [ ] Define wire/storage schema and migration for logical ID, `Radio` queue kind, occurrence origin, center artist, state/reason and durable heard/skipped/removed identities. Preserve old Album/Manual rows and unknown-version handling.
-  - [ ] Define source-qualified artist identity from provider metadata. Use `(server_id, artist_id)` only when a stable ID is available; never join artists across servers or by name in this story. State whether no-ID and multiple-artist tracks wait.
-  - [ ] Define event-driven triggers and limits: target five auto upcoming, trigger below two, one refill in flight, maximum eight sources and 400 candidates/source (3,200/request), 15-second retrieval and 15-second preparation deadlines, and at most five candidate preparation failures in one refill. A failed pass waits for a new meaningful trigger or explicit retry; no timer spin. Retain existing 16.1 caps unless measurements justify a documented adjustment.
-  - [ ] Define heard at **natural completion** and exclusions at explicit skip/automatic removal; do not equate transport movement, preview, failed preparation or technical failure with heard. Define when a failed source may be retried after a new user action/source recovery without repeating a busy loop.
-- [ ] Extend the owner-owned session and persistence model (AC: 1–7).
-  - [ ] Add Radio mode and automatic/manual occurrence provenance without changing existing Album and Manual behavior. Persist logical state and exclusions transactionally with accepted queue mutations/outcomes; add indexed source-qualified membership and paged reads.
-  - [ ] Admit refill through the session owner with session ID, generation, expected queue revision, refill ID and current Radio state checks. Atomically append a batch and increment revision once. On conflict, recompute remaining capacity/exclusions from current state; do not overwrite an edit or replay a stale batch.
-  - [ ] Preserve Radio kind on manual queue edits. Only removed automatic entries add exclusions. Preserve manual order, accepted queue revisions, command ID dedup and occurrence identity.
-  - [ ] Connect completion, explicit Next, Stop, preview, replacement, shutdown and restoration to Radio state without changing album retry, Back/replay, output-loss inhibition or preview return semantics.
-- [ ] Reuse the shared selector for incremental artist-scoped refill (AC: 1–2, 4–5, 8).
-  - [ ] Extend Playback selection to filter candidates by the stable center artist and durable source-qualified eligibility **before** the shared pure ordering. Keep sync inputs and ordering unchanged. Use bounded provider retrieval and a bounded request cache; do not reuse a stale pool indefinitely or reload the entire library on every consumed track.
-  - [ ] Fetch/prepare outside the owner, with a generation fence at each asynchronous boundary and final owner admission. Skip bounded technical failures while retaining their reason and source identity. Ensure an exhausted source or all-failed pass reaches waiting/backoff.
-- [ ] Wire explicit settings-view start and truthful status (AC: 1, 5–6, 9).
-  - [ ] Build on `playback.startSelection`'s validated settings, source routing, preflight and admission fence. Saving settings alone must not start/replace playback. Starting a new session must preserve the existing main session on pre-admission failure.
-  - [ ] Surface filling, waiting/exhausted and temporary source failure in authoritative snapshots and localized UI status. Keep controls keyboard accessible, with names, focus and live feedback. Do not expose final bar/menu **Play something** yet.
+- [x] Finalize the Radio contract before behavior changes (AC: 1–8).
+  - [x] Define wire/storage schema and migration for logical ID, `Radio` queue kind, occurrence origin, center artist, state/reason and durable heard/skipped/removed identities. Preserve old Album/Manual rows and unknown-version handling.
+  - [x] Define source-qualified artist identity from provider metadata. Use `(server_id, artist_id)` only when a stable ID is available; never join artists across servers or by name in this story. State whether no-ID and multiple-artist tracks wait.
+  - [x] Define event-driven triggers and limits: target five auto upcoming, trigger below two, one refill in flight, maximum eight sources and 400 candidates/source (3,200/request), 15-second retrieval and 15-second preparation deadlines, and at most five candidate preparation failures in one refill. A failed pass waits for a new meaningful trigger or explicit retry; no timer spin. Retain existing 16.1 caps unless measurements justify a documented adjustment.
+  - [x] Define heard at **natural completion** and exclusions at explicit skip/automatic removal; do not equate transport movement, preview, failed preparation or technical failure with heard. Define when a failed source may be retried after a new user action/source recovery without repeating a busy loop.
+- [x] Extend the owner-owned session and persistence model (AC: 1–7).
+  - [x] Add Radio mode and automatic/manual occurrence provenance without changing existing Album and Manual behavior. Persist logical state and exclusions transactionally with accepted queue mutations/outcomes; add indexed source-qualified membership and paged reads.
+  - [x] Admit refill through the session owner with session ID, generation, expected queue revision, refill ID and current Radio state checks. Atomically append a batch and increment revision once. On conflict, recompute remaining capacity/exclusions from current state; do not overwrite an edit or replay a stale batch.
+  - [x] Preserve Radio kind on manual queue edits. Only removed automatic entries add exclusions. Preserve manual order, accepted queue revisions, command ID dedup and occurrence identity.
+  - [x] Connect completion, explicit Next, Stop, preview, replacement, shutdown and restoration to Radio state without changing album retry, Back/replay, output-loss inhibition or preview return semantics.
+- [x] Reuse the shared selector for incremental artist-scoped refill (AC: 1–2, 4–5, 8).
+  - [x] Extend Playback selection to filter candidates by the stable center artist and durable source-qualified eligibility **before** the shared pure ordering. Keep sync inputs and ordering unchanged. Use bounded provider retrieval and a bounded request cache; do not reuse a stale pool indefinitely or reload the entire library on every consumed track.
+  - [x] Fetch/prepare outside the owner, with a generation fence at each asynchronous boundary and final owner admission. Skip bounded technical failures while retaining their reason and source identity. Ensure an exhausted source or all-failed pass reaches waiting/backoff.
+- [x] Wire explicit settings-view start and truthful status (AC: 1, 5–6, 9).
+  - [x] Build on `playback.startSelection`'s validated settings, source routing, preflight and admission fence. Saving settings alone must not start/replace playback. Starting a new session must preserve the existing main session on pre-admission failure.
+  - [x] Surface filling, waiting/exhausted and temporary source failure in authoritative snapshots and localized UI status. Keep controls keyboard accessible, with names, focus and live feedback. Do not expose final bar/menu **Play something** yet.
 - [ ] Verify with deterministic owner, persistence, provider and UI tests (AC: 1–9).
-  - [ ] Include same local track IDs on different servers, manual edits racing refill, duplicate delivery, explicit replay, all candidates failed, ambiguous artist, corrupt state and long-history indexed/paged behavior.
+  - [x] Include same local track IDs on different servers, manual edits racing refill, duplicate delivery, explicit replay, all candidates failed, ambiguous artist, corrupt state and long-history indexed/paged behavior.
   - [ ] Run relevant Rust, TypeScript, UI and cross-platform build/test gates; report which platforms and installed scenarios were actually exercised.
 
 ## Dev Notes
@@ -93,15 +97,56 @@ Architecture places Radio in `hifimule-daemon/src/playback/radio.rs` and persist
 
 ## Dev Agent Record
 
+### Implementation Plan
+
+- Radio is a logical session identified by the existing UUID `session_id`; `queueKind: radio` is the wire value. Version 8 SQLite migration retains old `playback_sessions` and `playback_occurrences` rows and adds Radio metadata, indexed automatic occurrence origin, and indexed source-qualified membership without loading membership into memory. An unknown future playback schema remains a restore error. Existing snapshot `schemaVersion: 1` remains compatible through additive optional fields. The old SQLite queue-kind constraint stores Radio as Manual in its legacy column; the companion Radio row determines the restored kind.
+- `Song.artist_id` is accepted only when it is a nonempty single stable ID; its identity is `(server_id, artist_id)`. Missing or ambiguous metadata waits with an explanation. Jellyfin and Subsonic multi-artist metadata is marked ambiguous even when a primary ID exists. Artist names never identify a center. Radio 16.2 stays within that artist and server.
+- A refill is triggered by an owner event when indexed automatic upcoming count falls below two; it targets five, with one request in flight. Retrieval takes at most 15 seconds over at most eight sources and 400 candidates per source. Preparation has a separate 15-second deadline and at most five failures. Each asynchronous boundary and owner admission checks session, generation, revision and refill identity. A failed pass waits for a meaningful new trigger or explicit retry, with no timer spin. Existing compressed and PCM limits are unchanged.
+- Natural completion records heard membership. Explicit Next and removal of an automatic upcoming occurrence record exclusion membership. Technical failure, failed preparation, preview, and transport movement do not. A failed source can be retried after an explicit user action or source recovery. Back and replay remain explicit even for heard or excluded sources. Existing streaming and PCM caps remain in force.
+
 ### Agent Model Used
 
-GPT-6 Codex (story preparation)
+GPT-6 Codex
+
+### Debug Log References
+
+- Red/green checks exercised Radio owner policy, persistence, artist identity, refill admission and UI status before the implementation passed. The controlled native audio wrapper was required for daemon tests.
+- The default sandbox denies loopback listeners used by existing daemon tests. The full daemon suite passed with the permitted loopback-capable test command.
+- An unchanged audio test contained one Clippy `unused_io_amount` error. Its read now explicitly discards the returned byte count; the four affected audio tests pass and all-target Clippy completes.
+- Local verification host: macOS arm64. The four-runner CI matrix was updated, but Windows, Linux and macOS x64 jobs have not executed on this change. No installed-package Radio result is claimed.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented bounded same-artist Radio behind the explicit settings action, with durable source-qualified exclusions, indexed automatic provenance and owner-only revisioned admission.
+- Added conservative provider artist evidence, authoritative localized Radio status with accessible Retry, and deterministic owner, persistence, provider and UI coverage.
+- Local gates passed: 1,209 daemon unit tests and five provider contract tests, 257 Node tests (256 pass, one skip), two Python playback-evidence unit tests, seven localization tests, UI production build, all-target daemon Clippy, Rust format, and diff whitespace check.
+- Cross-platform CI is pending. The story remains in progress until Windows, Linux and macOS x64 verification runs.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/16-2-replenish-radio-within-a-bounded-upcoming-queue.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `.github/workflows/build.yml`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/playback/audio/queue_edit_tests.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/radio.rs`
+- `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/album_admission.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_selection.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/rpc.ts`
+- `scripts/tests/playback-radio-ui.test.mjs`
+
+### Change Log
+
+- 2026-09-28: Added bounded same-artist Radio session, transactional persistence, owner refill admission, provider ambiguity handling, localized UI status, regression tests, and four-platform CI coverage configuration.

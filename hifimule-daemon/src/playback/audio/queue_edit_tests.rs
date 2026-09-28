@@ -172,7 +172,7 @@ async fn delayed_successor_http_is_cancelled_without_cancelling_current_or_retai
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0u8; 2048];
-        socket.read(&mut request).await.unwrap();
+        let _ = socket.read(&mut request).await.unwrap();
         entered_tx.send(()).unwrap();
         let _ = release_rx.await;
     });

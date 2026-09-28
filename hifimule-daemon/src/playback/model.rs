@@ -98,6 +98,8 @@ pub struct SessionSnapshot {
     pub generation_id: String,
     pub mode: PlaybackMode,
     pub queue_kind: QueueKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio: Option<super::radio::RadioState>,
     pub preview: Option<PreviewSummary>,
     pub state: TransportState,
     pub current: Option<Occurrence>,
@@ -128,6 +130,7 @@ pub enum PlaybackMode {
 pub enum QueueKind {
     Album,
     Manual,
+    Radio,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +465,11 @@ pub enum SessionOperation {
         source: TrackSource,
     },
     #[serde(skip_deserializing)]
+    StartRadio {
+        source: TrackSource,
+        center: Option<super::radio::ArtistIdentity>,
+    },
+    #[serde(skip_deserializing)]
     PlayAlbum {
         sources: Vec<TrackSource>,
     },
@@ -613,6 +621,7 @@ pub struct PersistedSession {
     pub current_occurrence_id: Option<String>,
     pub position_ms: u64,
     pub queue_kind: QueueKind,
+    pub radio: Option<super::radio::RadioState>,
     pub(crate) current_gain_bits: u32,
     pub(crate) current_qualified_suffix: Option<String>,
     pub(crate) album_context: Option<FrozenAlbumContext>,

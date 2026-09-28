@@ -138,6 +138,13 @@ enum OwnerCommand {
         Option<crate::sync::MutationGuard>,
         mpsc::Sender<PResult<SessionSnapshot>>,
     ),
+    ReserveRadio(mpsc::Sender<PResult<Option<super::radio::RefillLease>>>),
+    AdmitRadio(
+        super::radio::RefillLease,
+        Vec<super::selection::SelectionCandidate>,
+        Option<String>,
+        mpsc::Sender<PResult<bool>>,
+    ),
 }
 
 enum OwnerControl {
@@ -177,6 +184,10 @@ struct Inner {
     dirty: bool,
     checkpointed_position_ms: u64,
     playback: PlaybackState,
+    radio_inflight: Option<String>,
+    radio_wake: Option<tokio::sync::mpsc::Sender<()>>,
+    radio_resume_after_refill: bool,
+    radio_wait_for_transition: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +271,57 @@ struct OwnerResources {
 }
 
 impl PlaybackSession {
+    pub fn register_radio_wake(&self, sender: tokio::sync::mpsc::Sender<()>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.radio_wake = Some(sender);
+        wake_radio(&inner);
+    }
+
+    pub fn reserve_radio_refill(&self) -> PResult<Option<super::radio::RefillLease>> {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::ReserveRadio(reply))
+            .map_err(admission_error)?;
+        receiver.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn radio_lease_current(&self, lease: &super::radio::RefillLease) -> bool {
+        if self.fenced.load(Ordering::Acquire) {
+            return false;
+        }
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.radio_inflight.as_deref() == Some(lease.refill_id.as_str())
+            && inner.session.session_id == lease.session_id
+            && inner.generation_id == lease.generation_id
+            && inner.session.queue_revision == lease.queue_revision
+            && inner.preview.is_none()
+            && inner
+                .session
+                .radio
+                .as_ref()
+                .and_then(|radio| radio.center.as_ref())
+                == Some(&lease.center)
+    }
+
+    pub fn admit_radio_refill(
+        &self,
+        lease: super::radio::RefillLease,
+        candidates: Vec<super::selection::SelectionCandidate>,
+        failure: Option<String>,
+    ) -> PResult<bool> {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::AdmitRadio(lease, candidates, failure, reply))
+            .map_err(admission_error)?;
+        receiver.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
     pub(crate) fn successor_candidate(
         &self,
         generation_id: &str,
@@ -426,6 +488,10 @@ impl PlaybackSession {
                 status: restored_playback_status,
                 ..Default::default()
             },
+            radio_inflight: None,
+            radio_wake: None,
+            radio_resume_after_refill: false,
+            radio_wait_for_transition: false,
         }));
         let (ingress, health) = {
             let i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1380,6 +1446,33 @@ fn owner_loop(
                 let i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(with_metadata(snapshot(&i), &i));
             }
+            Ok(OwnerCommand::ReserveRadio(reply)) => {
+                let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    reserve_radio_inner(&mut i)
+                };
+                let _ = reply.send(with_metadata(result, &i));
+            }
+            Ok(OwnerCommand::AdmitRadio(lease, candidates, failure, reply)) => {
+                let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    admit_radio_inner(&mut i, &lease, &candidates, failure, &generation_serial)
+                };
+                if result.is_err() && i.session.queue_kind == QueueKind::Radio {
+                    i.radio_inflight = None;
+                    if let Some(radio) = i.session.radio.as_mut() {
+                        radio.status = super::radio::RadioStatus::Waiting;
+                        radio.reason = Some("radio.persistenceFailure".into());
+                    }
+                    mark_persistence_failed(&mut i);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
+            }
             Ok(OwnerCommand::List(params, reply)) => {
                 let i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(with_metadata(list_inner(&i, params), &i));
@@ -1765,6 +1858,204 @@ fn publish_health(i: &Inner, health: &Mutex<PlaybackHealth>) {
         restoration: i.restoration.clone(),
         persistence: i.persistence.clone(),
     };
+    wake_radio(i);
+}
+
+fn wake_radio(i: &Inner) {
+    if i.session.queue_kind == QueueKind::Radio
+        && i.preview.is_none()
+        && i.radio_inflight.is_none()
+        && !i.radio_wait_for_transition
+        && i.playback.status != PlaybackStatus::Stopped
+        && i.session.radio.as_ref().is_some_and(|radio| {
+            matches!(
+                radio.status,
+                super::radio::RadioStatus::Ready | super::radio::RadioStatus::Filling
+            )
+        })
+    {
+        if let Some(sender) = &i.radio_wake {
+            let _ = sender.try_send(());
+        }
+    }
+}
+
+fn reserve_radio_inner(i: &mut Inner) -> PResult<Option<super::radio::RefillLease>> {
+    if i.preview.is_some()
+        || i.radio_inflight.is_some()
+        || i.restoration.status == "error"
+        || i.pending_terminal.is_some()
+        || i.playback.status == PlaybackStatus::Stopped
+    {
+        return Ok(None);
+    }
+    let Some(radio) = i.session.radio.as_ref() else {
+        return Ok(None);
+    };
+    if i.session.queue_kind != QueueKind::Radio
+        || matches!(
+            radio.status,
+            super::radio::RadioStatus::Waiting | super::radio::RadioStatus::Stopped
+        )
+    {
+        return Ok(None);
+    }
+    let Some(center) = radio.center.clone() else {
+        return Ok(None);
+    };
+    let Some(current_id) = i.session.current_occurrence_id.as_ref() else {
+        return Ok(None);
+    };
+    let current =
+        i.db.playback_occurrence(&i.session.session_id, current_id)
+            .map_err(storage)?
+            .ok_or_else(|| {
+                PlaybackError::invalid("INVALID_SESSION", "Radio current occurrence is absent")
+            })?;
+    let count =
+        i.db.radio_auto_upcoming_count(&i.session.session_id, current.ordinal)
+            .map_err(storage)?;
+    let Some(capacity) = super::radio::refill_capacity(count as usize) else {
+        return Ok(None);
+    };
+    let refill_id = Uuid::new_v4().to_string();
+    let mut next = i.session.clone();
+    if let Some(radio) = next.radio.as_mut() {
+        radio.status = super::radio::RadioStatus::Filling;
+        radio.reason = None;
+    }
+    i.db.checkpoint_radio_state(&next).map_err(storage)?;
+    i.session = next;
+    i.radio_inflight = Some(refill_id.clone());
+    i.state_sequence = i.state_sequence.saturating_add(1);
+    Ok(Some(super::radio::RefillLease {
+        session_id: i.session.session_id.clone(),
+        generation_id: i.generation_id.clone(),
+        queue_revision: i.session.queue_revision,
+        refill_id,
+        center,
+        capacity,
+    }))
+}
+
+fn admit_radio_inner(
+    i: &mut Inner,
+    lease: &super::radio::RefillLease,
+    candidates: &[super::selection::SelectionCandidate],
+    failure: Option<String>,
+    generation_serial: &AtomicU64,
+) -> PResult<bool> {
+    if i.radio_inflight.as_deref() != Some(lease.refill_id.as_str()) {
+        return Ok(false);
+    }
+    i.radio_inflight = None;
+    if i.preview.is_some()
+        || i.session.queue_kind != QueueKind::Radio
+        || i.session.session_id != lease.session_id
+        || i.generation_id != lease.generation_id
+        || i.session.queue_revision != lease.queue_revision
+        || i.session
+            .radio
+            .as_ref()
+            .and_then(|radio| radio.center.as_ref())
+            != Some(&lease.center)
+    {
+        wake_radio(i);
+        return Ok(false);
+    }
+    let current_id = i.session.current_occurrence_id.as_ref().ok_or_else(|| {
+        PlaybackError::invalid("INVALID_SESSION", "Radio current occurrence is absent")
+    })?;
+    let current =
+        i.db.playback_occurrence(&i.session.session_id, current_id)
+            .map_err(storage)?
+            .ok_or_else(|| {
+                PlaybackError::invalid("INVALID_SESSION", "Radio current occurrence is absent")
+            })?;
+    let count =
+        i.db.radio_auto_upcoming_count(&i.session.session_id, current.ordinal)
+            .map_err(storage)?;
+    let Some(capacity) = super::radio::refill_capacity(count as usize) else {
+        return Ok(false);
+    };
+    let mut sources = Vec::new();
+    for candidate in candidates {
+        if sources.len() >= capacity.min(lease.capacity) {
+            break;
+        }
+        if !lease.center.matches(
+            &candidate.source.server_id,
+            candidate.song.artist_id.as_deref(),
+        ) {
+            continue;
+        }
+        if i.db
+            .radio_has_membership(&i.session.session_id, &candidate.source)
+            .map_err(storage)?
+            || i.db
+                .radio_has_occurrence(&i.session.session_id, &candidate.source)
+                .map_err(storage)?
+            || sources.contains(&candidate.source)
+        {
+            continue;
+        }
+        sources.push(candidate.source.clone());
+    }
+    let mut next = i.session.clone();
+    if let Some(radio) = next.radio.as_mut() {
+        let short_pass = sources.len() < capacity;
+        radio.status = if short_pass {
+            super::radio::RadioStatus::Waiting
+        } else {
+            super::radio::RadioStatus::Ready
+        };
+        radio.reason = short_pass.then(|| failure.unwrap_or_else(|| "radio.exhausted".into()));
+    }
+    if sources.is_empty() {
+        i.db.checkpoint_radio_state(&next).map_err(storage)?;
+        i.session = next;
+        i.state_sequence = i.state_sequence.saturating_add(1);
+        return Ok(false);
+    }
+    if fence_successor_for_edit(i).is_err() {
+        i.radio_wait_for_transition = true;
+        return Ok(false);
+    }
+    let ordinal =
+        i.db.playback_next_ordinal(&i.session.session_id)
+            .map_err(storage)?;
+    let mut assigned = make_occurrences(&sources, ordinal);
+    decorate_availability(&i.db, &mut assigned)?;
+    let resume = i.radio_resume_after_refill && i.playback.status == PlaybackStatus::Completed;
+    if resume {
+        next.current_occurrence_id = assigned.first().map(|item| item.occurrence_id.clone());
+        next.position_ms = 0;
+        next.state = TransportState::Buffering;
+    }
+    next.queue_revision = checked_next_revision(next.queue_revision)?;
+    i.db.append_radio_occurrences(&next, current_id, &assigned)
+        .map_err(storage)?;
+    i.session = next;
+    i.state_sequence = i.state_sequence.saturating_add(1);
+    if resume {
+        i.radio_resume_after_refill = false;
+        i.control_epoch.fetch_add(1, Ordering::AcqRel);
+        generation_serial.fetch_add(1, Ordering::AcqRel);
+        i.generation_id = Uuid::new_v4().to_string();
+        i.output_gate.store(true, Ordering::Release);
+        i.playback = PlaybackState {
+            status: PlaybackStatus::Loading,
+            ..Default::default()
+        };
+    } else {
+        i.playback.can_go_next = true;
+    }
+    if i.output_gate.load(Ordering::Acquire) {
+        if let Some(outputs) = i.outputs.as_mut() {
+            outputs.effect = Some(i.generation_id.clone());
+        }
+    }
+    Ok(true)
 }
 fn metadata(i: &Inner) -> SessionMetadata {
     SessionMetadata {
@@ -1828,6 +2119,12 @@ fn reject_unstarted(command: OwnerCommand) {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::NativeControl(_, _guard, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::ReserveRadio(reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::AdmitRadio(_, _, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
     }
@@ -1914,6 +2211,10 @@ fn retry_restore_inner(
         preview_dedup_order: VecDeque::new(),
         seek_resume_after_commit: false,
         dirty: false,
+        radio_inflight: None,
+        radio_wake: inner.radio_wake.clone(),
+        radio_resume_after_refill: false,
+        radio_wait_for_transition: false,
     };
     let response = snapshot(&candidate)?;
     inner.session = candidate.session;
@@ -2012,6 +2313,7 @@ fn fresh_session() -> PersistedSession {
         current_occurrence_id: None,
         position_ms: 0,
         queue_kind: QueueKind::Manual,
+        radio: None,
         current_gain_bits: 1.0f32.to_bits(),
         current_qualified_suffix: None,
         album_context: None,
@@ -2134,6 +2436,16 @@ fn apply_inner_with_album_context(
         reconcile_presented_handoff(i, generation_serial)?;
     }
     let mut next_session = i.session.clone();
+    if is_queue_edit {
+        if let Some(radio) = next_session
+            .radio
+            .as_mut()
+            .filter(|radio| radio.status == super::radio::RadioStatus::Waiting)
+        {
+            radio.status = super::radio::RadioStatus::Ready;
+            radio.reason = None;
+        }
+    }
     let superseded_audition = i
         .preview
         .as_ref()
@@ -2167,6 +2479,7 @@ fn apply_inner_with_album_context(
             } else {
                 QueueKind::Manual
             };
+            next_session.radio = None;
             decorate_availability(&i.db, &mut assigned)?;
             let (start_index, start_position_ms) =
                 if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
@@ -2218,7 +2531,9 @@ fn apply_inner_with_album_context(
             if sources.is_empty() {
                 return Ok(noop_apply_result(i));
             }
-            next_session.queue_kind = QueueKind::Manual;
+            if next_session.queue_kind != QueueKind::Radio {
+                next_session.queue_kind = QueueKind::Manual;
+            }
             if let Some(current_id) = next_session.current_occurrence_id.as_deref() {
                 let current = i
                     .db
@@ -2316,7 +2631,9 @@ fn apply_inner_with_album_context(
                 ));
             }
             let current = canonical_main_current(i)?;
-            next_session.queue_kind = QueueKind::Manual;
+            if next_session.queue_kind != QueueKind::Radio {
+                next_session.queue_kind = QueueKind::Manual;
+            }
             next_session.queue_revision = checked_next_revision(next_session.queue_revision)?;
             fence_successor_for_edit(i)?;
             i.db.remove_playback_upcoming(&next_session, current.ordinal, occurrence_ids)
@@ -2372,7 +2689,9 @@ fn apply_inner_with_album_context(
             if already_noop {
                 return Ok(noop_apply_result(i));
             }
-            next_session.queue_kind = QueueKind::Manual;
+            if next_session.queue_kind != QueueKind::Radio {
+                next_session.queue_kind = QueueKind::Manual;
+            }
             next_session.queue_revision = checked_next_revision(next_session.queue_revision)?;
             fence_successor_for_edit(i)?;
             i.db.move_playback_upcoming(
@@ -2413,6 +2732,7 @@ fn apply_inner_with_album_context(
         SessionOperation::Clear => {
             next_session.album_context = None;
             next_session.queue_kind = QueueKind::Manual;
+            next_session.radio = None;
             next_session.current_occurrence_id = None;
             next_session.position_ms = 0;
             next_session.current_gain_bits = 1.0f32.to_bits();
@@ -2433,9 +2753,42 @@ fn apply_inner_with_album_context(
                     .map_err(storage)?;
             }
         }
-        SessionOperation::PlayTrack { source } => {
+        SessionOperation::PlayTrack { source } | SessionOperation::StartRadio { source, .. } => {
+            if let SessionOperation::StartRadio {
+                center: Some(center),
+                ..
+            } = &p.operation
+            {
+                if center.server_id != source.server_id
+                    || center.artist_id.is_empty()
+                    || center.artist_id.len() > MAX_ID_BYTES
+                {
+                    return Err(PlaybackError::invalid(
+                        "INVALID_RADIO_ARTIST",
+                        "Radio requires a stable source-qualified artist",
+                    ));
+                }
+            }
             next_session.album_context = None;
-            next_session.queue_kind = QueueKind::Manual;
+            next_session.queue_kind = if matches!(p.operation, SessionOperation::StartRadio { .. })
+            {
+                QueueKind::Radio
+            } else {
+                QueueKind::Manual
+            };
+            next_session.radio = match &p.operation {
+                SessionOperation::StartRadio { center, .. } => Some(super::radio::RadioState {
+                    logical_id: Uuid::new_v4().to_string(),
+                    center: center.clone(),
+                    status: if center.is_some() {
+                        super::radio::RadioStatus::Filling
+                    } else {
+                        super::radio::RadioStatus::Waiting
+                    },
+                    reason: center.is_none().then(|| "radio.artistUnavailable".into()),
+                }),
+                _ => None,
+            };
             source
                 .validate()
                 .map_err(|m| PlaybackError::invalid("INVALID_SESSION", m))?;
@@ -2474,6 +2827,9 @@ fn apply_inner_with_album_context(
     ) && (i.preview.is_some()
         || i.session.current_occurrence_id == next_session.current_occurrence_id);
     if !preserve_generation {
+        i.radio_inflight = None;
+        i.radio_resume_after_refill = false;
+        i.radio_wait_for_transition = false;
         i.preview = None;
         i.preview_return_pending = false;
         i.pending_terminal = None;
@@ -2501,6 +2857,7 @@ fn apply_inner_with_album_context(
     };
     i.playback = match &p.operation {
         SessionOperation::PlayTrack { .. }
+        | SessionOperation::StartRadio { .. }
         | SessionOperation::PlayAlbum { .. }
         | SessionOperation::PlayPlaylist { .. } => PlaybackState {
             status: PlaybackStatus::Loading,
@@ -2538,6 +2895,7 @@ fn apply_inner_with_album_context(
     if matches!(
         p.operation,
         SessionOperation::PlayTrack { .. }
+            | SessionOperation::StartRadio { .. }
             | SessionOperation::PlayAlbum { .. }
             | SessionOperation::PlayPlaylist { .. }
     ) && i.outputs.is_some()
@@ -2555,6 +2913,7 @@ fn apply_inner_with_album_context(
         start_audio: matches!(
             p.operation,
             SessionOperation::PlayTrack { .. }
+                | SessionOperation::StartRadio { .. }
                 | SessionOperation::PlayAlbum { .. }
                 | SessionOperation::PlayPlaylist { .. }
         ) && (i.outputs.is_none() || output_policy(i).is_ok()),
@@ -2694,6 +3053,9 @@ fn preview_inner(
 
     i.pending_terminal = None;
     album_admission::cancel_pending(i);
+    i.radio_inflight = None;
+    i.radio_resume_after_refill = false;
+    i.radio_wait_for_transition = false;
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
     generation_serial.fetch_add(1, Ordering::AcqRel);
     super::audio::global().control(ControlAction::Stop);
@@ -2974,6 +3336,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
             PlaybackMode::Main
         },
         queue_kind: i.session.queue_kind,
+        radio: i.session.radio.clone(),
         preview: i.preview.as_ref().map(|preview| PreviewSummary {
             audition_id: preview.occurrence.occurrence_id.clone(),
             has_main_session: preview.saved_main_occurrence_id.is_some(),
@@ -3146,13 +3509,24 @@ fn control_inner(
             ));
         }
     }
-    if p.action == ControlAction::Retry && i.playback.status != PlaybackStatus::Error {
+    let radio_retry = p.action == ControlAction::Retry
+        && i.session.queue_kind == QueueKind::Radio
+        && i.playback.status != PlaybackStatus::Error
+        && i.session
+            .radio
+            .as_ref()
+            .is_some_and(|radio| radio.status == super::radio::RadioStatus::Waiting);
+    if p.action == ControlAction::Retry
+        && i.playback.status != PlaybackStatus::Error
+        && !radio_retry
+    {
         return Err(PlaybackError::invalid(
             "RETRY_UNAVAILABLE",
             "the current occurrence has no retryable failure",
         ));
     }
-    if matches!(p.action, ControlAction::Resume | ControlAction::Retry)
+    if !radio_retry
+        && matches!(p.action, ControlAction::Resume | ControlAction::Retry)
         && (p.action == ControlAction::Retry
             || matches!(
                 i.playback.status,
@@ -3207,6 +3581,7 @@ fn control_inner(
     match p.action {
         ControlAction::Back => unreachable!("Back is handled before ordinary transport"),
         ControlAction::Pause => {
+            i.radio_resume_after_refill = false;
             i.output_gate.store(false, Ordering::Release);
             i.session.state = TransportState::Paused;
             i.playback.status = PlaybackStatus::Paused;
@@ -3232,6 +3607,22 @@ fn control_inner(
             i.playback.error = None;
         }
         ControlAction::Retry => {
+            if i.session.queue_kind == QueueKind::Radio
+                && i.session
+                    .radio
+                    .as_ref()
+                    .is_some_and(|radio| radio.status == super::radio::RadioStatus::Waiting)
+            {
+                let mut next = i.session.clone();
+                if let Some(radio) = next.radio.as_mut() {
+                    radio.status = super::radio::RadioStatus::Ready;
+                    radio.reason = None;
+                }
+                i.db.checkpoint_radio_state(&next).map_err(storage)?;
+                i.session = next;
+                i.state_sequence = i.state_sequence.saturating_add(1);
+                return snapshot(i);
+            }
             if i.playback.status != PlaybackStatus::Error {
                 return Err(PlaybackError::invalid(
                     "RETRY_UNAVAILABLE",
@@ -3274,6 +3665,14 @@ fn control_inner(
                 PlaybackStatus::Stopped | PlaybackStatus::Completed
             );
             let mut next_session = i.session.clone();
+            if let Some(radio) = next_session
+                .radio
+                .as_mut()
+                .filter(|radio| radio.status == super::radio::RadioStatus::Waiting)
+            {
+                radio.status = super::radio::RadioStatus::Ready;
+                radio.reason = None;
+            }
             next_session.current_occurrence_id = Some(successor.occurrence_id);
             next_session.position_ms = 0;
             next_session.state = if resume {
@@ -3301,6 +3700,15 @@ fn control_inner(
             committed_snapshot = Some(commit_terminal(i, terminal, generation_serial, false)?);
         }
         ControlAction::Stop => {
+            i.radio_inflight = None;
+            i.radio_resume_after_refill = false;
+            i.radio_wait_for_transition = false;
+            if i.preview.is_none() && i.session.queue_kind == QueueKind::Radio {
+                if let Some(radio) = i.session.radio.as_mut() {
+                    radio.status = super::radio::RadioStatus::Stopped;
+                    radio.reason = None;
+                }
+            }
             let qualified_active = i.session.state == TransportState::Playing
                 && i.playback.status == PlaybackStatus::Active;
             let completed_naturally = i.playback.status == PlaybackStatus::Completed
@@ -3361,6 +3769,9 @@ fn control_inner(
             } else {
                 PlaybackStatus::Idle
             };
+            if i.preview.is_none() && i.session.queue_kind == QueueKind::Radio {
+                i.db.checkpoint_radio_state(&i.session).map_err(storage)?;
+            }
             i.dirty = true;
             checkpoint_inner(i)?;
         }
@@ -4430,6 +4841,7 @@ fn adopt_presented_handoff(
     }
     i.session = next;
     i.checkpointed_position_ms = i.session.position_ms;
+    i.radio_wait_for_transition = false;
     i.playback = PlaybackState {
         status: if i.output_gate.load(Ordering::Acquire) {
             PlaybackStatus::Active
@@ -4492,6 +4904,13 @@ fn complete_occurrence(
     terminal.session.position_ms = position_ms;
     terminal.session.state = TransportState::Paused;
     let advances = successor.is_some();
+    let was_audible = matches!(
+        i.session.state,
+        TransportState::Playing | TransportState::Buffering
+    ) || matches!(
+        i.playback.status,
+        PlaybackStatus::Active | PlaybackStatus::Loading
+    );
     if let Some(successor) = successor {
         let resume = matches!(
             i.session.state,
@@ -4514,6 +4933,10 @@ fn complete_occurrence(
         };
     }
     commit_terminal(i, terminal, generation_serial, false)?;
+    i.radio_wait_for_transition = false;
+    if !advances && i.session.queue_kind == QueueKind::Radio {
+        i.radio_resume_after_refill = was_audible;
+    }
     if advances
         && i.output_gate.load(Ordering::Acquire)
         && let Some(outputs) = i.outputs.as_mut()
@@ -4668,6 +5091,7 @@ fn commit_terminal(
         i.playback = PlaybackState::default();
     }
     i.session = terminal.session;
+    i.radio_wait_for_transition = false;
     i.playback.status = terminal.status;
     i.playback.error = terminal.failure;
     i.output_gate.store(
@@ -5241,6 +5665,7 @@ mod tests {
             current_occurrence_id: None,
             position_ms: 0,
             queue_kind: QueueKind::Manual,
+            radio: None,
             current_gain_bits: 1.0f32.to_bits(),
             current_qualified_suffix: None,
             album_context: None,

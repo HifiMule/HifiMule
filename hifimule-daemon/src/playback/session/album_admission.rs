@@ -388,6 +388,7 @@ pub(super) fn commit(
         generation_id: i.generation_id.clone(),
         mode: PlaybackMode::Main,
         queue_kind: QueueKind::Album,
+        radio: None,
         preview: None,
         state: i.session.state,
         current: current.clone(),

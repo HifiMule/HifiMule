@@ -2700,6 +2700,7 @@ fn map_book_detail(
             cover_reference,
             part_identities,
             credits,
+            ambiguous_music_artist: false,
         },
     })
 }

@@ -129,6 +129,9 @@ pub enum CreditRole {
 /// It is not serialized into RPC payloads or persisted as an authenticated URL.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderItemMetadata {
+    /// A provider reported more than one music artist for this track.
+    /// Radio must not infer its center from the first display credit.
+    pub ambiguous_music_artist: bool,
     pub identity: Option<ProviderIdentity>,
     pub audio_file_id: Option<String>,
     pub chapters: Vec<ChapterMarker>,
