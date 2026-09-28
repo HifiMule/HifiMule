@@ -149,6 +149,9 @@ pub struct NameIdPair {
 pub struct JellyfinItem {
     pub id: String,
     pub name: String,
+    // Read-only: rename_item round-trips this DTO in a write request.
+    #[serde(default, skip_serializing)]
+    pub provider_ids: Option<std::collections::HashMap<String, serde_json::Value>>,
     #[serde(rename = "Type")]
     pub item_type: String,
     // `skip_serializing_if` keeps `None` fields out of the serialized body. This matters for
@@ -481,7 +484,7 @@ impl JellyfinClient {
 
         let ids_str = item_ids.join(",");
         let endpoint = format!(
-            "{}/Items?userId={}&Ids={}&Fields=MediaSources",
+            "{}/Items?userId={}&Ids={}&Fields=MediaSources,ProviderIds",
             url.trim_end_matches('/'),
             user_id,
             ids_str
@@ -512,7 +515,7 @@ impl JellyfinClient {
         let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!(
-            "{}/Items/{}?userId={}&Fields=MediaSources",
+            "{}/Items/{}?userId={}&Fields=MediaSources,ProviderIds",
             url.trim_end_matches('/'),
             item_id,
             user_id
@@ -543,7 +546,7 @@ impl JellyfinClient {
         let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!(
-            "{}/Items?userId={}&ParentId={}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true",
+            "{}/Items?userId={}&ParentId={}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources,ProviderIds&Recursive=true",
             url.trim_end_matches('/'),
             user_id,
             parent_id
@@ -575,7 +578,7 @@ impl JellyfinClient {
 
         let mut query_params = vec![
             format!("userId={}", user_id),
-            "Fields=MediaSources".to_string(),
+            "Fields=MediaSources,ProviderIds".to_string(),
         ];
         if let Some(date_str) = min_date_last_saved {
             query_params.push(format!("minDateLastSaved={}", url_encode(date_str)));
@@ -806,7 +809,7 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes={}&Recursive=true&Limit=50&Fields=Id,Name,Album,AlbumArtist,Artists,ArtistItems,AlbumId,RecursiveItemCount,CumulativeRunTimeTicks",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes={}&Recursive=true&Limit=50&Fields=Id,Name,Album,AlbumArtist,Artists,ArtistItems,AlbumId,RecursiveItemCount,CumulativeRunTimeTicks,ProviderIds",
             url.trim_end_matches('/'),
             user_id,
             encoded_title,
@@ -1289,7 +1292,7 @@ impl JellyfinClient {
     }
 
     /// Internal helper for browse queries. All public browse methods delegate here.
-    /// Requests `Fields=MediaSources,UserData,DateCreated` so `Song` browse metadata
+    /// Requests `Fields=MediaSources,UserData,DateCreated,ProviderIds` so `Song` browse metadata
     /// is populated in the response.
     async fn get_audio_items(
         &self,
@@ -1490,7 +1493,7 @@ impl JellyfinClient {
             .query_pairs_mut()
             .append_pair("ParentId", playlist_id)
             .append_pair("IncludeItemTypes", "Audio,MusicVideo")
-            .append_pair("Fields", "MediaSources")
+            .append_pair("Fields", "MediaSources,ProviderIds")
             .append_pair("Recursive", "true");
         if let Some(limit) = limit {
             endpoint
@@ -1652,7 +1655,7 @@ impl JellyfinClient {
             format!("userId={}", user_id),
             format!("IncludeItemTypes={}", include_item_types),
             "Recursive=true".to_string(),
-            "Fields=MediaSources,UserData,DateCreated".to_string(),
+            "Fields=MediaSources,UserData,DateCreated,ProviderIds".to_string(),
             format!("StartIndex={}", start_index),
             format!("Limit={}", limit),
         ];
@@ -2613,7 +2616,7 @@ mod tests {
 
         // Mock: fetch individual Audio item with MediaSources
         let _mock = server
-            .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources")
+            .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources,ProviderIds")
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -2639,7 +2642,10 @@ mod tests {
 
         // Mock: fetch album item (container type)
         let _mock_album = server
-            .mock("GET", "/Items/album1?userId=user1&Fields=MediaSources")
+            .mock(
+                "GET",
+                "/Items/album1?userId=user1&Fields=MediaSources,ProviderIds",
+            )
             .match_header(
                 "Authorization",
                 format!("MediaBrowser Token=\"{}\"", token).as_str(),
@@ -2652,7 +2658,7 @@ mod tests {
 
         // Mock: fetch child items of album
         let _mock_children = server
-            .mock("GET", "/Items?userId=user1&ParentId=album1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=album1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources,ProviderIds&Recursive=true")
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -2681,7 +2687,10 @@ mod tests {
 
         // Mock: fetch artist item (container type; no MediaSources on container is deliberate)
         let _mock_artist = server
-            .mock("GET", "/Items/artist1?userId=user1&Fields=MediaSources")
+            .mock(
+                "GET",
+                "/Items/artist1?userId=user1&Fields=MediaSources,ProviderIds",
+            )
             .match_header(
                 "Authorization",
                 format!("MediaBrowser Token=\"{}\"", token).as_str(),
@@ -2695,7 +2704,7 @@ mod tests {
 
         // Mock: fetch all tracks under artist (Recursive=true flattens Artist → Albums → Tracks)
         let _mock_children = server
-            .mock("GET", "/Items?userId=user1&ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources,ProviderIds&Recursive=true")
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -2724,7 +2733,10 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock_artist = server
-            .mock("GET", "/Items/artist2?userId=user1&Fields=MediaSources")
+            .mock(
+                "GET",
+                "/Items/artist2?userId=user1&Fields=MediaSources,ProviderIds",
+            )
             .match_header(
                 "Authorization",
                 format!("MediaBrowser Token=\"{}\"", token).as_str(),
@@ -2737,7 +2749,7 @@ mod tests {
             .await;
 
         let _mock_children = server
-            .mock("GET", "/Items?userId=user1&ParentId=artist2&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=artist2&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources,ProviderIds&Recursive=true")
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -2763,7 +2775,10 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock_artist = server
-            .mock("GET", "/Items/artist3?userId=user1&Fields=MediaSources")
+            .mock(
+                "GET",
+                "/Items/artist3?userId=user1&Fields=MediaSources,ProviderIds",
+            )
             .match_header(
                 "Authorization",
                 format!("MediaBrowser Token=\"{}\"", token).as_str(),
@@ -2777,7 +2792,7 @@ mod tests {
 
         // Server error on the children endpoint — production code logs and drops the error
         let _mock_children = server
-            .mock("GET", "/Items?userId=user1&ParentId=artist3&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=artist3&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources,ProviderIds&Recursive=true")
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(500)
             .expect(1)
@@ -2801,7 +2816,10 @@ mod tests {
 
         // Mock: item with no MediaSources
         let _mock = server
-            .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources")
+            .mock(
+                "GET",
+                "/Items/track1?userId=user1&Fields=MediaSources,ProviderIds",
+            )
             .match_header(
                 "Authorization",
                 format!("MediaBrowser Token=\"{}\"", token).as_str(),

@@ -14338,7 +14338,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), "Me".into()),
                 Matcher::UrlEncoded("Ids".into(), "playlist-1".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
             ]))
             .with_status(200)
             .with_body(r#"{"Items":[{"Id":"playlist-1","Name":"Road Trip","Type":"Playlist","Etag":"pl-etag"}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -14352,7 +14352,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), "Me".into()),
                 Matcher::UrlEncoded("ParentId".into(), "playlist-1".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
             .with_status(200)
@@ -14458,7 +14458,7 @@ mod tests {
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .match_query(mockito::Matcher::AllOf(vec![
                 mockito::Matcher::UrlEncoded("userId".into(), "Me".into()),
-                mockito::Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                mockito::Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
             ]))
             .with_status(200)
             .with_body(r#"{"Items":[{"Id":"item-1","Name":"Item 1","Type":"Audio","AlbumArtist":"Artist","MediaSources":[{"Size":1000}]}],"TotalRecordCount":1,"StartIndex":0}"#)

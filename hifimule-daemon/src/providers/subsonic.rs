@@ -1677,6 +1677,21 @@ fn playlist_from_with_songs_dto(playlist: PlaylistWithSongsDto) -> Playlist {
 }
 
 fn song_from_dto(song: SongDto) -> Song {
+    let recording = (song.media_type.as_deref() == Some("song")
+        && song
+            .media_kind
+            .as_deref()
+            .is_none_or(|kind| kind == "music"))
+    .then(|| {
+        crate::playback::recording::RecordingEvidence::from_recording_fields(
+            crate::playback::recording::RecordingProvenance::OpenSubsonicSong,
+            song.music_brainz_id
+                .as_ref()
+                .and_then(serde_json::Value::as_str),
+            &song.title,
+            song.album.as_deref(),
+        )
+    });
     let artist = song.artists.as_ref().and_then(|artists| artists.first());
     let ambiguous_music_artist = song
         .artists
@@ -1716,6 +1731,7 @@ fn song_from_dto(song: SongDto) -> Song {
         size_bytes: song.size,
         album_loudness,
         provider_metadata: crate::domain::models::ProviderItemMetadata {
+            recording,
             ambiguous_music_artist,
             music_artist_ids,
             ..Default::default()
@@ -2126,6 +2142,12 @@ struct Search3Dto {
 struct SongDto {
     id: String,
     title: String,
+    #[serde(default, rename = "musicBrainzId")]
+    music_brainz_id: Option<serde_json::Value>,
+    #[serde(default, rename = "mediaType")]
+    media_type: Option<String>,
+    #[serde(default, rename = "type")]
+    media_kind: Option<String>,
     album: Option<String>,
     artist: Option<String>,
     #[serde(rename = "albumId")]
@@ -2262,6 +2284,9 @@ mod tests {
         let song = song_from_dto(SongDto {
             id: "song-id".to_string(),
             title: "Track".to_string(),
+            music_brainz_id: None,
+            media_type: None,
+            media_kind: None,
             album: Some("Album".to_string()),
             artist: Some("Artist".to_string()),
             album_id: Some("album-id".to_string()),
@@ -2296,10 +2321,52 @@ mod tests {
     }
 
     #[test]
+    fn open_subsonic_recording_requires_song_entity_and_one_uuid() {
+        let id = "189002e7-3285-4e2e-92a3-7f6c30d407a2";
+        let make = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({"id":"local", "title":"Take"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            song_from_dto(serde_json::from_value(value).unwrap())
+        };
+        let exact = make(serde_json::json!({"mediaType":"song","type":"music","musicBrainzId":id}));
+        assert_eq!(
+            exact
+                .provider_metadata
+                .recording
+                .as_ref()
+                .and_then(|e| e.key())
+                .map(|k| k.as_str()),
+            Some("mbrec:1:189002e7-3285-4e2e-92a3-7f6c30d407a2:plain")
+        );
+        for metadata in [
+            serde_json::json!({"musicBrainzId":id}),
+            serde_json::json!({"mediaType":"album","musicBrainzId":id}),
+            serde_json::json!({"mediaType":"song","musicBrainzId":"bad"}),
+            serde_json::json!({"mediaType":"song","musicBrainzId":[id,id]}),
+            serde_json::json!({"mediaType":"song","isrc":["USSM18300073"]}),
+        ] {
+            assert!(
+                make(metadata)
+                    .provider_metadata
+                    .recording
+                    .as_ref()
+                    .and_then(|e| e.key())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn song_conversion_keeps_missing_optional_fields_none() {
         let song = song_from_dto(SongDto {
             id: "song-id".to_string(),
             title: "Track".to_string(),
+            music_brainz_id: None,
+            media_type: None,
+            media_kind: None,
             album: None,
             artist: None,
             album_id: None,
@@ -3435,6 +3502,9 @@ mod tests {
         let actual = SongDto {
             id: "song1".to_string(),
             title: "Track".to_string(),
+            music_brainz_id: None,
+            media_type: None,
+            media_kind: None,
             album: None,
             artist: None,
             album_id: Some("album1".to_string()),

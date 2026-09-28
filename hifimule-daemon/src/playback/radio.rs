@@ -158,6 +158,7 @@ pub fn choose_transition(
                 pool
             })
             .collect();
+        let scoped = include_recording_copies(&valid_pools, scoped);
         if let Ok(ordered) = super::selection::select_radio_order(settings, scoped)
             && !ordered.is_empty()
         {
@@ -193,6 +194,7 @@ pub fn choose_transition(
                 pool
             })
             .collect();
+        let scoped = include_recording_copies(&valid_pools, scoped);
         if let Ok(ordered) = super::selection::select_radio_order(settings, scoped)
             && !ordered.is_empty()
         {
@@ -203,6 +205,42 @@ pub fn choose_transition(
         }
     }
     None
+}
+
+fn include_recording_copies(
+    available: &[super::selection::SelectionPool],
+    anchors: Vec<super::selection::SelectionPool>,
+) -> Vec<super::selection::SelectionPool> {
+    let keys: std::collections::HashSet<_> = anchors
+        .iter()
+        .flat_map(|pool| &pool.tracks)
+        .filter_map(|song| {
+            song.provider_metadata
+                .recording
+                .as_ref()
+                .and_then(|e| e.key())
+        })
+        .map(|key| key.as_str().to_owned())
+        .collect();
+    available
+        .iter()
+        .cloned()
+        .zip(anchors)
+        .map(|(mut pool, anchor)| {
+            let anchor_ids: std::collections::HashSet<_> =
+                anchor.tracks.iter().map(|song| song.id.as_str()).collect();
+            pool.tracks.retain(|song| {
+                anchor_ids.contains(song.id.as_str())
+                    || song
+                        .provider_metadata
+                        .recording
+                        .as_ref()
+                        .and_then(|e| e.key())
+                        .is_some_and(|key| keys.contains(key.as_str()))
+            });
+            pool
+        })
+        .collect()
 }
 
 impl RadioState {
@@ -320,6 +358,7 @@ mod tests {
     fn candidate(server: &str, track: &str, artist: &str) -> SelectionCandidate {
         SelectionCandidate {
             source: source(server, track),
+            center_origin: None,
             song: Song {
                 id: track.into(),
                 title: track.into(),
@@ -369,7 +408,203 @@ mod tests {
                     artist_id: "artist".into(),
                 }),
                 settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+                recording: None,
             },
+        );
+    }
+
+    fn evidence(title: &str) -> crate::playback::recording::RecordingEvidence {
+        crate::playback::recording::RecordingEvidence::from_recording_field(
+            crate::playback::recording::RecordingProvenance::OpenSubsonicSong,
+            Some("189002e7-3285-4e2e-92a3-7f6c30d407a2"),
+            title,
+        )
+    }
+
+    #[test]
+    fn initial_radio_recording_blocks_another_server_then_skip_survives_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(temp.path().join("recording.db")).unwrap());
+        let session = PlaybackSession::restore(db.clone(), "recording".into());
+        apply(
+            &session,
+            SessionOperation::StartRadio {
+                source: source("one", "first"),
+                center: Some(ArtistIdentity {
+                    server_id: "one".into(),
+                    artist_id: "artist".into(),
+                }),
+                settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+                recording: Some(evidence("Take")),
+            },
+        );
+        let key = evidence("Take").key().unwrap().as_str().to_owned();
+        let initial = session.snapshot().unwrap();
+        assert!(db.radio_recording_used(&initial.session_id, &key).unwrap());
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        let mut copy = candidate("two", "another-local-id", "other-artist");
+        copy.song.title = "Take".into();
+        copy.song.provider_metadata.recording = Some(evidence("Take"));
+        let transition = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "two".into(),
+                artist_id: "other-artist".into(),
+            },
+            RadioTransitionKind::NewStartingPoint,
+        );
+        assert!(
+            !session
+                .admit_radio_refill_plan(lease, vec![copy], None, false, Some(transition))
+                .unwrap()
+        );
+        assert_eq!(
+            db.playback_page(&initial.session_id, None, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        let stored = db.load_playback_session().unwrap().unwrap();
+        db.persist_playback_terminal(
+            &stored,
+            stored.current_occurrence_id.as_deref().unwrap(),
+            "explicitSkip",
+            None,
+            1000,
+        )
+        .unwrap();
+        assert!(
+            db.radio_recording_has_kind(&initial.session_id, &key, "excluded")
+                .unwrap()
+        );
+        session.shutdown_checkpoint().unwrap();
+        session.stop_and_join().unwrap();
+        drop(session);
+        let restored = PlaybackSession::restore(db.clone(), "restored".into());
+        assert_eq!(restored.snapshot().unwrap().total_occurrence_count, 1);
+        assert!(
+            db.radio_recording_has_kind(&initial.session_id, &key, "excluded")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn automatic_copies_share_one_slot_and_removal_excludes_the_recording() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "copies".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        let mut first = candidate("one", "copy-a", "artist");
+        first.song.title = "Take".into();
+        first.song.provider_metadata.recording = Some(evidence("Take"));
+        let mut second = candidate("one", "copy-b", "artist");
+        second.song.title = "Take".into();
+        second.song.provider_metadata.recording = Some(evidence("Take"));
+        assert!(
+            session
+                .admit_radio_refill_plan(lease, vec![first, second], None, true, None)
+                .unwrap()
+        );
+        let snapshot = session.snapshot().unwrap();
+        let old_logical_id = snapshot.radio.as_ref().unwrap().logical_id.clone();
+        let page = db.playback_page(&snapshot.session_id, None, 20).unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[1].source, source("one", "copy-a"));
+        apply(
+            &session,
+            SessionOperation::RemoveUpcoming {
+                occurrence_ids: vec![page[1].occurrence_id.clone()],
+            },
+        );
+        let key = evidence("Take").key().unwrap().as_str().to_owned();
+        assert!(
+            db.radio_recording_has_kind(&snapshot.session_id, &key, "excluded")
+                .unwrap()
+        );
+        assert!(db.radio_recording_used(&snapshot.session_id, &key).unwrap());
+        start(&session);
+        let fresh = session.snapshot().unwrap();
+        assert_ne!(fresh.radio.as_ref().unwrap().logical_id, old_logical_id);
+        assert!(!db.radio_recording_used(&fresh.session_id, &key).unwrap());
+    }
+
+    #[test]
+    fn technical_failure_does_not_exclude_a_recording_copy() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "failure".into());
+        apply(
+            &session,
+            SessionOperation::StartRadio {
+                source: source("one", "first"),
+                center: Some(ArtistIdentity {
+                    server_id: "one".into(),
+                    artist_id: "artist".into(),
+                }),
+                settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+                recording: Some(evidence("Take")),
+            },
+        );
+        let stored = db.load_playback_session().unwrap().unwrap();
+        let key = evidence("Take").key().unwrap().as_str().to_owned();
+        db.persist_playback_terminal(
+            &stored,
+            stored.current_occurrence_id.as_deref().unwrap(),
+            "technicalFailure",
+            Some("SOURCE_UNAVAILABLE"),
+            0,
+        )
+        .unwrap();
+        assert!(
+            !db.radio_recording_has_kind(&stored.session_id, &key, "excluded")
+                .unwrap()
+        );
+        assert!(
+            !db.radio_recording_has_kind(&stored.session_id, &key, "heard")
+                .unwrap()
+        );
+        assert!(!db.radio_recording_used(&stored.session_id, &key).unwrap());
+    }
+
+    #[test]
+    fn cycle_renewal_clears_recording_heard_but_keeps_exclusion() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "cycle-recording".into());
+        apply(
+            &session,
+            SessionOperation::StartRadio {
+                source: source("one", "first"),
+                center: Some(ArtistIdentity {
+                    server_id: "one".into(),
+                    artist_id: "artist".into(),
+                }),
+                settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+                recording: Some(evidence("Take")),
+            },
+        );
+        let mut stored = db.load_playback_session().unwrap().unwrap();
+        let key = evidence("Take").key().unwrap().as_str().to_owned();
+        db.persist_playback_terminal(
+            &stored,
+            stored.current_occurrence_id.as_deref().unwrap(),
+            "naturalCompletion",
+            None,
+            1000,
+        )
+        .unwrap();
+        assert!(
+            db.radio_recording_has_kind(&stored.session_id, &key, "heard")
+                .unwrap()
+        );
+        let excluded = "mbrec:1:aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa:plain";
+        db.conn.lock().unwrap().execute("INSERT INTO playback_radio_recording_membership(session_id,recording_key,kind) VALUES(?1,?2,'excluded')", rusqlite::params![stored.session_id,excluded]).unwrap();
+        stored.radio.as_mut().unwrap().cycle = 2;
+        db.renew_radio_cycle(&stored, 1).unwrap();
+        assert!(
+            !db.radio_recording_has_kind(&stored.session_id, &key, "heard")
+                .unwrap()
+        );
+        assert!(
+            db.radio_recording_has_kind(&stored.session_id, excluded, "excluded")
+                .unwrap()
         );
     }
 
@@ -400,6 +635,7 @@ mod tests {
                 source: source("one", "first"),
                 center: None,
                 settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+                recording: None,
             },
         );
         let lease = session.reserve_radio_refill().unwrap();
@@ -521,6 +757,130 @@ mod tests {
     }
 
     #[test]
+    fn transition_can_choose_better_copy_without_changing_its_artist_anchor() {
+        use crate::playback::selection::{
+            PlaybackSelectionConfig, SelectionKind, SelectionPool, SelectionSource,
+        };
+        let settings = PlaybackSelectionConfig {
+            sources: vec![
+                SelectionSource {
+                    server_id: "one".into(),
+                    kind: SelectionKind::Genre,
+                    ref_id: "rock".into(),
+                },
+                SelectionSource {
+                    server_id: "two".into(),
+                    kind: SelectionKind::Genre,
+                    ref_id: "rock".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut anchor = candidate("one", "first", "artist").song;
+        anchor.title = "Take".into();
+        anchor.suffix = Some("mp3".into());
+        anchor.bitrate_kbps = Some(128);
+        anchor.provider_metadata.recording = Some(evidence("Take"));
+        let mut better = candidate("two", "second", "other").song;
+        better.title = "Take".into();
+        better.suffix = Some("mp3".into());
+        better.bitrate_kbps = Some(320);
+        better.provider_metadata.recording = Some(evidence("Take"));
+        let relation = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "one".into(),
+                artist_id: "artist".into(),
+            },
+            RadioTransitionKind::SimilarArtist,
+        );
+        let (chosen, ordered) = choose_transition(
+            &settings,
+            &[
+                SelectionPool {
+                    source: settings.sources[0].clone(),
+                    tracks: vec![anchor],
+                },
+                SelectionPool {
+                    source: settings.sources[1].clone(),
+                    tracks: vec![better],
+                },
+            ],
+            &[relation],
+            false,
+        )
+        .unwrap();
+        assert_eq!(chosen.center.server_id, "one");
+        assert_eq!(ordered[0], source("two", "second"));
+    }
+
+    #[test]
+    fn owner_preserves_cross_server_copy_source_and_artist_anchor() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "copy-source".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        let mut copy = candidate("two", "better", "other-artist");
+        copy.song.title = "Take".into();
+        copy.song.provider_metadata.recording = Some(evidence("Take"));
+        copy.center_origin = Some(ArtistIdentity {
+            server_id: "one".into(),
+            artist_id: "artist".into(),
+        });
+        assert!(
+            session
+                .admit_radio_refill_plan(lease, vec![copy], None, true, None)
+                .unwrap()
+        );
+        let snapshot = session.snapshot().unwrap();
+        let page = db.playback_page(&snapshot.session_id, None, 20).unwrap();
+        assert_eq!(page[1].source, source("two", "better"));
+        assert_eq!(snapshot.radio.unwrap().center.unwrap().server_id, "one");
+    }
+
+    #[test]
+    fn deliberate_manual_repeats_keep_independent_occurrences() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "manual-repeats".into());
+        apply(
+            &session,
+            SessionOperation::StartRadio {
+                source: source("one", "first"),
+                center: Some(ArtistIdentity {
+                    server_id: "one".into(),
+                    artist_id: "artist".into(),
+                }),
+                settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+                recording: Some(evidence("Take")),
+            },
+        );
+        apply(
+            &session,
+            SessionOperation::AppendQueue {
+                sources: vec![source("one", "first"), source("one", "first")],
+            },
+        );
+        let snapshot = session.snapshot().unwrap();
+        let page = db.playback_page(&snapshot.session_id, None, 20).unwrap();
+        assert_eq!(page.len(), 3);
+        assert_ne!(page[1].occurrence_id, page[2].occurrence_id);
+        assert_eq!(page[1].source, page[2].source);
+        apply(
+            &session,
+            SessionOperation::RemoveUpcoming {
+                occurrence_ids: vec![page[1].occurrence_id.clone()],
+            },
+        );
+        assert!(
+            !db.radio_recording_has_kind(
+                &snapshot.session_id,
+                evidence("Take").key().unwrap().as_str(),
+                "excluded"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn contradictory_artist_ids_for_one_source_track_cannot_become_a_center() {
         use crate::playback::selection::{
             PlaybackSelectionConfig, SelectionKind, SelectionPool, SelectionSource,
@@ -638,6 +998,7 @@ mod tests {
                 source: source("one", "first"),
                 center: None,
                 settings: Some(settings.clone()),
+                recording: None,
             },
         );
         settings.seed = 99;
@@ -1143,6 +1504,7 @@ mod tests {
                 source: source("one", "first"),
                 center: None,
                 settings: None,
+                recording: None,
             },
         );
         let snapshot = session.snapshot().unwrap();

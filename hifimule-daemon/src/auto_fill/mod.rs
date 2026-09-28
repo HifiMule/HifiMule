@@ -577,6 +577,7 @@ mod tests {
     ) -> JellyfinItem {
         JellyfinItem {
             id: id.to_string(),
+            provider_ids: None,
             name: format!("Track {}", id),
             item_type: "Audio".to_string(),
             album: None,

@@ -469,6 +469,8 @@ pub enum SessionOperation {
         source: TrackSource,
         center: Option<super::radio::ArtistIdentity>,
         settings: Option<super::selection::PlaybackSelectionConfig>,
+        #[serde(skip)]
+        recording: Option<super::recording::RecordingEvidence>,
     },
     #[serde(skip_deserializing)]
     PlayAlbum {

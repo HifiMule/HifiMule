@@ -129,6 +129,8 @@ pub enum CreditRole {
 /// It is not serialized into RPC payloads or persisted as an authenticated URL.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderItemMetadata {
+    /// Private provider-verified music recording identity for Radio.
+    pub recording: Option<crate::playback::recording::RecordingEvidence>,
     /// A provider reported more than one music artist for this track.
     /// Radio must not infer its center from the first display credit.
     pub ambiguous_music_artist: bool,

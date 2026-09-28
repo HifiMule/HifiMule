@@ -1118,6 +1118,24 @@ pub(crate) fn playlist_from_item(item: JellyfinItem) -> Playlist {
 }
 
 pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
+    let recording = {
+        use crate::playback::recording::{RecordingEvidence, RecordingProvenance};
+        let values: Vec<_> = item
+            .provider_ids
+            .as_ref()
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter(|(name, _)| name.eq_ignore_ascii_case("MusicBrainzRecording"))
+            .collect();
+        (item.item_type == "Audio" && values.len() == 1).then(|| {
+            RecordingEvidence::from_recording_fields(
+                RecordingProvenance::JellyfinRecording,
+                values[0].1.as_str(),
+                &item.name,
+                item.album.as_deref(),
+            )
+        })
+    };
     let cover_art_id = cover_art_id(&item);
     let bitrate = item
         .bitrate
@@ -1173,6 +1191,7 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
             .and_then(|s| u64::try_from(s).ok()),
         album_loudness: Default::default(),
         provider_metadata: crate::domain::models::ProviderItemMetadata {
+            recording,
             ambiguous_music_artist,
             music_artist_ids: item
                 .artist_items
@@ -1287,6 +1306,7 @@ mod tests {
     fn jellyfin_item_maps_song_normalized_fields() {
         let item = JellyfinItem {
             id: "song-uuid".to_string(),
+            provider_ids: None,
             name: "Track 1".to_string(),
             item_type: "Audio".to_string(),
             album: Some("Album A".to_string()),
@@ -1350,9 +1370,48 @@ mod tests {
     }
 
     #[test]
+    fn recording_provider_id_is_private_and_entity_specific() {
+        let item: JellyfinItem = serde_json::from_value(serde_json::json!({
+            "Id":"local", "Name":"Take", "Type":"Audio",
+            "ProviderIds":{"MusicBrainzRecording":"189002e7-3285-4e2e-92a3-7f6c30d407a2", "MusicBrainzTrack":"aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"}
+        })).unwrap();
+        assert!(
+            serde_json::to_value(&item)
+                .unwrap()
+                .get("ProviderIds")
+                .is_none()
+        );
+        let song = song_from_item(item);
+        assert_eq!(
+            song.provider_metadata
+                .recording
+                .as_ref()
+                .and_then(|e| e.key())
+                .map(|k| k.as_str()),
+            Some("mbrec:1:189002e7-3285-4e2e-92a3-7f6c30d407a2:plain")
+        );
+        assert!(
+            serde_json::to_value(&song)
+                .unwrap()
+                .get("providerMetadata")
+                .is_none()
+        );
+        let wrong: JellyfinItem = serde_json::from_value(serde_json::json!({"Id":"local","Name":"Take","Type":"Audio","ProviderIds":{"MusicBrainzTrack":"189002e7-3285-4e2e-92a3-7f6c30d407a2"}})).unwrap();
+        assert!(song_from_item(wrong).provider_metadata.recording.is_none());
+        let multiple: JellyfinItem = serde_json::from_value(serde_json::json!({"Id":"local","Name":"Take","Type":"Audio","ProviderIds":{"MusicBrainzRecording":"189002e7-3285-4e2e-92a3-7f6c30d407a2","musicbrainzrecording":"aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"}})).unwrap();
+        assert!(
+            song_from_item(multiple)
+                .provider_metadata
+                .recording
+                .is_none()
+        );
+    }
+
+    #[test]
     fn jellyfin_item_missing_optional_fields_remain_none() {
         let item = JellyfinItem {
             id: "song-uuid".to_string(),
+            provider_ids: None,
             name: "Track 1".to_string(),
             item_type: "Audio".to_string(),
             album: None,
@@ -1462,7 +1521,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("ParentId".into(), "album1".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
@@ -1595,7 +1654,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("ParentId".into(), "playlist1".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
@@ -2079,7 +2138,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("minDateLastSaved".into(), "2026-05-09T10:00:00Z".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
@@ -2110,7 +2169,7 @@ mod tests {
             .mock("GET", "/Items")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
             ]))
             .match_header(
                 "Authorization",
@@ -2370,7 +2429,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("GenreIds".into(), "genre1".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated,ProviderIds".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
@@ -2432,7 +2491,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("SortBy".into(), "PlayCount".into()),
                 Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated,ProviderIds".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
@@ -2463,7 +2522,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("SortBy".into(), "DatePlayed".into()),
                 Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated,ProviderIds".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
@@ -2496,7 +2555,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("IsFavorite".into(), "true".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated,ProviderIds".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
