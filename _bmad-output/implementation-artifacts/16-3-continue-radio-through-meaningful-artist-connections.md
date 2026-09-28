@@ -3,7 +3,7 @@ baseline_commit: 7bebcb6fc00cfb655ac57e3a65f164210d1878c4
 ---
 # Story 16.3: Continue Radio through meaningful artist connections
 
-Status: review
+Status: done
 
 ## Story
 
@@ -141,3 +141,9 @@ GPT-6 Codex (story preparation and implementation)
 ### Change Log
 
 - 2026-09-28: Implemented story 16.3 Radio continuation, verified local fixtures and read-only live provider metadata, and passed the four-platform Build matrix on commit `2c32fb2`. Marked ready for review; installed-package scenarios were not run.
+- 2026-09-28: Code review applied two patches: retain verified shared-credit links if optional artist-info lookup fails, and show both accepted transition evidence and waiting reason after a short refill. Focused provider and UI tests, UI build, daemon check, formatting and diff checks passed.
+
+### Review Findings
+
+- [x] [Review][Patch] Preserve verified shared-credit links when optional artist-info lookup fails [hifimule-daemon/src/providers/subsonic.rs:289]
+- [x] [Review][Patch] Keep accepted transition reason visible when a refill has a short final batch [hifimule-daemon/src/playback/session.rs:2132]

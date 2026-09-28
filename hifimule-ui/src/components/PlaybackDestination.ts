@@ -151,9 +151,12 @@ export class PlaybackDestination {
         const radio = snapshot.radio;
         this.radioStatus.hidden = snapshot.queueKind !== 'radio' || !radio;
         this.radioRetry.hidden = snapshot.queueKind !== 'radio' || radio?.status !== 'waiting' || snapshot.playback?.status === 'error';
-        this.radioStatus.textContent = radio
-            ? t(radio.reason ? `playback.${radio.reason}` : radio.transition?.reason ? `playback.${radio.transition.reason}` : `playback.radio.${radio.status}`)
-            : '';
+        const reason = radio?.reason ?? radio?.transition?.reason;
+        const statusText = radio ? t(reason ? `playback.${reason}` : `playback.radio.${radio.status}`) : '';
+        this.radioStatus.textContent = radio?.status === 'waiting' && radio.reason && radio.transition?.reason
+            && radio.reason !== radio.transition.reason
+            ? `${t(`playback.${radio.transition.reason}`)} ${statusText}`
+            : statusText;
         if (!changed) return;
         this.loadIdentity = identity;
         for (const region of Object.values(this.regions)) this.resetRegion(region);

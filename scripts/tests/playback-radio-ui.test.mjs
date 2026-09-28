@@ -73,6 +73,19 @@ test('accepted artist transition keeps its evidence explanation after reconnect'
   destination.destroy();
 });
 
+test('a short transition refill explains both its evidence and waiting state', async () => {
+  const {destination,root} = load();
+  const snapshot = { instanceId:'instance',sessionId:'session',queueRevision:'4',mainCurrent:null,
+    queueKind:'radio',radio:{logicalId:'logical',center:{serverId:'one',artistId:'artist'},status:'waiting',
+      reason:'radio.exhausted',transition:{center:{serverId:'one',artistId:'artist'},kind:'similarArtist',reason:'radio.similarArtist'}},
+    current:{occurrenceId:'current',source:{serverId:'one',trackId:'first'}},generationId:'generation' };
+  await destination.receive(snapshot);
+  const status = root.find(node => node.textContent === 'playback.radio.similarArtist playback.radio.exhausted');
+  assert.equal(status?.attributes['aria-live'],'polite');
+  assert.equal(status?.attributes.role,'status');
+  destination.destroy();
+});
+
 test('Radio transition and cycle explanations exist in all four locales', () => {
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
   for (const locale of ['en','fr','es','de']) {

@@ -276,7 +276,7 @@ impl MediaProvider for SubsonicProvider {
             return Ok(ids);
         }
         let count = limit.to_string();
-        let body: ArtistInfo2Body = self
+        let body: ArtistInfo2Body = match self
             .client
             .get(
                 "getArtistInfo2",
@@ -286,7 +286,14 @@ impl MediaProvider for SubsonicProvider {
                     ("includeNotPresent", "false"),
                 ],
             )
-            .await?;
+            .await
+        {
+            Ok(body) => body,
+            // Shared-track credits are independently verified evidence. An
+            // unavailable optional similar-artist endpoint must not erase them.
+            Err(_) if !ids.is_empty() => return Ok(ids),
+            Err(error) => return Err(error),
+        };
         for artist in body
             .artist_info2
             .similar_artist
@@ -2348,6 +2355,61 @@ mod tests {
                 "artistInfo2": {"similarArtist": [{"name":"Name without ID"}]}
             }))
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_track_credit_survives_unavailable_artist_info() {
+        let mut server = Server::new_async().await;
+        let _artist = server
+            .mock("GET", "/rest/getArtist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "first".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""artist":{"id":"first","name":"First","album":[{"id":"album","name":"Album"}]}"#,
+            ))
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""album":{"id":"album","name":"Album","song":[{"id":"track","title":"Duet","artists":[{"id":"first","name":"First"},{"id":"second","name":"Second"}]}]}"#,
+            ))
+            .create_async()
+            .await;
+        let _artist_info = server
+            .mock("GET", "/rest/getArtistInfo2.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "first".into()));
+                matchers
+            }))
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let relations = provider(&server)
+            .await
+            .related_artists("first", 8)
+            .await
+            .expect("verified credits remain usable");
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].artist_id, "second");
+        assert_eq!(
+            relations[0].kind,
+            crate::providers::ArtistRelationKind::SharedTrackCredit
         );
     }
 
