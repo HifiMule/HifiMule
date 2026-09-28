@@ -15,6 +15,7 @@ fn playback_settings_activation_is_explicit_and_acknowledged() {
         .unwrap();
     assert_eq!(request.request_id, request_id);
     assert!(request.open_playback_settings);
+    assert!(!request.open_audio_output);
     acknowledge_ui_activation(profile.path(), &request_id).unwrap();
     assert_eq!(
         hifimule_lifecycle::read_ui_activation_ack(profile.path()).unwrap(),
@@ -27,6 +28,12 @@ fn playback_settings_activation_is_explicit_and_acknowledged() {
             .unwrap()
             .open_playback_settings
     );
+    hifimule_lifecycle::request_ui_audio_output_activation(profile.path()).unwrap();
+    let request = hifimule_lifecycle::read_ui_activation_detail(profile.path())
+        .unwrap()
+        .unwrap();
+    assert!(request.open_audio_output);
+    assert!(!request.open_playback_settings);
 }
 
 #[test]

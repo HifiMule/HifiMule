@@ -65,6 +65,7 @@ async function init() {
     const { rpcCall } = await import('./rpc');
     const { listen } = await import('@tauri-apps/api/event');
     await listen('hifimule-open-playback-settings', () => openPlaybackSettings());
+    await listen('hifimule-open-audio-output', () => openAudioOutput());
 
     try {
         await waitForNativeReadiness();
@@ -72,7 +73,9 @@ async function init() {
         await routeFromDaemonState(state);
         await showMainWindow();
         const { invoke } = await import('@tauri-apps/api/core');
-        if (await invoke<boolean>('report_ui_ready')) openPlaybackSettings();
+        const activation = await invoke<string | null>('report_ui_ready');
+        if (activation === 'settings') openPlaybackSettings();
+        else if (activation === 'output') openAudioOutput();
         observeShutdown(rpcCall);
     } catch (e) {
         console.error("Failed to check daemon state", e);
@@ -507,6 +510,10 @@ function openPlaybackSettings(): void {
         showSurface('playback', false);
         activePlaybackDestination?.focusSettings();
     });
+}
+
+function openAudioOutput(): void {
+    activePlaybackControls?.openOutputChoice();
 }
 
 function showSurface(surface: 'library' | 'playback', focus = true): void {

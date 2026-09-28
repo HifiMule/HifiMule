@@ -65,6 +65,8 @@ impl PlaybackCommandService {
         let Some(guard) = self.operations.try_admit_mutation() else {
             return Err(stopped());
         };
+        // A native Stop/Resume is an explicit user supersession even when
+        // there is no current session for the transport command to change.
         crate::rpc::playback_selection::supersede_pending_start();
         let playback = self.playback.clone();
         let snapshot =

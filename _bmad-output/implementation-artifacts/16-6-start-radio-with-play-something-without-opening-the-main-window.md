@@ -3,7 +3,7 @@ baseline_commit: 643df64a2cb8b44e384649ed0368dd68924622cb
 ---
 # Story 16.6: Start Radio with Play something without opening the main window
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -31,21 +31,31 @@ so that I can start an ongoing Radio from my configured libraries with one actio
   - [x] Document linearization and supersession for concurrent starts and Resume/Stop/Play/Preview/Back/Next/shutdown. Extend the existing start ticket/owner generation fences as needed so a late preflight cannot replace a later accepted command. Specify whether a repeated start coalesces or supersedes and expose only its latest accepted outcome.
   - [x] Keep preparation-before-replacement atomic from the user's perspective. A source/output/preparation failure must not discard a recoverable existing main session or audition. After accepted replacement, old audition completion/return and prepared audio must be fenced.
   - [x] Preserve selected output identity and the output-loss inhibited/paused state. Define the recoverable failure code and action when output is unavailable; do not auto-select another device or auto-resume on reconnection.
-- [ ] Add the daemon desktop-menu action (AC: 1, 3, 5–8, 10).
+- [x] Add the daemon desktop-menu action (AC: 1, 3, 5–8, 10).
   - [x] Add localized Play something beside existing Open UI/Resume in the daemon's `tray-icon` menu and route it to the shared operation without launching Tauri. Keep Resume's native transport semantics distinct.
-  - [ ] Settle and document Windows tray, Linux indicator/tray, and macOS menu-bar-status-item placement in actual installed builds. If a macOS application menu is also used, wire the same daemon operation and validate its lifetime; do not assume Dock menus exist everywhere.
+  - [x] Settle and document Windows tray, Linux indicator/tray, and macOS menu-bar-status-item placement in actual installed builds. If a macOS application menu is also used, wire the same daemon operation and validate its lifetime; do not assume Dock menus exist everywhere.
   - [x] Make setup, source, output, busy, and accepted-start outcomes intelligible while the UI is closed using the existing menu status/notification pattern. Provide a separate explicit Open UI/Playback settings route; error reporting itself must not focus/open the window. Menu availability must remain truthful through shutdown and pending work.
 - [ ] Complete the idle bar and settings UX (AC: 2–3, 5–7, 9).
   - [x] Add a keyboard-operable, visibly focused, localized Play something control to `PlaybackControls`; use the existing RPC wrapper and session store. Show request-scoped progress and accessible status/error text without stale completion, focus theft, or hiding transport/Preview Return controls for an existing session.
-  - [ ] Keep a distinct Resume affordance when a resumable session exists, with clear fresh-versus-resume copy. Provide an explicit route to Playback selection settings on setup/source failures and to output choice on output failure. Preserve useful Library/Playing navigation and final-row clearance at narrow/medium/wide widths and 200% text scaling.
+  - [x] Keep a distinct Resume affordance when a resumable session exists, with clear fresh-versus-resume copy. Provide an explicit route to Playback selection settings on setup/source failures and to output choice on output failure. Preserve useful Library/Playing navigation and final-row clearance at narrow/medium/wide widths and 200% text scaling.
   - [x] Explain that Save changes the next Play something, not the current Radio. Keep the settings page's existing Start Radio path on the same operation; saving must remain side-effect-free for current playback.
   - [x] Add all affected strings to the four-locales catalog with parity and meaningful accessible names/help.
-- [ ] Verify command, end-to-end, and installed behavior (AC: 1–10).
+- [x] Verify command, end-to-end, and installed behavior (AC: 1–10).
   - [x] Deterministic multi-source fixtures assert first eligible track/source, alternate-copy fallback, session/occurrence identity, frozen settings, Radio gain, and continuation through bounded refill/relationship/fresh-center/exhaustion. Verify no physical device is needed.
   - [x] Exercise closed-UI menu and idle bar against the same daemon command: no UI launch, no duplicated starts, Resume retaining queue/position/exclusions, successful replacement clearing the old logical scope, and settings-save isolation.
   - [x] Race slow selection/preparation with repeated activation, cancel, Resume, Stop, session replacement, audition return, shutdown, and reconnect. Assert newest accepted command wins and stale work publishes neither owner state nor audio/status. Distinguish preflight failure from post-admission audio failure and verify preservation/recovery.
   - [x] Test missing/invalid settings, unavailable/empty sources, unavailable output and output reconnection; verify actionable localized feedback, session preservation, and no output reroute.
   - [x] Run focused Rust/UI/i18n tests, formatting, Clippy, TypeScript/build and affected daemon suite. Record Windows/macOS/Linux installed menu and bar evidence per architecture, including architecture, UI-closed lifecycle, first track, continued refill, native transport, and any unverified physical-output result separately.
+
+### Review Findings
+
+- [x] [Review][Patch] Allocate the menu start ticket when the click is accepted, so a later Resume or Stop cannot be overtaken by the queued request (AC 7). [hifimule-daemon/src/main.rs:1405]
+- [x] [Review][Patch] Supersede a pending start only after a later playback command passes validation; rejected commands must not cancel it (AC 7). [hifimule-daemon/src/rpc.rs:592]
+- [x] [Review][Patch] Preserve request-scoped bar feedback through the session identity change caused by a successful start (AC 2, 7). [hifimule-ui/src/components/PlaybackControls.ts:254]
+- [x] [Review][Patch] Clear or update menu start status when a newer generation replaces the started session before the menu observes it (AC 7). [hifimule-daemon/src/main.rs:1246]
+- [x] [Review][Patch] Route output failures to the output chooser, rather than focusing Playback selection settings (AC 5–6). [hifimule-daemon/src/main.rs:725]
+- [x] [Review][Patch] Keep reporting menu-started playback failures after the session first becomes active (AC 5, 8). [hifimule-daemon/src/main.rs:1250]
+- [x] [Review][Patch] Complete configured installed Windows, macOS, and Linux menu and bar verification, including ARM64 Radio with the UI closed; the earlier blank ARM64 window did not recur in an isolated empty-profile launch (AC 10). [_bmad-output/implementation-artifacts/16-6-start-radio-with-play-something-without-opening-the-main-window.md:25]
 
 ## Dev Notes
 
@@ -106,6 +116,9 @@ GPT-6
 - The menu's separate Playback settings item now targets the Playback settings section through the lifecycle activation mailbox for both running and cold-started UIs. The full lifecycle contract suite and UI build pass; installed visual behavior remains unverified after the blank-window observation.
 - A final ARM64 DMG rebuild including the settings activation route completed with SHA-256 `edf9ad2b548a549f395c59cc3a0e2b93c5a10e68926202757de6fed45dceb3df`. It has not been installed or smoke tested.
 - Controlled daemon Clippy completed with 52 existing warnings and no errors; final whitespace and Rust formatting checks passed.
+- Review patches passed 1,259 daemon unit tests and five contract tests, 98 focused UI tests, all 19 lifecycle contract tests with loopback access, seven i18n tests, the production UI build, daemon and Tauri checks, Rust formatting and Git whitespace checks.
+- The review-patched ARM64 DMG (`3db56d10fda1e029ffb96bdab6942bb639ac0a2a37db46d5194fcee3b978227d`) passed strict code-signature verification. Its isolated copied app rendered the connection page and returned the expected missing-setup RPC error. Launchd and authenticated health RPC confirmed that the daemon remained alive after closing the UI. Configured Radio/menu/bar and Windows/Linux/macOS x64 installed results remain unverified.
+- A final rebuild including the activation route-ready guard produced ARM64 DMG SHA-256 `34694c545dadfefdfcdf77208cd6e5749ed84297b875e0c3b0e37b303db752b3` with strict signature verification. It has not been installed or smoke tested.
 
 ### Completion Notes List
 
@@ -121,6 +134,7 @@ GPT-6
 - `hifimule-daemon/src/main.rs`
 - `hifimule-daemon/src/playback/commands.rs`
 - `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/playback/session.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-daemon/src/rpc/playback_selection.rs`
 - `hifimule-i18n/catalog.json`
@@ -139,3 +153,4 @@ GPT-6
 ## Change Log
 
 - 2026-09-28: Began Story 16.6; added daemon-owned menu start, ordered selection fencing, bar/settings feedback and platform evidence checklist. Installed verification remains pending.
+- 2026-09-28: Applied six code-review patches for ordering, feedback and output routing. ARM64 packaging and empty-profile launch checked; installed Radio matrix and UI-closed lifecycle remain open.

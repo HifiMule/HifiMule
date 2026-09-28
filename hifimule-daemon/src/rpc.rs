@@ -274,6 +274,7 @@ pub struct RpcServerConfig {
 /// The response is only delivered for the accepted request; the owner remains
 /// authoritative for subsequent audio and output state.
 pub(crate) struct MenuStartRequest {
+    pub ticket: u64,
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
 }
 
@@ -318,7 +319,7 @@ pub async fn run_server(
     tokio::spawn(async move {
         while let Some(request) = menu_starts.recv().await {
             let state = menu_state.clone();
-            let ticket = playback_selection::begin_start();
+            let ticket = request.ticket;
             tokio::spawn(async move {
                 let result = match state.sync_operation_manager.try_admit_mutation() {
                     Some(guard) => {
@@ -587,21 +588,6 @@ async fn handler(
     } else {
         None
     };
-    // Acceptance order is established before any potentially slow provider
-    // preflight. A later session command invalidates an older Radio start.
-    if mutation_guard.is_some()
-        && matches!(
-            payload.method.as_str(),
-            "playback.applySession"
-                | "playback.playEpisode"
-                | "playback.playAlbum"
-                | "playback.playPlaylist"
-                | "playback.previewTrack"
-                | "playback.control"
-        )
-    {
-        playback_selection::supersede_pending_start();
-    }
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
         "server.connect" => handle_server_connect(&state, payload.params).await,
@@ -17804,6 +17790,34 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(stale.data.unwrap()["code"], "PLAYBACK_SELECTION_CANCELLED");
+    }
+
+    #[tokio::test]
+    async fn rejected_control_does_not_supersede_pending_selection() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let ticket = playback_selection::begin_start();
+        let rejected =
+            handle_playback_control(&state, Some(serde_json::json!({"action":"stop"})), None).await;
+        assert!(rejected.is_err());
+        let outcome = playback_selection::start_with_config(
+            &state,
+            crate::playback::selection::PlaybackSelectionConfig {
+                sources: vec![crate::playback::selection::SelectionSource {
+                    server_id: "offline".into(),
+                    kind: crate::playback::selection::SelectionKind::Playlist,
+                    ref_id: "list".into(),
+                }],
+                ..Default::default()
+            },
+            ticket,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            outcome.data.unwrap()["code"],
+            "PLAYBACK_SELECTION_SOURCE_UNAVAILABLE"
+        );
     }
 
     #[tokio::test]

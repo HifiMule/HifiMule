@@ -179,10 +179,7 @@ export class PlaybackControls {
         this.startRoute.type = 'button';
         this.startRoute.addEventListener('click', () => {
             if (this.startIssue === 'settings') this.onSurfaceChange('settings');
-            else if (this.startIssue === 'output') {
-                this.outputToggle.focus();
-                this.outputToggle.click();
-            }
+            else if (this.startIssue === 'output') this.openOutputChoice();
         });
         this.messages.id = 'playback-guidance';
         this.messagesToggle.setAttribute('aria-controls', this.messages.id);
@@ -235,6 +232,11 @@ export class PlaybackControls {
         if (this.repaintTimer !== undefined) globalThis.clearInterval(this.repaintTimer);
         window.removeEventListener('pagehide', this.onPageHide);
     }
+    openOutputChoice(): void {
+        if (this.disposed) return;
+        this.outputToggle.focus();
+        this.outputToggle.click();
+    }
     setSurface(surface: 'library' | 'playback'): void {
         this.surface = surface;
         const showPlayback = surface === 'library';
@@ -252,7 +254,9 @@ export class PlaybackControls {
             }
             if (!this.disposed && this.container.isConnected) {
                 if (this.seekIdentity(previous) !== this.seekIdentity(snapshot)) {
-                    this.invalidateInteractions(true);
+                    // Our own successful start changes the session identity before
+                    // the RPC reply can arrive. Keep its progress tied to that reply.
+                    this.invalidateInteractions(true, this.startBusy && snapshot.queueKind === 'radio');
                 }
                 this.snapshot = snapshot;
                 this.anchorPositionMs = snapshot.positionMs;
@@ -339,12 +343,14 @@ export class PlaybackControls {
         this.renderTimeline();
     }
 
-    private invalidateInteractions(clearCommandError = false): void {
+    private invalidateInteractions(clearCommandError = false, preserveStart = false): void {
         ++this.interactionEpoch;
-        ++this.startRequest;
-        this.startBusy = false;
-        this.startIssue = null;
-        this.startStatus.textContent = '';
+        if (!preserveStart) {
+            ++this.startRequest;
+            this.startBusy = false;
+            this.startIssue = null;
+            this.startStatus.textContent = '';
+        }
         this.scrubbing = false;
         this.scrubPreviewMs = undefined;
         this.queuedSeek = undefined;

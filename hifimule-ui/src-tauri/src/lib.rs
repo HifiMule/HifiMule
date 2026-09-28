@@ -14,6 +14,7 @@ struct StartupState {
     status: LifecycleStatus,
     observed: Option<hifimule_lifecycle::OwnerDescriptor>,
     hydrated: Option<(u64, hifimule_lifecycle::OwnerDescriptor)>,
+    route_ready: bool,
 }
 
 #[derive(Clone)]
@@ -53,6 +54,7 @@ impl StartupCoordinator {
         }
         state.epoch += 1;
         state.hydrated = None;
+        state.route_ready = false;
         state.observed = None;
         state.status = status(LifecycleState::Starting, None);
         Some((state.epoch, state.ticket.take()))
@@ -140,8 +142,10 @@ async fn close_ui(
 /// An installed smoke run may request a non-secret acknowledgment after the actual
 /// main webview has hydrated through rpc_proxy and finished rendering its route.
 #[tauri::command]
-fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<bool, String> {
-    let state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+fn report_ui_ready(
+    coordinator: tauri::State<'_, StartupCoordinator>,
+) -> Result<Option<String>, String> {
+    let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
     let (epoch, owner) = state.hydrated.as_ref().ok_or("UI has not hydrated")?;
     if *epoch != state.epoch || state.closed || state.status.state != LifecycleState::Ready {
         return Err("UI startup attempt was abandoned".into());
@@ -151,23 +155,29 @@ fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<
         let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
         hifimule_lifecycle::publish_ui_ready(&path, &pair[1], owner).map_err(|e| e.to_string())?;
     }
+    // JS calls this only after mounting the route and floating bar.
+    state.route_ready = true;
     let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
     let Some(request) =
         hifimule_lifecycle::read_ui_activation_detail(&path).map_err(|e| e.to_string())?
     else {
-        return Ok(false);
+        return Ok(None);
     };
-    if !request.open_playback_settings
+    if !(request.open_playback_settings || request.open_audio_output)
         || hifimule_lifecycle::read_ui_activation_ack(&path)
             .map_err(|e| e.to_string())?
             .as_deref()
             == Some(request.request_id.as_str())
     {
-        return Ok(false);
+        return Ok(None);
     }
     hifimule_lifecycle::acknowledge_ui_activation(&path, &request.request_id)
         .map_err(|e| e.to_string())?;
-    Ok(true)
+    Ok(Some(if request.open_audio_output {
+        "output".to_string()
+    } else {
+        "settings".to_string()
+    }))
 }
 
 #[tauri::command]
@@ -987,12 +997,12 @@ fn watch_ui_activation(
                     handled = Some(request.request_id);
                     continue;
                 }
-                if request.open_playback_settings {
+                if request.open_playback_settings || request.open_audio_output {
                     let ready = app
                         .try_state::<StartupCoordinator>()
                         .is_some_and(|coordinator| {
                             let state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
-                            state.hydrated.is_some()
+                            state.route_ready
                                 && !state.closed
                                 && state.status.state == LifecycleState::Ready
                         });
@@ -1005,10 +1015,13 @@ fn watch_ui_activation(
                 let (reply_tx, reply_rx) = mpsc::channel();
                 let foreground_app = app.clone();
                 let open_settings = request.open_playback_settings;
+                let open_output = request.open_audio_output;
                 match app.run_on_main_thread(move || {
                     let activated = activate_existing_ui(&foreground_app);
                     if activated && open_settings {
                         let _ = foreground_app.emit("hifimule-open-playback-settings", ());
+                    } else if activated && open_output {
+                        let _ = foreground_app.emit("hifimule-open-audio-output", ());
                     }
                     let _ = reply_tx.send(activated);
                 }) {
@@ -1127,6 +1140,7 @@ pub fn run() {
                 ticket: None,
                 observed: None,
                 hydrated: None,
+                route_ready: false,
                 status: status(
                     if startup_error.is_some() {
                         LifecycleState::Failed
@@ -1228,6 +1242,7 @@ mod lifecycle_tests {
             ticket: None,
             observed: None,
             hydrated: None,
+            route_ready: false,
             status: status(LifecycleState::Starting, None),
         })))
     }

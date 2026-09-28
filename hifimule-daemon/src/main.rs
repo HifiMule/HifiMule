@@ -738,11 +738,12 @@ fn play_something_failure_message(code: &str) -> String {
         "DAEMON_STOPPED" => "lifecycle.quitting_waiting",
         _ => "playback.selection.unavailable",
     };
-    format!(
-        "{} {}",
-        hifimule_i18n::t(key),
-        hifimule_i18n::t("tray.open_playback_settings")
-    )
+    let route = if matches!(code, "OUTPUT_UNAVAILABLE" | "OUTPUT_LOST") {
+        "tray.choose_audio_output"
+    } else {
+        "tray.open_playback_settings"
+    };
+    format!("{} {}", hifimule_i18n::t(key), hifimule_i18n::t(route))
 }
 
 fn send_playback_failure_notification(body: String) {
@@ -1034,6 +1035,8 @@ fn run_candidate(
     let open_ui_item = MenuItem::new(hifimule_i18n::t("tray.open_ui"), true, None);
     let open_settings_item =
         MenuItem::new(hifimule_i18n::t("tray.open_playback_settings"), true, None);
+    let choose_output_item =
+        MenuItem::new(hifimule_i18n::t("tray.choose_audio_output"), true, None);
     let play_something_item = MenuItem::new(hifimule_i18n::t("tray.play_something"), true, None);
     let resume_item = MenuItem::new(hifimule_i18n::t("tray.resume_playback"), false, None);
     let radio_status_item =
@@ -1056,6 +1059,7 @@ fn run_candidate(
         .append_items(&[
             &open_ui_item,
             &open_settings_item,
+            &choose_output_item,
             &play_something_item,
             &resume_item,
             &radio_status_item,
@@ -1078,6 +1082,8 @@ fn run_candidate(
     let mut menu_start_pending: Option<tokio::sync::oneshot::Receiver<Result<String, String>>> =
         None;
     let mut menu_start_generation: Option<String> = None;
+    let mut menu_start_recorded_at: Option<std::time::Instant> = None;
+    let mut menu_start_active_announced = false;
     let mut menu_resume_failure: Option<String> = None;
     let mut dev_ui_runner: Option<std::process::Child> = None;
     let mut ui_launches: Vec<std::process::Child> = Vec::new();
@@ -1226,6 +1232,8 @@ fn run_candidate(
                     match result {
                         Ok(generation) => {
                             menu_start_generation = Some(generation);
+                            menu_start_recorded_at = Some(std::time::Instant::now());
+                            menu_start_active_announced = false;
                             radio_status_item
                                 .set_text(hifimule_i18n::t("playback.selection.started"));
                         }
@@ -1248,6 +1256,7 @@ fn run_candidate(
         let menu_available = !shutdown_pending && quit_reply.is_none() && fence_reply.is_none();
         play_something_item.set_enabled(menu_available && menu_start_pending.is_none());
         open_settings_item.set_enabled(menu_available);
+        choose_output_item.set_enabled(menu_available);
         if let Some(ingress) = native_ingress.as_ref() {
             let view = ingress.latest();
             if menu_start_generation.as_deref() == Some(view.generation_id.as_str()) {
@@ -1256,10 +1265,24 @@ fn run_candidate(
                     radio_status_item.set_text(&message);
                     send_playback_failure_notification(message);
                     menu_start_generation = None;
-                } else if view.status == playback::model::PlaybackStatus::Active {
+                    menu_start_recorded_at = None;
+                } else if view.status == playback::model::PlaybackStatus::Active
+                    && !menu_start_active_announced
+                {
                     radio_status_item.set_text(hifimule_i18n::t("playback.radio.ready"));
-                    menu_start_generation = None;
+                    menu_start_active_announced = true;
                 }
+            } else if menu_start_generation.is_some()
+                && (menu_start_active_announced
+                    || menu_start_recorded_at
+                        .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(1)))
+            {
+                // The native view refreshes every 250 ms. A different generation
+                // after that interval means this start no longer owns playback.
+                menu_start_generation = None;
+                menu_start_recorded_at = None;
+                menu_start_active_announced = false;
+                radio_status_item.set_text(hifimule_i18n::t("playback.selection.ready"));
             }
             if menu_resume_pending.is_none()
                 && view.status == playback::model::PlaybackStatus::Active
@@ -1403,7 +1426,11 @@ fn run_candidate(
                 && menu_start_pending.is_none()
             {
                 let (reply, receipt) = tokio::sync::oneshot::channel();
-                if menu_start_tx.send(rpc::MenuStartRequest { reply }).is_ok() {
+                let ticket = rpc::playback_selection::begin_start();
+                if menu_start_tx
+                    .send(rpc::MenuStartRequest { ticket, reply })
+                    .is_ok()
+                {
                     // The menu coalesces repeated clicks while one result is
                     // pending. A later accepted RPC start still supersedes it.
                     menu_start_pending = Some(receipt);
@@ -1411,11 +1438,16 @@ fn run_candidate(
                 } else {
                     radio_status_item.set_text(playback_failure_message("DAEMON_STOPPED"));
                 }
-            } else if event.id == open_ui_item.id() || event.id == open_settings_item.id() {
+            } else if event.id == open_ui_item.id()
+                || event.id == open_settings_item.id()
+                || event.id == choose_output_item.id()
+            {
                 // Post first. A live UI can act on this even if the launcher
                 // loses a close/reopen race or exits before Tauri is ready.
                 let activation = if event.id == open_settings_item.id() {
                     hifimule_lifecycle::request_ui_playback_settings_activation(&shutdown_app_data)
+                } else if event.id == choose_output_item.id() {
+                    hifimule_lifecycle::request_ui_audio_output_activation(&shutdown_app_data)
                 } else {
                     hifimule_lifecycle::request_ui_activation(&shutdown_app_data)
                 };

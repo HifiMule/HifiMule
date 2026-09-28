@@ -303,7 +303,9 @@ test('main wires the bar-owned Library/Playing switch and updates the shared tit
   assert.match(source, /showSurface\('playback', false\)/);
   assert.match(source, /activePlaybackDestination\?\.focusSettings\(\)/);
   assert.match(source, /listen\('hifimule-open-playback-settings', \(\) => openPlaybackSettings\(\)\)/);
-  assert.match(source, /invoke<boolean>\('report_ui_ready'\)\) openPlaybackSettings\(\)/);
+  assert.match(source, /listen\('hifimule-open-audio-output', \(\) => openAudioOutput\(\)\)/);
+  assert.match(source, /invoke<string \| null>\('report_ui_ready'\)/);
+  assert.match(source, /activePlaybackControls\?\.openOutputChoice\(\)/);
   assert.match(source, /activePlaybackDestination\?\.focus\(\)/);
 });
 

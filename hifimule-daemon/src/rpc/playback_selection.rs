@@ -15,8 +15,8 @@ use crate::playback::{
     selection::{self, PlaybackSelectionConfig, SelectionError, SelectionKind, SelectionPool},
 };
 
-static START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-static START_EPOCH: AtomicU64 = AtomicU64::new(0);
+pub(crate) static START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static START_EPOCH: AtomicU64 = AtomicU64::new(0);
 const DEADLINE: Duration = Duration::from_secs(15);
 
 /// A later accepted session command wins over any selection still fetching or

@@ -48,6 +48,14 @@ pub(crate) struct ApplyFence {
     pub expected: u64,
 }
 
+// Call only while START_GATE is held. Successful owner commands, rather than
+// merely parsed or queued requests, supersede a pending Radio selection.
+fn supersede_selection_after_commit<T>(result: &PResult<T>) {
+    if result.is_ok() {
+        crate::rpc::playback_selection::START_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 // A one-shot test handshake after Apply is dequeued, before locking session state.
 #[cfg(test)]
 type ApplyGate = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
@@ -1528,6 +1536,9 @@ fn owner_loop(
                 let _ = reply.send(with_metadata(result, &i));
             }
             Ok(OwnerCommand::CommitAlbum(reservation, sources, policy, representations, reply)) => {
+                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
@@ -1544,6 +1555,7 @@ fn owner_loop(
                 if result.is_ok() {
                     reset_ingress(&i, &ingress);
                 }
+                supersede_selection_after_commit(&result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
             }
@@ -1623,9 +1635,13 @@ fn owner_loop(
                         let _ = resume.recv();
                     }
                 }
-                let _selection_guard = selection_fence
-                    .as_ref()
-                    .map(|fence| fence.gate.lock().unwrap_or_else(|error| error.into_inner()));
+                let _selection_guard = if let Some(fence) = selection_fence.as_ref() {
+                    fence.gate.lock().unwrap_or_else(|error| error.into_inner())
+                } else {
+                    crate::rpc::playback_selection::START_GATE
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                };
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if selection_fence
                     .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
@@ -1675,6 +1691,9 @@ fn owner_loop(
                         result
                     }
                 };
+                if selection_fence.is_none() {
+                    supersede_selection_after_commit(&result);
+                }
                 let result = with_metadata(result, &i).map(|mut result| {
                     result.current_metadata = metadata(&i);
                     result
@@ -1685,6 +1704,9 @@ fn owner_loop(
             }
             Ok(OwnerCommand::Preview(params, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
+                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 prune_dedup(&mut i);
                 let result = if fenced.load(Ordering::Acquire) {
@@ -1733,12 +1755,16 @@ fn owner_loop(
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
                 }
+                supersede_selection_after_commit(&result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
             }
             Ok(OwnerCommand::Control(params, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
+                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 prune_dedup(&mut i);
                 let result = if fenced.load(Ordering::Acquire) {
@@ -1783,6 +1809,7 @@ fn owner_loop(
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
                 }
+                supersede_selection_after_commit(&result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
@@ -1837,6 +1864,9 @@ fn owner_loop(
             }
             Ok(OwnerCommand::NativeControl(intent, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
+                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
@@ -1847,6 +1877,7 @@ fn owner_loop(
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
                 }
+                supersede_selection_after_commit(&result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);

@@ -149,6 +149,19 @@ test('a replaced session discards late Play something completion', async () => {
   h.component.destroy();
 });
 
+test('the new Radio snapshot keeps its Play something progress until the RPC reply', async () => {
+  const idle = { ...snapshot('paused'), current: null };
+  let resolveStart;
+  const h = harness(idle, undefined, { start: () => new Promise(resolve => { resolveStart = resolve; }) }); await h.tick();
+  await h.component.playSomething.click();
+  h.setSnapshot({ ...snapshot('buffering', '2'), sessionId: 'radio', generationId: 'radio-generation', queueKind: 'radio' });
+  await h.tick();
+  assert.equal(h.component.startStatus.textContent, 'playback.selection.starting');
+  resolveStart(); await h.tick();
+  assert.equal(h.component.startStatus.textContent, 'playback.selection.started');
+  h.component.destroy();
+});
+
 test('unavailable output offers the existing chooser without rerouting', async () => {
   const idle = { ...snapshot('paused'), current: null };
   let selected = 0;
