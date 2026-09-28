@@ -252,15 +252,15 @@ pub(super) async fn start_with_config(
                     && let Ok(prepared) =
                         crate::playback::audio::prepare_selection_source(description).await
                 {
-                    let artist_id = selection::artist_for_source(&pools, &source);
-                    return Ok((source, artist_id, prepared));
+                    let center = selection::radio_center_for_source(&config, &pools, &source);
+                    return Ok((source, center, prepared));
                 }
                 failures += 1;
             }
         }
         Err(error(SelectionError::SourceUnavailable))
     };
-    let (first, artist_id, prepared) = tokio::time::timeout(DEADLINE, preflight)
+    let (first, center, prepared) = tokio::time::timeout(DEADLINE, preflight)
         .await
         .map_err(|_| error(SelectionError::SourceUnavailable))??;
     if START_EPOCH.load(Ordering::Acquire) != ticket {
@@ -274,7 +274,7 @@ pub(super) async fn start_with_config(
         command_id: uuid::Uuid::new_v4().to_string(),
         expected_queue_revision: snapshot.queue_revision,
         operation: SessionOperation::StartRadio {
-            center: crate::playback::radio::center_for(&first, artist_id.as_deref()),
+            center,
             recording: pools
                 .iter()
                 .filter(|pool| pool.source.server_id == first.server_id)
@@ -367,6 +367,7 @@ async fn gather_radio_candidates(
     let mut anchor_keys = HashSet::new();
     let retrieve = async {
         let mut pools = Vec::new();
+        let mut center_pools_cleared = false;
         for source in config
             .sources
             .iter()
@@ -381,6 +382,10 @@ async fn gather_radio_candidates(
         {
             if !state.playback.radio_lease_current(lease) {
                 break;
+            }
+            if source.server_id != center.server_id && !center_pools_cleared {
+                anchor_keys = selection::recording_keys_after_conflict_clear(&mut pools);
+                center_pools_cleared = true;
             }
             let Ok(provider) = provider(state, &source.server_id).await else {
                 failed_source = true;
@@ -451,9 +456,6 @@ async fn gather_radio_candidates(
                                 })
                         {
                             continue;
-                        }
-                        if same_artist && let Some(key) = key {
-                            anchor_keys.insert(key);
                         }
                         eligible.push(song);
                     }

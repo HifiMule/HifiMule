@@ -3,7 +3,7 @@ baseline_commit: 0421475fefc7f92576777256757c8fd8b0097460
 ---
 # Story 16.4: Avoid duplicate Radio recordings across configured servers
 
-Status: review
+Status: done
 
 ## Story
 
@@ -43,6 +43,16 @@ so that duplicate library copies do not repeat unnecessarily while distinct perf
   - [x] Add adapter fixtures for exact recording ID, wrong MusicBrainz entity, malformed/multiple IDs, ISRC-only, absent fields and contradictory/live metadata. Verify server/version-specific response fields before enabling a provider path.
   - [x] Add resolver, bounded-window, owner, SQLite migration/restart and source-routing tests. Assert no accidental manual-queue collapse, no second automatic slot for a confident copy, no cross-copy exclusion after technical failure, and no stale commit after queue edit/new Radio/Preview.
   - [x] Run focused and full affected Rust tests, `cargo fmt --check`, Clippy, UI TypeScript/build, i18n parity if public status changes, and the four shipping-platform CI fixture/build jobs. Record real-library identity coverage separately; a fixture or source build does not prove installed playback.
+
+### Review Findings
+
+- [x] [Review][Patch] Keep conflicting source-track recording evidence uncertain across every observation [hifimule-daemon/src/playback/selection.rs:668] — A third observation could restore a key after two observations conflicted; conflict is now sticky.
+- [x] [Review][Patch] Make preferred-copy ranking stable across source order, codec, and track ties [hifimule-daemon/src/playback/selection.rs:730] — Ranking now uses a stable codec anchor, comparable quality, configured order and portable ID ties.
+- [x] [Review][Patch] Build cross-server artist anchors only from conflict-cleared evidence [hifimule-daemon/src/rpc/playback_selection.rs:427] — Center pools are cleared before their recording keys authorize cross-server candidates.
+- [x] [Review][Patch] Preserve a valid artist center when the chosen recording copy lacks one [hifimule-daemon/src/rpc/playback_selection.rs:259] — Radio start now uses a stable source-qualified artist anchor from another confident copy.
+- [x] [Review][Patch] Treat explicit unrecognized performance versions as uncertain [hifimule-daemon/src/playback/recording.rs:70] — Unknown explicit qualifiers now withhold a confident key, while ordinary titles such as `Take` retain their key (AC2).
+- [x] [Review][Patch] Apply quality ranking to preparation fallback copies [hifimule-daemon/src/playback/selection.rs:279] — Alternates now use the same stable ranking as primary copy selection (AC3).
+- [ ] [Review][Verify] Run the four-platform source-build matrix on a commit containing these review fixes; the earlier Build #110 covered the pre-review implementation.
 
 ## Dev Notes
 
@@ -105,6 +115,7 @@ GPT-6 Codex (story preparation)
 - Implemented private, versioned MusicBrainz recording evidence in Jellyfin and OpenSubsonic adapters. Radio groups only confident copies, ranks fetched sources deterministically, and retries another eligible copy after preparation failure while preserving portable source routing and manual queue intent.
 - Migrated Playback SQLite schema 9 to 10 with immutable automatic-occurrence recording associations and indexed heard/excluded membership. Worker, owner, and append transaction enforce recording-level eligibility; source-qualified historical state remains authoritative.
 - Verified the full daemon suite, adapter/resolver/owner/migration fixtures, UI TypeScript/build, formatting, Clippy, and four-platform Build #110. The real-library sample found 89/100 accepted OpenSubsonic keys and 0/100 accepted Jellyfin keys; installed playback and an actual cross-server match remain untested.
+- Review fixes: six findings resolved. Focused selection tests passed (18/18); the full daemon suite passed with loopback fixture access (1,245 unit tests, 5 contract tests, 6 ignored). `cargo fmt --check`, `git diff --check`, and daemon Clippy passed with existing warnings. Four-platform CI has not run on the review fixes, so this story remains in progress.
 
 ### File List
 

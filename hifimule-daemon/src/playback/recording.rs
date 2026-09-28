@@ -80,6 +80,42 @@ fn version_signature(title: &str, album: Option<&str>) -> Option<&'static str> {
                 .any(|part| part == *word)
         })
         .collect();
+    // An unfamiliar explicit version is uncertainty, never the unmarked
+    // recording. Provider tags can reuse a recording UUID incorrectly.
+    let other_versions = [
+        "instrumental",
+        "alternate",
+        "take",
+        "version",
+        "mix",
+        "reprise",
+        "unplugged",
+        "orchestral",
+        "stripped",
+        "rerecorded",
+        "radio",
+        "extended",
+        "club",
+        "dub",
+        "karaoke",
+        "mono",
+        "stereo",
+        "remaster",
+        "remastered",
+    ];
+    let has_other_version = |value: &str| {
+        other_versions.iter().any(|word| {
+            value
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|part| part.eq_ignore_ascii_case(word))
+        })
+    };
+    let title_qualifier = title.contains('(') || title.contains('[') || title.contains(" - ");
+    if (title_qualifier && (found.is_empty() || has_other_version(title)))
+        || album.is_some_and(has_other_version)
+    {
+        return None;
+    }
     match found.as_slice() {
         [] => Some("plain"),
         ["live"] => Some("live"),
@@ -146,6 +182,16 @@ mod tests {
             Some("Live at the Hall"),
         );
         assert_ne!(studio.key(), live_album.key());
+        assert!(
+            RecordingEvidence::from_recording_fields(
+                RecordingProvenance::JellyfinRecording,
+                Some(ID),
+                "Take",
+                Some("Ordinary Album"),
+            )
+            .key()
+            .is_some()
+        );
         let contradictory = RecordingEvidence::from_recording_fields(
             RecordingProvenance::JellyfinRecording,
             Some(ID),
@@ -153,5 +199,20 @@ mod tests {
             None,
         );
         assert!(contradictory.key().is_none());
+        for title in [
+            "A Song (Instrumental)",
+            "A Song (Alternate Take)",
+            "A Song [Unknown Version]",
+        ] {
+            assert!(
+                RecordingEvidence::from_recording_field(
+                    RecordingProvenance::OpenSubsonicSong,
+                    Some(ID),
+                    title,
+                )
+                .key()
+                .is_none()
+            );
+        }
     }
 }

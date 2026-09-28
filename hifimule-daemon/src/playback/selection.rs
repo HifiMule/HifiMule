@@ -176,12 +176,10 @@ pub struct SelectionCandidate {
     pub center_origin: Option<super::radio::ArtistIdentity>,
 }
 
-/// A source-local track seen through more than one configured source must not
-/// inherit one arbitrary metadata observation when the observations disagree.
-pub fn clear_conflicting_recordings(pools: &mut [SelectionPool]) {
+fn stable_recording_keys(pools: &[SelectionPool]) -> HashMap<(String, String), Option<String>> {
     let mut observed = HashMap::<(String, String), Option<String>>::new();
     let mut conflicts = HashSet::new();
-    for pool in pools.iter() {
+    for pool in pools {
         for song in &pool.tracks {
             let source = (pool.source.server_id.clone(), song.id.clone());
             let key = song
@@ -190,24 +188,115 @@ pub fn clear_conflicting_recordings(pools: &mut [SelectionPool]) {
                 .as_ref()
                 .and_then(|e| e.key())
                 .map(|k| k.as_str().to_owned());
+            if conflicts.contains(&source) {
+                continue;
+            }
             match observed.entry(source.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(key);
                 }
                 std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &key => {
+                    entry.into_mut().take();
                     conflicts.insert(source);
                 }
                 _ => {}
             }
         }
     }
+    observed
+}
+
+/// A source-local track seen through more than one configured source must not
+/// inherit one arbitrary metadata observation when the observations disagree.
+pub fn clear_conflicting_recordings(pools: &mut [SelectionPool]) {
+    let observed = stable_recording_keys(pools);
     for pool in pools {
         for song in &mut pool.tracks {
-            if conflicts.contains(&(pool.source.server_id.clone(), song.id.clone())) {
+            if observed
+                .get(&(pool.source.server_id.clone(), song.id.clone()))
+                .is_some_and(Option::is_none)
+            {
                 song.provider_metadata.recording = None;
             }
         }
     }
+}
+
+pub fn recording_keys_after_conflict_clear(pools: &mut [SelectionPool]) -> HashSet<String> {
+    clear_conflicting_recordings(pools);
+    pools
+        .iter()
+        .flat_map(|pool| &pool.tracks)
+        .filter_map(|song| {
+            song.provider_metadata
+                .recording
+                .as_ref()
+                .and_then(|e| e.key())
+                .map(|key| key.as_str().to_owned())
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct RankedCopy {
+    source: TrackSource,
+    codec: Option<String>,
+    bitrate: Option<u32>,
+    source_order: usize,
+}
+
+impl RankedCopy {
+    fn new(source: TrackSource, song: &Song, source_order: usize) -> Self {
+        Self {
+            source,
+            codec: song.suffix.as_ref().map(|value| value.to_ascii_lowercase()),
+            bitrate: song.bitrate_kbps.filter(|value| *value > 0),
+            source_order,
+        }
+    }
+}
+
+/// Pick the earliest configured copy as the codec comparison anchor. Quality
+/// is ordered only within that codec; incomparable copies retain configured
+/// order and portable IDs. This is a total, arrival-order-independent ranking.
+fn rank_copies(mut copies: Vec<RankedCopy>) -> Vec<TrackSource> {
+    let Some(anchor) = copies.iter().min_by_key(|copy| {
+        (
+            copy.source_order,
+            &copy.source.server_id,
+            &copy.source.track_id,
+        )
+    }) else {
+        return Vec::new();
+    };
+    let comparable_codec = anchor.bitrate.and(anchor.codec.clone());
+    copies.sort_by(|a, b| {
+        let comparable = |copy: &RankedCopy| {
+            comparable_codec.as_ref() == copy.codec.as_ref() && copy.bitrate.is_some()
+        };
+        comparable(b)
+            .cmp(&comparable(a))
+            .then_with(|| {
+                if comparable(a) && comparable(b) {
+                    b.bitrate.cmp(&a.bitrate)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| {
+                (a.source_order, &a.source.server_id, &a.source.track_id).cmp(&(
+                    b.source_order,
+                    &b.source.server_id,
+                    &b.source.track_id,
+                ))
+            })
+    });
+    let mut seen = HashSet::new();
+    copies
+        .into_iter()
+        .filter(|copy| seen.insert((copy.source.server_id.clone(), copy.source.track_id.clone())))
+        .map(|copy| copy.source)
+        .collect()
 }
 
 /// Return a single stable provider artist ID for a selected source. Multiple
@@ -233,6 +322,48 @@ pub fn artist_for_source(pools: &[SelectionPool], source: &TrackSource) -> Optio
         }
     }
     found.then(|| observed.map(str::to_owned)).flatten()
+}
+
+/// A preferred recording copy may lack an artist ID. Retain a source-qualified
+/// center from another confident copy instead of starting a centerless Radio.
+pub fn radio_center_for_source(
+    config: &PlaybackSelectionConfig,
+    pools: &[SelectionPool],
+    selected: &TrackSource,
+) -> Option<super::radio::ArtistIdentity> {
+    if let Some(artist_id) = artist_for_source(pools, selected) {
+        return super::radio::center_for(selected, Some(&artist_id));
+    }
+    let stable = stable_recording_keys(pools);
+    let key = stable
+        .get(&(selected.server_id.clone(), selected.track_id.clone()))
+        .and_then(Option::as_ref)?;
+    let mut copies = Vec::new();
+    for (order, configured) in config.sources.iter().enumerate() {
+        for pool in pools.iter().filter(|pool| pool.source == *configured) {
+            for song in &pool.tracks {
+                let source = TrackSource {
+                    server_id: pool.source.server_id.clone(),
+                    track_id: song.id.clone(),
+                };
+                if stable
+                    .get(&(source.server_id.clone(), source.track_id.clone()))
+                    .and_then(Option::as_ref)
+                    == Some(key)
+                    && let Some(artist_id) = artist_for_source(pools, &source)
+                {
+                    copies.push((order, source, artist_id));
+                }
+            }
+        }
+    }
+    copies.sort_by(|a, b| {
+        (a.0, &a.1.server_id, &a.1.track_id).cmp(&(b.0, &b.1.server_id, &b.1.track_id))
+    });
+    copies
+        .into_iter()
+        .next()
+        .and_then(|(_, source, artist_id)| super::radio::center_for(&source, Some(&artist_id)))
 }
 
 /// Radio needs enough ranked candidates for five admissions plus its bounded
@@ -264,45 +395,36 @@ pub fn radio_copy_alternates(
     pools: &[SelectionPool],
     primary: &TrackSource,
 ) -> Vec<TrackSource> {
-    let key = pools
-        .iter()
-        .filter(|pool| pool.source.server_id == primary.server_id)
-        .flat_map(|pool| &pool.tracks)
-        .find(|song| song.id == primary.track_id)
-        .and_then(|song| song.provider_metadata.recording.as_ref()?.key())
-        .map(|key| key.as_str().to_owned());
+    let stable = stable_recording_keys(pools);
+    let key = stable
+        .get(&(primary.server_id.clone(), primary.track_id.clone()))
+        .and_then(Option::as_ref);
     let Some(key) = key else {
         return Vec::new();
     };
     let mut alternatives = Vec::new();
-    let mut seen = HashSet::new();
     for (order, source) in config.sources.iter().enumerate() {
         for pool in pools.iter().filter(|pool| pool.source == *source) {
             for song in &pool.tracks {
-                if song
-                    .provider_metadata
-                    .recording
-                    .as_ref()
-                    .and_then(|e| e.key())
-                    .is_some_and(|value| value.as_str() == key)
+                if stable
+                    .get(&(pool.source.server_id.clone(), song.id.clone()))
+                    .and_then(Option::as_ref)
+                    == Some(key)
                     && (pool.source.server_id != primary.server_id || song.id != primary.track_id)
-                    && seen.insert((pool.source.server_id.clone(), song.id.clone()))
                 {
-                    alternatives.push((
-                        order,
+                    alternatives.push(RankedCopy::new(
                         TrackSource {
                             server_id: pool.source.server_id.clone(),
                             track_id: song.id.clone(),
                         },
+                        song,
+                        order,
                     ));
                 }
             }
         }
     }
-    alternatives.sort_by(|a, b| {
-        (a.0, &a.1.server_id, &a.1.track_id).cmp(&(b.0, &b.1.server_id, &b.1.track_id))
-    });
-    alternatives.into_iter().map(|(_, source)| source).collect()
+    rank_copies(alternatives)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -661,32 +783,13 @@ fn select_inner(
         ..Default::default()
     };
     let mut identities = HashMap::<String, TrackSource>::new();
-    let mut stable_recording = HashMap::<(String, String), Option<String>>::new();
-    if group_recordings {
-        for pool in &pools {
-            for song in &pool.tracks {
-                let source = (pool.source.server_id.clone(), song.id.clone());
-                let key = song
-                    .provider_metadata
-                    .recording
-                    .as_ref()
-                    .and_then(|e| e.key())
-                    .map(|k| k.as_str().to_owned());
-                match stable_recording.entry(source) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(key);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if *entry.get() != key {
-                            entry.insert(None);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let stable_recording = if group_recordings {
+        stable_recording_keys(&pools)
+    } else {
+        HashMap::new()
+    };
     let mut recording_for_source = HashMap::new();
-    let mut best_copy = HashMap::<String, (TrackSource, Option<String>, Option<u32>, usize)>::new();
+    let mut copies_for_recording = HashMap::<String, Vec<RankedCopy>>::new();
     let mut candidates = Vec::new();
     for (source_order, source) in config.sources.iter().enumerate() {
         let tracks = pools
@@ -722,28 +825,14 @@ fn select_inner(
                     ),
                     key.clone(),
                 );
-                let codec = candidate
-                    .song
-                    .suffix
-                    .as_ref()
-                    .map(|s| s.to_ascii_lowercase());
-                let bitrate = candidate.song.bitrate_kbps.filter(|rate| *rate > 0);
-                let replace =
-                    best_copy
-                        .get(&key)
-                        .is_none_or(|(_, prior_codec, prior_rate, prior_order)| {
-                            if prior_codec.as_ref() == codec.as_ref() && codec.is_some() {
-                                bitrate.zip(*prior_rate).is_some_and(|(new, old)| new > old)
-                            } else {
-                                source_order < *prior_order
-                            }
-                        });
-                if replace {
-                    best_copy.insert(
-                        key,
-                        (candidate.source.clone(), codec, bitrate, source_order),
-                    );
-                }
+                copies_for_recording
+                    .entry(key)
+                    .or_default()
+                    .push(RankedCopy::new(
+                        candidate.source.clone(),
+                        &candidate.song,
+                        source_order,
+                    ));
             }
             let id = if multiple_servers {
                 format!(
@@ -773,6 +862,15 @@ fn select_inner(
     input
         .pools
         .insert(SourceKey::new(SourceKind::Library, None), candidates);
+    let best_copy: HashMap<_, _> = copies_for_recording
+        .into_iter()
+        .filter_map(|(key, copies)| {
+            rank_copies(copies)
+                .into_iter()
+                .next()
+                .map(|copy| (key, copy))
+        })
+        .collect();
     let mut seen = HashSet::new();
     let mut seen_recordings = HashSet::new();
     let result: Vec<_> = run_pipeline(&input, &pipeline)
@@ -787,7 +885,7 @@ fn select_inner(
             recording_for_source
                 .get(&(source.server_id.clone(), source.track_id.clone()))
                 .and_then(|key| best_copy.get(key))
-                .map(|(best, _, _, _)| best.clone())
+                .cloned()
                 .unwrap_or(source)
         })
         .filter(|source| seen.insert((source.server_id.clone(), source.track_id.clone())))
@@ -863,6 +961,140 @@ mod tests {
             kind: SelectionKind::Playlist,
             ref_id: "playlist".into(),
         }
+    }
+
+    fn recorded_song(id: &str, recording_id: &str, bitrate: u32, codec: &str) -> Song {
+        use crate::playback::recording::{RecordingEvidence, RecordingProvenance};
+        let mut item = song(id, "Take");
+        item.bitrate_kbps = Some(bitrate);
+        item.suffix = Some(codec.into());
+        item.provider_metadata.recording = Some(RecordingEvidence::from_recording_field(
+            RecordingProvenance::OpenSubsonicSong,
+            Some(recording_id),
+            &item.title,
+        ));
+        item
+    }
+
+    #[test]
+    fn recording_conflict_stays_uncertain_after_a_third_observation() {
+        let first_id = "189002e7-3285-4e2e-92a3-7f6c30d407a2";
+        let second_id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+        let mut pools = (0..3)
+            .map(|index| {
+                let mut scope = source("one");
+                scope.ref_id = format!("scope-{index}");
+                SelectionPool {
+                    source: scope,
+                    tracks: vec![recorded_song(
+                        "local",
+                        if index == 0 { first_id } else { second_id },
+                        256,
+                        "mp3",
+                    )],
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(recording_keys_after_conflict_clear(&mut pools).is_empty());
+        assert!(
+            pools
+                .iter()
+                .all(|pool| pool.tracks[0].provider_metadata.recording.is_none())
+        );
+    }
+
+    #[test]
+    fn copy_ranking_is_stable_and_fallback_uses_comparable_quality() {
+        let id = "189002e7-3285-4e2e-92a3-7f6c30d407a2";
+        let config = PlaybackSelectionConfig {
+            sources: vec![source("one"), source("two"), source("three")],
+            ..Default::default()
+        };
+        let first = recorded_song("a", id, 700, "flac");
+        let best = recorded_song("b", id, 1000, "flac");
+        let incompatible = recorded_song("c", id, 320, "mp3");
+        let pools = vec![
+            SelectionPool {
+                source: source("one"),
+                tracks: vec![first, incompatible],
+            },
+            SelectionPool {
+                source: source("two"),
+                tracks: vec![best],
+            },
+        ];
+        let expected = TrackSource {
+            server_id: "two".into(),
+            track_id: "b".into(),
+        };
+        assert_eq!(
+            select_with_recordings(&config, pools.clone()).unwrap(),
+            vec![expected.clone()]
+        );
+        let mut reversed = pools.clone();
+        reversed[0].tracks.reverse();
+        assert_eq!(
+            select_with_recordings(&config, reversed).unwrap(),
+            vec![expected]
+        );
+
+        let pools = vec![
+            SelectionPool {
+                source: source("one"),
+                tracks: vec![recorded_song("primary", id, 320, "mp3")],
+            },
+            SelectionPool {
+                source: source("two"),
+                tracks: vec![recorded_song("low", id, 128, "mp3")],
+            },
+            SelectionPool {
+                source: source("three"),
+                tracks: vec![recorded_song("high", id, 256, "mp3")],
+            },
+        ];
+        let primary = TrackSource {
+            server_id: "one".into(),
+            track_id: "primary".into(),
+        };
+        assert_eq!(
+            radio_copy_alternates(&config, &pools, &primary)
+                .iter()
+                .map(|source| source.track_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["high", "low"]
+        );
+    }
+
+    #[test]
+    fn radio_start_uses_artist_anchor_from_another_confident_copy() {
+        let id = "189002e7-3285-4e2e-92a3-7f6c30d407a2";
+        let config = PlaybackSelectionConfig {
+            sources: vec![source("one"), source("two")],
+            ..Default::default()
+        };
+        let mut anchor = recorded_song("anchor", id, 128, "mp3");
+        anchor.artist_id = Some("artist-one".into());
+        let pools = vec![
+            SelectionPool {
+                source: source("one"),
+                tracks: vec![anchor],
+            },
+            SelectionPool {
+                source: source("two"),
+                tracks: vec![recorded_song("preferred", id, 320, "mp3")],
+            },
+        ];
+        let preferred = TrackSource {
+            server_id: "two".into(),
+            track_id: "preferred".into(),
+        };
+        assert_eq!(
+            radio_center_for_source(&config, &pools, &preferred),
+            Some(super::super::radio::ArtistIdentity {
+                server_id: "one".into(),
+                artist_id: "artist-one".into()
+            })
+        );
     }
 
     #[test]
