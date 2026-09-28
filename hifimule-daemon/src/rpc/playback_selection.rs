@@ -1,5 +1,5 @@
 //! Playback selection RPCs. This state is local and independent of device auto-fill.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -212,37 +212,50 @@ pub(super) async fn start_with_config(
             if START_EPOCH.load(Ordering::Acquire) != ticket {
                 return Err(error(SelectionError::Cancelled));
             }
-            let provider = provider(state, &source.server_id).await?;
-            pools.push(
-                selection::fetch_source(provider.as_ref(), source)
-                    .await
-                    .map_err(error)?,
-            );
+            let Ok(provider) = provider(state, &source.server_id).await else {
+                continue;
+            };
+            if let Ok(pool) = selection::fetch_source(provider.as_ref(), source).await {
+                pools.push(pool);
+            }
+        }
+        if pools.is_empty() {
+            return Err(error(SelectionError::SourceUnavailable));
         }
         Ok(pools)
     };
-    let pools = tokio::time::timeout(DEADLINE, fetch)
+    let mut pools = tokio::time::timeout(DEADLINE, fetch)
         .await
         .map_err(|_| error(SelectionError::SourceUnavailable))??;
+    selection::clear_conflicting_recordings(&mut pools);
     if START_EPOCH.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
-    let selected = selection::select(&config, pools.clone()).map_err(error)?;
+    let selected = selection::select_with_recordings(&config, pools.clone()).map_err(error)?;
     // Resolve before touching the owner. A missing or expired source leaves the current
     // listening session intact and generates no skip/taste signal. Try the next
     // bounded selected result if a track vanished after candidate retrieval.
     let preflight = async {
-        for source in selected {
-            if START_EPOCH.load(Ordering::Acquire) != ticket {
-                return Err(error(SelectionError::Cancelled));
-            }
-            let provider = provider(state, &source.server_id).await?;
-            if let Ok(description) = provider.resolve_playback(&source.track_id).await
-                && let Ok(prepared) =
-                    crate::playback::audio::prepare_selection_source(description).await
-            {
-                let artist_id = selection::artist_for_source(&pools, &source);
-                return Ok((source, artist_id, prepared));
+        let mut failures = 0;
+        for primary in selected {
+            let attempts = std::iter::once(primary.clone())
+                .chain(selection::radio_copy_alternates(&config, &pools, &primary));
+            for source in attempts {
+                if START_EPOCH.load(Ordering::Acquire) != ticket {
+                    return Err(error(SelectionError::Cancelled));
+                }
+                if failures >= crate::playback::radio::MAX_PREPARATION_FAILURES {
+                    break;
+                }
+                if let Ok(provider) = provider(state, &source.server_id).await
+                    && let Ok(description) = provider.resolve_playback(&source.track_id).await
+                    && let Ok(prepared) =
+                        crate::playback::audio::prepare_selection_source(description).await
+                {
+                    let artist_id = selection::artist_for_source(&pools, &source);
+                    return Ok((source, artist_id, prepared));
+                }
+                failures += 1;
             }
         }
         Err(error(SelectionError::SourceUnavailable))
@@ -262,6 +275,12 @@ pub(super) async fn start_with_config(
         expected_queue_revision: snapshot.queue_revision,
         operation: SessionOperation::StartRadio {
             center: crate::playback::radio::center_for(&first, artist_id.as_deref()),
+            recording: pools
+                .iter()
+                .filter(|pool| pool.source.server_id == first.server_id)
+                .flat_map(|pool| &pool.tracks)
+                .find(|song| song.id == first.track_id)
+                .and_then(|song| song.provider_metadata.recording.clone()),
             source: first,
             settings: Some(config),
         },
@@ -303,6 +322,32 @@ pub(super) async fn run_radio_worker(
     }
 }
 
+async fn prepare_radio_copy(
+    state: &AppState,
+    lease: &crate::playback::radio::RefillLease,
+    source: &crate::playback::model::TrackSource,
+) -> bool {
+    if !state.playback.radio_lease_current(lease) {
+        return false;
+    }
+    let Ok(source_provider) = provider(state, &source.server_id).await else {
+        return false;
+    };
+    if !state.playback.radio_lease_current(lease) {
+        return false;
+    }
+    let Ok(description) = source_provider.resolve_playback(&source.track_id).await else {
+        return false;
+    };
+    if !state.playback.radio_lease_current(lease) {
+        return false;
+    }
+    let prepared = crate::playback::audio::prepare_selection_source(description)
+        .await
+        .is_ok();
+    prepared && state.playback.radio_lease_current(lease)
+}
+
 async fn gather_radio_candidates(
     state: &AppState,
     lease: &crate::playback::radio::RefillLease,
@@ -318,17 +363,20 @@ async fn gather_radio_candidates(
     let config = &lease.original_settings;
     let mut failed_source = false;
     let mut more_windows = false;
+    let center = lease.center.as_ref().expect("center was checked above");
+    let mut anchor_keys = HashSet::new();
     let retrieve = async {
         let mut pools = Vec::new();
         for source in config
             .sources
             .iter()
-            .filter(|source| {
-                lease
-                    .center
-                    .as_ref()
-                    .is_none_or(|center| source.server_id == center.server_id)
-            })
+            .filter(|source| source.server_id == center.server_id)
+            .chain(
+                config
+                    .sources
+                    .iter()
+                    .filter(|source| source.server_id != center.server_id),
+            )
             .take(selection::MAX_SOURCES)
         {
             if !state.playback.radio_lease_current(lease) {
@@ -366,9 +414,16 @@ async fn gather_radio_candidates(
                         if song.provider_metadata.ambiguous_music_artist {
                             continue;
                         }
-                        if lease.center.as_ref().is_some_and(|center| {
-                            !center.matches(&source.server_id, song.artist_id.as_deref())
-                        }) {
+                        let same_artist =
+                            center.matches(&source.server_id, song.artist_id.as_deref());
+                        let key = song
+                            .provider_metadata
+                            .recording
+                            .as_ref()
+                            .and_then(|e| e.key())
+                            .map(|key| key.as_str().to_owned());
+                        if !same_artist && key.as_ref().is_none_or(|key| !anchor_keys.contains(key))
+                        {
                             continue;
                         }
                         let identity = crate::playback::model::TrackSource {
@@ -383,8 +438,22 @@ async fn gather_radio_candidates(
                                 .db
                                 .radio_has_occurrence(&lease.session_id, &identity)
                                 .unwrap_or(true)
+                            || song
+                                .provider_metadata
+                                .recording
+                                .as_ref()
+                                .and_then(|e| e.key())
+                                .is_some_and(|key| {
+                                    state
+                                        .db
+                                        .radio_recording_used(&lease.session_id, key.as_str())
+                                        .unwrap_or(true)
+                                })
                         {
                             continue;
+                        }
+                        if same_artist && let Some(key) = key {
+                            anchor_keys.insert(key);
                         }
                         eligible.push(song);
                     }
@@ -417,7 +486,7 @@ async fn gather_radio_candidates(
         }
         pools
     };
-    let pools = match tokio::time::timeout(
+    let mut pools = match tokio::time::timeout(
         Duration::from_secs(crate::playback::radio::RETRIEVAL_DEADLINE_SECS),
         retrieve,
     )
@@ -426,6 +495,7 @@ async fn gather_radio_candidates(
         Ok(pools) => pools,
         Err(_) => return (Vec::new(), Some("radio.sourceFailure".into()), false, None),
     };
+    selection::clear_conflicting_recordings(&mut pools);
     let ordered = match selection::select_radio_order(config, pools.clone()) {
         Ok(ordered) => ordered,
         Err(_) => {
@@ -438,18 +508,27 @@ async fn gather_radio_candidates(
             };
         }
     };
+    let alternates: HashMap<_, _> = ordered
+        .iter()
+        .map(|source| {
+            (
+                (source.server_id.clone(), source.track_id.clone()),
+                selection::radio_copy_alternates(config, &pools, source),
+            )
+        })
+        .collect();
     let mut evidence = HashMap::new();
-    for pool in pools {
-        for song in pool.tracks {
+    for pool in &pools {
+        for song in &pool.tracks {
             evidence
                 .entry((pool.source.server_id.clone(), song.id.clone()))
-                .or_insert(song);
+                .or_insert_with(|| song.clone());
         }
     }
     let prepare = async {
         let mut selected = Vec::new();
         let mut failures = 0;
-        for source in ordered {
+        for primary in ordered {
             if !state.playback.radio_lease_current(lease) {
                 break;
             }
@@ -458,36 +537,36 @@ async fn gather_radio_candidates(
             {
                 break;
             }
-            let Ok(provider) = provider(state, &source.server_id).await else {
-                failures += 1;
-                continue;
-            };
-            if !state.playback.radio_lease_current(lease) {
-                break;
-            }
-            if let Ok(description) = provider.resolve_playback(&source.track_id).await {
-                if !state.playback.radio_lease_current(lease) {
+            let attempts = std::iter::once(primary.clone()).chain(
+                alternates
+                    .get(&(primary.server_id.clone(), primary.track_id.clone()))
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            for source in attempts {
+                if failures >= crate::playback::radio::MAX_PREPARATION_FAILURES
+                    || !state.playback.radio_lease_current(lease)
+                {
                     break;
                 }
-                if crate::playback::audio::prepare_selection_source(description)
-                    .await
-                    .is_ok()
-                {
-                    if !state.playback.radio_lease_current(lease) {
-                        break;
-                    }
+                if prepare_radio_copy(state, lease, &source).await {
                     if let Some(song) =
                         evidence.get(&(source.server_id.clone(), source.track_id.clone()))
                     {
+                        let center_origin = (!center
+                            .matches(&source.server_id, song.artist_id.as_deref()))
+                        .then(|| center.clone());
                         selected.push(selection::SelectionCandidate {
                             source,
                             song: song.clone(),
+                            center_origin,
                         });
                     }
-                    continue;
+                    break;
                 }
+                failures += 1;
             }
-            failures += 1;
         }
         (selected, failures)
     };
@@ -535,53 +614,54 @@ async fn gather_transition_candidates(
     let mut ranked = Vec::new();
     let mut relation_unknown = false;
     if let Some(center) = &lease.center {
-        let Ok(center_provider) = provider(state, &center.server_id).await else {
-            return (Vec::new(), Some("radio.sourceFailure".into()), false, None);
-        };
-        if !state.playback.radio_lease_current(lease) {
-            return (Vec::new(), None, false, None);
-        }
-        match tokio::time::timeout(
-            DEADLINE,
-            center_provider.related_artists(&center.artist_id, 8),
-        )
-        .await
-        {
-            Ok(Ok(relations)) => {
-                for (index, relation) in relations.into_iter().enumerate() {
-                    if relation.artist_id.is_empty()
-                        || relation.artist_id == center.artist_id
-                        || relation.artist_id.len() > crate::playback::model::MAX_ID_BYTES
-                    {
-                        continue;
-                    }
-                    let kind = match relation.kind {
-                        ArtistRelationKind::SharedTrackCredit => {
-                            RadioTransitionKind::SharedTrackCredit
-                        }
-                        ArtistRelationKind::SimilarArtist => RadioTransitionKind::SimilarArtist,
-                    };
-                    let source_order = lease
-                        .original_settings
-                        .sources
-                        .iter()
-                        .position(|source| source.server_id == center.server_id)
-                        .unwrap_or(usize::MAX);
-                    ranked.push((
-                        ArtistIdentity {
-                            server_id: center.server_id.clone(),
-                            artist_id: relation.artist_id,
-                        },
-                        kind,
-                        index,
-                        source_order,
-                    ));
-                }
+        if let Ok(center_provider) = provider(state, &center.server_id).await {
+            if !state.playback.radio_lease_current(lease) {
+                return (Vec::new(), None, false, None);
             }
-            Ok(Err(crate::providers::ProviderError::UnsupportedCapability(_))) => {}
-            // Unsupported or unverified metadata cannot establish a link. The
-            // fresh-center search still evaluates the original scope.
-            _ => relation_unknown = true,
+            match tokio::time::timeout(
+                DEADLINE,
+                center_provider.related_artists(&center.artist_id, 8),
+            )
+            .await
+            {
+                Ok(Ok(relations)) => {
+                    for (index, relation) in relations.into_iter().enumerate() {
+                        if relation.artist_id.is_empty()
+                            || relation.artist_id == center.artist_id
+                            || relation.artist_id.len() > crate::playback::model::MAX_ID_BYTES
+                        {
+                            continue;
+                        }
+                        let kind = match relation.kind {
+                            ArtistRelationKind::SharedTrackCredit => {
+                                RadioTransitionKind::SharedTrackCredit
+                            }
+                            ArtistRelationKind::SimilarArtist => RadioTransitionKind::SimilarArtist,
+                        };
+                        let source_order = lease
+                            .original_settings
+                            .sources
+                            .iter()
+                            .position(|source| source.server_id == center.server_id)
+                            .unwrap_or(usize::MAX);
+                        ranked.push((
+                            ArtistIdentity {
+                                server_id: center.server_id.clone(),
+                                artist_id: relation.artist_id,
+                            },
+                            kind,
+                            index,
+                            source_order,
+                        ));
+                    }
+                }
+                Ok(Err(crate::providers::ProviderError::UnsupportedCapability(_))) => {}
+                // Unsupported or unverified metadata cannot establish a link. The
+                // fresh-center search still evaluates the original scope.
+                _ => relation_unknown = true,
+            }
+        } else {
+            relation_unknown = true;
         }
     }
     let ranked = crate::playback::radio::rank_relations(ranked);
@@ -599,7 +679,7 @@ async fn gather_transition_candidates(
     });
     let related_phase = lease.center.is_some() && !ranked.is_empty() && related_remaining;
     let phase = if related_phase { "related" } else { "fresh" };
-    let (pools, cursors, failed) = match tokio::time::timeout(DEADLINE, async {
+    let (mut pools, cursors, failed) = match tokio::time::timeout(DEADLINE, async {
         let mut pools = Vec::new();
         let mut cursors = Vec::new();
         let mut failed = false;
@@ -653,6 +733,29 @@ async fn gather_transition_candidates(
                             (Ok(_), Ok(_)) => {}
                             _ => failed = true,
                         }
+                        if let Some(key) = song
+                            .provider_metadata
+                            .recording
+                            .as_ref()
+                            .and_then(|e| e.key())
+                        {
+                            match (
+                                state.db.radio_recording_has_kind(
+                                    &lease.session_id,
+                                    key.as_str(),
+                                    "heard",
+                                ),
+                                state.db.radio_recording_has_kind(
+                                    &lease.session_id,
+                                    key.as_str(),
+                                    "excluded",
+                                ),
+                            ) {
+                                (Ok(true), Ok(false)) => seen_heard = true,
+                                (Ok(_), Ok(_)) => {}
+                                _ => failed = true,
+                            }
+                        }
                         !state
                             .db
                             .radio_has_membership(&lease.session_id, &identity)
@@ -661,6 +764,17 @@ async fn gather_transition_candidates(
                                 .db
                                 .radio_has_occurrence(&lease.session_id, &identity)
                                 .unwrap_or(true)
+                            && song
+                                .provider_metadata
+                                .recording
+                                .as_ref()
+                                .and_then(|e| e.key())
+                                .is_none_or(|key| {
+                                    !state
+                                        .db
+                                        .radio_recording_used(&lease.session_id, key.as_str())
+                                        .unwrap_or(true)
+                                })
                     });
                     pools.push(pool);
                     cursors.push((key, cursor, next, seen_heard));
@@ -675,9 +789,7 @@ async fn gather_transition_candidates(
         Ok(result) => result,
         Err(_) => return (Vec::new(), Some("radio.sourceFailure".into()), false, None),
     };
-    if failed {
-        return (Vec::new(), Some("radio.sourceFailure".into()), false, None);
-    }
+    selection::clear_conflicting_recordings(&mut pools);
     if !state.playback.radio_lease_current(lease) {
         return (Vec::new(), None, false, None);
     }
@@ -688,52 +800,65 @@ async fn gather_transition_candidates(
         !related_phase,
     );
     if let Some((transition, ordered)) = chosen {
+        let alternates: HashMap<_, _> = ordered
+            .iter()
+            .map(|source| {
+                (
+                    (source.server_id.clone(), source.track_id.clone()),
+                    selection::radio_copy_alternates(&lease.original_settings, &pools, source),
+                )
+            })
+            .collect();
         let mut evidence = HashMap::new();
-        for pool in pools {
-            for song in pool.tracks {
-                evidence.insert((pool.source.server_id.clone(), song.id.clone()), song);
+        for pool in &pools {
+            for song in &pool.tracks {
+                evidence.insert(
+                    (pool.source.server_id.clone(), song.id.clone()),
+                    song.clone(),
+                );
             }
         }
         let prepared = tokio::time::timeout(DEADLINE, async {
             let mut selected = Vec::new();
             let mut failures = 0;
-            for source in ordered {
+            for primary in ordered {
                 if selected.len() >= lease.capacity
                     || failures >= crate::playback::radio::MAX_PREPARATION_FAILURES
                     || !state.playback.radio_lease_current(lease)
                 {
                     break;
                 }
-                let Ok(source_provider) = provider(state, &source.server_id).await else {
-                    failures += 1;
-                    continue;
-                };
-                if !state.playback.radio_lease_current(lease) {
-                    break;
-                }
-                if let Ok(description) = source_provider.resolve_playback(&source.track_id).await {
-                    if !state.playback.radio_lease_current(lease) {
+                let attempts = std::iter::once(primary.clone()).chain(
+                    alternates
+                        .get(&(primary.server_id.clone(), primary.track_id.clone()))
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                for source in attempts {
+                    if failures >= crate::playback::radio::MAX_PREPARATION_FAILURES
+                        || !state.playback.radio_lease_current(lease)
+                    {
                         break;
                     }
-                    if crate::playback::audio::prepare_selection_source(description)
-                        .await
-                        .is_ok()
-                    {
-                        if !state.playback.radio_lease_current(lease) {
-                            break;
-                        }
+                    if prepare_radio_copy(state, lease, &source).await {
                         if let Some(song) =
                             evidence.get(&(source.server_id.clone(), source.track_id.clone()))
                         {
+                            let center_origin = (!transition
+                                .center
+                                .matches(&source.server_id, song.artist_id.as_deref()))
+                            .then(|| transition.center.clone());
                             selected.push(selection::SelectionCandidate {
                                 source,
                                 song: song.clone(),
+                                center_origin,
                             });
-                            continue;
                         }
+                        break;
                     }
+                    failures += 1;
                 }
-                failures += 1;
             }
             (selected, failures)
         })
@@ -742,8 +867,8 @@ async fn gather_transition_candidates(
         return match prepared {
             Ok((selected, failures)) if !selected.is_empty() => (
                 selected,
-                (failures > 0).then(|| "radio.sourceFailure".into()),
-                failures == 0,
+                (failures > 0 || failed).then(|| "radio.sourceFailure".into()),
+                failures == 0 && !failed,
                 proposal,
             ),
             _ => (Vec::new(), Some("radio.sourceFailure".into()), false, None),
@@ -776,7 +901,7 @@ async fn gather_transition_candidates(
     }
     if more {
         (Vec::new(), None, true, None)
-    } else if relation_unknown {
+    } else if relation_unknown || failed {
         (Vec::new(), Some("radio.sourceFailure".into()), false, None)
     } else {
         (Vec::new(), Some("radio.exhausted".into()), false, None)

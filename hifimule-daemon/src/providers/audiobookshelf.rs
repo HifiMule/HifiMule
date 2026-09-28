@@ -2690,6 +2690,7 @@ fn map_book_detail(
         album,
         tracks,
         provider_metadata: ProviderItemMetadata {
+            recording: None,
             identity: Some(ProviderIdentity {
                 library_id: library.into(),
                 library_item_id: book.id.clone(),

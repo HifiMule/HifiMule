@@ -4855,6 +4855,7 @@ mod tests {
     ) -> crate::api::JellyfinItem {
         crate::api::JellyfinItem {
             id: "test-id".to_string(),
+            provider_ids: None,
             name: name.to_string(),
             item_type: "Audio".to_string(),
             album: album.map(|s| s.to_string()),
@@ -6609,6 +6610,7 @@ mod tests {
         let managed = std::path::PathBuf::from("Music");
         let item = crate::api::JellyfinItem {
             id: "item1".to_string(),
+            provider_ids: None,
             name: "Speak to Me".to_string(),
             item_type: "Audio".to_string(),
             album: Some("The Dark Side of the Moon".to_string()),
@@ -6647,6 +6649,7 @@ mod tests {
         let managed = std::path::PathBuf::from("Music");
         let item = crate::api::JellyfinItem {
             id: "item2".to_string(),
+            provider_ids: None,
             name: "Unknown Track".to_string(),
             item_type: "Audio".to_string(),
             album: None,

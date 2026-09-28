@@ -13,6 +13,7 @@ pub mod native;
 mod output;
 pub mod persistence;
 pub mod radio;
+pub mod recording;
 pub mod selection;
 pub mod session;
 pub mod streaming;

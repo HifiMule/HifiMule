@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 9;
+pub const PERSISTENCE_VERSION: i64 = 10;
 type RadioRow = (
     String,
     Option<String>,
@@ -132,10 +132,18 @@ impl Database {
         }
         if version == Some(PERSISTENCE_VERSION) {
             let radio_tables: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('playback_radio','playback_radio_origin','playback_radio_membership')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('playback_radio','playback_radio_origin','playback_radio_membership','playback_radio_recording','playback_radio_recording_membership')",
                 [], |row| row.get(0))?;
-            if radio_tables != 3 {
+            if radio_tables != 5 {
                 return Err(anyhow!("INVALID_RADIO_STATE"));
+            }
+            let unknown: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playback_radio_recording WHERE resolver_version<>?1)",
+                [super::recording::RESOLVER_VERSION],
+                |row| row.get(0),
+            )?;
+            if unknown {
+                return Err(anyhow!("UNSUPPORTED_RECORDING_RESOLVER_VERSION"));
             }
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_schema (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), version INTEGER NOT NULL);
@@ -150,6 +158,10 @@ impl Database {
             CREATE INDEX IF NOT EXISTS playback_radio_origin_session ON playback_radio_origin(session_id,ordinal);
             CREATE TABLE IF NOT EXISTS playback_radio_membership (session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('heard','excluded')), PRIMARY KEY(session_id,server_id,track_id,kind));
             CREATE INDEX IF NOT EXISTS playback_radio_membership_lookup ON playback_radio_membership(session_id,server_id,track_id);
+            CREATE TABLE IF NOT EXISTS playback_radio_recording (occurrence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, recording_key TEXT NOT NULL, resolver_version INTEGER NOT NULL, provenance TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS playback_radio_recording_key ON playback_radio_recording(session_id,recording_key);
+            CREATE TABLE IF NOT EXISTS playback_radio_recording_membership (session_id TEXT NOT NULL, recording_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('heard','excluded')), PRIMARY KEY(session_id,recording_key,kind));
+            CREATE INDEX IF NOT EXISTS playback_radio_recording_membership_lookup ON playback_radio_recording_membership(session_id,recording_key);
             CREATE TABLE IF NOT EXISTS playback_radio_scan (session_id TEXT NOT NULL, source_key TEXT NOT NULL, cursor_index INTEGER NOT NULL CHECK(cursor_index>=0), cursor_intra INTEGER NOT NULL CHECK(cursor_intra>=0), exhausted INTEGER NOT NULL CHECK(exhausted IN (0,1)), PRIMARY KEY(session_id,source_key));
             CREATE TABLE IF NOT EXISTS playback_audition (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, position_ms INTEGER NOT NULL CHECK(position_ms>=0), transport_state TEXT NOT NULL, saved_main_occurrence_id TEXT, saved_main_position_ms INTEGER NOT NULL CHECK(saved_main_position_ms>=0), saved_main_intent TEXT NOT NULL, resume_inhibited INTEGER NOT NULL CHECK(resume_inhibited IN (0,1)), contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)));
             CREATE TABLE IF NOT EXISTS playback_audition_outcomes (outcome_id INTEGER PRIMARY KEY AUTOINCREMENT, audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT NOT NULL CHECK(disposition IN ('naturalCompletion','stopped','returned','replaced','superseded','technicalFailure','interrupted')), terminal_position_ms INTEGER NOT NULL CHECK(terminal_position_ms>=0), duration_ms INTEGER CHECK(duration_ms>=0), failure_code TEXT, contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)), fully_heard INTEGER NOT NULL CHECK(fully_heard IN (0,1)));
@@ -159,6 +171,11 @@ impl Database {
             CREATE TRIGGER IF NOT EXISTS playback_book_mapping_queue AFTER UPDATE OF session_id,queue_revision ON playback_sessions BEGIN DELETE FROM playback_book_mapping WHERE session_id<>NEW.session_id OR queue_revision<>NEW.queue_revision; END;
             CREATE TRIGGER IF NOT EXISTS playback_book_continuity_current AFTER UPDATE OF current_occurrence_id,session_id ON playback_sessions BEGIN DELETE FROM playback_book_continuity WHERE session_id<>NEW.session_id OR occurrence_id<>COALESCE(NEW.current_occurrence_id,''); END;
             CREATE TRIGGER IF NOT EXISTS playback_book_continuity_occurrence AFTER DELETE ON playback_occurrences BEGIN DELETE FROM playback_book_continuity WHERE occurrence_id=OLD.occurrence_id; END;")?;
+        let key_pattern = format!("mbrec:{}:%", super::recording::RESOLVER_VERSION);
+        let unknown: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording WHERE resolver_version<>?1 OR recording_key NOT LIKE ?2 UNION SELECT 1 FROM playback_radio_recording_membership WHERE recording_key NOT LIKE ?2)", params![super::recording::RESOLVER_VERSION,key_pattern], |row|row.get(0))?;
+        if unknown {
+            return Err(anyhow!("UNSUPPORTED_RECORDING_RESOLVER_VERSION"));
+        }
         let radio_columns = {
             let mut statement = tx.prepare("PRAGMA table_info(playback_radio)")?;
             statement
@@ -763,6 +780,24 @@ impl Database {
         )?)
     }
 
+    pub fn radio_recording_used(&self, session_id: &str, recording_key: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playback_radio_recording_membership WHERE session_id=?1 AND recording_key=?2 UNION SELECT 1 FROM playback_radio_recording r JOIN playback_occurrences o ON o.occurrence_id=r.occurrence_id AND o.session_id=r.session_id WHERE r.session_id=?1 AND r.recording_key=?2 AND o.outcome IS NULL)",
+            params![session_id, recording_key], |row| row.get(0),
+        )?)
+    }
+
+    pub fn radio_recording_has_kind(
+        &self,
+        session_id: &str,
+        recording_key: &str,
+        kind: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording_membership WHERE session_id=?1 AND recording_key=?2 AND kind=?3)", params![session_id,recording_key,kind], |row|row.get(0))?)
+    }
+
     pub fn radio_is_heard(&self, session_id: &str, source: &TrackSource) -> Result<bool> {
         let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
         Ok(conn.query_row(
@@ -884,6 +919,10 @@ impl Database {
             [&session.session_id],
         )?;
         tx.execute(
+            "DELETE FROM playback_radio_recording_membership WHERE session_id=?1 AND kind='heard'",
+            [&session.session_id],
+        )?;
+        tx.execute(
             "DELETE FROM playback_radio_scan WHERE session_id=?1",
             [&session.session_id],
         )?;
@@ -950,9 +989,11 @@ impl Database {
         session: &PersistedSession,
         prior_current_id: &str,
         occurrences: &[Occurrence],
+        candidates: &[super::selection::SelectionCandidate],
     ) -> Result<()> {
         if session.queue_kind != super::model::QueueKind::Radio
             || occurrences.len() > super::radio::AUTO_UPCOMING_TARGET
+            || occurrences.len() != candidates.len()
         {
             return Err(anyhow!("INVALID_RADIO_STATE"));
         }
@@ -997,7 +1038,11 @@ impl Database {
             return Err(anyhow!("RADIO_CAPACITY_CHANGED"));
         }
         let mut seen = std::collections::HashSet::new();
-        for occurrence in occurrences {
+        let mut seen_recordings = std::collections::HashSet::new();
+        for (occurrence, candidate) in occurrences.iter().zip(candidates) {
+            if occurrence.source != candidate.source {
+                return Err(anyhow!("RADIO_SOURCE_CHANGED"));
+            }
             occurrence
                 .source
                 .validate()
@@ -1008,6 +1053,21 @@ impl Database {
             let used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_membership WHERE session_id=?1 AND server_id=?2 AND track_id=?3 UNION SELECT 1 FROM playback_occurrences WHERE session_id=?1 AND server_id=?2 AND track_id=?3 AND outcome IS NULL)", params![session.session_id,occurrence.source.server_id,occurrence.source.track_id], |row| row.get(0))?;
             if used {
                 return Err(anyhow!("RADIO_SOURCE_ALREADY_USED"));
+            }
+            if let Some(key) = candidate
+                .song
+                .provider_metadata
+                .recording
+                .as_ref()
+                .and_then(|e| e.key())
+            {
+                if !seen_recordings.insert(key.as_str()) {
+                    return Err(anyhow!("DUPLICATE_RADIO_RECORDING"));
+                }
+                let used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording_membership WHERE session_id=?1 AND recording_key=?2 UNION SELECT 1 FROM playback_radio_recording r JOIN playback_occurrences o ON o.occurrence_id=r.occurrence_id AND o.session_id=r.session_id WHERE r.session_id=?1 AND r.recording_key=?2 AND o.outcome IS NULL)", params![session.session_id,key.as_str()], |row|row.get(0))?;
+                if used {
+                    return Err(anyhow!("RADIO_RECORDING_ALREADY_USED"));
+                }
             }
         }
         let previous_center: Option<(Option<String>, Option<String>, i64)> = tx.query_row(
@@ -1044,10 +1104,16 @@ impl Database {
         }
         update_session(&tx, session)?;
         insert_occurrences(&tx, &session.session_id, occurrences)?;
-        for occurrence in occurrences {
+        for (occurrence, candidate) in occurrences.iter().zip(candidates) {
             tx.execute(
                 "INSERT INTO playback_radio_origin(occurrence_id,session_id,ordinal) VALUES(?1,?2,?3)",
                 params![occurrence.occurrence_id, session.session_id, i64::try_from(occurrence.ordinal)?],
+            )?;
+            insert_radio_recording(
+                &tx,
+                &session.session_id,
+                &occurrence.occurrence_id,
+                candidate.song.provider_metadata.recording.as_ref(),
             )?;
         }
         ensure_active_attempt(&tx, session, "superseded")?;
@@ -1060,7 +1126,16 @@ impl Database {
         session: &PersistedSession,
         occurrences: &[Occurrence],
     ) -> Result<()> {
-        self.persist_playback_structure_inner(session, occurrences, false)
+        self.persist_playback_structure_inner(session, occurrences, false, None)
+    }
+
+    pub fn persist_radio_start_structure(
+        &self,
+        session: &PersistedSession,
+        occurrences: &[Occurrence],
+        evidence: &super::recording::RecordingEvidence,
+    ) -> Result<()> {
+        self.persist_playback_structure_inner(session, occurrences, false, Some(evidence))
     }
 
     pub fn persist_playback_structure_superseding_audition(
@@ -1068,6 +1143,7 @@ impl Database {
         session: &PersistedSession,
         occurrences: &[Occurrence],
         audition: &PersistedAudition,
+        recording: Option<&super::recording::RecordingEvidence>,
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
@@ -1090,6 +1166,17 @@ impl Database {
             [&session.session_id],
         )?;
         insert_occurrences(&tx, &session.session_id, occurrences)?;
+        if let Some(evidence) = recording {
+            let first = occurrences
+                .first()
+                .ok_or_else(|| anyhow!("RADIO_CURRENT_CHANGED"))?;
+            insert_radio_recording(
+                &tx,
+                &session.session_id,
+                &first.occurrence_id,
+                Some(evidence),
+            )?;
+        }
         ensure_active_attempt(&tx, session, "superseded")?;
         tx.commit()?;
         Ok(())
@@ -1100,6 +1187,7 @@ impl Database {
         session: &PersistedSession,
         occurrences: &[Occurrence],
         fail_after_delete: bool,
+        recording: Option<&super::recording::RecordingEvidence>,
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
@@ -1126,6 +1214,17 @@ impl Database {
                 ])?;
             }
         }
+        if let Some(evidence) = recording {
+            let first = occurrences
+                .first()
+                .ok_or_else(|| anyhow!("RADIO_CURRENT_CHANGED"))?;
+            insert_radio_recording(
+                &tx,
+                &session.session_id,
+                &first.occurrence_id,
+                Some(evidence),
+            )?;
+        }
         ensure_active_attempt(&tx, session, "superseded")?;
         tx.commit()?;
         Ok(())
@@ -1137,7 +1236,7 @@ impl Database {
         session: &PersistedSession,
         occurrences: &[Occurrence],
     ) -> Result<()> {
-        self.persist_playback_structure_inner(session, occurrences, true)
+        self.persist_playback_structure_inner(session, occurrences, true, None)
     }
 
     pub fn append_playback_occurrences(
@@ -1284,6 +1383,7 @@ impl Database {
                     "INSERT OR IGNORE INTO playback_radio_membership(session_id,server_id,track_id,kind) SELECT o.session_id,o.server_id,o.track_id,'excluded' FROM playback_occurrences o JOIN playback_radio_origin r ON r.occurrence_id=o.occurrence_id WHERE o.session_id=?1 AND o.occurrence_id=?2 AND o.ordinal>?3",
                     params![session.session_id,occurrence_id,i64::try_from(current_ordinal)?],
                 )?;
+                tx.execute("INSERT OR IGNORE INTO playback_radio_recording_membership(session_id,recording_key,kind) SELECT r.session_id,r.recording_key,'excluded' FROM playback_radio_recording r JOIN playback_radio_origin o ON o.occurrence_id=r.occurrence_id WHERE r.session_id=?1 AND r.occurrence_id=?2 AND o.ordinal>?3", params![session.session_id,occurrence_id,i64::try_from(current_ordinal)?])?;
             }
             let changed = tx.execute(
                 "DELETE FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2 AND ordinal>?3",
@@ -1435,6 +1535,7 @@ impl Database {
                 "INSERT OR IGNORE INTO playback_radio_membership(session_id,server_id,track_id,kind) SELECT session_id,server_id,track_id,?3 FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
                 params![session.session_id,departed_occurrence_id,kind],
             )?;
+            tx.execute("INSERT OR IGNORE INTO playback_radio_recording_membership(session_id,recording_key,kind) SELECT session_id,recording_key,?3 FROM playback_radio_recording WHERE session_id=?1 AND occurrence_id=?2", params![session.session_id,departed_occurrence_id,kind])?;
         }
         if session.queue_kind == super::model::QueueKind::Radio
             && outcome == "naturalCompletion"
@@ -1646,6 +1747,14 @@ impl Database {
         )?;
         tx.execute(
             "DELETE FROM playback_radio_membership WHERE session_id=?1",
+            [&session.session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM playback_radio_recording_membership WHERE session_id=?1",
+            [&session.session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM playback_radio_recording WHERE session_id=?1",
             [&session.session_id],
         )?;
         tx.execute(
@@ -2472,9 +2581,25 @@ fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) ->
 fn replace_radio_state(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
     tx.execute("DELETE FROM playback_radio_scan", [])?;
     tx.execute("DELETE FROM playback_radio_membership", [])?;
+    tx.execute("DELETE FROM playback_radio_recording_membership", [])?;
+    tx.execute("DELETE FROM playback_radio_recording", [])?;
     tx.execute("DELETE FROM playback_radio_origin", [])?;
     tx.execute("DELETE FROM playback_radio", [])?;
     store_radio_state(tx, session)
+}
+
+fn insert_radio_recording(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    occurrence_id: &str,
+    evidence: Option<&super::recording::RecordingEvidence>,
+) -> Result<()> {
+    if let Some(evidence) = evidence
+        && let Some(key) = evidence.key()
+    {
+        tx.execute("INSERT INTO playback_radio_recording(occurrence_id,session_id,recording_key,resolver_version,provenance) VALUES(?1,?2,?3,?4,?5)", params![occurrence_id,session_id,key.as_str(),super::recording::RESOLVER_VERSION,evidence.provenance.as_str()])?;
+    }
+    Ok(())
 }
 
 fn store_radio_state(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
@@ -2588,6 +2713,52 @@ fn queue_kind_name(kind: super::model::QueueKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v9_radio_membership_migrates_without_guessing_recording_identity() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO playback_radio_membership(session_id,server_id,track_id,kind) VALUES('old','one','track','excluded')", []).unwrap();
+            conn.execute_batch("DROP TABLE playback_radio_recording; DROP TABLE playback_radio_recording_membership; UPDATE playback_schema SET version=9;").unwrap();
+        }
+        db.init_playback().unwrap();
+        assert!(
+            db.radio_has_membership(
+                "old",
+                &TrackSource {
+                    server_id: "one".into(),
+                    track_id: "track".into()
+                }
+            )
+            .unwrap()
+        );
+        assert!(
+            !db.radio_recording_used("old", "mbrec:1:189002e7-3285-4e2e-92a3-7f6c30d407a2:plain")
+                .unwrap()
+        );
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+    }
+
+    #[test]
+    fn unknown_recording_resolver_version_is_recoverable_error() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO playback_radio_recording(occurrence_id,session_id,recording_key,resolver_version,provenance) VALUES('old','old','mbrec:2:uuid:plain',2,'future')", []).unwrap();
+        assert!(
+            db.init_playback()
+                .unwrap_err()
+                .to_string()
+                .contains("UNSUPPORTED_RECORDING_RESOLVER_VERSION")
+        );
+    }
     use uuid::Uuid;
 
     #[test]
@@ -2713,7 +2884,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 9);
+        assert_eq!(PERSISTENCE_VERSION, 10);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);

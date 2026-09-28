@@ -2084,7 +2084,9 @@ fn admit_radio_inner(
         i.state_sequence = i.state_sequence.saturating_add(1);
         return Ok(false);
     }
+    let mut accepted = Vec::new();
     let mut sources = Vec::new();
+    let mut recording_keys = std::collections::HashSet::new();
     let target_center = transition
         .as_ref()
         .map(|item| &item.center)
@@ -2097,7 +2099,14 @@ fn admit_radio_inner(
             center.matches(
                 &candidate.source.server_id,
                 candidate.song.artist_id.as_deref(),
-            )
+            ) || (candidate.center_origin.as_ref() == Some(center)
+                && candidate
+                    .song
+                    .provider_metadata
+                    .recording
+                    .as_ref()
+                    .and_then(|e| e.key())
+                    .is_some())
         }) {
             continue;
         }
@@ -2111,7 +2120,23 @@ fn admit_radio_inner(
         {
             continue;
         }
+        if let Some(key) = candidate
+            .song
+            .provider_metadata
+            .recording
+            .as_ref()
+            .and_then(|e| e.key())
+        {
+            if i.db
+                .radio_recording_used(&i.session.session_id, key.as_str())
+                .map_err(storage)?
+                || !recording_keys.insert(key.as_str().to_owned())
+            {
+                continue;
+            }
+        }
         sources.push(candidate.source.clone());
+        accepted.push(candidate.clone());
     }
     let mut next = i.session.clone();
     if let Some(radio) = next.radio.as_mut() {
@@ -2156,7 +2181,7 @@ fn admit_radio_inner(
         next.state = TransportState::Buffering;
     }
     next.queue_revision = checked_next_revision(next.queue_revision)?;
-    i.db.append_radio_occurrences(&next, current_id, &assigned)
+    i.db.append_radio_occurrences(&next, current_id, &assigned, &accepted)
         .map_err(storage)?;
     i.session = next;
     i.state_sequence = i.state_sequence.saturating_add(1);
@@ -2642,6 +2667,7 @@ fn apply_inner_with_album_context(
                     &next_session,
                     &assigned,
                     audition,
+                    None,
                 )
                 .map_err(storage)?;
             } else {
@@ -2869,8 +2895,13 @@ fn apply_inner_with_album_context(
                 })?;
             next_session.state = TransportState::Idle;
             if let Some(audition) = superseded_audition.as_ref() {
-                i.db.persist_playback_structure_superseding_audition(&next_session, &[], audition)
-                    .map_err(storage)?;
+                i.db.persist_playback_structure_superseding_audition(
+                    &next_session,
+                    &[],
+                    audition,
+                    None,
+                )
+                .map_err(storage)?;
             } else {
                 i.db.clear_playback_session(&next_session)
                     .map_err(storage)?;
@@ -2936,13 +2967,21 @@ fn apply_inner_with_album_context(
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
             next_session.state = TransportState::Buffering;
+            let recording = match &p.operation {
+                SessionOperation::StartRadio { recording, .. } => recording.as_ref(),
+                _ => None,
+            };
             if let Some(audition) = superseded_audition.as_ref() {
                 i.db.persist_playback_structure_superseding_audition(
                     &next_session,
                     &assigned,
                     audition,
+                    recording,
                 )
                 .map_err(storage)?;
+            } else if let Some(evidence) = recording {
+                i.db.persist_radio_start_structure(&next_session, &assigned, evidence)
+                    .map_err(storage)?;
             } else {
                 i.db.persist_playback_structure(&next_session, &assigned)
                     .map_err(storage)?;

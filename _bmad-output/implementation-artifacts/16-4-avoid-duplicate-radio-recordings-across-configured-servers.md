@@ -1,6 +1,9 @@
+---
+baseline_commit: 0421475fefc7f92576777256757c8fd8b0097460
+---
 # Story 16.4: Avoid duplicate Radio recordings across configured servers
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -83,11 +86,38 @@ GPT-6 Codex (story preparation)
 
 ### Debug Log References
 
+- 2026-09-28 provider contract check: [OpenSubsonic Child](https://opensubsonic.netlify.app/docs/responses/child/) documents optional `musicBrainzId`, `mediaType` and `isrc`; `mediaType=song` is required before treating the ID as a recording. [Jellyfin BaseItemDto](https://typescript-sdk.jellyfin.org/interfaces/generated-client.BaseItemDto.html) exposes optional `ProviderIds`; Jellyfin's [track/recording distinction](https://github.com/jellyfin/jellyfin/issues/11020) rules out `MusicBrainzTrack` as a recording key. The adapter requests `ProviderIds` on music item/list/search paths and only accepts `MusicBrainzRecording` on Audio items. Audiobookshelf remains unmatched.
+- Configured local server inventory (server type/version only; no addresses or credentials read into logs): Jellyfin 12.1.0 ×1, OpenSubsonic 1.16.1 ×1, Audiobookshelf with no recorded version ×3. Authenticated track-response and real-library identity coverage have not been measured yet; adapter fixtures establish parser correctness only.
+- Red phase: the new resolver tests failed to compile before `RecordingEvidence` existed. Green phase: recording and Radio tests pass. The first full daemon run failed only on one Jellyfin mock request that still expected the old `Fields` list; it was updated. The final unsandboxed loopback fixture suite passed (1,242 daemon unit tests and 5 contract tests; 6 ignored). Local UI TypeScript/build, `cargo fmt --check`, and `git diff --check` passed. Clippy completed with existing warnings and no errors.
+
+### Implementation Plan
+
+- Keep provider recording evidence private in `Song.provider_metadata`. Use one validated MusicBrainz recording UUID with provider provenance and explicit performance-version vetoes; neither local IDs nor ISRC, release, work, artist or title/duration alone create a recording key.
+- Preserve `run_pipeline` ordering, then collapse only confident keys in bounded pools. Choose one fetched copy using comparable same-codec bitrate and stable configured-source ties; try another bounded copy if preparation fails. Keep the artist anchor separate from the selected portable playback source.
+- Persist immutable, versioned automatic-occurrence associations and indexed heard/excluded membership in schema 10. Source-qualified schema 9 rows remain authoritative. Recheck both forms of membership in the owner and the append transaction; renew only heard membership, and clear the exclusion scope on a new Radio.
+
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 
 ### File List
 
+- `.github/workflows/build.yml`
 - `_bmad-output/implementation-artifacts/16-4-avoid-duplicate-radio-recordings-across-configured-servers.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/api.rs`
+- `hifimule-daemon/src/auto_fill/mod.rs`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/radio.rs`
+- `hifimule-daemon/src/playback/recording.rs`
+- `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_selection.rs`
+- `hifimule-daemon/src/sync.rs`
