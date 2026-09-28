@@ -151,6 +151,12 @@ impl PlaybackCommandService {
         let resume_epoch = snapshot.resume_epoch;
         let gain = f32::from_bits(snapshot.gain_bits);
         let admitted_suffix = snapshot.qualified_suffix.clone();
+        let queue_kind = if snapshot.mode == super::model::PlaybackMode::Preview {
+            super::model::QueueKind::Manual
+        } else {
+            snapshot.queue_kind
+        };
+        let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -176,20 +182,43 @@ impl PlaybackCommandService {
                 return;
             }
             let failure = match resolved {
-                Some(Ok(Ok(description))) => super::audio::global()
-                    .start_at_epoch_with_gain(
-                        description,
-                        current.source,
-                        position_ms,
-                        generation.clone(),
-                        playback.clone(),
-                        deadline,
+                Some(Ok(Ok(description))) => {
+                    let Some((gain, admitted_suffix)) = resolved_gain(
+                        &playback,
+                        queue_kind,
+                        queue_revision,
+                        &generation,
                         resume_epoch,
+                        &current,
+                        &description.song,
                         gain,
                         admitted_suffix,
-                    )
-                    .await
-                    .err(),
+                    ) else {
+                        playback.publish_event_at_epoch(
+                            generation,
+                            super::model::PlaybackEvent::Failed {
+                                code: "RADIO_POLICY_UNAVAILABLE".into(),
+                                retryable: true,
+                            },
+                            resume_epoch,
+                        );
+                        return;
+                    };
+                    super::audio::global()
+                        .start_at_epoch_with_gain(
+                            description,
+                            current.source,
+                            position_ms,
+                            generation.clone(),
+                            playback.clone(),
+                            deadline,
+                            resume_epoch,
+                            gain,
+                            admitted_suffix,
+                        )
+                        .await
+                        .err()
+                }
                 Some(Ok(Err(error))) => Some(
                     super::audio::PlaybackPipelineError::from_provider_error(error),
                 ),
@@ -247,6 +276,12 @@ impl PlaybackCommandService {
         let back_audible = snapshot.back_audible;
         let gain = f32::from_bits(snapshot.gain_bits);
         let admitted_suffix = snapshot.qualified_suffix.clone();
+        let queue_kind = if snapshot.mode == super::model::PlaybackMode::Preview {
+            super::model::QueueKind::Manual
+        } else {
+            snapshot.queue_kind
+        };
+        let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -272,20 +307,44 @@ impl PlaybackCommandService {
                 return;
             }
             let failure = match resolved {
-                Some(Ok(Ok(description))) => super::audio::global()
-                    .start_back_at_epoch_with_gain(
-                        description,
-                        current.source,
-                        pending.operation_id.clone(),
-                        generation.clone(),
-                        playback.clone(),
-                        deadline,
+                Some(Ok(Ok(description))) => {
+                    let Some((gain, admitted_suffix)) = resolved_gain(
+                        &playback,
+                        queue_kind,
+                        queue_revision,
+                        &generation,
                         back_epoch,
+                        &current,
+                        &description.song,
                         gain,
                         admitted_suffix,
-                    )
-                    .await
-                    .err(),
+                    ) else {
+                        playback.publish_event_at_epoch(
+                            generation,
+                            super::model::PlaybackEvent::BackFailed {
+                                operation_id: pending.operation_id,
+                                code: "BACK_SOURCE_UNAVAILABLE".into(),
+                                retryable: true,
+                            },
+                            back_epoch,
+                        );
+                        return;
+                    };
+                    super::audio::global()
+                        .start_back_at_epoch_with_gain(
+                            description,
+                            current.source,
+                            pending.operation_id.clone(),
+                            generation.clone(),
+                            playback.clone(),
+                            deadline,
+                            back_epoch,
+                            gain,
+                            admitted_suffix,
+                        )
+                        .await
+                        .err()
+                }
                 Some(Ok(Err(error))) => Some(
                     super::audio::PlaybackPipelineError::from_provider_error(error),
                 ),
@@ -340,6 +399,12 @@ impl PlaybackCommandService {
         let seek_epoch = snapshot.seek_epoch;
         let gain = f32::from_bits(snapshot.gain_bits);
         let admitted_suffix = snapshot.qualified_suffix.clone();
+        let queue_kind = if snapshot.mode == super::model::PlaybackMode::Preview {
+            super::model::QueueKind::Manual
+        } else {
+            snapshot.queue_kind
+        };
+        let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -365,21 +430,45 @@ impl PlaybackCommandService {
                 return;
             }
             let failure = match resolved {
-                Some(Ok(Ok(description))) => super::audio::global()
-                    .start_seek_at_epoch_with_gain(
-                        description,
-                        current.source,
-                        pending.requested_position_ms,
-                        pending.operation_id.clone(),
-                        generation.clone(),
-                        playback.clone(),
-                        deadline,
+                Some(Ok(Ok(description))) => {
+                    let Some((gain, admitted_suffix)) = resolved_gain(
+                        &playback,
+                        queue_kind,
+                        queue_revision,
+                        &generation,
                         seek_epoch,
+                        &current,
+                        &description.song,
                         gain,
                         admitted_suffix,
-                    )
-                    .await
-                    .err(),
+                    ) else {
+                        playback.publish_event_at_epoch(
+                            generation,
+                            super::model::PlaybackEvent::SeekFailed {
+                                operation_id: pending.operation_id,
+                                code: "SEEK_FAILED".into(),
+                                retryable: true,
+                            },
+                            seek_epoch,
+                        );
+                        return;
+                    };
+                    super::audio::global()
+                        .start_seek_at_epoch_with_gain(
+                            description,
+                            current.source,
+                            pending.requested_position_ms,
+                            pending.operation_id.clone(),
+                            generation.clone(),
+                            playback.clone(),
+                            deadline,
+                            seek_epoch,
+                            gain,
+                            admitted_suffix,
+                        )
+                        .await
+                        .err()
+                }
                 Some(Ok(Err(error))) => Some(
                     super::audio::PlaybackPipelineError::from_provider_error(error),
                 ),
@@ -432,6 +521,28 @@ pub(crate) fn authorize_prepared_back(
 /// One sequential preparer per installed output pipeline. Capture the fence
 /// before the owner candidate, cancel pending provider/HTTP work on revocation,
 /// and do not allocate another source until the worker releases its old slot.
+#[allow(clippy::too_many_arguments)]
+fn resolved_gain(
+    playback: &PlaybackSession,
+    queue_kind: super::model::QueueKind,
+    queue_revision: u64,
+    generation: &str,
+    control_epoch: u64,
+    occurrence: &super::model::Occurrence,
+    song: &crate::domain::models::Song,
+    gain: f32,
+    admitted_suffix: Option<String>,
+) -> Option<(f32, Option<String>)> {
+    if queue_kind == super::model::QueueKind::Radio {
+        playback
+            .freeze_radio_policy(generation, control_epoch, queue_revision, occurrence, song)
+            .ok()
+            .flatten()
+    } else {
+        Some((gain, admitted_suffix))
+    }
+}
+
 pub(crate) fn spawn_successor_preparation(
     playback: PlaybackSession,
     manager: Arc<tokio::sync::RwLock<ServerManager>>,
@@ -451,7 +562,7 @@ pub(crate) fn spawn_successor_preparation(
                 let control_epoch = playback.control_epoch();
                 let key = (ticket.epoch, control_epoch);
                 if attempted != Some(key) {
-                    if let Some(candidate) =
+                    if let Some(mut candidate) =
                         playback.successor_candidate(&generation, control_epoch)
                     {
                         attempted = Some(key);
@@ -472,6 +583,21 @@ pub(crate) fn spawn_successor_preparation(
                             _ = ticket.cancelled() => None,
                         };
                         if let Some(Ok(Ok(description))) = resolved {
+                            let Some((gain, admitted_suffix)) = resolved_gain(
+                                &playback,
+                                playback.queue_kind(),
+                                candidate.queue_revision,
+                                &generation,
+                                control_epoch,
+                                &candidate.successor,
+                                &description.song,
+                                f32::from_bits(candidate.gain_bits),
+                                candidate.qualified_suffix.clone(),
+                            ) else {
+                                continue;
+                            };
+                            candidate.gain_bits = gain.to_bits();
+                            candidate.qualified_suffix = admitted_suffix;
                             let _ = super::audio::global()
                                 .prepare_successor(
                                     candidate,

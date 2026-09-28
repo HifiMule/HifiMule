@@ -1168,6 +1168,10 @@ async fn handle_playback_apply_session_prepared_fenced(
         }
         _ => None,
     };
+    let start_radio = matches!(
+        &p.operation,
+        crate::playback::model::SessionOperation::StartRadio { .. }
+    );
     let playback = state.playback.clone();
     let owner = playback.clone();
     let audio_fence = selection_fence;
@@ -1192,6 +1196,8 @@ async fn handle_playback_apply_session_prepared_fenced(
             .find(|item| item.source == source)
             .cloned();
         let session_id = result.session_id.clone();
+        let queue_revision = result.queue_revision.parse::<u64>().unwrap_or_default();
+        let start_epoch = playback.control_epoch();
         tokio::spawn(async move {
             if audio_fence
                 .is_some_and(|fence| fence.epoch.load(AtomicOrdering::Acquire) != fence.expected)
@@ -1295,6 +1301,34 @@ async fn handle_playback_apply_session_prepared_fenced(
             };
             let outcome = match resolved {
                 Ok((description, response)) => {
+                    let (gain, admitted_suffix) = if start_radio {
+                        let Some(occurrence) = occurrence.as_ref() else {
+                            return;
+                        };
+                        match playback.freeze_radio_policy(
+                            &generation,
+                            start_epoch,
+                            queue_revision,
+                            occurrence,
+                            &description.song,
+                        ) {
+                            Ok(Some(policy)) => policy,
+                            Ok(None) => return,
+                            Err(_) => {
+                                playback.publish_event_at_epoch(
+                                    generation,
+                                    crate::playback::model::PlaybackEvent::Failed {
+                                        code: "RADIO_POLICY_UNAVAILABLE".into(),
+                                        retryable: true,
+                                    },
+                                    start_epoch,
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        (1.0, None)
+                    };
                     crate::playback::audio::global()
                         .start_with_response(
                             description,
@@ -1303,6 +1337,9 @@ async fn handle_playback_apply_session_prepared_fenced(
                             generation.clone(),
                             playback.clone(),
                             deadline,
+                            start_epoch,
+                            gain,
+                            admitted_suffix,
                             response,
                             audio_fence,
                         )
@@ -16425,6 +16462,7 @@ mod tests {
             suffix: None,
             size_bytes: Some(100),
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         };
         let album = |id: &str, tracks: Vec<crate::domain::models::Song>| {
@@ -16513,6 +16551,7 @@ mod tests {
                 suffix: Some("mp3".to_string()),
                 size_bytes: None,
                 album_loudness: Default::default(),
+                track_loudness: Default::default(),
                 provider_metadata: Default::default(),
             })
             .collect::<Vec<_>>();
@@ -16554,6 +16593,7 @@ mod tests {
             suffix: Some("flac".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         });
 
@@ -16841,6 +16881,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         };
         let provider = FakeBrowseProvider::with_album_and_song(
@@ -16922,6 +16963,7 @@ mod tests {
             suffix: None,
             size_bytes: None,
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         }
     }
@@ -17271,6 +17313,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         };
         let provider = FakePlaylistProvider::with_song("playlist-42", song);
@@ -17315,6 +17358,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         }
     }

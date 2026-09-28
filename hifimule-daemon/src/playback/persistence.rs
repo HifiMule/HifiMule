@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 10;
+pub const PERSISTENCE_VERSION: i64 = 11;
 type RadioRow = (
     String,
     Option<String>,
@@ -94,6 +94,83 @@ fn planned_book_successor(
 }
 
 impl Database {
+    /// Read a frozen Radio decision bound to this exact accepted source copy.
+    /// Missing decisions are v10/legacy occurrences and may freeze on their
+    /// first successful resolution. Malformed or future decisions are errors.
+    pub(crate) fn radio_track_policy(
+        &self,
+        session_id: &str,
+        occurrence: &Occurrence,
+    ) -> Result<Option<super::loudness::FrozenTrackPolicy>> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let row: Option<(String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT server_id,track_id,radio_policy_json FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+                params![session_id, occurrence.occurrence_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((server_id, track_id, json)) = row else {
+            return Err(anyhow!("Radio occurrence is absent"));
+        };
+        if server_id != occurrence.source.server_id || track_id != occurrence.source.track_id {
+            return Err(anyhow!("Radio policy source differs from occurrence"));
+        }
+        json.map(|json| {
+            let policy: super::loudness::FrozenTrackPolicy = serde_json::from_str(&json)?;
+            policy.validate().map_err(|reason| anyhow!(reason))?;
+            Ok(policy)
+        })
+        .transpose()
+    }
+
+    pub(crate) fn freeze_radio_track_policy(
+        &self,
+        session_id: &str,
+        occurrence: &Occurrence,
+        candidate: &super::loudness::FrozenTrackPolicy,
+        is_current: bool,
+    ) -> Result<super::loudness::FrozenTrackPolicy> {
+        candidate.validate().map_err(|reason| anyhow!(reason))?;
+        let mut conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let tx = conn.transaction()?;
+        let row: Option<(String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT server_id,track_id,radio_policy_json FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+                params![session_id, occurrence.occurrence_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((server_id, track_id, json)) = row else {
+            return Err(anyhow!("Radio occurrence is absent"));
+        };
+        if server_id != occurrence.source.server_id || track_id != occurrence.source.track_id {
+            return Err(anyhow!("Radio policy source differs from occurrence"));
+        }
+        let policy = if let Some(json) = json {
+            let existing: super::loudness::FrozenTrackPolicy = serde_json::from_str(&json)?;
+            existing.validate().map_err(|reason| anyhow!(reason))?;
+            existing
+        } else {
+            tx.execute(
+                "UPDATE playback_occurrences SET radio_policy_json=?1 WHERE session_id=?2 AND occurrence_id=?3 AND radio_policy_json IS NULL",
+                params![serde_json::to_string(candidate)?, session_id, occurrence.occurrence_id],
+            )?;
+            candidate.clone()
+        };
+        if is_current {
+            let changed = tx.execute(
+                "UPDATE playback_sessions SET current_gain_bits=?1,current_qualified_suffix=?2 WHERE session_id=?3 AND current_occurrence_id=?4 AND EXISTS(SELECT 1 FROM playback_radio WHERE session_id=?3)",
+                params![i64::from(policy.policy.scalar_bits), policy.qualified_suffix, session_id, occurrence.occurrence_id],
+            )?;
+            if changed != 1 {
+                return Err(anyhow!("Radio current occurrence changed"));
+            }
+        }
+        tx.commit()?;
+        Ok(policy)
+    }
+
     pub fn has_portable_server(&self, server_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(conn.query_row(
@@ -148,7 +225,7 @@ impl Database {
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_schema (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0), album_context_json TEXT, queue_kind TEXT NOT NULL DEFAULT 'manual' CHECK(queue_kind IN ('album','manual')), current_gain_bits INTEGER NOT NULL DEFAULT 1065353216 CHECK(current_gain_bits>=0 AND current_gain_bits<=4294967295), current_qualified_suffix TEXT, active_attempt_id TEXT);
-            CREATE TABLE IF NOT EXISTS playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL CHECK(ordinal>=0), server_id TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(session_id, ordinal));
+            CREATE TABLE IF NOT EXISTS playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL CHECK(ordinal>=0), server_id TEXT NOT NULL, track_id TEXT NOT NULL, radio_policy_json TEXT, PRIMARY KEY(session_id, ordinal));
             CREATE INDEX IF NOT EXISTS playback_occurrences_source ON playback_occurrences(session_id,server_id,track_id);
             CREATE TABLE IF NOT EXISTS playback_attempts (attempt_seq INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT CHECK(disposition IN ('naturalCompletion','explicitSkip','technicalFailure','restarted','backNavigation','superseded','interrupted') OR disposition IS NULL), failure_code TEXT, terminal_position_ms INTEGER CHECK(terminal_position_ms>=0), legacy INTEGER NOT NULL DEFAULT 0 CHECK(legacy IN (0,1)));
             CREATE INDEX IF NOT EXISTS playback_attempts_page ON playback_attempts(session_id,attempt_seq);
@@ -234,6 +311,20 @@ impl Database {
             if !has_outcome {
                 tx.execute("ALTER TABLE playback_occurrences ADD COLUMN outcome TEXT CHECK(outcome IN ('naturalCompletion','explicitSkip','technicalFailure') OR outcome IS NULL)", [])?;
             }
+        }
+        let has_radio_policy = {
+            let mut statement = tx.prepare("PRAGMA table_info(playback_occurrences)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|name| name == "radio_policy_json")
+        };
+        if !has_radio_policy {
+            tx.execute(
+                "ALTER TABLE playback_occurrences ADD COLUMN radio_policy_json TEXT",
+                [],
+            )?;
         }
         let has_failure_code = {
             let mut statement = tx.prepare("PRAGMA table_info(playback_occurrences)")?;
@@ -2715,6 +2806,110 @@ mod tests {
     use super::*;
 
     #[test]
+    fn radio_policy_is_source_bound_immutable_and_rejects_corruption() {
+        use crate::domain::models::TrackLoudnessEvidence;
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let first = occurrence(&session_id, 0, "same-track");
+        let mut second = occurrence(&session_id, 1, "same-track");
+        second.source.server_id = "other-server".into();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms) VALUES(1,?1,0,0,'paused',?2,0)",
+                params![session_id, first.occurrence_id]).unwrap();
+            conn.execute(
+                "INSERT INTO playback_radio(session_id,logical_id,status) VALUES(?1,?2,'waiting')",
+                params![session_id, uuid::Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+            for row in [&first, &second] {
+                conn.execute("INSERT INTO playback_occurrences(session_id,occurrence_id,ordinal,server_id,track_id) VALUES(?1,?2,?3,?4,?5)",
+                    params![session_id, row.occurrence_id, row.ordinal as i64, row.source.server_id, row.source.track_id]).unwrap();
+            }
+        }
+        let mut song: crate::domain::models::Song = serde_json::from_value(serde_json::json!({
+            "id":"same-track","title":"Track","duration":1,"suffix":"flac","contentType":"audio/flac"
+        })).unwrap();
+        song.track_loudness = TrackLoudnessEvidence::open_subsonic(-6.0, 0.8);
+        let quiet = super::super::loudness::FrozenTrackPolicy::from_song(&song);
+        song.track_loudness = TrackLoudnessEvidence::open_subsonic(6.0, 0.8);
+        let loud = super::super::loudness::FrozenTrackPolicy::from_song(&song);
+        assert_ne!(quiet.policy.scalar_bits, loud.policy.scalar_bits);
+        db.freeze_radio_track_policy(&session_id, &first, &quiet, true)
+            .unwrap();
+        db.freeze_radio_track_policy(&session_id, &second, &loud, false)
+            .unwrap();
+        assert_eq!(
+            db.radio_track_policy(&session_id, &first).unwrap(),
+            Some(quiet.clone())
+        );
+        assert_eq!(
+            db.radio_track_policy(&session_id, &second).unwrap(),
+            Some(loud.clone())
+        );
+        assert_eq!(
+            db.freeze_radio_track_policy(&session_id, &first, &loud, true)
+                .unwrap(),
+            quiet
+        );
+        let mut wrong_copy = first.clone();
+        wrong_copy.source.server_id = "other-server".into();
+        assert!(db.radio_track_policy(&session_id, &wrong_copy).is_err());
+        db.conn.lock().unwrap().execute(
+            r#"UPDATE playback_occurrences SET radio_policy_json='{"version":99}' WHERE occurrence_id=?1"#,
+            [&second.occurrence_id],
+        ).unwrap();
+        assert!(db.radio_track_policy(&session_id, &second).is_err());
+    }
+
+    #[test]
+    fn schema_ten_radio_occurrences_migrate_without_losing_source_rows() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let occurrence_id = uuid::Uuid::new_v4().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO playback_sessions(singleton_id,session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms) VALUES(1,?1,7,3,'paused',?2,1234)",
+                params![session_id, occurrence_id]).unwrap();
+            conn.execute("INSERT INTO playback_occurrences(session_id,occurrence_id,ordinal,server_id,track_id) VALUES(?1,?2,0,'one','track')",
+                params![session_id, occurrence_id]).unwrap();
+            conn.execute(
+                "INSERT INTO playback_radio(session_id,logical_id,status) VALUES(?1,?2,'waiting')",
+                params![session_id, uuid::Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+            conn.execute_batch("ALTER TABLE playback_occurrences DROP COLUMN radio_policy_json; UPDATE playback_schema SET version=10;").unwrap();
+        }
+        assert!(db.init_playback_with_injected_failure().is_err());
+        {
+            let conn = db.conn.lock().unwrap();
+            let version: i64 = conn
+                .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 10);
+            let columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(playback_occurrences)")
+                .unwrap()
+                .query_map([], |row| row.get(1))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(!columns.iter().any(|name| name == "radio_policy_json"));
+        }
+        db.init_playback().unwrap();
+        let row: (i64, String, String, Option<String>) = db.conn.lock().unwrap()
+            .query_row("SELECT ordinal,server_id,track_id,radio_policy_json FROM playback_occurrences WHERE occurrence_id=?1",
+                [&occurrence_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(row, (0, "one".into(), "track".into(), None));
+        let state = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(state.queue_revision, 7);
+        assert_eq!(state.position_ms, 1234);
+        assert_eq!(state.queue_kind, super::super::model::QueueKind::Radio);
+    }
+
+    #[test]
     fn v9_radio_membership_migrates_without_guessing_recording_identity() {
         let db = Database::memory().unwrap();
         db.init_playback().unwrap();
@@ -2744,7 +2939,7 @@ mod tests {
             .unwrap()
             .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]
@@ -2884,7 +3079,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 10);
+        assert_eq!(PERSISTENCE_VERSION, 11);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);

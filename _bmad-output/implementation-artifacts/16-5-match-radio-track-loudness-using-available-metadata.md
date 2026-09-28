@@ -1,6 +1,10 @@
+---
+baseline_commit: 06bcd8490f19bd4e7c820b2d876722cf09b71d0a
+---
+
 # Story 16.5: Match Radio track loudness using available metadata
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -23,24 +27,24 @@ so that music from different albums has more consistent listening levels without
 
 ## Tasks / Subtasks
 
-- [ ] Lock the track policy contract before wiring playback (AC: 1–3, 5).
-  - [ ] Define the supported OpenSubsonic `Child.replayGain.trackGain` dB adjustment and `trackPeak` linear sample peak pair, conventional ReplayGain reference (89 dB SPL), zero preamp, accepted provider capability and original representation baseline. Use the supplied adjustment; do not treat it as raw measured LUFS or convert it between reference scales.
-  - [ ] Reuse Story 15.10's accepted bounds (`gain ∈ [-60,+30]` dB, `peak ∈ (0,64]`), `SAMPLE_PEAK_CEILING = 10^(-1/20)`, `min(10^(gain/20), ceiling/peak)`, finite checks, and downward f32 rounding. Factor shared math/format qualification instead of cloning it. Keep album-specific consistency checks album-only.
-  - [ ] Specify frozen-policy version, provenance/reason, source and occurrence identity, and the safe unity result for every unsupported or invalid case. Decide and document exactly when a policy is frozen and how old Radio sessions without it restore.
-- [ ] Retain and validate optional track evidence through the existing provider boundary (AC: 1–3, 4, 7).
-  - [ ] Add an equality-safe, bounded, daemon-private track evidence type beside `AlbumLoudnessEvidence` on `Song`; keep public `Song` JSON and provider credentials unchanged. Parse `trackGain`/`trackPeak` independently of album fields from tolerant raw OpenSubsonic `replayGain` JSON. A malformed optional field must not invalidate the song DTO or its album evidence.
-  - [ ] Apply the same verified OpenSubsonic capability gate to both `get_song`/`resolve_playback` and album/list paths. Classic Subsonic, Jellyfin, Audiobookshelf and embedded-only values remain unity until an equivalent gain/peak/reference/decoder-baseline contract is separately established. Nonzero or invalid `baseGain` is not silently combined; preserve the codec's mandatory output gain in normal decoding.
-  - [ ] Bind evidence to the source copy returned by `resolve_playback`, not recording identity or currently browsed server. The selected original representation must match the qualified suffix/container/codec; a later contradiction yields recoverable preparation failure for frozen non-unity policy, not unsafe gain or automatic source replacement.
-- [ ] Integrate a frozen Radio policy with session ownership and audio preparation (AC: 1, 4–7).
-  - [ ] Reuse `playback/loudness.rs` math, `audio.rs::qualified_gain_suffix`, `decoder.rs::decode_stream_with_seek_and_gain`, and both CPAL/Pulse preparation paths. Scale packed f32 after swresample and before PCM enqueue, including flush; preserve unity's bit-exact bypass and submitted-tail replay without rescaling.
-  - [ ] Dispatch by queue/session mode and occurrence: album member → common album policy; Radio occurrence → its own track policy; manual/Preview/nonmember → unity. Pass the selected policy and admitted representation through initial, successor, seek, Back, Retry, output recreation and Preview return. Keep the existing generation/control-epoch/occurrence checks before publishing audio or persisting a policy.
-  - [ ] Persist only the minimal versioned, validated frozen policy needed for accepted Radio occurrences. If the SQLite schema changes, migrate schema 10 transactionally, preserve queue, source references, recording associations, heard/excluded state, album context and command outcomes, and reject corrupt/future policy safely. A metadata fetch failure must not erase an accepted occurrence or its recoverable session.
-  - [ ] Preserve bounded five-upcoming Radio queue, two audio slots, existing compressed/PCM caps and preparation deadlines. No new global cache, provider-side library analysis, callback DSP, limiter or crossfade.
+- [x] Lock the track policy contract before wiring playback (AC: 1–3, 5).
+  - [x] Define the supported OpenSubsonic `Child.replayGain.trackGain` dB adjustment and `trackPeak` linear sample peak pair, conventional ReplayGain reference (89 dB SPL), zero preamp, accepted provider capability and original representation baseline. Use the supplied adjustment; do not treat it as raw measured LUFS or convert it between reference scales.
+  - [x] Reuse Story 15.10's accepted bounds (`gain ∈ [-60,+30]` dB, `peak ∈ (0,64]`), `SAMPLE_PEAK_CEILING = 10^(-1/20)`, `min(10^(gain/20), ceiling/peak)`, finite checks, and downward f32 rounding. Factor shared math/format qualification instead of cloning it. Keep album-specific consistency checks album-only.
+  - [x] Specify frozen-policy version, provenance/reason, source and occurrence identity, and the safe unity result for every unsupported or invalid case. Decide and document exactly when a policy is frozen and how old Radio sessions without it restore.
+- [x] Retain and validate optional track evidence through the existing provider boundary (AC: 1–3, 4, 7).
+  - [x] Add an equality-safe, bounded, daemon-private track evidence type beside `AlbumLoudnessEvidence` on `Song`; keep public `Song` JSON and provider credentials unchanged. Parse `trackGain`/`trackPeak` independently of album fields from tolerant raw OpenSubsonic `replayGain` JSON. A malformed optional field must not invalidate the song DTO or its album evidence.
+  - [x] Apply the same verified OpenSubsonic capability gate to both `get_song`/`resolve_playback` and album/list paths. Classic Subsonic, Jellyfin, Audiobookshelf and embedded-only values remain unity until an equivalent gain/peak/reference/decoder-baseline contract is separately established. Nonzero or invalid `baseGain` is not silently combined; preserve the codec's mandatory output gain in normal decoding.
+  - [x] Bind evidence to the source copy returned by `resolve_playback`, not recording identity or currently browsed server. The selected original representation must match the qualified suffix/container/codec; a later contradiction yields recoverable preparation failure for frozen non-unity policy, not unsafe gain or automatic source replacement.
+- [x] Integrate a frozen Radio policy with session ownership and audio preparation (AC: 1, 4–7).
+  - [x] Reuse `playback/loudness.rs` math, `audio.rs::qualified_gain_suffix`, `decoder.rs::decode_stream_with_seek_and_gain`, and both CPAL/Pulse preparation paths. Scale packed f32 after swresample and before PCM enqueue, including flush; preserve unity's bit-exact bypass and submitted-tail replay without rescaling.
+  - [x] Dispatch by queue/session mode and occurrence: album member → common album policy; Radio occurrence → its own track policy; manual/Preview/nonmember → unity. Pass the selected policy and admitted representation through initial, successor, seek, Back, Retry, output recreation and Preview return. Keep the existing generation/control-epoch/occurrence checks before publishing audio or persisting a policy.
+  - [x] Persist only the minimal versioned, validated frozen policy needed for accepted Radio occurrences. If the SQLite schema changes, migrate schema 10 transactionally, preserve queue, source references, recording associations, heard/excluded state, album context and command outcomes, and reject corrupt/future policy safely. A metadata fetch failure must not erase an accepted occurrence or its recoverable session.
+  - [x] Preserve bounded five-upcoming Radio queue, two audio slots, existing compressed/PCM caps and preparation deadlines. No new global cache, provider-side library analysis, callback DSP, limiter or crossfade.
 - [ ] Verify source-to-sample behavior and regression gates (AC: 1–8).
-  - [ ] Test raw OpenSubsonic metadata parsing: valid zero/positive/negative gain, peak >1, cap reduction, partial/malformed/overflow/non-finite values, nonzero `baseGain`, absent capability, album-only values and conflicting track tags. Confirm malformed track evidence leaves album behavior intact and vice versa.
+  - [x] Test raw OpenSubsonic metadata parsing: valid zero/positive/negative gain, peak >1, cap reduction, partial/malformed/overflow/non-finite values, nonzero `baseGain`, absent capability, album-only values and conflicting track tags. Confirm malformed track evidence leaves album behavior intact and vice versa.
   - [ ] Test owner/admission and SQLite migration/reopen: source-copy-specific policy, identical track IDs on different servers, manual repetitions, new Radio, album/standalone/Preview dispatch, paused restoration, stale resolve after replacement/seek/queue edit, and corrupted/future policy. Exercise CPAL and Pulse call sites.
-  - [ ] Use two known-level Radio tracks with distinct gain/peak tags through provider → prepared decoder → boundary consumer; compare independent expected scalars and packed-f32 samples, including tail, seek and Pause replay. Assert exact frame/boundary markers and no accidental gain-square. Test album session on the same fixtures to prove common gain persists.
-  - [ ] Run focused and full affected daemon tests via the controlled `npm run build:daemon -- test -p hifimule-daemon ...` wrapper, formatting, Clippy, and four shipping-platform source/fixture jobs. If UI/wire contracts change, run TypeScript/build and localization parity. Record actual installed/physical-output tests separately and leave unrun rows unverified.
+  - [x] Use two known-level Radio tracks with distinct gain/peak tags through provider → prepared decoder → boundary consumer; compare independent expected scalars and packed-f32 samples, including tail, seek and Pause replay. Assert exact frame/boundary markers and no accidental gain-square. Test album session on the same fixtures to prove common gain persists.
+  - [x] Run focused and full affected daemon tests via the controlled `npm run build:daemon -- test -p hifimule-daemon ...` wrapper, formatting, Clippy, and four shipping-platform source/fixture jobs. If UI/wire contracts change, run TypeScript/build and localization parity. Record actual installed/physical-output tests separately and leave unrun rows unverified.
 
 ## Dev Notes
 
@@ -81,17 +85,50 @@ Keep provider parsing in `providers/`, metadata and shared gain math in `domain/
 
 ### Agent Model Used
 
-GPT-6 Codex (story preparation)
+GPT-6 Codex (story implementation)
+
+### Implementation Plan
+
+- Keep track evidence private on `Song`; parse only qualified OpenSubsonic track gain/peak fields, independently of album evidence.
+- Reuse album scalar bounds and static peak math, then freeze a versioned Radio decision against the accepted occurrence and source copy in schema 11. Legacy Radio rows freeze on first successful resolution.
+- Route initial and resumed Radio preparation through the owner fence and existing decoder gain path. Keep album, manual and Preview mode dispatch separate; verify production decoded samples with a deterministic two-track fixture.
 
 ### Debug Log References
 
-- Story creation inspected planning artifacts, current gain/provider/session code and recent Git history; no implementation or platform test was run.
+- Initial context review identified the existing album gain primitive, OpenSubsonic capability gate, owner generation/control fences and two audio preparation paths.
+- Red-phase tests covered track evidence, frozen scalar validation, source-bound policy/migration and digital source-to-sample behavior. The controlled local daemon suite passed after implementation: 1,255 unit tests, 5 integration tests, 6 ignored, 0 failures. `fmt --check`, normal Clippy and `git diff --check` passed; normal Clippy emitted existing repository warnings. Strict `-D warnings` is blocked by those existing warnings.
+- The four shipping-platform workflow jobs are configured but have not run on this uncommitted source. The local GitHub browser is unauthenticated and `gh` is unavailable, so a PR/CI run cannot be started from this workspace. Installed and physical output evidence remains unverified.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
+- Added optional OpenSubsonic track ReplayGain evidence and a validated, versioned Radio policy using the existing sample-peak ceiling and decoder scaling path.
+- Bound frozen policy to the accepted occurrence/source in schema 11 and preserved paused restore, Preview isolation and source-specific decisions. Added provider, scalar, owner, migration and digital boundary fixtures.
+- The story remains in progress until the four-platform source/fixture jobs and remaining owner/native-path evidence are run and assessed. See `docs/playback-installed-test-checklist.md` for the evidence boundary.
 
 ### File List
 
+- `.github/workflows/build.yml`
 - `_bmad-output/implementation-artifacts/16-5-match-radio-track-loudness-using-available-metadata.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/auto_fill/fetch.rs`
+- `hifimule-daemon/src/auto_fill/pipeline.rs`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/playback/album.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/decoder_continuity_tests.rs`
+- `hifimule-daemon/src/playback/loudness.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/radio.rs`
+- `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+
+### Change Log
+
+- 2026-09-28: Implemented source-bound Radio track ReplayGain, schema 11 frozen policy, production decoder fixtures, and four-platform CI fixture commands. Local validation passed; platform and installed evidence remain open.

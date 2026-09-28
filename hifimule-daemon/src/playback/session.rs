@@ -379,6 +379,14 @@ impl PlaybackSession {
             .db
             .playback_successor(&inner.session.session_id, predecessor.ordinal)
             .ok()??;
+        let radio_policy = if inner.session.queue_kind == QueueKind::Radio {
+            inner
+                .db
+                .radio_track_policy(&inner.session.session_id, &successor)
+                .ok()?
+        } else {
+            None
+        };
         let gain_bits = if inner.session.queue_kind == QueueKind::Album {
             inner
                 .session
@@ -387,6 +395,8 @@ impl PlaybackSession {
                 .map_or(1.0f32.to_bits(), |context| {
                     context.scalar_for(&successor).to_bits()
                 })
+        } else if let Some(policy) = radio_policy.as_ref() {
+            policy.policy.scalar_bits
         } else {
             1.0f32.to_bits()
         };
@@ -406,9 +416,84 @@ impl PlaybackSession {
                         .as_ref()
                         .and_then(|context| context.suffix_for(&successor))
                 })
-                .flatten(),
+                .flatten()
+                .or_else(|| radio_policy.and_then(|policy| policy.qualified_suffix)),
             gain_bits,
         })
+    }
+
+    pub(crate) fn queue_kind(&self) -> QueueKind {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.session.queue_kind
+    }
+
+    /// Freeze one Radio source decision only while its generation, queue and
+    /// control epoch still own the current or immediate successor occurrence.
+    /// An existing decision wins over all later provider metadata.
+    pub(crate) fn freeze_radio_policy(
+        &self,
+        generation_id: &str,
+        control_epoch: u64,
+        queue_revision: u64,
+        occurrence: &Occurrence,
+        song: &crate::domain::models::Song,
+    ) -> PResult<Option<(f32, Option<String>)>> {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if inner.generation_id != generation_id
+            || inner.control_epoch.load(Ordering::Acquire) != control_epoch
+            || inner.session.queue_revision != queue_revision
+            || inner.session.queue_kind != QueueKind::Radio
+            || inner.preview.is_some()
+            || song.id != occurrence.source.track_id
+        {
+            return Ok(None);
+        }
+        let is_current = inner.session.current_occurrence_id.as_deref()
+            == Some(occurrence.occurrence_id.as_str());
+        if !is_current {
+            let current_id = inner
+                .session
+                .current_occurrence_id
+                .as_deref()
+                .ok_or_else(|| {
+                    PlaybackError::conflict(
+                        "GENERATION_CONFLICT",
+                        "Radio current occurrence changed",
+                    )
+                })?;
+            let current = inner
+                .db
+                .playback_occurrence(&inner.session.session_id, current_id)
+                .map_err(storage)?
+                .ok_or_else(|| {
+                    PlaybackError::conflict(
+                        "GENERATION_CONFLICT",
+                        "Radio current occurrence changed",
+                    )
+                })?;
+            let successor = inner
+                .db
+                .playback_successor(&inner.session.session_id, current.ordinal)
+                .map_err(storage)?;
+            if successor.as_ref() != Some(occurrence) {
+                return Ok(None);
+            }
+        }
+        let candidate = super::loudness::FrozenTrackPolicy::from_song(song);
+        let frozen = inner
+            .db
+            .freeze_radio_track_policy(
+                &inner.session.session_id,
+                occurrence,
+                &candidate,
+                is_current,
+            )
+            .map_err(storage)?;
+        if is_current {
+            inner.session.current_gain_bits = frozen.policy.scalar_bits;
+            inner.session.current_qualified_suffix = frozen.qualified_suffix.clone();
+        }
+        Ok(Some((frozen.policy.scalar(), frozen.qualified_suffix)))
     }
 
     pub fn restore(db: Arc<Database>, instance_id: String) -> Self {
@@ -2643,7 +2728,7 @@ fn apply_inner_with_album_context(
             }
             let start = assigned.get(start_index);
             next_session.current_occurrence_id = start.map(|o| o.occurrence_id.clone());
-            set_current_policy(&mut next_session, start);
+            set_current_policy(&i.db, &mut next_session, start);
             next_session.position_ms = start_position_ms;
             next_session.queue_revision = next_session
                 .queue_revision
@@ -2728,7 +2813,7 @@ fn apply_inner_with_album_context(
                 next_session.current_occurrence_id =
                     assigned.first().map(|o| o.occurrence_id.clone());
                 next_session.position_ms = 0;
-                set_current_policy(&mut next_session, assigned.first());
+                set_current_policy(&i.db, &mut next_session, assigned.first());
             }
             next_session.queue_revision = next_session
                 .queue_revision
@@ -2871,7 +2956,7 @@ fn apply_inner_with_album_context(
                     .ok_or_else(|| {
                         PlaybackError::invalid("INVALID_SESSION", "selected occurrence is absent")
                     })?;
-            set_current_policy(&mut next_session, Some(&selected));
+            set_current_policy(&i.db, &mut next_session, Some(&selected));
             next_session.position_ms = 0;
             next_session.state = TransportState::Paused;
             i.db.select_playback_current(&next_session).map_err(|_| {
@@ -3413,7 +3498,7 @@ fn fence_successor_for_edit(i: &Inner) -> PResult<()> {
     }
     Ok(())
 }
-fn set_current_policy(session: &mut PersistedSession, current: Option<&Occurrence>) {
+fn set_current_policy(db: &Database, session: &mut PersistedSession, current: Option<&Occurrence>) {
     let policy = if session.queue_kind == QueueKind::Album {
         current.and_then(|occurrence| {
             session.album_context.as_ref().map(|context| {
@@ -3422,6 +3507,13 @@ fn set_current_policy(session: &mut PersistedSession, current: Option<&Occurrenc
                     context.suffix_for(occurrence),
                 )
             })
+        })
+    } else if session.queue_kind == QueueKind::Radio {
+        current.and_then(|occurrence| {
+            db.radio_track_policy(&session.session_id, occurrence)
+                .ok()
+                .flatten()
+                .map(|frozen| (frozen.policy.scalar_bits, frozen.qualified_suffix))
         })
     } else {
         None
@@ -4134,7 +4226,7 @@ fn back_control_inner(
         .filter(|value| *value <= i64::MAX as u64)
         .ok_or_else(|| storage(anyhow::anyhow!("checkpoint sequence overflow")))?;
     if changed {
-        set_current_policy(&mut next, Some(&target));
+        set_current_policy(&i.db, &mut next, Some(&target));
     }
     let close = i.db.active_playback_attempt().map_err(storage)?.map(|_| {
         if changed {
@@ -4984,7 +5076,7 @@ fn adopt_presented_handoff(
         i.db.playback_occurrence(&i.session.session_id, &token.successor_occurrence_id)
             .map_err(storage)?
             .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "successor absent"))?;
-    set_current_policy(&mut next, Some(&successor));
+    set_current_policy(&i.db, &mut next, Some(&successor));
     next.position_ms = successor_offset_frames.saturating_mul(1000) / u64::from(sample_rate);
     next.state = if i.output_gate.load(Ordering::Acquire) {
         TransportState::Playing
@@ -5221,7 +5313,7 @@ fn commit_terminal(
         }
         response.main_current = response.current.clone();
         if terminal.session.current_occurrence_id != i.session.current_occurrence_id {
-            set_current_policy(&mut terminal.session, response.current.as_ref());
+            set_current_policy(&i.db, &mut terminal.session, response.current.as_ref());
         }
         // The projection began with the predecessor snapshot. Transport effects
         // must use the destination occurrence's frozen policy after the commit.
@@ -9263,7 +9355,7 @@ mod tests {
                     reason: super::super::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
                 },
             });
-            set_current_policy(&mut session, Some(&rows[current_index]));
+            set_current_policy(&db, &mut session, Some(&rows[current_index]));
         }
         db.persist_playback_structure(&session, &rows).unwrap();
         let playback = PlaybackSession::restore(db.clone(), "review-queue-owner".into());

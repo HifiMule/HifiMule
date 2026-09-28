@@ -951,6 +951,7 @@ mod tests {
             suffix: None,
             size_bytes: Some(1_000),
             album_loudness: Default::default(),
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         }
     }

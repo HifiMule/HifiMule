@@ -41,6 +41,45 @@ impl AlbumLoudnessEvidence {
     }
 }
 
+/// Optional track ReplayGain evidence retained only inside the daemon.
+/// A rejected pair is distinct from a missing pair; neither can request gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackLoudnessEvidence {
+    #[default]
+    Absent,
+    Rejected,
+    OpenSubsonic {
+        gain_db_bits: u64,
+        peak_bits: u64,
+    },
+}
+
+impl TrackLoudnessEvidence {
+    pub fn open_subsonic(gain_db: f64, peak: f64) -> Self {
+        if !gain_db.is_finite()
+            || !peak.is_finite()
+            || !(-60.0..=30.0).contains(&gain_db)
+            || !(0.0 < peak && peak <= 64.0)
+        {
+            return Self::Rejected;
+        }
+        Self::OpenSubsonic {
+            gain_db_bits: gain_db.to_bits(),
+            peak_bits: peak.to_bits(),
+        }
+    }
+
+    pub fn values(self) -> Option<(f64, f64)> {
+        match self {
+            Self::OpenSubsonic {
+                gain_db_bits,
+                peak_bits,
+            } => Some((f64::from_bits(gain_db_bits), f64::from_bits(peak_bits))),
+            Self::Absent | Self::Rejected => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Library {
     pub id: String,
@@ -87,6 +126,8 @@ pub struct Song {
     pub size_bytes: Option<u64>,
     #[serde(skip)]
     pub album_loudness: AlbumLoudnessEvidence,
+    #[serde(skip)]
+    pub track_loudness: TrackLoudnessEvidence,
     #[serde(skip, default)]
     pub provider_metadata: ProviderItemMetadata,
 }
@@ -387,6 +428,7 @@ mod tests {
             suffix: Some("mp3".to_string()),
             size_bytes: None,
             album_loudness: AlbumLoudnessEvidence::Absent,
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         };
 

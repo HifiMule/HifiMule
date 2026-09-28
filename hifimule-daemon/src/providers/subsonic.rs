@@ -436,7 +436,7 @@ impl MediaProvider for SubsonicProvider {
 
     async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
         let song = self.client.get_song(song_id).await?;
-        Ok(song_from_dto(song.song))
+        Ok(song_from_dto_with_capability(song.song, self.open_subsonic))
     }
 
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
@@ -456,7 +456,7 @@ impl MediaProvider for SubsonicProvider {
             .entry
             .iter()
             .cloned()
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect();
 
         Ok(PlaylistWithTracks {
@@ -476,7 +476,7 @@ impl MediaProvider for SubsonicProvider {
             .entry
             .into_iter()
             .take(limit as usize)
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect())
     }
 
@@ -493,7 +493,7 @@ impl MediaProvider for SubsonicProvider {
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect())
     }
 
@@ -597,7 +597,11 @@ impl MediaProvider for SubsonicProvider {
         Ok(SearchResult {
             artists: result.artist.into_iter().map(artist_from_dto).collect(),
             albums: result.album.into_iter().map(album_from_dto).collect(),
-            songs: result.song.into_iter().map(song_from_dto).collect(),
+            songs: result
+                .song
+                .into_iter()
+                .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
+                .collect(),
             playlists: result.playlist.into_iter().map(playlist_from_dto).collect(),
             possibly_truncated,
         })
@@ -785,7 +789,7 @@ impl MediaProvider for SubsonicProvider {
             .await?
             .into_iter()
             .filter(|song| song.play_count.unwrap_or_default() > 0)
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect();
         songs.sort_by(|left, right| {
             right
@@ -814,7 +818,7 @@ impl MediaProvider for SubsonicProvider {
                     .as_deref()
                     .is_some_and(|played| !played.is_empty())
             })
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect();
         songs.sort_by(|left, right| {
             right
@@ -858,7 +862,7 @@ impl MediaProvider for SubsonicProvider {
             .songs_by_genre
             .song
             .into_iter()
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect();
         let total = all_songs.len() as u32;
         let page: Vec<Song> = all_songs
@@ -883,7 +887,7 @@ impl MediaProvider for SubsonicProvider {
             .songs_by_genre
             .song
             .into_iter()
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect())
     }
 
@@ -899,7 +903,7 @@ impl MediaProvider for SubsonicProvider {
             .song
             .into_iter()
             .map(|s| {
-                let mut song = song_from_dto(s);
+                let mut song = song_from_dto_with_capability(s, self.open_subsonic);
                 song.is_favorite = Some(true);
                 song
             })
@@ -927,7 +931,7 @@ impl MediaProvider for SubsonicProvider {
             .search_result3
             .song
             .into_iter()
-            .map(song_from_dto)
+            .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
             .collect();
         let count = songs.len() as u32;
         Ok((songs, count))
@@ -955,7 +959,7 @@ impl MediaProvider for SubsonicProvider {
             .song
             .into_iter()
             .map(|s| {
-                let mut song = song_from_dto(s);
+                let mut song = song_from_dto_with_capability(s, self.open_subsonic);
                 song.is_favorite = Some(true);
                 song
             })
@@ -978,14 +982,25 @@ impl MediaProvider for SubsonicProvider {
         let all_songs: Vec<Song> = if let Some(album_id) = filter.album_id.as_deref() {
             // Branch 1: album-scoped (album implies its artist — AC 4).
             let album = self.client.get_album(album_id).await?;
-            album.album.song.into_iter().map(song_from_dto).collect()
+            album
+                .album
+                .song
+                .into_iter()
+                .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
+                .collect()
         } else if let Some(artist_id) = filter.artist_id.as_deref() {
             // Branch 2: artist-scoped — fetch all albums for the artist and flatten.
             let artist = self.client.get_artist(artist_id).await?;
             let mut songs = Vec::new();
             for album_summary in artist.artist.album {
                 let album = self.client.get_album(&album_summary.id).await?;
-                songs.extend(album.album.song.into_iter().map(song_from_dto));
+                songs.extend(
+                    album
+                        .album
+                        .song
+                        .into_iter()
+                        .map(|song| song_from_dto_with_capability(song, self.open_subsonic)),
+                );
             }
             songs
         } else {
@@ -1003,7 +1018,7 @@ impl MediaProvider for SubsonicProvider {
                 .search_result3
                 .song
                 .into_iter()
-                .map(song_from_dto)
+                .map(|song| song_from_dto_with_capability(song, self.open_subsonic))
                 .collect();
             // search3 does not return a total; mirror list_all_songs_page and return
             // page-length as total. The UI uses "page length < limit" as exhaustion.
@@ -1703,6 +1718,7 @@ fn song_from_dto(song: SongDto) -> Song {
         .map(|artists| artists.iter().map(|artist| artist.id.clone()).collect())
         .unwrap_or_else(|| song.artist_id.clone().into_iter().collect());
     let album_loudness = parse_album_loudness(song.replay_gain.as_deref());
+    let track_loudness = parse_track_loudness(song.replay_gain.as_deref());
 
     Song {
         id: song.id,
@@ -1730,6 +1746,7 @@ fn song_from_dto(song: SongDto) -> Song {
         suffix: song.suffix,
         size_bytes: song.size,
         album_loudness,
+        track_loudness,
         provider_metadata: crate::domain::models::ProviderItemMetadata {
             recording,
             ambiguous_music_artist,
@@ -1743,6 +1760,7 @@ fn song_from_dto_with_capability(song: SongDto, open_subsonic: bool) -> Song {
     let mut song = song_from_dto(song);
     if !open_subsonic {
         song.album_loudness = AlbumLoudnessEvidence::Absent;
+        song.track_loudness = crate::domain::models::TrackLoudnessEvidence::Absent;
     }
     song
 }
@@ -1786,6 +1804,35 @@ fn parse_album_loudness(value: Option<&serde_json::value::RawValue>) -> AlbumLou
         return AlbumLoudnessEvidence::Rejected;
     };
     AlbumLoudnessEvidence::open_subsonic(gain, peak)
+}
+
+fn parse_track_loudness(
+    value: Option<&serde_json::value::RawValue>,
+) -> crate::domain::models::TrackLoudnessEvidence {
+    use crate::domain::models::TrackLoudnessEvidence;
+    let Some(value) = value else {
+        return TrackLoudnessEvidence::Absent;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(value.get()) else {
+        return TrackLoudnessEvidence::Rejected;
+    };
+    let Some(object) = value.as_object() else {
+        return TrackLoudnessEvidence::Rejected;
+    };
+    if object.get("baseGain").is_some_and(|value| {
+        value
+            .as_f64()
+            .is_none_or(|gain| !gain.is_finite() || gain != 0.0)
+    }) {
+        return TrackLoudnessEvidence::Rejected;
+    }
+    let (Some(gain), Some(peak)) = (
+        object.get("trackGain").and_then(serde_json::Value::as_f64),
+        object.get("trackPeak").and_then(serde_json::Value::as_f64),
+    ) else {
+        return TrackLoudnessEvidence::Rejected;
+    };
+    TrackLoudnessEvidence::open_subsonic(gain, peak)
 }
 
 fn album_matches_letter(name: &str, letter: Option<&str>) -> bool {
@@ -2534,6 +2581,70 @@ mod tests {
             song_from_dto(overflow).album_loudness,
             AlbumLoudnessEvidence::Rejected
         );
+    }
+
+    #[test]
+    fn track_replay_gain_is_independent_of_album_fields_and_capability_gated() {
+        let row: SongDto = serde_json::from_value(serde_json::json!({
+            "id":"song", "title":"Track", "suffix":"flac", "contentType":"audio/flac",
+            "replayGain":{"trackGain":-4.0,"trackPeak":1.2,
+                          "albumGain":"broken","albumPeak":0.8}
+        }))
+        .unwrap();
+        let song = song_from_dto_with_capability(row.clone(), true);
+        assert_eq!(song.track_loudness.values(), Some((-4.0, 1.2)));
+        assert_eq!(song.album_loudness, AlbumLoudnessEvidence::Rejected);
+        assert_eq!(
+            song_from_dto_with_capability(row, false).track_loudness,
+            crate::domain::models::TrackLoudnessEvidence::Absent
+        );
+    }
+
+    #[test]
+    fn track_replay_gain_rejects_partial_malformed_base_gain_and_overflow() {
+        use crate::domain::models::TrackLoudnessEvidence;
+        let base = serde_json::json!({"id":"song", "title":"Track"});
+        for replay_gain in [
+            serde_json::json!({"trackGain":-4.0}),
+            serde_json::json!({"trackPeak":0.8}),
+            serde_json::json!({"trackGain":"-4.0","trackPeak":0.8}),
+            serde_json::json!({"trackGain":-4.0,"trackPeak":null}),
+            serde_json::json!({"trackGain":-4.0,"trackPeak":0.8,"baseGain":1.0}),
+            serde_json::json!({"albumGain":-4.0,"albumPeak":0.8}),
+            serde_json::json!([]),
+        ] {
+            let mut row = base.clone();
+            row.as_object_mut()
+                .unwrap()
+                .insert("replayGain".into(), replay_gain);
+            let song = song_from_dto_with_capability(serde_json::from_value(row).unwrap(), true);
+            assert_eq!(song.track_loudness, TrackLoudnessEvidence::Rejected);
+        }
+        let overflow: SongDto = serde_json::from_str(
+            r#"{"id":"song","title":"Track","replayGain":{"trackGain":1e400,"trackPeak":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            song_from_dto(overflow).track_loudness,
+            TrackLoudnessEvidence::Rejected
+        );
+        let valid: SongDto = serde_json::from_value(serde_json::json!({
+            "id":"song","title":"Track","replayGain":{"trackGain":0.0,"trackPeak":1.2}
+        }))
+        .unwrap();
+        assert_eq!(
+            song_from_dto(valid).track_loudness.values(),
+            Some((0.0, 1.2))
+        );
+        let malformed_track: SongDto = serde_json::from_value(serde_json::json!({
+            "id":"song","title":"Track","replayGain":{
+                "trackGain":"not dB","trackPeak":0.8,"albumGain":-3.0,"albumPeak":0.9
+            }
+        }))
+        .unwrap();
+        let song = song_from_dto(malformed_track);
+        assert_eq!(song.track_loudness, TrackLoudnessEvidence::Rejected);
+        assert_eq!(song.album_loudness.values(), Some((-3.0, 0.9)));
     }
 
     #[tokio::test]

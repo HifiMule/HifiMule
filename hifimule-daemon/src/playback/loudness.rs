@@ -1,8 +1,153 @@
-use crate::domain::models::{AlbumLoudnessEvidence, AlbumWithTracks};
+use crate::domain::models::{AlbumLoudnessEvidence, AlbumWithTracks, Song, TrackLoudnessEvidence};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const ALBUM_LOUDNESS_POLICY_VERSION: u32 = 1;
 pub(crate) const SAMPLE_PEAK_CEILING: f64 = 0.891_250_938_133_745_6;
+pub(crate) const TRACK_LOUDNESS_POLICY_VERSION: u32 = 1;
+
+/// ReplayGain's conventional 89 dB SPL reference and zero preamp are already
+/// represented by OpenSubsonic's supplied dB adjustment. No reference
+/// conversion or additional gain is applied here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TrackLoudnessReason {
+    OpenSubsonicReplayGain,
+    MetadataAbsent,
+    MetadataRejected,
+    UnsupportedRepresentation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TrackLoudnessPolicy {
+    pub version: u32,
+    pub scalar_bits: u32,
+    pub gain_db_bits: Option<u64>,
+    pub peak_bits: Option<u64>,
+    pub reason: TrackLoudnessReason,
+}
+
+/// Versioned, per-occurrence decision. The SQLite occurrence row carries the
+/// session, occurrence and chosen source identity; this value carries only the
+/// qualified original suffix and reproducible signal policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FrozenTrackPolicy {
+    pub policy: TrackLoudnessPolicy,
+    pub qualified_suffix: Option<String>,
+}
+
+impl FrozenTrackPolicy {
+    pub fn from_song(song: &Song) -> Self {
+        let policy = resolve_track_policy(song);
+        let qualified_suffix = (policy.scalar_bits != 1.0f32.to_bits()).then(|| {
+            song.suffix
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase()
+        });
+        Self {
+            policy,
+            qualified_suffix,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.policy.validate()?;
+        if self.policy.scalar_bits == 1.0f32.to_bits() {
+            if self.qualified_suffix.is_some() {
+                return Err("unity track policy has a format restriction");
+            }
+        } else if !matches!(
+            self.qualified_suffix.as_deref(),
+            Some("wav" | "flac" | "m4a" | "mp3")
+        ) {
+            return Err("track policy has an unsupported original format");
+        }
+        Ok(())
+    }
+}
+
+impl TrackLoudnessPolicy {
+    pub const fn unity(reason: TrackLoudnessReason) -> Self {
+        Self {
+            version: TRACK_LOUDNESS_POLICY_VERSION,
+            scalar_bits: 1.0f32.to_bits(),
+            gain_db_bits: None,
+            peak_bits: None,
+            reason,
+        }
+    }
+
+    pub fn scalar(self) -> f32 {
+        f32::from_bits(self.scalar_bits)
+    }
+
+    pub fn validate(self) -> Result<(), &'static str> {
+        if self.version != TRACK_LOUDNESS_POLICY_VERSION {
+            return Err("unsupported track loudness policy version");
+        }
+        match self.reason {
+            TrackLoudnessReason::OpenSubsonicReplayGain => {
+                let (Some(gain), Some(peak)) = (self.gain_db_bits, self.peak_bits) else {
+                    return Err("track loudness evidence is incomplete");
+                };
+                if !valid_gain_peak(f64::from_bits(gain), f64::from_bits(peak))
+                    || effective_scalar(f64::from_bits(gain), f64::from_bits(peak))
+                        .map(f32::to_bits)
+                        != Some(self.scalar_bits)
+                {
+                    return Err("track loudness evidence or scalar is invalid");
+                }
+            }
+            _ if self.scalar_bits != 1.0f32.to_bits()
+                || self.gain_db_bits.is_some()
+                || self.peak_bits.is_some() =>
+            {
+                return Err("track unity policy is incoherent");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn resolve_track_policy(song: &Song) -> TrackLoudnessPolicy {
+    if !qualified_original(song.suffix.as_deref(), song.content_type.as_deref()) {
+        return TrackLoudnessPolicy::unity(TrackLoudnessReason::UnsupportedRepresentation);
+    }
+    let (gain, peak) = match song.track_loudness {
+        TrackLoudnessEvidence::Absent => {
+            return TrackLoudnessPolicy::unity(TrackLoudnessReason::MetadataAbsent);
+        }
+        TrackLoudnessEvidence::Rejected => {
+            return TrackLoudnessPolicy::unity(TrackLoudnessReason::MetadataRejected);
+        }
+        evidence => evidence.values().expect("matched track evidence"),
+    };
+    if !valid_gain_peak(gain, peak) {
+        return TrackLoudnessPolicy::unity(TrackLoudnessReason::MetadataRejected);
+    }
+    let Some(scalar) = effective_scalar(gain, peak) else {
+        return TrackLoudnessPolicy::unity(TrackLoudnessReason::MetadataRejected);
+    };
+    TrackLoudnessPolicy {
+        version: TRACK_LOUDNESS_POLICY_VERSION,
+        scalar_bits: scalar.to_bits(),
+        gain_db_bits: Some(gain.to_bits()),
+        peak_bits: Some(peak.to_bits()),
+        reason: TrackLoudnessReason::OpenSubsonicReplayGain,
+    }
+}
+
+fn valid_gain_peak(gain: f64, peak: f64) -> bool {
+    gain.is_finite()
+        && peak.is_finite()
+        && (-60.0..=30.0).contains(&gain)
+        && (0.0 < peak && peak <= 64.0)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,11 +200,7 @@ impl AlbumLoudnessPolicy {
                 };
                 let gain = f64::from_bits(gain_bits);
                 let peak = f64::from_bits(peak_bits);
-                if !gain.is_finite()
-                    || !peak.is_finite()
-                    || !(-60.0..=30.0).contains(&gain)
-                    || !(0.0 < peak && peak <= 64.0)
-                {
+                if !valid_gain_peak(gain, peak) {
                     return Err("qualified loudness evidence is invalid");
                 }
                 if effective_scalar(gain, peak).map(f32::to_bits) != Some(self.scalar_bits) {
@@ -111,7 +252,7 @@ pub(crate) fn resolve_album_policy_for(
                 track.album_loudness.values().expect("matched evidence")
             }
         };
-        if !(-60.0..=30.0).contains(&gain) || !(0.0 < peak && peak <= 64.0) {
+        if !valid_gain_peak(gain, peak) {
             return AlbumLoudnessPolicy::unity(AlbumLoudnessReason::MetadataRejected);
         }
         min_gain = min_gain.min(gain);
@@ -179,7 +320,64 @@ pub(crate) fn qualified_original(suffix: Option<&str>, content_type: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{Album, Song};
+    use crate::domain::models::{Album, Song, TrackLoudnessEvidence};
+
+    #[test]
+    fn track_policy_uses_supplied_replaygain_and_static_sample_peak_limit() {
+        let mut row = song("radio", AlbumLoudnessEvidence::Absent, "flac");
+        row.track_loudness = TrackLoudnessEvidence::open_subsonic(6.0, 0.8);
+        let policy = resolve_track_policy(&row);
+        assert_eq!(policy.reason, TrackLoudnessReason::OpenSubsonicReplayGain);
+        assert!(policy.validate().is_ok());
+        let expected = 10f64.powf(6.0 / 20.0).min(SAMPLE_PEAK_CEILING / 0.8);
+        assert!((f64::from(policy.scalar()) - expected).abs() < 1e-7);
+        assert!(f64::from(policy.scalar()) * 0.8 <= SAMPLE_PEAK_CEILING);
+    }
+
+    #[test]
+    fn track_policy_rejects_incomplete_out_of_bounds_and_unsupported_evidence() {
+        let mut row = song("radio", AlbumLoudnessEvidence::Absent, "flac");
+        for evidence in [
+            TrackLoudnessEvidence::Absent,
+            TrackLoudnessEvidence::Rejected,
+        ] {
+            row.track_loudness = evidence;
+            assert_eq!(resolve_track_policy(&row).scalar(), 1.0);
+        }
+        for (gain, peak) in [
+            (-60.001, 0.5),
+            (30.001, 0.5),
+            (0.0, 0.0),
+            (0.0, 64.001),
+            (f64::NAN, 0.5),
+            (0.0, f64::INFINITY),
+        ] {
+            row.track_loudness = TrackLoudnessEvidence::open_subsonic(gain, peak);
+            assert_eq!(resolve_track_policy(&row).scalar(), 1.0);
+        }
+        row.track_loudness = TrackLoudnessEvidence::open_subsonic(-3.0, 0.8);
+        row.suffix = Some("opus".into());
+        assert_eq!(
+            resolve_track_policy(&row).reason,
+            TrackLoudnessReason::UnsupportedRepresentation
+        );
+        row.suffix = Some("flac".into());
+        row.content_type = Some("audio/mpeg".into());
+        assert_eq!(resolve_track_policy(&row).scalar(), 1.0);
+    }
+
+    #[test]
+    fn frozen_track_policy_rejects_corrupt_or_future_versions() {
+        let mut row = song("radio", AlbumLoudnessEvidence::Absent, "flac");
+        row.track_loudness = TrackLoudnessEvidence::open_subsonic(-3.0, 0.8);
+        let mut frozen = FrozenTrackPolicy::from_song(&row);
+        assert!(frozen.validate().is_ok());
+        frozen.policy.scalar_bits = 0.25f32.to_bits();
+        assert!(frozen.validate().is_err());
+        frozen = FrozenTrackPolicy::from_song(&row);
+        frozen.policy.version += 1;
+        assert!(frozen.validate().is_err());
+    }
 
     fn resolve_album_policy(album: &AlbumWithTracks) -> AlbumLoudnessPolicy {
         resolve_album_policy_for(album, "album")
@@ -206,6 +404,7 @@ mod tests {
             suffix: Some(suffix.into()),
             size_bytes: None,
             album_loudness: gain,
+            track_loudness: Default::default(),
             provider_metadata: Default::default(),
         }
     }

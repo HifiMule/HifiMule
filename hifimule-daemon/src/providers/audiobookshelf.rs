@@ -2519,6 +2519,7 @@ fn podcast_episode_song(episode: &PodcastEpisode) -> Song {
         suffix: None,
         size_bytes: None,
         album_loudness: Default::default(),
+        track_loudness: Default::default(),
         provider_metadata: Default::default(),
     }
 }
@@ -2672,6 +2673,7 @@ fn map_book_detail(
                 suffix: None,
                 size_bytes: None,
                 album_loudness: Default::default(),
+                track_loudness: Default::default(),
                 provider_metadata: ProviderItemMetadata {
                     identity: Some(ProviderIdentity {
                         library_id: library.into(),

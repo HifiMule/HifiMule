@@ -1015,6 +1015,32 @@ reconciliation do not perform gain work, allocate, fetch metadata, touch SQLite,
 or acquire sync locks. Replay therefore cannot square the scalar, and gain does
 not change frame counts, padding decisions or album boundaries.
 
+## Frozen Radio track loudness policy (internal contract, Story 16.5)
+
+Radio uses an OpenSubsonic `Child.replayGain.trackGain` dB adjustment and
+`trackPeak` linear decoded sample peak for the selected source copy. The supplied
+ReplayGain adjustment already uses the conventional 89 dB SPL reference. The
+preamp is zero, and no LUFS or reference-scale conversion is applied. Both
+fields must be present and finite, with gain in `[-60,+30]` dB and peak in
+`(0,64]`. `baseGain` must be absent or zero. The same static scalar formula,
+downward f32 rounding, original-format qualification, and decoder checks as the
+album path apply to one Radio occurrence. Album fields, `fallbackGain`, embedded
+tags, and values from other providers never substitute for a missing track pair.
+
+The policy is frozen at the first successful resolution of an accepted Radio
+occurrence, before that occurrence's audio can publish. The private schema 11
+occurrence row stores the v1 policy, provenance/reason, canonical qualified
+suffix when non-unity, and the existing session/occurrence/source identity. A
+later resolution cannot change it. Initial start, seek, Back, Retry, resumed
+playback, and successor preparation use the same record; stale generations,
+queue revisions, or control epochs cannot freeze another occurrence. Older Radio
+sessions without a policy restore paused and freeze on their first successful
+post-restore resolution. Invalid or future policy data blocks adjusted playback
+with a recoverable failure while preserving the accepted queue. A later original
+representation contradiction also fails preparation without switching copies.
+Explicit album sessions retain their common album policy; manual and Preview
+playback use unity.
+
 Native Next resolves owner state at execution. `canGoNext` is true only for a real
 successor while lifecycle state permits it; delivery while false has no effect. A
 qualified MPRIS relative seek strictly beyond duration uses the same Next path

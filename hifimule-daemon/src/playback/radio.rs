@@ -348,6 +348,88 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    #[test]
+    fn radio_gain_freezes_for_current_source_and_restores_paused() {
+        use crate::domain::models::TrackLoudnessEvidence;
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "radio-policy".into());
+        start(&session);
+        let snapshot = session.snapshot().unwrap();
+        let occurrence = snapshot.current.clone().unwrap();
+        let mut song = candidate("one", "first", "artist").song;
+        song.suffix = Some("flac".into());
+        song.content_type = Some("audio/flac".into());
+        song.track_loudness = TrackLoudnessEvidence::open_subsonic(-6.0, 0.8);
+        let epoch = session.control_epoch();
+        let revision = snapshot.queue_revision.parse().unwrap();
+        assert!(
+            session
+                .freeze_radio_policy("stale", epoch, revision, &occurrence, &song)
+                .unwrap()
+                .is_none()
+        );
+        let first = session
+            .freeze_radio_policy(&snapshot.generation_id, epoch, revision, &occurrence, &song)
+            .unwrap()
+            .unwrap();
+        assert!(first.0 < 1.0);
+        song.track_loudness = TrackLoudnessEvidence::open_subsonic(6.0, 0.8);
+        assert_eq!(
+            session
+                .freeze_radio_policy(&snapshot.generation_id, epoch, revision, &occurrence, &song)
+                .unwrap(),
+            Some(first.clone())
+        );
+        let saved = session.snapshot().unwrap();
+        assert_eq!(f32::from_bits(saved.gain_bits), first.0);
+        assert_eq!(saved.qualified_suffix.as_deref(), Some("flac"));
+        let restored = PlaybackSession::restore(db, "radio-policy-restored".into())
+            .snapshot()
+            .unwrap();
+        assert_eq!(restored.state, TransportState::Paused);
+        assert_eq!(
+            restored.current.as_ref().unwrap().occurrence_id,
+            occurrence.occurrence_id
+        );
+        assert_eq!(f32::from_bits(restored.gain_bits), first.0);
+    }
+
+    #[test]
+    fn legacy_radio_without_policy_restores_paused_and_freezes_on_resolution() {
+        let db = Arc::new(Database::memory().unwrap());
+        let initial = PlaybackSession::restore(db.clone(), "legacy-radio".into());
+        start(&initial);
+        let original = initial.snapshot().unwrap().current.unwrap();
+        let restored = PlaybackSession::restore(db, "legacy-radio-restored".into());
+        let before = restored.snapshot().unwrap();
+        assert_eq!(before.state, TransportState::Paused);
+        assert_eq!(before.gain_bits, 1.0f32.to_bits());
+        assert_eq!(
+            before.current.as_ref().unwrap().occurrence_id,
+            original.occurrence_id
+        );
+        let mut song = candidate("one", "first", "artist").song;
+        song.suffix = Some("flac".into());
+        song.content_type = Some("audio/flac".into());
+        song.track_loudness =
+            crate::domain::models::TrackLoudnessEvidence::open_subsonic(-3.0, 0.8);
+        let decision = restored
+            .freeze_radio_policy(
+                &before.generation_id,
+                restored.control_epoch(),
+                before.queue_revision.parse().unwrap(),
+                before.current.as_ref().unwrap(),
+                &song,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(decision.0 < 1.0);
+        assert_eq!(
+            f32::from_bits(restored.snapshot().unwrap().gain_bits),
+            decision.0
+        );
+    }
+
     fn source(server: &str, track: &str) -> TrackSource {
         TrackSource {
             server_id: server.into(),
@@ -379,6 +461,7 @@ mod tests {
                 suffix: None,
                 size_bytes: Some(1000),
                 album_loudness: Default::default(),
+                track_loudness: Default::default(),
                 provider_metadata: Default::default(),
             },
         }
@@ -1677,6 +1760,21 @@ mod tests {
         start(&session);
         let lease = session.reserve_radio_refill().unwrap().unwrap();
         let before = session.snapshot().unwrap();
+        let mut song = candidate("one", "first", "artist").song;
+        song.suffix = Some("flac".into());
+        song.content_type = Some("audio/flac".into());
+        song.track_loudness =
+            crate::domain::models::TrackLoudnessEvidence::open_subsonic(-6.0, 0.8);
+        let frozen = session
+            .freeze_radio_policy(
+                &before.generation_id,
+                session.control_epoch(),
+                before.queue_revision.parse().unwrap(),
+                before.current.as_ref().unwrap(),
+                &song,
+            )
+            .unwrap()
+            .unwrap();
         let logical_id = before.radio.unwrap().logical_id;
         let preview = session
             .preview_with_guard(
@@ -1698,6 +1796,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(preview.radio.unwrap().logical_id, logical_id);
+        assert_eq!(preview.gain_bits, 1.0f32.to_bits());
         let current = session.snapshot().unwrap();
         let returned = session
             .control_with_guard(
@@ -1714,6 +1813,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(returned.radio.unwrap().logical_id, logical_id);
+        assert_eq!(f32::from_bits(returned.gain_bits), frozen.0);
         assert!(session.reserve_radio_refill().unwrap().is_some());
     }
 

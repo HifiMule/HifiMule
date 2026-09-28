@@ -1101,28 +1101,6 @@ impl AudioEngine {
         Ok(())
     }
 
-    pub async fn start(
-        &self,
-        description: PlaybackDescription,
-        source: super::model::TrackSource,
-        start_ms: u64,
-        generation: String,
-        session: super::PlaybackSession,
-        deadline: std::time::Instant,
-    ) -> Result<(), PlaybackPipelineError> {
-        let epoch = session.control_epoch();
-        self.start_at_epoch(
-            description,
-            source,
-            start_ms,
-            generation,
-            session,
-            deadline,
-            epoch,
-        )
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_with_response(
         &self,
@@ -1132,15 +1110,27 @@ impl AudioEngine {
         generation: String,
         session: super::PlaybackSession,
         deadline: std::time::Instant,
+        expected_epoch: u64,
+        gain: f32,
+        admitted_suffix: Option<String>,
         response: Option<reqwest::Response>,
         selection_fence: Option<super::session::ApplyFence>,
     ) -> Result<(), PlaybackPipelineError> {
         if response.is_none() {
             return self
-                .start(description, source, start_ms, generation, session, deadline)
+                .start_at_epoch_with_gain(
+                    description,
+                    source,
+                    start_ms,
+                    generation,
+                    session,
+                    deadline,
+                    expected_epoch,
+                    gain,
+                    admitted_suffix,
+                )
                 .await;
         }
-        let epoch = session.control_epoch();
         self.start_at_epoch_kind(
             description,
             source,
@@ -1148,9 +1138,9 @@ impl AudioEngine {
             generation,
             session,
             deadline,
-            epoch,
-            1.0,
-            None,
+            expected_epoch,
+            gain,
+            admitted_suffix,
             None,
             None,
             response,

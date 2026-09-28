@@ -610,6 +610,205 @@ fn production_gain(
     samples
 }
 
+// Digital source-to-sample evidence for two independent Radio track policies.
+// The 44.1→48 kHz conversion exercises the resampler drain on both sides of
+// the exact boundary; it is not installed or physical-output evidence.
+#[tokio::test]
+async fn radio_track_metadata_scales_each_prepared_boundary_once() {
+    use crate::domain::models::{Album, AlbumWithTracks};
+    use crate::playback::loudness::{
+        SAMPLE_PEAK_CEILING, resolve_album_policy_for, resolve_track_policy,
+    };
+    use crate::playback::output::{SubmittedFrame, SubmittedTail};
+    use crate::providers::{
+        CredentialKind, MediaProvider, ProviderCredentials, subsonic::SubsonicProvider,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let mut files = Vec::new();
+    let mut songs = Vec::new();
+    let mut expected_tracks = Vec::new();
+    let mut actual_tracks = Vec::new();
+    for (index, (gain_db, peak, amplitude)) in [(-6.0f64, 0.5f64, 8192i16), (6.0, 0.8, 16384)]
+        .into_iter()
+        .enumerate()
+    {
+        let track_id = format!("radio-{index}");
+        let wav_file = dir.path().join(format!("{track_id}.wav"));
+        let file = dir.path().join(format!("{track_id}.flac"));
+        let samples: Vec<i16> = (0..4003)
+            .flat_map(|frame| {
+                let value = match frame % 4 {
+                    0 => 0,
+                    1 => amplitude,
+                    2 => -amplitude,
+                    _ => 0,
+                };
+                [value, value]
+            })
+            .collect();
+        wav(&wav_file, 44_100, 2, &samples);
+        let encoded = Command::new(reference_cli())
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&wav_file)
+            .args(["-c:a", "flac", "-metadata", "REPLAYGAIN_TRACK_GAIN=20 dB"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(encoded.status.success());
+        let mock = server
+            .mock("GET", "/rest/getSong.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), track_id.clone()))
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({"subsonic-response":{"status":"ok","song":{
+                    "id":track_id,"title":"Radio fixture","duration":1,"albumId":"album",
+                    "suffix":"flac","contentType":"audio/flac",
+                    "replayGain":{"trackGain":gain_db,"trackPeak":peak,
+                                  "albumGain":-3.0,"albumPeak":0.8}
+                }}})
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let provider = SubsonicProvider::from_stored_config(
+            ProviderCredentials {
+                server_url: server.url(),
+                credential: CredentialKind::Password {
+                    username: "fixture".into(),
+                    password: "fixture".into(),
+                },
+            },
+            true,
+            None,
+        )
+        .unwrap();
+        let song = provider.get_song(&format!("radio-{index}")).await.unwrap();
+        mock.assert_async().await;
+        let policy = resolve_track_policy(&song);
+        songs.push(song.clone());
+        let expected_scalar = 10f64.powf(gain_db / 20.0).min(SAMPLE_PEAK_CEILING / peak);
+        assert!((f64::from(policy.scalar()) - expected_scalar).abs() < 1e-7);
+        let baseline = reference(&file, 48_000, 2);
+        let actual = production_gain(&file, 48_000, 2, 0, policy.scalar(), "flac");
+        let expected: Vec<f32> = baseline
+            .iter()
+            .map(|&sample| (f64::from(sample) * expected_scalar) as f32)
+            .collect();
+        assert_samples(&actual, &expected, "Radio gain including resampler tail");
+        assert_samples(
+            &production_gain(&file, 48_000, 2, 100, policy.scalar(), "flac"),
+            &actual[200..],
+            "Radio seek retains frozen gain",
+        );
+        files.push(file);
+        expected_tracks.push(expected);
+        actual_tracks.push(actual);
+    }
+    assert_ne!(actual_tracks[0][2].to_bits(), actual_tracks[1][2].to_bits());
+    let joined = join_at_boundary(&actual_tracks[0], &actual_tracks[1], 2);
+    let expected = [expected_tracks[0].as_slice(), expected_tracks[1].as_slice()].concat();
+    assert_samples(
+        &joined,
+        &expected,
+        "distinct Radio boundary with no gain square",
+    );
+    assert_eq!(
+        joined.len(),
+        actual_tracks[0].len() + actual_tracks[1].len()
+    );
+    let qa = ArrayQueue::new(actual_tracks[0].len());
+    let qb = ArrayQueue::new(actual_tracks[1].len());
+    for &sample in &actual_tracks[0] {
+        qa.push(sample).unwrap();
+    }
+    for &sample in &actual_tracks[1] {
+        qb.push(sample).unwrap();
+    }
+    let replay = ArrayQueue::<SubmittedFrame>::new(16);
+    let tail = SubmittedTail::new(16);
+    let mut consumer = BoundaryPcmConsumer::new(2, 2);
+    let mut first = vec![0.0; actual_tracks[0].len() + 8];
+    let rendered = consumer.render_with_tail(
+        &mut first, &qa, true, true, &qb, true, true, &replay, &tail, true,
+    );
+    assert_eq!(rendered.boundary_frame, Some(actual_tracks[0].len() / 2));
+    assert_samples(
+        &first,
+        &expected[..first.len()],
+        "Radio submitted boundary samples",
+    );
+    tail.reconcile(4, &replay).unwrap();
+    let mut paused = [1.0; 2];
+    consumer.render_with_tail(
+        &mut paused,
+        &qa,
+        true,
+        true,
+        &qb,
+        true,
+        true,
+        &replay,
+        &tail,
+        false,
+    );
+    assert_eq!(paused, [0.0; 2]);
+    let mut resumed = [0.0; 8];
+    consumer.render_with_tail(
+        &mut resumed,
+        &qa,
+        true,
+        true,
+        &qb,
+        true,
+        true,
+        &replay,
+        &tail,
+        true,
+    );
+    assert_eq!(
+        resumed,
+        actual_tracks[1][..8],
+        "Radio tail replay must not square gain"
+    );
+    let album = AlbumWithTracks {
+        album: serde_json::from_value::<Album>(serde_json::json!({
+            "id":"album", "name":"Album", "trackCount":2
+        }))
+        .unwrap(),
+        tracks: songs,
+        provider_metadata: Default::default(),
+    };
+    let common = resolve_album_policy_for(&album, "album");
+    assert!((f64::from(common.scalar()) - 10f64.powf(-3.0 / 20.0)).abs() < 1e-7);
+    let album_samples: Vec<Vec<f32>> = files
+        .iter()
+        .map(|file| production_gain(file, 48_000, 2, 0, common.scalar(), "flac"))
+        .collect();
+    let album_expected: Vec<Vec<f32>> = files
+        .iter()
+        .map(|file| {
+            reference(file, 48_000, 2)
+                .iter()
+                .map(|&sample| (f64::from(sample) * f64::from(common.scalar())) as f32)
+                .collect()
+        })
+        .collect();
+    for (actual, expected) in album_samples.iter().zip(&album_expected) {
+        assert_samples(
+            actual,
+            expected,
+            "album policy remains common on Radio fixtures",
+        );
+    }
+    assert_samples(
+        &join_at_boundary(&album_samples[0], &album_samples[1], 2),
+        &[album_expected[0].as_slice(), album_expected[1].as_slice()].concat(),
+        "album boundary retains one common scalar",
+    );
+    assert_eq!(files.len(), 2);
+}
+
 // Exercise the actual adapter and admission plan, file-backed persistence, both
 // occurrence preparations, production decode and native boundary/replay consumer.
 // This is digital evidence; it does not claim physical output or device coverage.

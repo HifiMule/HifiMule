@@ -856,3 +856,23 @@ exact source revision, provider/version/capabilities and install/upgrade environ
 Physical continuity and other material captures must use an immutable CI/release
 artifact URI, SHA-256, capture metadata and retention policy; a local path is not
 release evidence.
+
+## Story 16.5 Radio track loudness evidence (2026-09-28)
+
+The local source fixture ran on macOS 27.0.0 ARM64 with Rust 1.98.1 and the
+controlled FFmpeg 9.0.2 runtime (libavcodec 63.1.102, libavformat 63.1.102,
+libavutil 61.1.102, libswresample 7.1.102). It builds two 4,003-frame FLAC
+tracks from 44.1 kHz stereo PCM and decodes/resamples them at 48 kHz. The
+OpenSubsonic mock supplies independent track pairs `(-6 dB, 0.5)` and
+`(+6 dB, 0.8)` while embedded FLAC tags deliberately disagree. Assertions
+compare the frozen scalar to independent f64 calculations within `1e-7`, every
+packed f32 sample including the resampler tail within `2e-6`, seek slices,
+exact boundary frames, Pause replay, and absence of a second multiplication.
+Provider parsing, source-bound SQLite policy, schema-10 migration rollback,
+paused restore and Preview isolation have separate deterministic tests.
+
+These are digital source tests. The four Build workflow jobs for Windows x64,
+Linux x64, macOS x64 and macOS ARM64 have not run on the Story 16.5 source tree.
+Installed playback, native interface capture and physical output are unverified.
+Sample-peak evidence applies to the declared decoded reference only; converted
+and physical peaks, true peak and equal perceived loudness are not certified.

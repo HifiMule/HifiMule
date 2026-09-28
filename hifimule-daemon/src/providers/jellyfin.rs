@@ -1190,6 +1190,7 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
             .and_then(|source| source.size)
             .and_then(|s| u64::try_from(s).ok()),
         album_loudness: Default::default(),
+        track_loudness: Default::default(),
         provider_metadata: crate::domain::models::ProviderItemMetadata {
             recording,
             ambiguous_music_artist,
