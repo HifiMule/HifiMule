@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 
 use hifimule_lifecycle::{LifecycleErrorCode as Code, LifecycleState, LifecycleStatus};
 use std::sync::Arc;
@@ -140,7 +140,7 @@ async fn close_ui(
 /// An installed smoke run may request a non-secret acknowledgment after the actual
 /// main webview has hydrated through rpc_proxy and finished rendering its route.
 #[tauri::command]
-fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<(), String> {
+fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<bool, String> {
     let state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
     let (epoch, owner) = state.hydrated.as_ref().ok_or("UI has not hydrated")?;
     if *epoch != state.epoch || state.closed || state.status.state != LifecycleState::Ready {
@@ -151,7 +151,23 @@ fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<
         let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
         hifimule_lifecycle::publish_ui_ready(&path, &pair[1], owner).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
+    let Some(request) =
+        hifimule_lifecycle::read_ui_activation_detail(&path).map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    if !request.open_playback_settings
+        || hifimule_lifecycle::read_ui_activation_ack(&path)
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            == Some(request.request_id.as_str())
+    {
+        return Ok(false);
+    }
+    hifimule_lifecycle::acknowledge_ui_activation(&path, &request.request_id)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -960,23 +976,51 @@ fn watch_ui_activation(
     let mut handled = initial_handled;
     let mut last_error: Option<String> = None;
     while !stopping.load(Ordering::Relaxed) {
-        match hifimule_lifecycle::read_ui_activation_request(&app_data) {
-            Ok(Some(request_id)) if handled.as_deref() != Some(&request_id) => {
+        match hifimule_lifecycle::read_ui_activation_detail(&app_data) {
+            Ok(Some(request)) if handled.as_deref() != Some(&request.request_id) => {
+                if hifimule_lifecycle::read_ui_activation_ack(&app_data)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(request.request_id.as_str())
+                {
+                    handled = Some(request.request_id);
+                    continue;
+                }
+                if request.open_playback_settings {
+                    let ready = app
+                        .try_state::<StartupCoordinator>()
+                        .is_some_and(|coordinator| {
+                            let state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+                            state.hydrated.is_some()
+                                && !state.closed
+                                && state.status.state == LifecycleState::Ready
+                        });
+                    if !ready {
+                        std::thread::sleep(hifimule_lifecycle::POLL_INTERVAL);
+                        continue;
+                    }
+                }
                 last_error = None;
                 let (reply_tx, reply_rx) = mpsc::channel();
                 let foreground_app = app.clone();
+                let open_settings = request.open_playback_settings;
                 match app.run_on_main_thread(move || {
-                    let _ = reply_tx.send(activate_existing_ui(&foreground_app));
+                    let activated = activate_existing_ui(&foreground_app);
+                    if activated && open_settings {
+                        let _ = foreground_app.emit("hifimule-open-playback-settings", ());
+                    }
+                    let _ = reply_tx.send(activated);
                 }) {
                     Ok(()) => {
                         if reply_rx.recv_timeout(std::time::Duration::from_secs(1)) == Ok(true) {
                             if let Err(error) = hifimule_lifecycle::acknowledge_ui_activation(
                                 &app_data,
-                                &request_id,
+                                &request.request_id,
                             ) {
                                 ui_log(&format!("Could not acknowledge UI activation: {error}"));
                             }
-                            handled = Some(request_id);
+                            handled = Some(request.request_id);
                         }
                     }
                     Err(error) => ui_log(&format!("Could not schedule UI activation: {error}")),

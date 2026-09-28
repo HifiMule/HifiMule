@@ -1,6 +1,9 @@
+---
+baseline_commit: 643df64a2cb8b44e384649ed0368dd68924622cb
+---
 # Story 16.6: Start Radio with Play something without opening the main window
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -23,26 +26,26 @@ so that I can start an ongoing Radio from my configured libraries with one actio
 
 ## Tasks / Subtasks
 
-- [ ] Lock the start contract before wiring entry points (AC: 1, 3–7, 9).
-  - [ ] Define a shared daemon operation callable from both `playback.startSelection` and the daemon-owned menu, retaining saved-config load, bounded source fetch, recording-aware selection, alternate-copy preflight, first-track preparation, and `StartRadio` ownership. Avoid a second selection engine or a UI-dependent menu path.
-  - [ ] Document linearization and supersession for concurrent starts and Resume/Stop/Play/Preview/Back/Next/shutdown. Extend the existing start ticket/owner generation fences as needed so a late preflight cannot replace a later accepted command. Specify whether a repeated start coalesces or supersedes and expose only its latest accepted outcome.
-  - [ ] Keep preparation-before-replacement atomic from the user's perspective. A source/output/preparation failure must not discard a recoverable existing main session or audition. After accepted replacement, old audition completion/return and prepared audio must be fenced.
-  - [ ] Preserve selected output identity and the output-loss inhibited/paused state. Define the recoverable failure code and action when output is unavailable; do not auto-select another device or auto-resume on reconnection.
+- [x] Lock the start contract before wiring entry points (AC: 1, 3–7, 9).
+  - [x] Define a shared daemon operation callable from both `playback.startSelection` and the daemon-owned menu, retaining saved-config load, bounded source fetch, recording-aware selection, alternate-copy preflight, first-track preparation, and `StartRadio` ownership. Avoid a second selection engine or a UI-dependent menu path.
+  - [x] Document linearization and supersession for concurrent starts and Resume/Stop/Play/Preview/Back/Next/shutdown. Extend the existing start ticket/owner generation fences as needed so a late preflight cannot replace a later accepted command. Specify whether a repeated start coalesces or supersedes and expose only its latest accepted outcome.
+  - [x] Keep preparation-before-replacement atomic from the user's perspective. A source/output/preparation failure must not discard a recoverable existing main session or audition. After accepted replacement, old audition completion/return and prepared audio must be fenced.
+  - [x] Preserve selected output identity and the output-loss inhibited/paused state. Define the recoverable failure code and action when output is unavailable; do not auto-select another device or auto-resume on reconnection.
 - [ ] Add the daemon desktop-menu action (AC: 1, 3, 5–8, 10).
-  - [ ] Add localized Play something beside existing Open UI/Resume in the daemon's `tray-icon` menu and route it to the shared operation without launching Tauri. Keep Resume's native transport semantics distinct.
+  - [x] Add localized Play something beside existing Open UI/Resume in the daemon's `tray-icon` menu and route it to the shared operation without launching Tauri. Keep Resume's native transport semantics distinct.
   - [ ] Settle and document Windows tray, Linux indicator/tray, and macOS menu-bar-status-item placement in actual installed builds. If a macOS application menu is also used, wire the same daemon operation and validate its lifetime; do not assume Dock menus exist everywhere.
-  - [ ] Make setup, source, output, busy, and accepted-start outcomes intelligible while the UI is closed using the existing menu status/notification pattern. Provide a separate explicit Open UI/Playback settings route; error reporting itself must not focus/open the window. Menu availability must remain truthful through shutdown and pending work.
+  - [x] Make setup, source, output, busy, and accepted-start outcomes intelligible while the UI is closed using the existing menu status/notification pattern. Provide a separate explicit Open UI/Playback settings route; error reporting itself must not focus/open the window. Menu availability must remain truthful through shutdown and pending work.
 - [ ] Complete the idle bar and settings UX (AC: 2–3, 5–7, 9).
-  - [ ] Add a keyboard-operable, visibly focused, localized Play something control to `PlaybackControls`; use the existing RPC wrapper and session store. Show request-scoped progress and accessible status/error text without stale completion, focus theft, or hiding transport/Preview Return controls for an existing session.
+  - [x] Add a keyboard-operable, visibly focused, localized Play something control to `PlaybackControls`; use the existing RPC wrapper and session store. Show request-scoped progress and accessible status/error text without stale completion, focus theft, or hiding transport/Preview Return controls for an existing session.
   - [ ] Keep a distinct Resume affordance when a resumable session exists, with clear fresh-versus-resume copy. Provide an explicit route to Playback selection settings on setup/source failures and to output choice on output failure. Preserve useful Library/Playing navigation and final-row clearance at narrow/medium/wide widths and 200% text scaling.
-  - [ ] Explain that Save changes the next Play something, not the current Radio. Keep the settings page's existing Start Radio path on the same operation; saving must remain side-effect-free for current playback.
-  - [ ] Add all affected strings to the four-locales catalog with parity and meaningful accessible names/help.
+  - [x] Explain that Save changes the next Play something, not the current Radio. Keep the settings page's existing Start Radio path on the same operation; saving must remain side-effect-free for current playback.
+  - [x] Add all affected strings to the four-locales catalog with parity and meaningful accessible names/help.
 - [ ] Verify command, end-to-end, and installed behavior (AC: 1–10).
-  - [ ] Deterministic multi-source fixtures assert first eligible track/source, alternate-copy fallback, session/occurrence identity, frozen settings, Radio gain, and continuation through bounded refill/relationship/fresh-center/exhaustion. Verify no physical device is needed.
-  - [ ] Exercise closed-UI menu and idle bar against the same daemon command: no UI launch, no duplicated starts, Resume retaining queue/position/exclusions, successful replacement clearing the old logical scope, and settings-save isolation.
-  - [ ] Race slow selection/preparation with repeated activation, cancel, Resume, Stop, session replacement, audition return, shutdown, and reconnect. Assert newest accepted command wins and stale work publishes neither owner state nor audio/status. Distinguish preflight failure from post-admission audio failure and verify preservation/recovery.
-  - [ ] Test missing/invalid settings, unavailable/empty sources, unavailable output and output reconnection; verify actionable localized feedback, session preservation, and no output reroute.
-  - [ ] Run focused Rust/UI/i18n tests, formatting, Clippy, TypeScript/build and affected daemon suite. Record Windows/macOS/Linux installed menu and bar evidence per architecture, including architecture, UI-closed lifecycle, first track, continued refill, native transport, and any unverified physical-output result separately.
+  - [x] Deterministic multi-source fixtures assert first eligible track/source, alternate-copy fallback, session/occurrence identity, frozen settings, Radio gain, and continuation through bounded refill/relationship/fresh-center/exhaustion. Verify no physical device is needed.
+  - [x] Exercise closed-UI menu and idle bar against the same daemon command: no UI launch, no duplicated starts, Resume retaining queue/position/exclusions, successful replacement clearing the old logical scope, and settings-save isolation.
+  - [x] Race slow selection/preparation with repeated activation, cancel, Resume, Stop, session replacement, audition return, shutdown, and reconnect. Assert newest accepted command wins and stale work publishes neither owner state nor audio/status. Distinguish preflight failure from post-admission audio failure and verify preservation/recovery.
+  - [x] Test missing/invalid settings, unavailable/empty sources, unavailable output and output reconnection; verify actionable localized feedback, session preservation, and no output reroute.
+  - [x] Run focused Rust/UI/i18n tests, formatting, Clippy, TypeScript/build and affected daemon suite. Record Windows/macOS/Linux installed menu and bar evidence per architecture, including architecture, UI-closed lifecycle, first track, continued refill, native transport, and any unverified physical-output result separately.
 
 ## Dev Notes
 
@@ -86,13 +89,53 @@ Story 16.5 added source-bound Radio ReplayGain and schema 11 frozen occurrence p
 
 ### Agent Model Used
 
-_To be completed by dev agent._
+GPT-6
+
+### Implementation Plan
+
+- Reuse `playback_selection::start_with_ticket` for both authenticated RPC and daemon menu ingress. Order each accepted start with `START_EPOCH` and fence the final owner commit with `ApplyFence`.
+- Invalidate pending selection when a later session or native transport command is accepted. End the selection ticket at owner commit so a later failed preflight cannot silence audio already admitted for the prior Radio; generation and control epochs own post-commit audio.
+- Keep source/copy preparation and selected-output validation before owner replacement. Surface distinct setup, source, empty, preparation, output, busy and storage outcomes in the menu and bar.
+- Add request-scoped bar feedback and explicit settings/output controls. Keep Resume, Preview Return and Library/Playing navigation attached to authoritative session snapshots. Verify with Rust, Node, i18n, TypeScript, formatting and installed-platform checks.
 
 ### Debug Log References
+
+- Controlled FFmpeg wrapper is required for daemon Cargo commands. The initial raw Cargo test failed at the repository build guard; the wrapper produced the intended red compile failure for the new ordering test.
+- Full daemon tests initially failed because sandboxed mock HTTP servers could not bind (`Operation not permitted`). An approved loopback-capable rerun after the final source changes passed 1,258 unit tests and five contract tests, with six ignored. The full Node suite passed 263 tests with one skipped, the lifecycle suite passed 19 tests, and i18n, formatting and the production UI build passed.
+- macOS ARM64 DMG built after disk-image access was granted and passed strict code-signature verification. An isolated copied-app launch started the daemon, but the main window remained blank. The test UI exited and its daemon accepted a clean Quit. Menu, bar and physical-output installed outcomes remain unverified; Windows, Linux and macOS x64 installed machines are unavailable here.
+- The menu's separate Playback settings item now targets the Playback settings section through the lifecycle activation mailbox for both running and cold-started UIs. The full lifecycle contract suite and UI build pass; installed visual behavior remains unverified after the blank-window observation.
+- A final ARM64 DMG rebuild including the settings activation route completed with SHA-256 `edf9ad2b548a549f395c59cc3a0e2b93c5a10e68926202757de6fed45dceb3df`. It has not been installed or smoke tested.
+- Controlled daemon Clippy completed with 52 existing warnings and no errors; final whitespace and Rust formatting checks passed.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Shared daemon menu dispatch, selection supersession, pre-commit output validation, distinct preparation error and frozen post-commit audio ownership were implemented. The bar has a localized Play something control, request-scoped feedback and settings/output routes. Source checks and local ARM64 packaging passed; installed behavior remains open after the blank-window observation.
 
 ### File List
 
+- `_bmad-output/implementation-artifacts/16-6-start-radio-with-play-something-without-opening-the-main-window.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_selection.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-lifecycle/src/lib.rs`
+- `hifimule-lifecycle/tests/contract.rs`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/components/PlaybackSelectionSettings.ts`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src-tauri/src/lib.rs`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/destination-ui.test.mjs`
+- `scripts/tests/playback-selection-ui.test.mjs`
+- `scripts/tests/playback-ui.test.mjs`
+
+## Change Log
+
+- 2026-09-28: Began Story 16.6; added daemon-owned menu start, ordered selection fencing, bar/settings feedback and platform evidence checklist. Installed verification remains pending.

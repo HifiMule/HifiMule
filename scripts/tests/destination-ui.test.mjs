@@ -298,7 +298,12 @@ test('main wires the bar-owned Library/Playing switch and updates the shared tit
   assert.match(source, /title\.textContent = t\(playing \? 'playback\.playing_title' : 'ui\.library\.title'\)/);
   assert.match(source, /serverHub\.hidden = playing/);
   assert.match(source, /if \(surface === 'library'\) showLibrarySurface\(\)/);
-  assert.match(source, /activeDestinationHub\?\.selectPlayback\(\(\) => showSurface\('playback'\)\)/);
+  assert.match(source, /else if \(surface === 'settings'\) openPlaybackSettings\(\)/);
+  assert.match(source, /activeDestinationHub\?\.selectPlayback\(\(\) => \{/);
+  assert.match(source, /showSurface\('playback', false\)/);
+  assert.match(source, /activePlaybackDestination\?\.focusSettings\(\)/);
+  assert.match(source, /listen\('hifimule-open-playback-settings', \(\) => openPlaybackSettings\(\)\)/);
+  assert.match(source, /invoke<boolean>\('report_ui_ready'\)\) openPlaybackSettings\(\)/);
   assert.match(source, /activePlaybackDestination\?\.focus\(\)/);
 });
 

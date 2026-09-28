@@ -2421,6 +2421,8 @@ h2 {
 .playback-controls__source { color: var(--accent); font-size: 1rem; }
 .playback-controls__status, .playback-controls__artist { font-size: .8rem; color: var(--ink-dim); }
 .playback-controls__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; }
+.playback-controls__start-route { padding: .35rem .5rem; border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--panel-bg); color: var(--accent); font: inherit; cursor: pointer; }
+.playback-controls__start-route:hover { border-color: currentColor; }
 .playback-controls__output-trigger { display: inline-flex; }
 .playback-controls__timeline { flex: 1 0 100%; min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: center; gap: .45rem; font-size: .8rem; color: var(--ink-dim); }
 .playback-controls__timeline input[type="range"] { width: 100%; min-width: 0; margin: 0; accent-color: var(--accent); }
@@ -2458,7 +2460,7 @@ h2 {
 .playback-controls__seek-status, .playback-controls__error { overflow-wrap: anywhere; }
 .playback-controls__seek-status:empty, .playback-controls__error:empty { display: none; }
 .playback-controls__error { color: var(--amber-warn); }
-.playback-controls sl-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.playback-controls sl-button:focus-visible, .playback-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .playback-controls sl-button[hidden] { display: none !important; }
 .playback-controls [hidden] { display: none !important; }
 .playback-controls sl-button[variant="primary"]::part(base) { background: var(--accent); color: var(--app-bg); border-color: var(--accent); }

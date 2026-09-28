@@ -595,15 +595,28 @@ impl Drop for UiInstanceGuard {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UiActivationRequest {
+pub struct UiActivationRequest {
     schema_version: u32,
-    request_id: String,
+    pub request_id: String,
+    #[serde(default)]
+    pub open_playback_settings: bool,
 }
 
 /// A mailbox rather than a UI server: concurrent requests may coalesce, since
 /// each asks for the same idempotent window activation. It works before daemon
 /// readiness and does not depend on a platform-specific notification endpoint.
 pub fn request_ui_activation(app_data: &Path) -> Result<String, LifecycleError> {
+    request_ui_activation_with_target(app_data, false)
+}
+
+pub fn request_ui_playback_settings_activation(app_data: &Path) -> Result<String, LifecycleError> {
+    request_ui_activation_with_target(app_data, true)
+}
+
+fn request_ui_activation_with_target(
+    app_data: &Path,
+    open_playback_settings: bool,
+) -> Result<String, LifecycleError> {
     let runtime = prepare_runtime_dir(app_data)?;
     let request_id = Uuid::new_v4().to_string();
     atomic_write_json(
@@ -611,12 +624,19 @@ pub fn request_ui_activation(app_data: &Path) -> Result<String, LifecycleError> 
         &UiActivationRequest {
             schema_version: 1,
             request_id: request_id.clone(),
+            open_playback_settings,
         },
     )?;
     Ok(request_id)
 }
 
 pub fn read_ui_activation_request(app_data: &Path) -> Result<Option<String>, LifecycleError> {
+    Ok(read_ui_activation_detail(app_data)?.map(|request| request.request_id))
+}
+
+pub fn read_ui_activation_detail(
+    app_data: &Path,
+) -> Result<Option<UiActivationRequest>, LifecycleError> {
     read_ui_activation_record(app_data, "ui-activation.json")
 }
 
@@ -633,12 +653,16 @@ pub fn acknowledge_ui_activation(app_data: &Path, request_id: &str) -> Result<()
         &UiActivationRequest {
             schema_version: 1,
             request_id: request_id.to_owned(),
+            open_playback_settings: false,
         },
     )
 }
 
 pub fn read_ui_activation_ack(app_data: &Path) -> Result<Option<String>, LifecycleError> {
-    read_ui_activation_record(app_data, "ui-activation-ack.json")
+    Ok(
+        read_ui_activation_record(app_data, "ui-activation-ack.json")?
+            .map(|request| request.request_id),
+    )
 }
 
 /// A duplicate waits briefly for the winner to acknowledge the request. If
@@ -667,7 +691,7 @@ pub fn wait_for_ui_handoff(
 fn read_ui_activation_record(
     app_data: &Path,
     name: &str,
-) -> Result<Option<String>, LifecycleError> {
+) -> Result<Option<UiActivationRequest>, LifecycleError> {
     let runtime = prepare_runtime_dir(app_data)?;
     let path = runtime.join(name);
     match path.symlink_metadata() {
@@ -699,7 +723,7 @@ fn read_ui_activation_record(
             "UI activation request is invalid",
         ));
     }
-    Ok(Some(request.request_id))
+    Ok(Some(request))
 }
 
 #[derive(Debug)]

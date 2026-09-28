@@ -36,6 +36,7 @@ export class PlaybackSelectionSettings {
         this.element.className = 'playback-selection-settings';
         const heading = document.createElement('h2');
         heading.textContent = t('playback.selection.title');
+        heading.tabIndex = -1;
         const description = document.createElement('p');
         description.textContent = t('playback.selection.description');
         this.rows.className = 'playback-selection-settings__rows';
@@ -67,6 +68,10 @@ export class PlaybackSelectionSettings {
         this.disposed = true;
         ++this.request;
         if (this.busy) void playbackCancelSelectionStart().catch(() => undefined);
+    }
+
+    focus(): void {
+        this.element.querySelector<HTMLElement>('h2')?.focus();
     }
 
     private label(key: string, input: HTMLElement): HTMLLabelElement {
@@ -223,7 +228,11 @@ export class PlaybackSelectionSettings {
         } catch (error) {
             if (!this.disposed && request === this.request) {
                 const message = error instanceof Error ? error.message : String(error);
-                this.status.textContent = message.includes('PLAYBACK_SELECTION_EMPTY') ? t('playback.selection.empty')
+                this.status.textContent = message.includes('PLAYBACK_SELECTION_SAVE_FAILED') ? t('playback.selection.load_failed')
+                    : message.includes('PLAYBACK_SELECTION_PREPARATION_FAILED') ? t('playback.selection.preparation_failed')
+                    : message.includes('PLAYBACK_BUSY') ? t('playback.selection.busy')
+                    : message.includes('OUTPUT_') ? t('playback.output.choose')
+                    : message.includes('PLAYBACK_SELECTION_EMPTY') ? t('playback.selection.empty')
                     : message.includes('PLAYBACK_SELECTION_SETUP') ? t('playback.selection.invalid')
                     : message.includes('PLAYBACK_SELECTION_CANCELLED') ? t('playback.selection.cancelled')
                     : t('playback.selection.unavailable');

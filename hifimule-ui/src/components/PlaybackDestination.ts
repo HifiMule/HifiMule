@@ -81,6 +81,10 @@ export class PlaybackDestination {
         if (!this.disposed) this.regions.upcoming.heading.focus();
     }
 
+    focusSettings(): void {
+        if (!this.disposed) this.selectionSettings.focus();
+    }
+
     destroy(): void {
         this.disposed = true; this.unsubscribe?.();
         this.selectionSettings.destroy();

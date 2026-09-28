@@ -108,7 +108,7 @@ test('successful cancellation ignores an older start result and reports cancella
 });
 
 test('start reports empty, missing setup and unavailable source separately', async () => {
-  const errors = ['PLAYBACK_SELECTION_EMPTY', 'PLAYBACK_SELECTION_SETUP', 'PLAYBACK_SELECTION_SOURCE_UNAVAILABLE'];
+  const errors = ['PLAYBACK_SELECTION_EMPTY', 'PLAYBACK_SELECTION_SETUP', 'PLAYBACK_SELECTION_SOURCE_UNAVAILABLE', 'PLAYBACK_SELECTION_PREPARATION_FAILED'];
   const { settings, root } = load({
     playbackGetSelectionConfig: async () => config,
     serverList: async () => [server],
@@ -117,7 +117,7 @@ test('start reports empty, missing setup and unavailable source separately', asy
     playbackCancelSelectionStart: async () => {},
   });
   await tick();
-  for (const expected of ['empty', 'invalid', 'unavailable']) {
+  for (const expected of ['empty', 'invalid', 'unavailable', 'preparation_failed']) {
     button(root, 'playback.selection.start').click();
     await tick();
     assert.equal(status(root).textContent, `playback.selection.${expected}`);

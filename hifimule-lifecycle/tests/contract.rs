@@ -6,6 +6,30 @@ use hifimule_lifecycle::{
 };
 
 #[test]
+fn playback_settings_activation_is_explicit_and_acknowledged() {
+    let profile = tempfile::tempdir().unwrap();
+    let request_id =
+        hifimule_lifecycle::request_ui_playback_settings_activation(profile.path()).unwrap();
+    let request = hifimule_lifecycle::read_ui_activation_detail(profile.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.request_id, request_id);
+    assert!(request.open_playback_settings);
+    acknowledge_ui_activation(profile.path(), &request_id).unwrap();
+    assert_eq!(
+        hifimule_lifecycle::read_ui_activation_ack(profile.path()).unwrap(),
+        Some(request_id)
+    );
+    request_ui_activation(profile.path()).unwrap();
+    assert!(
+        !hifimule_lifecycle::read_ui_activation_detail(profile.path())
+            .unwrap()
+            .unwrap()
+            .open_playback_settings
+    );
+}
+
+#[test]
 fn descriptor_round_trips_and_rejects_mismatched_protocol() {
     let temp = tempfile::tempdir().unwrap();
     let mut owner = OwnerGuard::acquire(temp.path()).unwrap();

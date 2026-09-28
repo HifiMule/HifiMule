@@ -63,6 +63,8 @@ async function init() {
     registerReauthHandler();
 
     const { rpcCall } = await import('./rpc');
+    const { listen } = await import('@tauri-apps/api/event');
+    await listen('hifimule-open-playback-settings', () => openPlaybackSettings());
 
     try {
         await waitForNativeReadiness();
@@ -70,7 +72,7 @@ async function init() {
         await routeFromDaemonState(state);
         await showMainWindow();
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('report_ui_ready');
+        if (await invoke<boolean>('report_ui_ready')) openPlaybackSettings();
         observeShutdown(rpcCall);
     } catch (e) {
         console.error("Failed to check daemon state", e);
@@ -478,6 +480,7 @@ function renderMainLayout(_state: any = null) {
     const playbackContainer = document.getElementById('playback-controls-container');
     if (playbackContainer) activePlaybackControls = new PlaybackControls(playbackContainer, surface => {
         if (surface === 'library') showLibrarySurface();
+        else if (surface === 'settings') openPlaybackSettings();
         else void activeDestinationHub?.selectPlayback(() => showSurface('playback'));
     });
 
@@ -496,6 +499,13 @@ function renderMainLayout(_state: any = null) {
             activeBasketSidebar = new BasketSidebar(container);
             activeBasketSidebar.setDestinationHub(activeDestinationHub);
         }
+    });
+}
+
+function openPlaybackSettings(): void {
+    void activeDestinationHub?.selectPlayback(() => {
+        showSurface('playback', false);
+        activePlaybackDestination?.focusSettings();
     });
 }
 

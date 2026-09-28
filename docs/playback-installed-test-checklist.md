@@ -876,3 +876,22 @@ Linux x64, macOS x64 and macOS ARM64 have not run on the Story 16.5 source tree.
 Installed playback, native interface capture and physical output are unverified.
 Sample-peak evidence applies to the declared decoded reference only; converted
 and physical peaks, true peak and equal perceived loudness are not certified.
+
+## Story 16.6 Play something installed evidence (2026-09-28)
+
+The source implementation targets the daemon-owned `tray-icon` menu: Windows notification-area tray, Linux desktop indicator/tray, and macOS menu-bar status item. The macOS Dock menu is not an equivalent surface. The floating bar uses the same `playback.startSelection` operation. Local source tests and build results must be recorded separately from an installed package observation.
+
+For every installed row below, record OS and architecture, installer identity and hash, menu surface and screenshot, configured source fixture and first recording/source/occurrence, selected audio output, and the authoritative session before and after each action. Test Play something with the window closed and no sync device, then close the window through refill and reopen it. Compare with Resume from a paused Radio (same session, queue, position and exclusions). Repeat Play something and race slow selection with Stop, Resume, Preview, replacement and Quit. Include missing/invalid setup, unavailable/empty sources, first-track preparation failure, output loss/reconnection, native transport, and bounded refill with artist transition/fresh-center and deduplication. In the bar, exercise keyboard focus, setup/output routes, Library/Playing navigation, narrow/medium/wide widths and 200% text scaling. Record physical audible output separately from digital/owner state.
+
+| Installed target | Intended menu surface | Installed menu/bar and UI-closed result | Physical output result |
+| --- | --- | --- | --- |
+| Windows x64 MSI/NSIS | Notification-area tray | Unverified | Unverified |
+| Linux x64 deb/AppImage | Indicator/tray in supported desktop session | Unverified | Unverified |
+| macOS x64 DMG | Menu-bar status item | Unverified | Unverified |
+| macOS ARM64 DMG | Menu-bar status item | Blocked: the isolated installed main window remained blank; menu/bar flow unverified | Unverified |
+
+This table does not promote Story 15.17 or 16.5 platform checks. Replace each unverified cell only with evidence from the matching installed artifact and architecture.
+
+The local macOS ARM64 packaging attempt produced `HifiMule_0.16.1_aarch64.dmg` (SHA-256 `6f10072acedd383342c317c3a5906e85e0fcd905f869e4c51f1ce399cb7f9213`). The copied `.app` passed `codesign --verify --deep --strict` and its daemon executable reported Mach-O arm64. An isolated launch using `HIFIMULE_APP_DATA_DIR=/private/tmp/hifimule-story16-profile` started the daemon and opened a HifiMule Hub window, but the window remained blank in both screenshot and accessibility inspection. The UI process exited cleanly and the isolated daemon accepted `daemon.quit`. No first-track, refill, native-control, output, or platform-menu pass is inferred from this attempt. This local copied bundle is not an immutable release installation record.
+
+A subsequent package rebuild after the menu status change succeeded with SHA-256 `2478f729c51e99c4e67eff39d048267049d4b6a9b26f49056e4e5721d1660a7d`. The final local rebuild, including direct Playback settings activation, produced the ARM64 DMG with SHA-256 `edf9ad2b548a549f395c59cc3a0e2b93c5a10e68926202757de6fed45dceb3df`. Neither rebuilt DMG has been installed or smoke tested. Their hashes are packaging records, not installed behavior evidence.

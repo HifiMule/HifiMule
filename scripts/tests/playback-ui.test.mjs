@@ -64,6 +64,7 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
     clearTimeout: id => timers.delete(id),
     require: name => name === '../rpc'
       ? { playbackGetSession: async () => { calls++; return snapshot; }, playbackControl: control,
+          playbackStartSelection: outputRpc.start ?? (async () => {}),
           serverList: async () => [{ id: 'local-server', serverId: 'server', url: 'https://music.example', serverType: 'jellyfin', username: 'alexis', name: 'Salon', icon: null, selected: true }],
           playbackListOutputs: outputRpc.list ?? (async () => ({ instanceId: snapshot.instanceId, outputs: snapshot.output?.selected ? [snapshot.output.selected] : [], output: snapshot.output })),
           playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
@@ -100,6 +101,67 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
   };
 }
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
+
+test('idle Play something uses the shared start RPC and keeps manual navigation', async () => {
+  const idle = { ...snapshot('paused'), current: null };
+  let starts = 0;
+  const h = harness(idle, undefined, { start: async () => { starts++; } }); await h.tick();
+  assert.equal(h.component.playSomething.hidden, false);
+  assert.equal(h.component.playSomething.disabled, false);
+  assert.equal(h.component.playSomething.textContent, 'playback.play_something');
+  assert.equal(h.component.startStatus.attributes['aria-live'], 'polite');
+  await h.component.playSomething.click(); await h.tick();
+  assert.equal(starts, 1);
+  assert.equal(h.component.startStatus.textContent, 'playback.selection.started');
+  assert.equal(h.component.surfaceToggle.hidden, false);
+  h.component.destroy();
+});
+
+test('failed start gives a route to settings', async () => {
+  const idle = { ...snapshot('paused'), current: null };
+  const surfaces = [];
+  let rejectStart;
+  const h = harness(idle, undefined, {
+    start: () => new Promise((_resolve, reject) => { rejectStart = reject; }),
+    surfaceChange: surface => surfaces.push(surface),
+  }); await h.tick();
+  await h.component.playSomething.click();
+  assert.equal(h.component.startStatus.textContent, 'playback.selection.starting');
+  rejectStart(new Error('PLAYBACK_SELECTION_SETUP'));
+  await h.tick();
+  assert.equal(h.component.startStatus.textContent, 'playback.selection.invalid');
+  assert.equal(h.component.startRoute.hidden, false);
+  await h.component.startRoute.click();
+  assert.deepEqual(surfaces, ['settings']);
+  h.component.destroy();
+});
+
+test('a replaced session discards late Play something completion', async () => {
+  const idle = { ...snapshot('paused'), current: null };
+  let resolveStart;
+  const h = harness(idle, undefined, { start: () => new Promise(resolve => { resolveStart = resolve; }) }); await h.tick();
+  await h.component.playSomething.click();
+  const replacement = { ...snapshot('playing', '2'), sessionId: 'replacement', generationId: 'replacement-generation' };
+  h.setSnapshot(replacement); await h.tick();
+  resolveStart(); await h.tick();
+  assert.notEqual(h.component.startStatus.textContent, 'playback.selection.started');
+  assert.equal(h.component.playSomething.hidden, true);
+  h.component.destroy();
+});
+
+test('unavailable output offers the existing chooser without rerouting', async () => {
+  const idle = { ...snapshot('paused'), current: null };
+  let selected = 0;
+  const h = harness(idle, undefined, {
+    start: async () => { throw { data: { code: 'OUTPUT_UNAVAILABLE' } }; },
+    select: async () => { selected++; return idle; },
+  }); await h.tick();
+  await h.component.playSomething.click(); await h.tick();
+  assert.equal(h.component.startStatus.textContent, 'playback.output.choose');
+  assert.equal(h.component.startRoute.hidden, false);
+  assert.equal(selected, 0);
+  h.component.destroy();
+});
 
 test('two-row icon controls retain top hints and expose the Library/Playing surface switch', async () => {
   const idle = { ...snapshot('paused'), current: null };

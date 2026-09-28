@@ -121,6 +121,7 @@ pub struct DaemonCoreHandle {
     completed_rx: mpsc::Receiver<()>,
     sync_operation_manager: Arc<sync::SyncOperationManager>,
     native_bridge: playback::native::NativeBridge,
+    menu_start_tx: tokio::sync::mpsc::UnboundedSender<rpc::MenuStartRequest>,
 }
 
 async fn finish_shutdown_with_playback(
@@ -351,6 +352,7 @@ pub fn start_daemon_core(
     let sync_operation_manager = Arc::new(sync::SyncOperationManager::new());
     let core_operations = Arc::clone(&sync_operation_manager);
     let native_bridge = playback::native::NativeBridge::default();
+    let (menu_start_tx, menu_start_rx) = tokio::sync::mpsc::unbounded_channel();
     let core_native_bridge = native_bridge.clone();
 
     // Start Tokio runtime in a background thread
@@ -465,6 +467,7 @@ pub fn start_daemon_core(
                 };
                 if let Err(error) = rpc_runtime.block_on(rpc::run_server(
                     rpc::RpcServerConfig { listener, descriptor, ready_tx, shutdown: rpc_shutdown_server },
+                    menu_start_rx,
                     db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc, playback_rpc,
                     rpc_native_bridge,
                 )) { daemon_log!("RPC server stopped with error: {}", error); }
@@ -642,6 +645,7 @@ pub fn start_daemon_core(
                 while let Ok(command) = command_rx.try_recv() {
                     match command {
                         CoreCommand::BeginShutdown(reply) => {
+                            rpc::playback_selection::supersede_pending_start();
                             let _ = reply.send(sync_operation_manager.begin_shutdown_fence());
                         }
                         CoreCommand::FenceFailed => sync_operation_manager.fail_shutdown_fence(),
@@ -674,6 +678,7 @@ pub fn start_daemon_core(
         completed_rx,
         sync_operation_manager,
         native_bridge,
+        menu_start_tx,
     })
 }
 
@@ -718,6 +723,26 @@ fn playback_failure_message(code: &str) -> String {
     } else {
         translated
     }
+}
+
+fn play_something_failure_message(code: &str) -> String {
+    let key = match code {
+        "PLAYBACK_SELECTION_SETUP" => "playback.selection.invalid",
+        "PLAYBACK_SELECTION_SAVE_FAILED" => "playback.selection.load_failed",
+        "PLAYBACK_SELECTION_EMPTY" => "playback.selection.empty",
+        "PLAYBACK_SELECTION_PREPARATION_FAILED" => "playback.selection.preparation_failed",
+        "PLAYBACK_SELECTION_CANCELLED" => "playback.selection.cancelled",
+        "PLAYBACK_BUSY" => "playback.selection.busy",
+        "PERSISTENCE_FAILED" => "playback.command_error.persistence",
+        "OUTPUT_UNAVAILABLE" | "OUTPUT_LOST" => "playback.output.choose",
+        "DAEMON_STOPPED" => "lifecycle.quitting_waiting",
+        _ => "playback.selection.unavailable",
+    };
+    format!(
+        "{} {}",
+        hifimule_i18n::t(key),
+        hifimule_i18n::t("tray.open_playback_settings")
+    )
 }
 
 fn send_playback_failure_notification(body: String) {
@@ -932,6 +957,7 @@ fn run_candidate(
     let completed_rx = core.completed_rx;
     let shutdown_operations = core.sync_operation_manager;
     let native_bridge = core.native_bridge;
+    let menu_start_tx = core.menu_start_tx;
     let mut lifecycle_owner = Some(lifecycle_owner);
     let mut quit_reply: Option<mpsc::Receiver<sync::ShutdownSnapshot>> = None;
     let mut fence_reply: Option<mpsc::Receiver<Result<u64, String>>> = None;
@@ -1006,7 +1032,12 @@ fn run_candidate(
     let tray_menu = Menu::new();
     let quit_item = MenuItem::new(hifimule_i18n::t("tray.quit"), true, None);
     let open_ui_item = MenuItem::new(hifimule_i18n::t("tray.open_ui"), true, None);
+    let open_settings_item =
+        MenuItem::new(hifimule_i18n::t("tray.open_playback_settings"), true, None);
+    let play_something_item = MenuItem::new(hifimule_i18n::t("tray.play_something"), true, None);
     let resume_item = MenuItem::new(hifimule_i18n::t("tray.resume_playback"), false, None);
+    let radio_status_item =
+        MenuItem::new(hifimule_i18n::t("playback.selection.ready"), false, None);
     let native_status_item = MenuItem::new(
         hifimule_i18n::t(if native_owner.is_some() {
             "playback.native_controls_ready"
@@ -1024,7 +1055,10 @@ fn run_candidate(
     tray_menu
         .append_items(&[
             &open_ui_item,
+            &open_settings_item,
+            &play_something_item,
             &resume_item,
+            &radio_status_item,
             &native_status_item,
             &retry_session_item,
             &quit_item,
@@ -1041,6 +1075,9 @@ fn run_candidate(
 
     let menu_channel = MenuEvent::receiver();
     let mut menu_resume_pending: Option<playback::native::NativeCommandReceipt> = None;
+    let mut menu_start_pending: Option<tokio::sync::oneshot::Receiver<Result<String, String>>> =
+        None;
+    let mut menu_start_generation: Option<String> = None;
     let mut menu_resume_failure: Option<String> = None;
     let mut dev_ui_runner: Option<std::process::Child> = None;
     let mut ui_launches: Vec<std::process::Child> = Vec::new();
@@ -1182,8 +1219,48 @@ fn run_candidate(
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
         }
+        if let Some(receipt) = menu_start_pending.as_mut() {
+            match receipt.try_recv() {
+                Ok(result) => {
+                    menu_start_pending = None;
+                    match result {
+                        Ok(generation) => {
+                            menu_start_generation = Some(generation);
+                            radio_status_item
+                                .set_text(hifimule_i18n::t("playback.selection.started"));
+                        }
+                        Err(code) => {
+                            let message = play_something_failure_message(&code);
+                            radio_status_item.set_text(&message);
+                            if code != "PLAYBACK_SELECTION_CANCELLED" {
+                                send_playback_failure_notification(message);
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    menu_start_pending = None;
+                    radio_status_item.set_text(playback_failure_message("DAEMON_STOPPED"));
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
+        let menu_available = !shutdown_pending && quit_reply.is_none() && fence_reply.is_none();
+        play_something_item.set_enabled(menu_available && menu_start_pending.is_none());
+        open_settings_item.set_enabled(menu_available);
         if let Some(ingress) = native_ingress.as_ref() {
             let view = ingress.latest();
+            if menu_start_generation.as_deref() == Some(view.generation_id.as_str()) {
+                if let Some(code) = view.failure_code.as_deref() {
+                    let message = playback_failure_message(code);
+                    radio_status_item.set_text(&message);
+                    send_playback_failure_notification(message);
+                    menu_start_generation = None;
+                } else if view.status == playback::model::PlaybackStatus::Active {
+                    radio_status_item.set_text(hifimule_i18n::t("playback.radio.ready"));
+                    menu_start_generation = None;
+                }
+            }
             if menu_resume_pending.is_none()
                 && view.status == playback::model::PlaybackStatus::Active
                 && view.failure_code.is_none()
@@ -1321,10 +1398,28 @@ fn run_candidate(
                         }
                     }
                 }
-            } else if event.id == open_ui_item.id() {
+            } else if event.id == play_something_item.id()
+                && menu_available
+                && menu_start_pending.is_none()
+            {
+                let (reply, receipt) = tokio::sync::oneshot::channel();
+                if menu_start_tx.send(rpc::MenuStartRequest { reply }).is_ok() {
+                    // The menu coalesces repeated clicks while one result is
+                    // pending. A later accepted RPC start still supersedes it.
+                    menu_start_pending = Some(receipt);
+                    radio_status_item.set_text(hifimule_i18n::t("playback.selection.starting"));
+                } else {
+                    radio_status_item.set_text(playback_failure_message("DAEMON_STOPPED"));
+                }
+            } else if event.id == open_ui_item.id() || event.id == open_settings_item.id() {
                 // Post first. A live UI can act on this even if the launcher
                 // loses a close/reopen race or exits before Tauri is ready.
-                if let Err(error) = hifimule_lifecycle::request_ui_activation(&shutdown_app_data) {
+                let activation = if event.id == open_settings_item.id() {
+                    hifimule_lifecycle::request_ui_playback_settings_activation(&shutdown_app_data)
+                } else {
+                    hifimule_lifecycle::request_ui_activation(&shutdown_app_data)
+                };
+                if let Err(error) = activation {
                     eprintln!("Failed to request UI activation: {error}");
                 }
 

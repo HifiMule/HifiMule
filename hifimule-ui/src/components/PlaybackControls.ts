@@ -1,4 +1,4 @@
-import { playbackControl, playbackDescribeOccurrences, OccurrenceDisplay, playbackListOutputs, playbackSeek, playbackSelectOutput, serverList, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
+import { playbackControl, playbackDescribeOccurrences, playbackStartSelection, OccurrenceDisplay, playbackListOutputs, playbackSeek, playbackSelectOutput, serverList, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
 import { formatServerIdentity } from '../serverIdentity';
 import { playbackStore } from '../state/playback';
@@ -12,6 +12,9 @@ export class PlaybackControls {
     private repaintTimer: ReturnType<typeof setInterval> | undefined;
     private snapshot: PlaybackSessionSnapshot | undefined;
     private busy = false;
+    private startBusy = false;
+    private startRequest = 0;
+    private startIssue: 'settings' | 'output' | null = null;
     private outputBusy = false;
     private discovering = false;
     private lastDiscoveryAt = 0;
@@ -38,6 +41,7 @@ export class PlaybackControls {
     private readonly onPageHide = () => this.destroy();
     private readonly title = document.createElement('strong');
     private readonly status = document.createElement('span');
+    private readonly startStatus = document.createElement('span');
     private readonly source = document.createElement('sl-icon');
     private readonly sourceLabel = document.createElement('span');
     private readonly sourceHint = document.createElement('sl-tooltip');
@@ -50,6 +54,8 @@ export class PlaybackControls {
     private readonly messagesToggle = document.createElement('sl-icon-button');
     private readonly back = this.button('back');
     private readonly primary = this.button('resume');
+    private readonly playSomething = document.createElement('sl-button') as HTMLElement & { disabled: boolean };
+    private readonly startRoute = document.createElement('button');
     private readonly stop = this.button('stop');
     private readonly next = this.button('next');
     private readonly retry = this.button('retry');
@@ -62,7 +68,7 @@ export class PlaybackControls {
     private metadataRequest = 0;
     private metadata?: OccurrenceDisplay;
     private readonly hints = new Map<HTMLElement, HTMLElement>();
-    constructor(private readonly container: HTMLElement, private readonly onSurfaceChange: (surface: 'library' | 'playback') => void = () => {}) {
+    constructor(private readonly container: HTMLElement, private readonly onSurfaceChange: (surface: 'library' | 'playback' | 'settings') => void = () => {}) {
         container.className = 'playback-controls';
         container.setAttribute('aria-label', t('playback.controls'));
         const info = document.createElement('div');
@@ -72,6 +78,8 @@ export class PlaybackControls {
         this.status.setAttribute('role', 'status');
         this.status.setAttribute('aria-live', 'polite');
         this.status.setAttribute('aria-atomic', 'true');
+        this.startStatus.setAttribute('role', 'status');
+        this.startStatus.setAttribute('aria-live', 'polite');
         this.error.className = 'playback-controls__error';
         this.error.setAttribute('role', 'alert');
         const timelineGroup = document.createElement('div');
@@ -161,6 +169,21 @@ export class PlaybackControls {
         this.setIcon(this.refresh, 'arrow-clockwise', t('playback.refresh'));
         this.refresh.addEventListener('click', () => void this.refreshPlayback());
         this.setIcon(this.messagesToggle, 'info-circle', t('playback.guidance.hide'));
+        this.playSomething.textContent = t('playback.play_something');
+        this.playSomething.className = 'playback-controls__play-something';
+        this.playSomething.setAttribute('aria-description', t('playback.play_something_help'));
+        this.playSomething.disabled = true;
+        this.startRoute.className = 'playback-controls__start-route';
+        this.startRoute.hidden = true;
+        this.playSomething.addEventListener('click', () => void this.startRadio());
+        this.startRoute.type = 'button';
+        this.startRoute.addEventListener('click', () => {
+            if (this.startIssue === 'settings') this.onSurfaceChange('settings');
+            else if (this.startIssue === 'output') {
+                this.outputToggle.focus();
+                this.outputToggle.click();
+            }
+        });
         this.messages.id = 'playback-guidance';
         this.messagesToggle.setAttribute('aria-controls', this.messages.id);
         this.messagesToggle.addEventListener('click', () => {
@@ -170,9 +193,9 @@ export class PlaybackControls {
         this.surfaceToggle.addEventListener('click', () => this.onSurfaceChange(this.surface === 'library' ? 'playback' : 'library'));
         const actions = document.createElement('div');
         actions.className = 'playback-controls__actions';
-        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
+        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.playSomething, this.startRoute, this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
         this.messages.className = 'playback-controls__messages';
-        this.messages.append(this.status, this.seekStatus, this.error);
+        this.messages.append(this.status, this.startStatus, this.seekStatus, this.error);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
         this.back.hidden = this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
@@ -204,6 +227,7 @@ export class PlaybackControls {
     }
     destroy(): void {
         this.disposed = true;
+        ++this.startRequest;
         this.resizeObserver?.disconnect();
         this.unsubscribeConnection?.();
         this.unsubscribePlayback?.();
@@ -267,7 +291,7 @@ export class PlaybackControls {
         const continuityNotice = snapshot.mode === 'main' && snapshot.current && snapshot.continuityStatus
             ? t(`playback.book_progress.${snapshot.continuityStatus}`) : '';
         this.setText(this.error, [this.commandError, continuityNotice].filter(Boolean).join(' '));
-        this.statusPopup = !this.fresh() || !snapshot.current || sourceUnavailable || outputUnavailable
+        this.statusPopup = !this.fresh() || !snapshot.current || sourceUnavailable || outputUnavailable || Boolean(this.startStatus.textContent)
             || snapshot.mode === 'preview' || Boolean(snapshot.output?.error || snapshot.playback.error)
             || ['loading', 'buffering'].includes(snapshot.playback.status);
         const action = snapshot.state === 'playing' || snapshot.state === 'buffering' ? 'pause' : 'resume';
@@ -276,6 +300,10 @@ export class PlaybackControls {
         this.primary.dataset.playbackAction = action;
         this.setIcon(this.primary, action === 'pause' ? 'pause-fill' : 'play-fill', label);
         this.primary.hidden = this.stop.hidden = !snapshot.current;
+        this.playSomething.hidden = Boolean(snapshot.current && snapshot.state !== 'paused' && snapshot.state !== 'stopped');
+        this.playSomething.disabled = this.startBusy || !this.fresh();
+        this.startRoute.hidden = this.startIssue === null;
+        this.startRoute.textContent = t(this.startIssue === 'output' ? 'playback.output.choose' : 'playback.selection.open_settings');
         this.primary.disabled = this.stop.disabled = this.busy || !this.fresh();
         this.back.hidden = !snapshot.current;
         this.back.disabled = this.busy || !this.fresh() || !snapshot.playback.canGoBack;
@@ -313,6 +341,10 @@ export class PlaybackControls {
 
     private invalidateInteractions(clearCommandError = false): void {
         ++this.interactionEpoch;
+        ++this.startRequest;
+        this.startBusy = false;
+        this.startIssue = null;
+        this.startStatus.textContent = '';
         this.scrubbing = false;
         this.scrubPreviewMs = undefined;
         this.queuedSeek = undefined;
@@ -321,6 +353,46 @@ export class PlaybackControls {
     }
 
     private fresh(): boolean { return playbackStore.connection() === 'fresh'; }
+
+    private async startRadio(): Promise<void> {
+        if (this.disposed || !this.fresh() || this.startBusy) return;
+        const request = ++this.startRequest;
+        this.startBusy = true;
+        this.startIssue = null;
+        this.startStatus.textContent = t('playback.selection.starting');
+        if (this.snapshot) this.render(this.snapshot);
+        try {
+            await playbackStartSelection();
+            if (this.disposed || request !== this.startRequest) return;
+            this.startStatus.textContent = t('playback.selection.started');
+            try { await playbackStore.refresh(); }
+            catch { /* Admission succeeded; the shared connection state reports read failure. */ }
+        } catch (error) {
+            if (this.disposed || request !== this.startRequest) return;
+            const code = (error as { data?: { code?: string } })?.data?.code ?? String(error);
+            if (code.includes('OUTPUT_')) {
+                this.startIssue = 'output';
+                this.startStatus.textContent = t('playback.output.choose');
+            } else if (code.includes('PLAYBACK_SELECTION_CANCELLED')) {
+                this.startStatus.textContent = t('playback.selection.cancelled');
+            } else if (code.includes('PLAYBACK_BUSY')) {
+                this.startStatus.textContent = t('playback.selection.busy');
+            } else if (code.includes('PERSISTENCE_FAILED')) {
+                this.startStatus.textContent = t('playback.command_error.persistence');
+            } else {
+                this.startIssue = 'settings';
+                this.startStatus.textContent = t(code.includes('PLAYBACK_SELECTION_SAVE_FAILED') ? 'playback.selection.load_failed'
+                    : code.includes('PLAYBACK_SELECTION_PREPARATION_FAILED') ? 'playback.selection.preparation_failed'
+                    : code.includes('PLAYBACK_SELECTION_EMPTY') ? 'playback.selection.empty'
+                    : code.includes('PLAYBACK_SELECTION_SETUP') ? 'playback.selection.invalid' : 'playback.selection.unavailable');
+            }
+        } finally {
+            if (!this.disposed && request === this.startRequest) {
+                this.startBusy = false;
+                if (this.snapshot) this.render(this.snapshot);
+            }
+        }
+    }
 
     private renderConnection(): void {
         if (this.snapshot) this.render(this.snapshot);
@@ -459,12 +531,12 @@ export class PlaybackControls {
     }
 
     private updateMessages(): void {
-        const key = JSON.stringify([this.statusPopup, this.status.textContent, this.seekStatus.textContent, this.error.textContent]);
+        const key = JSON.stringify([this.statusPopup, this.status.textContent, this.startStatus.textContent, this.seekStatus.textContent, this.error.textContent]);
         if (key !== this.messageKey) {
             this.messageKey = key;
             this.messagesOverride = undefined;
         }
-        this.messagesVisible = this.messagesOverride ?? (this.statusPopup || Boolean(this.seekStatus.textContent || this.error.textContent));
+        this.messagesVisible = this.messagesOverride ?? (this.statusPopup || Boolean(this.startStatus.textContent || this.seekStatus.textContent || this.error.textContent));
         this.messages.className = `playback-controls__messages${this.messagesVisible ? ' is-visible' : ''}`;
         this.messagesToggle.setAttribute('aria-expanded', String(this.messagesVisible));
         this.setIcon(this.messagesToggle, 'info-circle', t(this.messagesVisible ? 'playback.guidance.hide' : 'playback.guidance.show'));

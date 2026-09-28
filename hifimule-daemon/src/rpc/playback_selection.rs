@@ -19,6 +19,62 @@ static START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static START_EPOCH: AtomicU64 = AtomicU64::new(0);
 const DEADLINE: Duration = Duration::from_secs(15);
 
+/// A later accepted session command wins over any selection still fetching or
+/// preparing. The same gate orders invalidation against the owner's final
+/// StartRadio commit. Repeated starts supersede instead of coalescing.
+pub(crate) fn supersede_pending_start() {
+    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
+    START_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
+pub(crate) fn begin_start() -> u64 {
+    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
+    START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+
+    #[test]
+    fn later_session_command_invalidates_pending_start() {
+        let ticket = START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+        supersede_pending_start();
+        assert_ne!(START_EPOCH.load(Ordering::Acquire), ticket);
+    }
+
+    #[test]
+    fn radio_start_requires_the_selected_available_output() {
+        let mut output = crate::playback::model::OutputState::default();
+        assert!(!selected_output_ready(&output));
+        let descriptor = crate::playback::devices::OutputDescriptor {
+            output_id: "chosen".into(),
+            display_name: "Chosen".into(),
+            detail: String::new(),
+            backend: "test".into(),
+            available: false,
+            is_default: false,
+            identity_confidence: "exact".into(),
+            is_virtual: false,
+            preference: None,
+        };
+        output.selected = Some(descriptor.clone());
+        assert!(!selected_output_ready(&output));
+        output.selected.as_mut().unwrap().available = true;
+        assert!(selected_output_ready(&output));
+        output.pending = Some(descriptor);
+        assert!(!selected_output_ready(&output));
+    }
+}
+
+fn selected_output_ready(output: &crate::playback::model::OutputState) -> bool {
+    output
+        .selected
+        .as_ref()
+        .is_some_and(|selected| selected.available)
+        && output.pending.is_none()
+}
+
 #[cfg(test)]
 pub(super) async fn test_ticket() -> u64 {
     let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -29,7 +85,9 @@ fn error(kind: SelectionError) -> JsonRpcError {
     let code = match kind {
         SelectionError::Setup => ERR_INVALID_PARAMS,
         SelectionError::Save => ERR_STORAGE_ERROR,
-        SelectionError::SourceUnavailable => super::ERR_CONNECTION_FAILED,
+        SelectionError::SourceUnavailable | SelectionError::PreparationFailed => {
+            super::ERR_CONNECTION_FAILED
+        }
         SelectionError::Empty => super::ERR_NOT_FOUND,
         SelectionError::Cancelled => super::ERR_SYNC_CANCELLED,
     };
@@ -174,8 +232,7 @@ pub async fn save_config(state: &AppState, params: Option<Value>) -> Result<Valu
 
 pub async fn cancel(params: Option<Value>) -> Result<Value, JsonRpcError> {
     version(params)?;
-    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
-    START_EPOCH.fetch_add(1, Ordering::AcqRel);
+    supersede_pending_start();
     Ok(json!({"data": {"cancelled": true}}))
 }
 
@@ -185,15 +242,23 @@ pub async fn start(
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
     version(params)?;
-    let ticket = {
-        let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
-        START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1
-    };
+    let ticket = begin_start();
+    start_with_ticket(state, ticket, mutation_guard).await
+}
+
+pub(crate) async fn start_with_ticket(
+    state: &AppState,
+    ticket: u64,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
     let path = path()?;
-    let config = tokio::task::spawn_blocking(move || selection::load(&path))
+    let loaded = tokio::task::spawn_blocking(move || selection::load(&path))
         .await
-        .map_err(|_| error(SelectionError::Save))?
-        .map_err(error)?;
+        .map_err(|_| error(SelectionError::Save))?;
+    if START_EPOCH.load(Ordering::Acquire) != ticket {
+        return Err(error(SelectionError::Cancelled));
+    }
+    let config = loaded.map_err(error)?;
     start_with_config(state, config, ticket, mutation_guard).await
 }
 
@@ -203,6 +268,9 @@ pub(super) async fn start_with_config(
     ticket: u64,
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
+    if START_EPOCH.load(Ordering::Acquire) != ticket {
+        return Err(error(SelectionError::Cancelled));
+    }
     if config.sources.is_empty() {
         return Err(error(SelectionError::Setup));
     }
@@ -258,15 +326,22 @@ pub(super) async fn start_with_config(
                 failures += 1;
             }
         }
-        Err(error(SelectionError::SourceUnavailable))
+        Err(error(SelectionError::PreparationFailed))
     };
     let (first, center, prepared) = tokio::time::timeout(DEADLINE, preflight)
         .await
-        .map_err(|_| error(SelectionError::SourceUnavailable))??;
+        .map_err(|_| error(SelectionError::PreparationFailed))??;
     if START_EPOCH.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
     let snapshot = state.playback.snapshot().map_err(super::playback_error)?;
+    if !selected_output_ready(&snapshot.output) {
+        return Err(JsonRpcError {
+            code: super::ERR_INVALID_PARAMS,
+            message: "Choose an available audio output before starting Radio".into(),
+            data: Some(json!({"code": "OUTPUT_UNAVAILABLE"})),
+        });
+    }
     let command = ApplySessionParams {
         schema_version: 1,
         instance_id: snapshot.instance_id,

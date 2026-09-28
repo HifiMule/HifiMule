@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
-mod playback_selection;
+pub(crate) mod playback_selection;
 
 // JSON-RPC 2.0 Error Codes
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
@@ -270,9 +270,17 @@ pub struct RpcServerConfig {
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// The daemon menu uses the same start operation as playback.startSelection.
+/// The response is only delivered for the accepted request; the owner remains
+/// authoritative for subsequent audio and output state.
+pub(crate) struct MenuStartRequest {
+    pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config: RpcServerConfig,
+    mut menu_starts: tokio::sync::mpsc::UnboundedReceiver<MenuStartRequest>,
     db: Arc<crate::db::Database>,
     device_manager: Arc<crate::device::DeviceManager>,
     last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
@@ -305,6 +313,38 @@ pub async fn run_server(
         playback,
         #[cfg(not(test))]
         pending_audiobookshelf_setups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+    });
+    let menu_state = state.clone();
+    tokio::spawn(async move {
+        while let Some(request) = menu_starts.recv().await {
+            let state = menu_state.clone();
+            let ticket = playback_selection::begin_start();
+            tokio::spawn(async move {
+                let result = match state.sync_operation_manager.try_admit_mutation() {
+                    Some(guard) => {
+                        playback_selection::start_with_ticket(&state, ticket, Some(guard))
+                            .await
+                            .map(|result| {
+                                result["data"]["generationId"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string()
+                            })
+                            .map_err(|error| {
+                                error
+                                    .data
+                                    .as_ref()
+                                    .and_then(|data| data.get("code"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("PLAYBACK_SELECTION_SOURCE_UNAVAILABLE")
+                                    .to_string()
+                            })
+                    }
+                    None => Err("DAEMON_STOPPED".to_string()),
+                };
+                let _ = request.reply.send(result);
+            });
+        }
     });
     // Startup (Story 2.11): migrate a legacy single-server vault to the UUID-keyed
     // multi-server vault (if needed), then load server rows into the manager.
@@ -547,6 +587,21 @@ async fn handler(
     } else {
         None
     };
+    // Acceptance order is established before any potentially slow provider
+    // preflight. A later session command invalidates an older Radio start.
+    if mutation_guard.is_some()
+        && matches!(
+            payload.method.as_str(),
+            "playback.applySession"
+                | "playback.playEpisode"
+                | "playback.playAlbum"
+                | "playback.playPlaylist"
+                | "playback.previewTrack"
+                | "playback.control"
+        )
+    {
+        playback_selection::supersede_pending_start();
+    }
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
         "server.connect" => handle_server_connect(&state, payload.params).await,
@@ -615,6 +670,7 @@ async fn handler(
             Ok(daemon_health_result(&state.sync_operation_manager, &state.playback).await)
         }
         "daemon.quit" => {
+            playback_selection::supersede_pending_start();
             state.sync_operation_manager.request_quit();
             Ok(serde_json::json!({ "data": { "accepted": true } }))
         }
@@ -1203,7 +1259,6 @@ async fn handle_playback_apply_session_prepared_fenced(
     );
     let playback = state.playback.clone();
     let owner = playback.clone();
-    let audio_fence = selection_fence;
     let result = tokio::task::spawn_blocking(move || match selection_fence {
         Some(fence) => owner.apply_with_guard_fenced(p, mutation_guard, fence),
         None => owner.apply_with_guard(p, mutation_guard),
@@ -1228,11 +1283,9 @@ async fn handle_playback_apply_session_prepared_fenced(
         let queue_revision = result.queue_revision.parse::<u64>().unwrap_or_default();
         let start_epoch = playback.control_epoch();
         tokio::spawn(async move {
-            if audio_fence
-                .is_some_and(|fence| fence.epoch.load(AtomicOrdering::Acquire) != fence.expected)
-            {
-                return;
-            }
+            // The selection ticket ends at owner commit. A later start that
+            // fails preflight must not cancel this accepted session's audio;
+            // generation and control epochs fence actual replacements.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             let resolved =
                 tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
@@ -1370,7 +1423,7 @@ async fn handle_playback_apply_session_prepared_fenced(
                             gain,
                             admitted_suffix,
                             response,
-                            audio_fence,
+                            None,
                         )
                         .await
                 }
@@ -15329,6 +15382,7 @@ mod tests {
                 ready_tx,
                 shutdown: task_shutdown,
             },
+            tokio::sync::mpsc::unbounded_channel().1,
             db,
             device_manager,
             Arc::new(tokio::sync::RwLock::new(None)),
@@ -17719,6 +17773,37 @@ mod tests {
         assert_eq!(after.session_id, before.session_id);
         assert_eq!(after.queue_revision, before.queue_revision);
         assert_eq!(after.generation_id, before.generation_id);
+    }
+
+    #[tokio::test]
+    async fn native_stop_supersedes_pending_selection_before_owner_dispatch() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let ticket = playback_selection::begin_start();
+        let service = crate::playback::commands::PlaybackCommandService::new(
+            state.playback.clone(),
+            state.server_manager.clone(),
+            state.db.clone(),
+            state.sync_operation_manager.clone(),
+        );
+        let _ = service
+            .native_control(crate::playback::NativeControlIntent::Stop)
+            .await;
+        let stale = playback_selection::start_with_config(
+            &state,
+            crate::playback::selection::PlaybackSelectionConfig {
+                sources: vec![crate::playback::selection::SelectionSource {
+                    server_id: "offline".into(),
+                    kind: crate::playback::selection::SelectionKind::Playlist,
+                    ref_id: "list".into(),
+                }],
+                ..Default::default()
+            },
+            ticket,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.data.unwrap()["code"], "PLAYBACK_SELECTION_CANCELLED");
     }
 
     #[tokio::test]

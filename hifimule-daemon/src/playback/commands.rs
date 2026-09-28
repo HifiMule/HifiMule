@@ -65,6 +65,7 @@ impl PlaybackCommandService {
         let Some(guard) = self.operations.try_admit_mutation() else {
             return Err(stopped());
         };
+        crate::rpc::playback_selection::supersede_pending_start();
         let playback = self.playback.clone();
         let snapshot =
             tokio::task::spawn_blocking(move || playback.native_control(intent, Some(guard)))

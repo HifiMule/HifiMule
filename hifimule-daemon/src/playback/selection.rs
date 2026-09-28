@@ -73,6 +73,8 @@ pub enum SelectionError {
     Save,
     #[error("PLAYBACK_SELECTION_SOURCE_UNAVAILABLE")]
     SourceUnavailable,
+    #[error("PLAYBACK_SELECTION_PREPARATION_FAILED")]
+    PreparationFailed,
     #[error("PLAYBACK_SELECTION_EMPTY")]
     Empty,
     #[error("PLAYBACK_SELECTION_CANCELLED")]
