@@ -279,6 +279,28 @@ mod tests {
             db.radio_has_membership(&edited.session_id, &source("one", "auto-0"))
                 .unwrap()
         );
+        assert_eq!(
+            db.radio_auto_upcoming_count(&edited.session_id, 0).unwrap(),
+            4
+        );
+        let more_auto_ids: Vec<_> = db
+            .playback_page(&edited.session_id, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|o| matches!(o.source.track_id.as_str(), "auto-1" | "auto-2" | "auto-3"))
+            .map(|o| o.occurrence_id)
+            .collect();
+        apply(
+            &session,
+            SessionOperation::RemoveUpcoming {
+                occurrence_ids: more_auto_ids,
+            },
+        );
+        assert_eq!(
+            db.radio_auto_upcoming_count(&edited.session_id, 0).unwrap(),
+            1
+        );
+        assert!(session.reserve_radio_refill().unwrap().is_some());
         let manual_id = db
             .playback_page(&edited.session_id, None, 100)
             .unwrap()
@@ -319,6 +341,22 @@ mod tests {
         let after = session.snapshot().unwrap();
         assert_eq!(after.queue_revision, before.queue_revision);
         assert_eq!(after.total_occurrence_count, before.total_occurrence_count);
+    }
+
+    #[test]
+    fn empty_bounded_window_advances_without_claiming_exhaustion() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db, "radio-test".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        assert!(
+            !session
+                .admit_radio_refill_with_more(lease, Vec::new(), None, true)
+                .unwrap()
+        );
+        let snapshot = session.snapshot().unwrap();
+        assert_eq!(snapshot.radio.unwrap().status, RadioStatus::Ready);
+        assert!(session.reserve_radio_refill().unwrap().is_some());
     }
 
     #[test]
@@ -420,6 +458,20 @@ mod tests {
         let session = PlaybackSession::restore(db.clone(), "radio-test".into());
         start(&session);
         let lease = session.reserve_radio_refill().unwrap().unwrap();
+        let source_key = "artist-source";
+        assert!(
+            db.advance_radio_scan(
+                &lease.session_id,
+                lease.queue_revision,
+                source_key,
+                crate::playback::selection::RadioSourceCursor::default(),
+                Some(crate::playback::selection::RadioSourceCursor {
+                    index: 32,
+                    intra: 7
+                }),
+            )
+            .unwrap()
+        );
         session
             .admit_radio_refill(lease, vec![candidate("one", "second", "artist")], None)
             .unwrap();
@@ -449,6 +501,15 @@ mod tests {
         let after = restored.snapshot().unwrap();
         assert_eq!(after.state, TransportState::Paused);
         assert_eq!(after.radio.as_ref().unwrap().logical_id, logical_id);
+        assert_eq!(
+            reopened
+                .radio_scan_cursor(&after.session_id, source_key)
+                .unwrap(),
+            Some(crate::playback::selection::RadioSourceCursor {
+                index: 32,
+                intra: 7
+            })
+        );
         assert!(
             reopened
                 .radio_has_membership(&after.session_id, &source("one", "second"))
@@ -457,6 +518,12 @@ mod tests {
         start(&restored);
         let fresh = restored.snapshot().unwrap();
         assert_ne!(fresh.radio.unwrap().logical_id, logical_id);
+        assert_eq!(
+            reopened
+                .radio_scan_cursor(&fresh.session_id, source_key)
+                .unwrap(),
+            Some(crate::playback::selection::RadioSourceCursor::default())
+        );
         assert!(
             !reopened
                 .radio_has_membership(&fresh.session_id, &source("one", "second"))
@@ -713,5 +780,48 @@ mod tests {
                 .unwrap();
             assert!(session.reserve_radio_refill().unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn retry_rechecks_exhausted_sources_without_clearing_membership() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "radio-test".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        assert!(
+            db.advance_radio_scan(
+                &lease.session_id,
+                lease.queue_revision,
+                "source",
+                crate::playback::selection::RadioSourceCursor::default(),
+                None,
+            )
+            .unwrap()
+        );
+        session.admit_radio_refill(lease, Vec::new(), None).unwrap();
+        let waiting = session.snapshot().unwrap();
+        assert!(
+            db.radio_scan_cursor(&waiting.session_id, "source")
+                .unwrap()
+                .is_none()
+        );
+        session
+            .control_with_guard(
+                ControlParams {
+                    schema_version: 1,
+                    instance_id: waiting.instance_id,
+                    session_id: waiting.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: waiting.generation_id,
+                    occurrence_id: waiting.current.unwrap().occurrence_id,
+                    action: ControlAction::Retry,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            db.radio_scan_cursor(&waiting.session_id, "source").unwrap(),
+            Some(crate::playback::selection::RadioSourceCursor::default())
+        );
     }
 }

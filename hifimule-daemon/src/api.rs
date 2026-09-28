@@ -1467,6 +1467,19 @@ impl JellyfinClient {
         playlist_id: &str,
         limit: Option<u32>,
     ) -> Result<Vec<JellyfinItem>> {
+        self.get_playlist_items_via_user_library_window(url, token, user_id, playlist_id, 0, limit)
+            .await
+    }
+
+    pub async fn get_playlist_items_via_user_library_window(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+        offset: u32,
+        limit: Option<u32>,
+    ) -> Result<Vec<JellyfinItem>> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -1483,6 +1496,11 @@ impl JellyfinClient {
             endpoint
                 .query_pairs_mut()
                 .append_pair("Limit", &limit.to_string());
+        }
+        if offset != 0 {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("StartIndex", &offset.to_string());
         }
 
         let response = self.client.get(endpoint).headers(headers).send().await?;

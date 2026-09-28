@@ -492,6 +492,20 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    /// A bounded window for incremental Radio selection. Providers that cannot
+    /// advance a playlist return an unsupported capability instead of repeating
+    /// its first page indefinitely.
+    async fn get_playlist_tracks_window(
+        &self,
+        _playlist_id: &str,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "paged playlist retrieval is unavailable".into(),
+        ))
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
 
     async fn download_url(

@@ -292,10 +292,10 @@ pub(super) async fn run_radio_worker(
             Ok(Ok(Some(lease))) => lease,
             _ => continue,
         };
-        let (candidates, reason) = gather_radio_candidates(&state, &lease).await;
+        let (candidates, reason, more_windows) = gather_radio_candidates(&state, &lease).await;
         let owner = state.playback.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            owner.admit_radio_refill(lease, candidates, reason)
+            owner.admit_radio_refill_with_more(lease, candidates, reason, more_windows)
         })
         .await;
     }
@@ -304,12 +304,13 @@ pub(super) async fn run_radio_worker(
 async fn gather_radio_candidates(
     state: &AppState,
     lease: &crate::playback::radio::RefillLease,
-) -> (Vec<selection::SelectionCandidate>, Option<String>) {
+) -> (Vec<selection::SelectionCandidate>, Option<String>, bool) {
     let config = match path().ok().and_then(|path| selection::load(&path).ok()) {
         Some(config) => config,
-        None => return (Vec::new(), Some("radio.settingsUnavailable".into())),
+        None => return (Vec::new(), Some("radio.settingsUnavailable".into()), false),
     };
     let mut failed_source = false;
+    let mut more_windows = false;
     let retrieve = async {
         let mut pools = Vec::new();
         for source in config
@@ -328,8 +329,23 @@ async fn gather_radio_candidates(
             if !state.playback.radio_lease_current(lease) {
                 break;
             }
-            match selection::fetch_source(provider.as_ref(), source).await {
-                Ok(mut pool) => {
+            let source_key = match serde_json::to_string(source) {
+                Ok(key) => key,
+                Err(_) => {
+                    failed_source = true;
+                    continue;
+                }
+            };
+            let cursor = match state.db.radio_scan_cursor(&lease.session_id, &source_key) {
+                Ok(Some(cursor)) => cursor,
+                Ok(None) => continue,
+                Err(_) => {
+                    failed_source = true;
+                    continue;
+                }
+            };
+            match selection::fetch_radio_window(provider.as_ref(), source, cursor).await {
+                Ok((mut pool, next)) => {
                     if !state.playback.radio_lease_current(lease) {
                         break;
                     }
@@ -361,6 +377,27 @@ async fn gather_radio_candidates(
                         }
                         eligible.push(song);
                     }
+                    if eligible.is_empty() {
+                        if state.playback.radio_lease_current(lease) {
+                            if state
+                                .db
+                                .advance_radio_scan(
+                                    &lease.session_id,
+                                    lease.queue_revision,
+                                    &source_key,
+                                    cursor,
+                                    next,
+                                )
+                                .unwrap_or(false)
+                            {
+                                more_windows |= next.is_some();
+                            } else {
+                                failed_source = true;
+                            }
+                        }
+                    } else {
+                        more_windows |= next.is_some();
+                    }
                     pool.tracks = eligible;
                     pools.push(pool);
                 }
@@ -376,22 +413,18 @@ async fn gather_radio_candidates(
     .await
     {
         Ok(pools) => pools,
-        Err(_) => return (Vec::new(), Some("radio.sourceFailure".into())),
+        Err(_) => return (Vec::new(), Some("radio.sourceFailure".into()), false),
     };
     let ordered = match selection::select_radio_order(&config, pools.clone()) {
         Ok(ordered) => ordered,
         Err(_) => {
-            return (
-                Vec::new(),
-                Some(
-                    if failed_source {
-                        "radio.sourceFailure"
-                    } else {
-                        "radio.exhausted"
-                    }
-                    .into(),
-                ),
-            );
+            return if failed_source {
+                (Vec::new(), Some("radio.sourceFailure".into()), false)
+            } else if more_windows {
+                (Vec::new(), None, true)
+            } else {
+                (Vec::new(), Some("radio.exhausted".into()), false)
+            };
         }
     };
     let mut evidence = HashMap::new();
@@ -453,10 +486,20 @@ async fn gather_radio_candidates(
     )
     .await
     {
-        Ok((selected, failures)) => (
-            selected,
-            (failed_source || failures > 0).then(|| "radio.sourceFailure".into()),
-        ),
-        Err(_) => (Vec::new(), Some("radio.sourceFailure".into())),
+        Ok((selected, failures)) => {
+            let reason = if failed_source || failures > 0 {
+                Some("radio.sourceFailure".into())
+            } else if selected.len() < lease.capacity && !more_windows {
+                Some("radio.exhausted".into())
+            } else {
+                None
+            };
+            (
+                selected,
+                reason,
+                more_windows && failures == 0 && !failed_source,
+            )
+        }
+        Err(_) => (Vec::new(), Some("radio.sourceFailure".into()), false),
     }
 }

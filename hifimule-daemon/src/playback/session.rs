@@ -143,6 +143,7 @@ enum OwnerCommand {
         super::radio::RefillLease,
         Vec<super::selection::SelectionCandidate>,
         Option<String>,
+        bool,
         mpsc::Sender<PResult<bool>>,
     ),
 }
@@ -312,12 +313,28 @@ impl PlaybackSession {
         candidates: Vec<super::selection::SelectionCandidate>,
         failure: Option<String>,
     ) -> PResult<bool> {
+        self.admit_radio_refill_with_more(lease, candidates, failure, false)
+    }
+
+    pub fn admit_radio_refill_with_more(
+        &self,
+        lease: super::radio::RefillLease,
+        candidates: Vec<super::selection::SelectionCandidate>,
+        failure: Option<String>,
+        more_windows: bool,
+    ) -> PResult<bool> {
         if self.fenced.load(Ordering::Acquire) {
             return Err(owner_stopped());
         }
         let (reply, receiver) = mpsc::channel();
         self.command_tx
-            .try_send(OwnerCommand::AdmitRadio(lease, candidates, failure, reply))
+            .try_send(OwnerCommand::AdmitRadio(
+                lease,
+                candidates,
+                failure,
+                more_windows,
+                reply,
+            ))
             .map_err(admission_error)?;
         receiver.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
@@ -1455,12 +1472,19 @@ fn owner_loop(
                 };
                 let _ = reply.send(with_metadata(result, &i));
             }
-            Ok(OwnerCommand::AdmitRadio(lease, candidates, failure, reply)) => {
+            Ok(OwnerCommand::AdmitRadio(lease, candidates, failure, more_windows, reply)) => {
                 let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
                 } else {
-                    admit_radio_inner(&mut i, &lease, &candidates, failure, &generation_serial)
+                    admit_radio_inner(
+                        &mut i,
+                        &lease,
+                        &candidates,
+                        failure,
+                        more_windows,
+                        &generation_serial,
+                    )
                 };
                 if result.is_err() && i.session.queue_kind == QueueKind::Radio {
                     i.radio_inflight = None;
@@ -1943,6 +1967,7 @@ fn admit_radio_inner(
     lease: &super::radio::RefillLease,
     candidates: &[super::selection::SelectionCandidate],
     failure: Option<String>,
+    more_windows: bool,
     generation_serial: &AtomicU64,
 ) -> PResult<bool> {
     if i.radio_inflight.as_deref() != Some(lease.refill_id.as_str()) {
@@ -2004,12 +2029,14 @@ fn admit_radio_inner(
     let mut next = i.session.clone();
     if let Some(radio) = next.radio.as_mut() {
         let short_pass = sources.len() < capacity;
-        radio.status = if short_pass {
+        radio.status = if short_pass && !more_windows {
             super::radio::RadioStatus::Waiting
         } else {
             super::radio::RadioStatus::Ready
         };
-        radio.reason = short_pass.then(|| failure.unwrap_or_else(|| "radio.exhausted".into()));
+        radio.reason = short_pass
+            .then(|| failure.unwrap_or_else(|| "radio.exhausted".into()))
+            .filter(|_| !more_windows);
     }
     if sources.is_empty() {
         i.db.checkpoint_radio_state(&next).map_err(storage)?;
@@ -2124,7 +2151,7 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::ReserveRadio(reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
-        OwnerCommand::AdmitRadio(_, _, _, reply) => {
+        OwnerCommand::AdmitRadio(_, _, _, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
     }

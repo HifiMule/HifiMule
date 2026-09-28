@@ -401,6 +401,23 @@ impl MediaProvider for SubsonicProvider {
             .collect())
     }
 
+    async fn get_playlist_tracks_window(
+        &self,
+        playlist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let playlist = self.client.get_playlist_limited(playlist_id).await?;
+        Ok(playlist
+            .playlist
+            .entry
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(song_from_dto)
+            .collect())
+    }
+
     async fn create_playlist(
         &self,
         name: &str,

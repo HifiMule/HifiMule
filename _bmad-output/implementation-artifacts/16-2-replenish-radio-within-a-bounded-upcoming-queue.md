@@ -4,7 +4,7 @@ baseline_commit: 5b93cbe5221293a662e7b550c8094f9b62d7b5dc
 
 # Story 16.2: Replenish Radio within a bounded upcoming queue
 
-Status: review
+Status: done
 
 ## Story
 
@@ -152,3 +152,10 @@ GPT-6 Codex
 - 2026-09-28: Added bounded same-artist Radio session, transactional persistence, owner refill admission, provider ambiguity handling, localized UI status, regression tests, and four-platform CI coverage configuration.
 - 2026-09-28: Recorded Alexis's report of successful Windows, Linux and both macOS CI jobs; completed the verification task.
 - 2026-09-28: Final local regression and quality gates passed; story moved to review.
+
+### Review Findings
+
+- [x] [Review][Patch] Removed automatic suggestions still consume upcoming capacity (AC 2–3): removal records the exclusion and deletes the occurrence but leaves its Radio origin row, which the refill threshold counts. [hifimule-daemon/src/playback/persistence.rs:1016]
+- [x] [Review][Patch] Radio can report exhaustion while eligible unheard tracks remain (AC 1, 5, 8): every refill fetches the same first bounded source window, with no cursor or window advancement after those tracks are consumed. [hifimule-daemon/src/rpc/playback_selection.rs:331]
+
+Review fixes: automatic removal now deletes its origin row. Radio advances durable per-source cursors through bounded playlist, genre, and artist windows, with queue-revision fencing and separate ready/waiting outcomes. Explicit Retry rescans an exhausted source without clearing heard or excluded membership. Local verification passed: 1,212 daemon tests and five provider contract tests, all-target Clippy, Rust format, and diff whitespace check. The updated code still needs the four-platform CI gate before this story returns to `done`.

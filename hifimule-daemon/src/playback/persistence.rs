@@ -140,6 +140,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS playback_radio_origin_session ON playback_radio_origin(session_id,ordinal);
             CREATE TABLE IF NOT EXISTS playback_radio_membership (session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('heard','excluded')), PRIMARY KEY(session_id,server_id,track_id,kind));
             CREATE INDEX IF NOT EXISTS playback_radio_membership_lookup ON playback_radio_membership(session_id,server_id,track_id);
+            CREATE TABLE IF NOT EXISTS playback_radio_scan (session_id TEXT NOT NULL, source_key TEXT NOT NULL, cursor_index INTEGER NOT NULL CHECK(cursor_index>=0), cursor_intra INTEGER NOT NULL CHECK(cursor_intra>=0), exhausted INTEGER NOT NULL CHECK(exhausted IN (0,1)), PRIMARY KEY(session_id,source_key));
             CREATE TABLE IF NOT EXISTS playback_audition (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, position_ms INTEGER NOT NULL CHECK(position_ms>=0), transport_state TEXT NOT NULL, saved_main_occurrence_id TEXT, saved_main_position_ms INTEGER NOT NULL CHECK(saved_main_position_ms>=0), saved_main_intent TEXT NOT NULL, resume_inhibited INTEGER NOT NULL CHECK(resume_inhibited IN (0,1)), contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)));
             CREATE TABLE IF NOT EXISTS playback_audition_outcomes (outcome_id INTEGER PRIMARY KEY AUTOINCREMENT, audition_id TEXT NOT NULL UNIQUE, parent_session_id TEXT NOT NULL, server_id TEXT NOT NULL, track_id TEXT NOT NULL, disposition TEXT NOT NULL CHECK(disposition IN ('naturalCompletion','stopped','returned','replaced','superseded','technicalFailure','interrupted')), terminal_position_ms INTEGER NOT NULL CHECK(terminal_position_ms>=0), duration_ms INTEGER CHECK(duration_ms>=0), failure_code TEXT, contiguous_heard_ms INTEGER NOT NULL CHECK(contiguous_heard_ms>=0), coverage_unknown INTEGER NOT NULL CHECK(coverage_unknown IN (0,1)), seek_discontinuous INTEGER NOT NULL CHECK(seek_discontinuous IN (0,1)), fully_heard INTEGER NOT NULL CHECK(fully_heard IN (0,1)));
             CREATE INDEX IF NOT EXISTS playback_audition_outcomes_page ON playback_audition_outcomes(outcome_id);
@@ -677,6 +678,67 @@ impl Database {
         )?)
     }
 
+    pub fn radio_scan_cursor(
+        &self,
+        session_id: &str,
+        source_key: &str,
+    ) -> Result<Option<super::selection::RadioSourceCursor>> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let row: Option<(i64, i64, i64)> = conn.query_row(
+            "SELECT cursor_index,cursor_intra,exhausted FROM playback_radio_scan WHERE session_id=?1 AND source_key=?2",
+            params![session_id, source_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        match row {
+            Some((_, _, 1)) => Ok(None),
+            Some((index, intra, 0)) => Ok(Some(super::selection::RadioSourceCursor {
+                index: u32::try_from(index)?,
+                intra: u32::try_from(intra)?,
+            })),
+            None => Ok(Some(super::selection::RadioSourceCursor::default())),
+            _ => Err(anyhow!("INVALID_RADIO_STATE")),
+        }
+    }
+
+    pub fn advance_radio_scan(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        source_key: &str,
+        cursor: super::selection::RadioSourceCursor,
+        next: Option<super::selection::RadioSourceCursor>,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        let tx = conn.transaction()?;
+        let active: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playback_radio r JOIN playback_sessions s ON s.session_id=r.session_id WHERE r.session_id=?1 AND s.queue_revision=?2 AND r.status='filling' AND NOT EXISTS(SELECT 1 FROM playback_audition a WHERE a.parent_session_id=r.session_id))",
+            params![session_id, i64::try_from(expected_revision)?],
+            |row| row.get(0),
+        )?;
+        if !active {
+            return Ok(false);
+        }
+        let stored: Option<(i64, i64, i64)> = tx.query_row(
+            "SELECT cursor_index,cursor_intra,exhausted FROM playback_radio_scan WHERE session_id=?1 AND source_key=?2",
+            params![session_id, source_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        if stored.is_some_and(|(index, intra, exhausted)| {
+            index != i64::from(cursor.index) || intra != i64::from(cursor.intra) || exhausted != 0
+        }) {
+            return Ok(false);
+        }
+        let (index, intra, exhausted) = next.map_or((0, 0, 1), |next| {
+            (i64::from(next.index), i64::from(next.intra), 0)
+        });
+        tx.execute(
+            "INSERT INTO playback_radio_scan(session_id,source_key,cursor_index,cursor_intra,exhausted) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id,source_key) DO UPDATE SET cursor_index=excluded.cursor_index,cursor_intra=excluded.cursor_intra,exhausted=excluded.exhausted",
+            params![session_id, source_key, index, intra, exhausted],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn radio_has_occurrence(&self, session_id: &str, source: &TrackSource) -> Result<bool> {
         let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
         Ok(conn.query_row(
@@ -694,6 +756,27 @@ impl Database {
         )?;
         if revision != i64::try_from(session.queue_revision)? {
             return Err(anyhow!("RADIO_REVISION_CHANGED"));
+        }
+        let previous_reason: Option<String> = tx
+            .query_row(
+                "SELECT reason FROM playback_radio WHERE session_id=?1",
+                [&session.session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if previous_reason.as_deref() == Some("radio.exhausted")
+            && session
+                .radio
+                .as_ref()
+                .is_some_and(|radio| radio.status == super::radio::RadioStatus::Ready)
+        {
+            // Explicit Retry rechecks an exhausted source after its catalog changes.
+            // Heard and excluded membership remains intact.
+            tx.execute(
+                "DELETE FROM playback_radio_scan WHERE session_id=?1",
+                [&session.session_id],
+            )?;
         }
         store_radio_state(&tx, session)?;
         tx.commit()?;
@@ -1024,6 +1107,10 @@ impl Database {
             if changed != 1 {
                 return Err(anyhow!("removed occurrence is no longer upcoming"));
             }
+            tx.execute(
+                "DELETE FROM playback_radio_origin WHERE session_id=?1 AND occurrence_id=?2",
+                params![session.session_id, occurrence_id],
+            )?;
         }
         update_session(&tx, session)?;
         tx.commit()?;
@@ -1347,6 +1434,10 @@ impl Database {
     pub fn clear_playback_session(&self, session: &PersistedSession) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playback_radio_scan WHERE session_id=?1",
+            [&session.session_id],
+        )?;
         tx.execute(
             "DELETE FROM playback_radio_membership WHERE session_id=?1",
             [&session.session_id],
@@ -2173,6 +2264,7 @@ fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) ->
 }
 
 fn replace_radio_state(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
+    tx.execute("DELETE FROM playback_radio_scan", [])?;
     tx.execute("DELETE FROM playback_radio_membership", [])?;
     tx.execute("DELETE FROM playback_radio_origin", [])?;
     tx.execute("DELETE FROM playback_radio", [])?;

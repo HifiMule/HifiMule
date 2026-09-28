@@ -393,6 +393,105 @@ pub async fn fetch_source(
     })
 }
 
+/// Cursor for one bounded Radio source window. For an artist, `index` is the
+/// album index and `intra` is the track index within that album. Other source
+/// kinds use `index` as the track offset and keep `intra` at zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadioSourceCursor {
+    pub index: u32,
+    pub intra: u32,
+}
+
+pub async fn fetch_radio_window(
+    provider: &dyn MediaProvider,
+    source: &SelectionSource,
+    cursor: RadioSourceCursor,
+) -> Result<(SelectionPool, Option<RadioSourceCursor>), SelectionError> {
+    let mut next = None;
+    let tracks = match source.kind {
+        SelectionKind::Playlist => {
+            let tracks = provider
+                .get_playlist_tracks_window(
+                    &source.ref_id,
+                    cursor.index,
+                    MAX_CANDIDATES_PER_SOURCE as u32,
+                )
+                .await
+                .map_err(|_| SelectionError::SourceUnavailable)?;
+            if tracks.len() == MAX_CANDIDATES_PER_SOURCE {
+                next = cursor
+                    .index
+                    .checked_add(tracks.len() as u32)
+                    .map(|index| RadioSourceCursor { index, intra: 0 });
+            }
+            tracks
+        }
+        SelectionKind::Genre => {
+            let tracks = provider
+                .get_genre_tracks_bounded(
+                    &source.ref_id,
+                    cursor.index,
+                    MAX_CANDIDATES_PER_SOURCE as u32,
+                )
+                .await
+                .map_err(|_| SelectionError::SourceUnavailable)?;
+            if tracks.len() == MAX_CANDIDATES_PER_SOURCE {
+                next = cursor
+                    .index
+                    .checked_add(tracks.len() as u32)
+                    .map(|index| RadioSourceCursor { index, intra: 0 });
+            }
+            tracks
+        }
+        SelectionKind::Artist => {
+            let artist = provider
+                .get_artist(&source.ref_id)
+                .await
+                .map_err(|_| SelectionError::SourceUnavailable)?;
+            let mut all = Vec::new();
+            let mut album_index = cursor.index as usize;
+            let mut track_index = cursor.intra as usize;
+            let mut visited = 0;
+            while album_index < artist.albums.len()
+                && visited < MAX_ARTIST_ALBUMS
+                && all.len() < MAX_CANDIDATES_PER_SOURCE
+            {
+                let album = &artist.albums[album_index];
+                let result = provider
+                    .get_album(&album.id)
+                    .await
+                    .map_err(|_| SelectionError::SourceUnavailable)?;
+                visited += 1;
+                let remaining = MAX_CANDIDATES_PER_SOURCE - all.len();
+                let track_count = result.tracks.len();
+                let available = track_count.saturating_sub(track_index);
+                let take = remaining.min(available);
+                all.extend(result.tracks.into_iter().skip(track_index).take(take));
+                track_index += take;
+                if track_index < track_count {
+                    break;
+                }
+                album_index += 1;
+                track_index = 0;
+            }
+            if album_index < artist.albums.len() {
+                next = Some(RadioSourceCursor {
+                    index: album_index as u32,
+                    intra: track_index as u32,
+                });
+            }
+            all
+        }
+    };
+    Ok((
+        SelectionPool {
+            source: source.clone(),
+            tracks,
+        },
+        next,
+    ))
+}
+
 /// Materialize the shared pure selector. A single-server pool uses its original IDs, so
 /// equivalent sync and Playback fixtures yield the same order for an explicit seed. With
 /// multiple servers the internal ID is a reversible, collision-free namespace; the output
