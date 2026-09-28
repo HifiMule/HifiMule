@@ -3,7 +3,7 @@ baseline_commit: 7bebcb6fc00cfb655ac57e3a65f164210d1878c4
 ---
 # Story 16.3: Continue Radio through meaningful artist connections
 
-Status: in-progress
+Status: review
 
 ## Story
 
@@ -43,9 +43,9 @@ so that its progression feels understandable within my curated libraries rather 
 - [x] Surface accepted transition and waiting explanations (AC: 2–3, 5–9).
   - [x] Extend the authoritative Radio snapshot and existing Playing destination/status, using localized, concise relationship/new-start/cycle/waiting text. Include safe provenance, never credentials or authenticated URLs. Preserve Retry, focus and `aria-live` behavior across UI reconnect.
   - [x] Keep the settings-view start action as the available Radio entry point. Final bar/menu Play something belongs to 16.6; recording deduplication belongs to 16.4, and Radio gain to 16.5.
-- [ ] Verify regressions and platform evidence (AC: 1–9).
+- [x] Verify regressions and platform evidence (AC: 1–9).
   - [x] Add deterministic owner, selector, provider-contract and SQLite migration/restart tests for transition ranking, original-settings stability, forged `StartRadio` snapshot rejection, centerless first track followed by fallback and restart, duplicate/stale admission, center/cycle cursor reset, cycle exclusions, partial windows and unknown availability.
-  - [ ] Extend `scripts/tests/playback-radio-ui.test.mjs` and four-locale catalog parity for explanations. Run focused Rust tests, full relevant daemon/UI quality gates, and the four-platform build matrix; record which provider/server and installed scenarios actually ran.
+  - [x] Extend `scripts/tests/playback-radio-ui.test.mjs` and four-locale catalog parity for explanations. Run focused Rust tests, full relevant daemon/UI quality gates, and the four-platform build matrix; record which provider/server and installed scenarios actually ran.
 
 ## Dev Notes
 
@@ -108,13 +108,15 @@ GPT-6 Codex (story preparation and implementation)
 - Live read-only contract check, 2026-09-28: Jellyfin 12.1.0 returned stable `ArtistItems` IDs for 400 sampled Audio items, with no multi-credit item in that sample. Its Similar endpoint returned IDs but no documented relationship reason, so the adapter does not use it as similar-artist evidence. Shared-credit behavior is verified with deterministic adapter fixtures.
 - Live read-only contract check, 2026-09-28: Navidrome 0.64.2 / OpenSubsonic 1.16.1 returned `getArtistInfo2` similar-artist IDs for three sampled artists (4, 3, 1); all eight IDs resolved through local `getArtist`. Empty, unsupported and malformed responses are fixture-tested. Audiobookshelf exposes no music relation capability.
 - Local macOS arm64: full daemon suite passed (1,225 unit tests, 6 ignored, plus 5 integration tests); 258 script tests passed with one pre-existing skip; 57 focused Playback UI tests passed; two Python evidence-script unit tests passed; playback-session-evidence integration run passed. UI production build, i18n tests, `cargo fmt --check`, daemon Clippy and `git diff --check` passed. Clippy and Vite reported existing warnings. The first unprivileged evidence run failed because local fixture sockets were sandboxed; the approved run passed.
-- Platform matrix and installed-package testing remain unverified. GitHub's web page is reachable without sign-in and SSH read access works, but this workspace has no `gh` CLI or GitHub API token; the repository's matrix triggers on PR or push to `main`.
+- GitHub [Build run #109](https://github.com/HifiMule/HifiMule/actions/runs/36429979592) succeeded for commit `2c32fb2` on the story branch: four jobs completed and `playback-evidence-{linux-x64,macos-arm64,macos-x64,windows-x64}` artifacts were uploaded. This is deterministic CI fixture and source-build evidence, not installed-package or real-library end-to-end Radio evidence. The run has one Windows MSYS2 MINGW64 deprecation warning.
+- Final step-9 validation: `npm run build:daemon -- test --workspace` passed across all Rust workspace suites after CI, with 0 failures; story checkboxes and File List were rechecked, and `git diff --check` passed.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Added source-qualified evidence-based Radio transitions, original settings persistence, centerless fresh fallback, cycle renewal, conservative waiting and localized explanations. No external enrichment or server-side writes.
-- Live provider checks are read-only metadata checks. They do not prove a real-library multi-credit Jellyfin transition or an installed-package Radio scenario.
+- Live provider checks are read-only metadata checks. They do not prove a real-library multi-credit Jellyfin transition or an installed-package Radio scenario; neither installed-package nor end-to-end real-library Radio playback was run for this story.
+- Four-platform CI passed on Linux x64, macOS arm64, macOS x64 and Windows x64 for the exact implementation commit. No platform failure remains in the story verification gate.
 
 ### File List
 
@@ -138,4 +140,4 @@ GPT-6 Codex (story preparation and implementation)
 
 ### Change Log
 
-- 2026-09-28: Implemented story 16.3 Radio continuation and verified local fixtures and read-only live provider metadata. Four-platform CI and installed-package evidence remain pending; story stays in progress.
+- 2026-09-28: Implemented story 16.3 Radio continuation, verified local fixtures and read-only live provider metadata, and passed the four-platform Build matrix on commit `2c32fb2`. Marked ready for review; installed-package scenarios were not run.

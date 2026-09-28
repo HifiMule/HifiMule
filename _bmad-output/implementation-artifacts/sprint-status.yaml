@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-28  # Story 16.3 ready for dev; Story 16.2 review CI evidence remains tracked in its story
+last_updated: 2026-09-28  # Story 16.3 implementation and four-platform CI complete; ready for review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -207,7 +207,7 @@ development_status:
   epic-16: in-progress
   16-1-configure-playback-selection-and-start-its-first-selected-track: done
   16-2-replenish-radio-within-a-bounded-upcoming-queue: done
-  16-3-continue-radio-through-meaningful-artist-connections: in-progress
+  16-3-continue-radio-through-meaningful-artist-connections: review
   16-4-avoid-duplicate-radio-recordings-across-configured-servers: backlog
   16-5-match-radio-track-loudness-using-available-metadata: backlog
   16-6-start-radio-with-play-something-without-opening-the-main-window: backlog
