@@ -333,7 +333,9 @@ export interface PlaybackSessionSnapshot {
     schemaVersion: number; instanceId: string; sessionId: string; queueRevision: string;
     stateSequence: string; generationId: string; mode: 'main' | 'preview'; queueKind: 'album' | 'manual' | 'radio';
     radio?: { logicalId: string; center: { serverId: string; artistId: string } | null;
-        status: 'filling' | 'ready' | 'waiting' | 'stopped'; reason: string | null } | null;
+        status: 'filling' | 'ready' | 'waiting' | 'stopped'; reason: string | null;
+        cycle?: number; transition?: { center: { serverId: string; artistId: string };
+            kind: 'sharedTrackCredit' | 'similarArtist' | 'newStartingPoint'; reason: string } | null } | null;
     preview: { auditionId: string; hasMainSession: boolean; savedMainOccurrenceId: string | null;
         savedMainPositionMs: number; savedMainIntent: string; resumeInhibited: boolean } | null;
     state: string; positionMs: number;

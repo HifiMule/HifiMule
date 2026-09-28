@@ -37,6 +37,172 @@ pub struct RadioState {
     pub center: Option<ArtistIdentity>,
     pub status: RadioStatus,
     pub reason: Option<String>,
+    pub original_settings: Option<super::selection::PlaybackSelectionConfig>,
+    pub cycle: u64,
+    pub transition: Option<RadioTransition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RadioTransition {
+    pub center: ArtistIdentity,
+    pub kind: RadioTransitionKind,
+    /// A fixed locale key, never provider text or a URL.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RadioTransitionKind {
+    SharedTrackCredit,
+    SimilarArtist,
+    NewStartingPoint,
+}
+
+impl RadioTransition {
+    pub fn new(center: ArtistIdentity, kind: RadioTransitionKind) -> Self {
+        let reason = match kind {
+            RadioTransitionKind::SharedTrackCredit => "radio.sharedTrackCredit",
+            RadioTransitionKind::SimilarArtist => "radio.similarArtist",
+            RadioTransitionKind::NewStartingPoint => "radio.newStartingPoint",
+        }
+        .to_string();
+        Self {
+            center,
+            kind,
+            reason,
+        }
+    }
+}
+
+/// Rank only verified source-local evidence. Stable ties cannot depend on
+/// provider arrival timing or display names.
+pub fn rank_relations(
+    mut relations: Vec<(ArtistIdentity, RadioTransitionKind, usize, usize)>,
+) -> Vec<RadioTransition> {
+    relations.sort_by(|a, b| {
+        let tier = |kind| match kind {
+            RadioTransitionKind::SharedTrackCredit => 0,
+            RadioTransitionKind::SimilarArtist => 1,
+            RadioTransitionKind::NewStartingPoint => 2,
+        };
+        (tier(a.1), a.2, a.3, &a.0.server_id, &a.0.artist_id).cmp(&(
+            tier(b.1),
+            b.2,
+            b.3,
+            &b.0.server_id,
+            &b.0.artist_id,
+        ))
+    });
+    let mut seen = std::collections::HashSet::new();
+    relations
+        .into_iter()
+        .filter(|(artist, _, _, _)| {
+            seen.insert((artist.server_id.clone(), artist.artist_id.clone()))
+        })
+        .map(|(artist, kind, _, _)| RadioTransition::new(artist, kind))
+        .collect()
+}
+
+pub fn choose_transition(
+    settings: &super::selection::PlaybackSelectionConfig,
+    pools: &[super::selection::SelectionPool],
+    relations: &[RadioTransition],
+    allow_fresh: bool,
+) -> Option<(RadioTransition, Vec<TrackSource>)> {
+    let mut stable = std::collections::HashMap::<(String, String), Option<String>>::new();
+    for pool in pools {
+        for song in &pool.tracks {
+            let candidate = (!song.provider_metadata.ambiguous_music_artist)
+                .then_some(song.artist_id.as_deref())
+                .flatten()
+                .filter(|id| !id.is_empty() && id.len() <= super::model::MAX_ID_BYTES)
+                .map(str::to_owned);
+            let key = (pool.source.server_id.clone(), song.id.clone());
+            match stable.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(candidate);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get() != &candidate {
+                        entry.insert(None);
+                    }
+                }
+            }
+        }
+    }
+    let valid_pools: Vec<_> = pools
+        .iter()
+        .cloned()
+        .map(|mut pool| {
+            pool.tracks.retain(|song| {
+                stable
+                    .get(&(pool.source.server_id.clone(), song.id.clone()))
+                    .is_some_and(Option::is_some)
+            });
+            pool
+        })
+        .collect();
+    for relation in relations {
+        let scoped = valid_pools
+            .iter()
+            .cloned()
+            .map(|mut pool| {
+                pool.tracks.retain(|song| {
+                    stable
+                        .get(&(pool.source.server_id.clone(), song.id.clone()))
+                        .and_then(Option::as_deref)
+                        == Some(relation.center.artist_id.as_str())
+                        && relation.center.server_id == pool.source.server_id
+                });
+                pool
+            })
+            .collect();
+        if let Ok(ordered) = super::selection::select_radio_order(settings, scoped)
+            && !ordered.is_empty()
+        {
+            return Some((relation.clone(), ordered));
+        }
+    }
+    if !allow_fresh {
+        return None;
+    }
+    let ordered = super::selection::select_radio_order(settings, valid_pools.clone()).ok()?;
+    for source in ordered {
+        let Some(artist_id) = stable
+            .get(&(source.server_id.clone(), source.track_id.clone()))
+            .and_then(Option::as_ref)
+        else {
+            continue;
+        };
+        let center = ArtistIdentity {
+            server_id: source.server_id,
+            artist_id: artist_id.clone(),
+        };
+        let scoped = valid_pools
+            .iter()
+            .cloned()
+            .map(|mut pool| {
+                pool.tracks.retain(|song| {
+                    stable
+                        .get(&(pool.source.server_id.clone(), song.id.clone()))
+                        .and_then(Option::as_deref)
+                        == Some(center.artist_id.as_str())
+                        && center.server_id == pool.source.server_id
+                });
+                pool
+            })
+            .collect();
+        if let Ok(ordered) = super::selection::select_radio_order(settings, scoped)
+            && !ordered.is_empty()
+        {
+            return Some((
+                RadioTransition::new(center, RadioTransitionKind::NewStartingPoint),
+                ordered,
+            ));
+        }
+    }
+    None
 }
 
 impl RadioState {
@@ -52,7 +218,9 @@ impl RadioState {
             {
                 return Err("INVALID_RADIO_STATE");
             }
-        } else if matches!(self.status, RadioStatus::Filling | RadioStatus::Ready) {
+        } else if matches!(self.status, RadioStatus::Filling | RadioStatus::Ready)
+            && self.original_settings.is_none()
+        {
             return Err("INVALID_RADIO_STATE");
         }
         if self.reason.as_deref().is_some_and(|reason| {
@@ -63,7 +231,28 @@ impl RadioState {
                     | "radio.sourceFailure"
                     | "radio.settingsUnavailable"
                     | "radio.persistenceFailure"
+                    | "radio.snapshotUnavailable"
+                    | "radio.sharedTrackCredit"
+                    | "radio.similarArtist"
+                    | "radio.newStartingPoint"
+                    | "radio.newCycle"
+                    | "radio.cyclePending"
             )
+        }) {
+            return Err("INVALID_RADIO_STATE");
+        }
+        if self.cycle == 0
+            || self
+                .original_settings
+                .as_ref()
+                .is_some_and(|settings| settings.validate().is_err())
+        {
+            return Err("INVALID_RADIO_STATE");
+        }
+        if self.transition.as_ref().is_some_and(|transition| {
+            self.center.as_ref() != Some(&transition.center)
+                || RadioTransition::new(transition.center.clone(), transition.kind).reason
+                    != transition.reason
         }) {
             return Err("INVALID_RADIO_STATE");
         }
@@ -77,7 +266,9 @@ pub struct RefillLease {
     pub generation_id: String,
     pub queue_revision: u64,
     pub refill_id: String,
-    pub center: ArtistIdentity,
+    pub center: Option<ArtistIdentity>,
+    pub cycle: u64,
+    pub original_settings: super::selection::PlaybackSelectionConfig,
     pub capacity: usize,
 }
 
@@ -177,6 +368,7 @@ mod tests {
                     server_id: "one".into(),
                     artist_id: "artist".into(),
                 }),
+                settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
             },
         );
     }
@@ -199,6 +391,23 @@ mod tests {
     }
 
     #[test]
+    fn centerless_first_track_can_reserve_a_fallback_refill() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db, "centerless-radio".into());
+        apply(
+            &session,
+            SessionOperation::StartRadio {
+                source: source("one", "first"),
+                center: None,
+                settings: Some(crate::playback::selection::PlaybackSelectionConfig::default()),
+            },
+        );
+        let lease = session.reserve_radio_refill().unwrap();
+        assert!(lease.is_some(), "centerless Radio needs a worker lease");
+        assert!(lease.unwrap().center.is_none());
+    }
+
+    #[test]
     fn threshold_and_capacity_are_independent_of_manual_occurrences() {
         assert_eq!(refill_capacity(0), Some(5));
         assert_eq!(refill_capacity(1), Some(4));
@@ -216,6 +425,399 @@ mod tests {
         assert!(!center.matches("two", Some("same")));
         assert!(!center.matches("one", Some("other")));
         assert!(!center.matches("one", None));
+    }
+
+    #[test]
+    fn direct_credit_precedes_server_suggestion_and_deduplicates_identity() {
+        let artist = |server: &str, id: &str| ArtistIdentity {
+            server_id: server.into(),
+            artist_id: id.into(),
+        };
+        let ranked = rank_relations(vec![
+            (
+                artist("one", "suggested"),
+                RadioTransitionKind::SimilarArtist,
+                0,
+                0,
+            ),
+            (
+                artist("one", "credit"),
+                RadioTransitionKind::SharedTrackCredit,
+                1,
+                0,
+            ),
+            (
+                artist("one", "credit"),
+                RadioTransitionKind::SimilarArtist,
+                0,
+                0,
+            ),
+            (
+                artist("two", "credit"),
+                RadioTransitionKind::SharedTrackCredit,
+                0,
+                1,
+            ),
+        ]);
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|item| item.center.artist_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["credit", "credit", "suggested"]
+        );
+        assert_eq!(ranked[0].kind, RadioTransitionKind::SharedTrackCredit);
+        assert_ne!(ranked[0].center.server_id, ranked[1].center.server_id);
+    }
+
+    #[test]
+    fn related_artist_needs_a_track_in_original_scope_and_genre_alone_falls_back() {
+        use crate::playback::selection::{
+            PlaybackSelectionConfig, SelectionKind, SelectionPool, SelectionSource,
+        };
+        let mut settings = PlaybackSelectionConfig::default();
+        settings.sources = vec![
+            SelectionSource {
+                server_id: "one".into(),
+                kind: SelectionKind::Genre,
+                ref_id: "rock".into(),
+            },
+            SelectionSource {
+                server_id: "two".into(),
+                kind: SelectionKind::Genre,
+                ref_id: "rock".into(),
+            },
+        ];
+        let pools = vec![
+            SelectionPool {
+                source: settings.sources[0].clone(),
+                tracks: vec![candidate("one", "linked-song", "linked").song],
+            },
+            SelectionPool {
+                source: settings.sources[1].clone(),
+                tracks: vec![candidate("two", "other-song", "other").song],
+            },
+        ];
+        let relation = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "one".into(),
+                artist_id: "linked".into(),
+            },
+            RadioTransitionKind::SharedTrackCredit,
+        );
+        let (chosen, ordered) = choose_transition(&settings, &pools, &[relation], false).unwrap();
+        assert_eq!(chosen.kind, RadioTransitionKind::SharedTrackCredit);
+        assert!(ordered.iter().all(|source| source.server_id == "one"));
+        let unavailable = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "two".into(),
+                artist_id: "linked".into(),
+            },
+            RadioTransitionKind::SimilarArtist,
+        );
+        assert!(choose_transition(&settings, &pools, &[unavailable], false).is_none());
+        let (fresh, _) = choose_transition(&settings, &pools, &[], true).unwrap();
+        assert_eq!(fresh.kind, RadioTransitionKind::NewStartingPoint);
+    }
+
+    #[test]
+    fn contradictory_artist_ids_for_one_source_track_cannot_become_a_center() {
+        use crate::playback::selection::{
+            PlaybackSelectionConfig, SelectionKind, SelectionPool, SelectionSource,
+        };
+        let mut settings = PlaybackSelectionConfig::default();
+        settings.sources = vec![
+            SelectionSource {
+                server_id: "one".into(),
+                kind: SelectionKind::Playlist,
+                ref_id: "list".into(),
+            },
+            SelectionSource {
+                server_id: "one".into(),
+                kind: SelectionKind::Genre,
+                ref_id: "rock".into(),
+            },
+        ];
+        let pools = vec![
+            SelectionPool {
+                source: settings.sources[0].clone(),
+                tracks: vec![candidate("one", "same-track", "first").song],
+            },
+            SelectionPool {
+                source: settings.sources[1].clone(),
+                tracks: vec![candidate("one", "same-track", "second").song],
+            },
+        ];
+        let relation = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "one".into(),
+                artist_id: "first".into(),
+            },
+            RadioTransitionKind::SimilarArtist,
+        );
+        assert!(choose_transition(&settings, &pools, &[relation], true).is_none());
+    }
+
+    #[test]
+    fn transition_and_append_commit_once_under_the_original_lease() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "transition".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        assert!(
+            db.advance_radio_scan(
+                &lease.session_id,
+                lease.queue_revision,
+                "fresh:scope",
+                Default::default(),
+                None
+            )
+            .unwrap()
+        );
+        let transition = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "two".into(),
+                artist_id: "linked".into(),
+            },
+            RadioTransitionKind::SimilarArtist,
+        );
+        assert!(
+            session
+                .admit_radio_refill_plan(
+                    lease.clone(),
+                    vec![candidate("two", "second", "linked")],
+                    None,
+                    true,
+                    Some(transition.clone())
+                )
+                .unwrap()
+        );
+        assert!(
+            !session
+                .admit_radio_refill_plan(
+                    lease,
+                    vec![candidate("two", "third", "linked")],
+                    None,
+                    false,
+                    Some(transition.clone())
+                )
+                .unwrap()
+        );
+        let radio = session.snapshot().unwrap().radio.unwrap();
+        assert_eq!(radio.center, Some(transition.center));
+        assert_eq!(radio.transition.unwrap().reason, "radio.similarArtist");
+        assert_eq!(
+            db.playback_page(&session.snapshot().unwrap().session_id, None, 20)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            db.radio_scan_cursor(&session.snapshot().unwrap().session_id, "fresh:scope")
+                .unwrap(),
+            Some(Default::default())
+        );
+    }
+
+    #[test]
+    fn original_settings_and_transition_restore_without_adopting_later_edits() {
+        use crate::playback::selection::{PlaybackSelectionConfig, SelectionKind, SelectionSource};
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(temp.path().join("radio-settings.db")).unwrap());
+        let session = PlaybackSession::restore(db.clone(), "settings".into());
+        let mut settings = PlaybackSelectionConfig::default();
+        settings.sources.push(SelectionSource {
+            server_id: "one".into(),
+            kind: SelectionKind::Artist,
+            ref_id: "artist".into(),
+        });
+        settings.seed = 17;
+        apply(
+            &session,
+            SessionOperation::StartRadio {
+                source: source("one", "first"),
+                center: None,
+                settings: Some(settings.clone()),
+            },
+        );
+        settings.seed = 99;
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        assert_eq!(lease.original_settings.seed, 17);
+        let transition = RadioTransition::new(
+            ArtistIdentity {
+                server_id: "one".into(),
+                artist_id: "new".into(),
+            },
+            RadioTransitionKind::NewStartingPoint,
+        );
+        assert!(
+            session
+                .admit_radio_refill_plan(
+                    lease,
+                    vec![candidate("one", "new-track", "new")],
+                    None,
+                    true,
+                    Some(transition)
+                )
+                .unwrap()
+        );
+        session.shutdown_checkpoint().unwrap();
+        session.stop_and_join().unwrap();
+        let restored = PlaybackSession::restore(db, "settings-restored".into());
+        let radio = restored.snapshot().unwrap().radio.unwrap();
+        assert_eq!(radio.original_settings.unwrap().seed, 17);
+        assert_eq!(radio.transition.unwrap().reason, "radio.newStartingPoint");
+    }
+
+    #[test]
+    fn legacy_radio_without_provable_snapshot_keeps_queue_but_waits_for_new_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy-radio.db");
+        let db = Arc::new(Database::new(path.clone()).unwrap());
+        let session = PlaybackSession::restore(db.clone(), "legacy".into());
+        start(&session);
+        let before = session.snapshot().unwrap();
+        session.shutdown_checkpoint().unwrap();
+        session.stop_and_join().unwrap();
+        drop(session);
+        drop(db);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE playback_radio SET settings_json=NULL,status='ready',reason=NULL",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE playback_schema SET version=8", [])
+            .unwrap();
+        drop(connection);
+        let reopened = Arc::new(Database::new(path).unwrap());
+        let restored = PlaybackSession::restore(reopened, "legacy-restored".into());
+        let after = restored.snapshot().unwrap();
+        assert_eq!(after.total_occurrence_count, before.total_occurrence_count);
+        assert_eq!(
+            after.radio.as_ref().unwrap().logical_id,
+            before.radio.unwrap().logical_id
+        );
+        assert_eq!(
+            after.radio.unwrap().reason.as_deref(),
+            Some("radio.snapshotUnavailable")
+        );
+        assert!(restored.reserve_radio_refill().unwrap().is_none());
+    }
+
+    #[test]
+    fn verified_fresh_scope_exhaustion_renews_only_heard_membership() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "cycle".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        let stored = db.load_playback_session().unwrap().unwrap();
+        let current_id = stored.current_occurrence_id.clone().unwrap();
+        db.persist_playback_terminal(&stored, &current_id, "naturalCompletion", None, 1000)
+            .unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO playback_radio_membership(session_id,server_id,track_id,kind) VALUES(?1,'one','skipped','excluded')",
+            [&stored.session_id],
+        ).unwrap();
+        assert!(
+            db.radio_is_heard(&stored.session_id, &source("one", "first"))
+                .unwrap()
+        );
+        assert!(
+            db.advance_radio_scan_with_heard(
+                &stored.session_id,
+                lease.queue_revision,
+                "fresh:one",
+                Default::default(),
+                None,
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            !session
+                .admit_radio_refill_plan(
+                    lease,
+                    Vec::new(),
+                    Some("radio.exhausted".into()),
+                    false,
+                    None
+                )
+                .unwrap()
+        );
+        let radio = session.snapshot().unwrap().radio.unwrap();
+        assert_eq!(radio.cycle, 2);
+        assert_eq!(radio.reason.as_deref(), Some("radio.newCycle"));
+        assert!(
+            !db.radio_has_membership(&stored.session_id, &source("one", "first"))
+                .unwrap()
+        );
+        assert!(
+            db.radio_has_membership(&stored.session_id, &source("one", "skipped"))
+                .unwrap()
+        );
+        assert_eq!(
+            db.radio_scan_cursor(&stored.session_id, "fresh:one")
+                .unwrap(),
+            Some(Default::default())
+        );
+        session.shutdown_checkpoint().unwrap();
+        session.stop_and_join().unwrap();
+        let restored = PlaybackSession::restore(db, "cycle-restored".into());
+        let after_restart = restored.snapshot().unwrap();
+        assert_eq!(after_restart.radio.unwrap().cycle, 2);
+        assert_eq!(after_restart.state, TransportState::Paused);
+    }
+
+    #[test]
+    fn completing_the_only_track_reopens_an_exhausted_scan_for_cycle_proof() {
+        let db = Arc::new(Database::memory().unwrap());
+        let session = PlaybackSession::restore(db.clone(), "single-track-cycle".into());
+        start(&session);
+        let lease = session.reserve_radio_refill().unwrap().unwrap();
+        db.advance_radio_scan(
+            &lease.session_id,
+            lease.queue_revision,
+            "fresh:only",
+            Default::default(),
+            None,
+        )
+        .unwrap();
+        session
+            .admit_radio_refill(lease, Vec::new(), Some("radio.exhausted".into()))
+            .unwrap();
+        let mut stored = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(
+            stored.radio.as_ref().unwrap().reason.as_deref(),
+            Some("radio.exhausted")
+        );
+        stored.radio.as_mut().unwrap().status = RadioStatus::Ready;
+        stored.radio.as_mut().unwrap().reason = None;
+        let current_id = stored.current_occurrence_id.clone().unwrap();
+        db.persist_playback_terminal(&stored, &current_id, "naturalCompletion", None, 1000)
+            .unwrap();
+        assert_eq!(
+            db.radio_scan_cursor(&stored.session_id, "fresh:only")
+                .unwrap(),
+            Some(Default::default())
+        );
+        assert!(
+            db.radio_is_heard(&stored.session_id, &source("one", "first"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn public_session_operation_rejects_forged_radio_snapshot() {
+        let forged = serde_json::json!({
+            "type": "startRadio",
+            "source": {"serverId": "one", "trackId": "first"},
+            "center": {"serverId": "one", "artistId": "artist"},
+            "settings": {"schemaVersion": 1, "sources": [], "ordering": ["random"], "seed": 0, "maxTracks": 16}
+        });
+        assert!(serde_json::from_value::<SessionOperation>(forged).is_err());
     }
 
     #[test]
@@ -540,12 +1142,13 @@ mod tests {
             SessionOperation::StartRadio {
                 source: source("one", "first"),
                 center: None,
+                settings: None,
             },
         );
         let snapshot = session.snapshot().unwrap();
         assert_eq!(
             snapshot.radio.unwrap().reason.as_deref(),
-            Some("radio.artistUnavailable")
+            Some("radio.snapshotUnavailable")
         );
         assert!(session.reserve_radio_refill().unwrap().is_none());
     }
@@ -571,6 +1174,34 @@ mod tests {
         let snapshot = restored.snapshot().unwrap();
         assert_eq!(snapshot.restoration.status, "error");
         assert!(snapshot.radio.is_none());
+    }
+
+    #[test]
+    fn corrupt_transition_metadata_preserves_queue_with_recoverable_waiting_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("corrupt-transition.db");
+        let db = Arc::new(Database::new(path.clone()).unwrap());
+        let session = PlaybackSession::restore(db.clone(), "radio-test".into());
+        start(&session);
+        let before = session.snapshot().unwrap();
+        session.shutdown_checkpoint().unwrap();
+        session.stop_and_join().unwrap();
+        drop(session);
+        drop(db);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("UPDATE playback_radio SET transition_json='{malformed'", [])
+            .unwrap();
+        drop(connection);
+        let reopened = Arc::new(Database::new(path).unwrap());
+        let restored = PlaybackSession::restore(reopened, "radio-restart".into());
+        let after = restored.snapshot().unwrap();
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.current, before.current);
+        let radio = after.radio.unwrap();
+        assert_eq!(radio.status, RadioStatus::Waiting);
+        assert_eq!(radio.reason.as_deref(), Some("radio.snapshotUnavailable"));
+        assert!(restored.reserve_radio_refill().unwrap().is_none());
     }
 
     #[test]

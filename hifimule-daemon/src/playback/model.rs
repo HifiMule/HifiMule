@@ -468,6 +468,7 @@ pub enum SessionOperation {
     StartRadio {
         source: TrackSource,
         center: Option<super::radio::ArtistIdentity>,
+        settings: Option<super::selection::PlaybackSelectionConfig>,
     },
     #[serde(skip_deserializing)]
     PlayAlbum {

@@ -2,6 +2,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
+    future::Future,
     io::{Read, Write},
     path::Path,
 };
@@ -402,6 +403,61 @@ pub struct RadioSourceCursor {
     pub intra: u32,
 }
 
+async fn fetch_offset_window<F, Fut, E>(
+    cursor: RadioSourceCursor,
+    mut fetch: F,
+) -> Result<(Vec<Song>, Option<RadioSourceCursor>), SelectionError>
+where
+    F: FnMut(u32, u32) -> Fut,
+    Fut: Future<Output = Result<Vec<Song>, E>>,
+{
+    let mut tracks = fetch(cursor.index, MAX_CANDIDATES_PER_SOURCE as u32)
+        .await
+        .map_err(|_| SelectionError::SourceUnavailable)?;
+    if tracks.len() > MAX_CANDIDATES_PER_SOURCE {
+        return Err(SelectionError::SourceUnavailable);
+    }
+    let offset = cursor
+        .index
+        .checked_add(tracks.len() as u32)
+        .ok_or(SelectionError::SourceUnavailable)?;
+    if tracks.len() == MAX_CANDIDATES_PER_SOURCE {
+        return Ok((
+            tracks,
+            Some(RadioSourceCursor {
+                index: offset,
+                intra: 0,
+            }),
+        ));
+    }
+    // Some servers underfill a bounded page. Probe the exact next offset before
+    // treating a short page as exhaustion; a failed probe means unknown.
+    let mut probe = fetch(offset, 1)
+        .await
+        .map_err(|_| SelectionError::SourceUnavailable)?;
+    if probe.len() > 1 {
+        return Err(SelectionError::SourceUnavailable);
+    }
+    if probe.is_empty() {
+        return Ok((tracks, None));
+    }
+    if tracks.is_empty() {
+        tracks.push(probe.remove(0));
+        let index = offset
+            .checked_add(1)
+            .ok_or(SelectionError::SourceUnavailable)?;
+        Ok((tracks, Some(RadioSourceCursor { index, intra: 0 })))
+    } else {
+        Ok((
+            tracks,
+            Some(RadioSourceCursor {
+                index: offset,
+                intra: 0,
+            }),
+        ))
+    }
+}
+
 pub async fn fetch_radio_window(
     provider: &dyn MediaProvider,
     source: &SelectionSource,
@@ -410,37 +466,19 @@ pub async fn fetch_radio_window(
     let mut next = None;
     let tracks = match source.kind {
         SelectionKind::Playlist => {
-            let tracks = provider
-                .get_playlist_tracks_window(
-                    &source.ref_id,
-                    cursor.index,
-                    MAX_CANDIDATES_PER_SOURCE as u32,
-                )
-                .await
-                .map_err(|_| SelectionError::SourceUnavailable)?;
-            if tracks.len() == MAX_CANDIDATES_PER_SOURCE {
-                next = cursor
-                    .index
-                    .checked_add(tracks.len() as u32)
-                    .map(|index| RadioSourceCursor { index, intra: 0 });
-            }
+            let (tracks, following) = fetch_offset_window(cursor, |offset, limit| {
+                provider.get_playlist_tracks_window(&source.ref_id, offset, limit)
+            })
+            .await?;
+            next = following;
             tracks
         }
         SelectionKind::Genre => {
-            let tracks = provider
-                .get_genre_tracks_bounded(
-                    &source.ref_id,
-                    cursor.index,
-                    MAX_CANDIDATES_PER_SOURCE as u32,
-                )
-                .await
-                .map_err(|_| SelectionError::SourceUnavailable)?;
-            if tracks.len() == MAX_CANDIDATES_PER_SOURCE {
-                next = cursor
-                    .index
-                    .checked_add(tracks.len() as u32)
-                    .map(|index| RadioSourceCursor { index, intra: 0 });
-            }
+            let (tracks, following) = fetch_offset_window(cursor, |offset, limit| {
+                provider.get_genre_tracks_bounded(&source.ref_id, offset, limit)
+            })
+            .await?;
+            next = following;
             tracks
         }
         SelectionKind::Artist => {
@@ -582,6 +620,34 @@ pub fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn short_radio_page_requires_a_successful_next_offset_probe() {
+        let fetch = |offset, _limit| {
+            std::future::ready(Ok::<Vec<Song>, ()>(match offset {
+                0 => vec![song("first", "First")],
+                1 => vec![song("second", "Second")],
+                _ => Vec::new(),
+            }))
+        };
+        let (first, next) = fetch_offset_window(RadioSourceCursor::default(), fetch)
+            .await
+            .unwrap();
+        assert_eq!(first[0].id, "first");
+        assert_eq!(next.unwrap().index, 1);
+        let (second, end) = fetch_offset_window(next.unwrap(), fetch).await.unwrap();
+        assert_eq!(second[0].id, "second");
+        assert!(end.is_none());
+        let failed = fetch_offset_window(RadioSourceCursor::default(), |offset, _| {
+            std::future::ready(if offset == 0 {
+                Ok(vec![song("first", "First")])
+            } else {
+                Err(())
+            })
+        })
+        .await;
+        assert!(matches!(failed, Err(SelectionError::SourceUnavailable)));
+    }
 
     fn song(id: &str, title: &str) -> Song {
         Song {

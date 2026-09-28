@@ -132,6 +132,8 @@ pub struct ProviderItemMetadata {
     /// A provider reported more than one music artist for this track.
     /// Radio must not infer its center from the first display credit.
     pub ambiguous_music_artist: bool,
+    /// Stable source-local track artist credits; album artists and names are excluded.
+    pub music_artist_ids: Vec<String>,
     pub identity: Option<ProviderIdentity>,
     pub audio_file_id: Option<String>,
     pub chapters: Vec<ChapterMarker>,

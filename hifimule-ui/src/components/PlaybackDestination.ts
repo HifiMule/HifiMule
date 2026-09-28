@@ -152,7 +152,7 @@ export class PlaybackDestination {
         this.radioStatus.hidden = snapshot.queueKind !== 'radio' || !radio;
         this.radioRetry.hidden = snapshot.queueKind !== 'radio' || radio?.status !== 'waiting' || snapshot.playback?.status === 'error';
         this.radioStatus.textContent = radio
-            ? t(radio.reason && radio.status === 'waiting' ? `playback.${radio.reason}` : `playback.radio.${radio.status}`)
+            ? t(radio.reason ? `playback.${radio.reason}` : radio.transition?.reason ? `playback.${radio.transition.reason}` : `playback.radio.${radio.status}`)
             : '';
         if (!changed) return;
         this.loadIdentity = identity;

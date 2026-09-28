@@ -241,6 +241,78 @@ fn is_navidrome_server_type(server_type: Option<&str>) -> bool {
 
 #[async_trait]
 impl MediaProvider for SubsonicProvider {
+    async fn related_artists(
+        &self,
+        artist_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::providers::ArtistRelation>, ProviderError> {
+        let limit = limit.min(8);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        let artist = self.get_artist(artist_id).await?;
+        for album in artist.albums.into_iter().take(4) {
+            let tracks = self.get_album(&album.id).await?.tracks;
+            for song in tracks.into_iter().take(400) {
+                let credits = &song.provider_metadata.music_artist_ids;
+                if !credits.iter().any(|id| id == artist_id) {
+                    continue;
+                }
+                for id in credits {
+                    if !id.is_empty() && id != artist_id && seen.insert(id.clone()) {
+                        ids.push(crate::providers::ArtistRelation {
+                            artist_id: id.clone(),
+                            kind: crate::providers::ArtistRelationKind::SharedTrackCredit,
+                        });
+                    }
+                }
+            }
+        }
+        ids.sort_by(|a, b| a.artist_id.cmp(&b.artist_id));
+        if ids.len() >= limit as usize {
+            ids.truncate(limit as usize);
+            return Ok(ids);
+        }
+        let count = limit.to_string();
+        let body: ArtistInfo2Body = self
+            .client
+            .get(
+                "getArtistInfo2",
+                &[
+                    ("id", artist_id),
+                    ("count", &count),
+                    ("includeNotPresent", "false"),
+                ],
+            )
+            .await?;
+        for artist in body
+            .artist_info2
+            .similar_artist
+            .into_iter()
+            .take(limit as usize)
+        {
+            if artist.id.is_empty() || artist.id == artist_id || !seen.insert(artist.id.clone()) {
+                continue;
+            }
+            // Some compatible servers return remote, unindexed artists despite
+            // includeNotPresent=false. Resolve each ID against this library.
+            if let Ok(resolved) = self.client.get_artist(&artist.id).await
+                && resolved.artist.id == artist.id
+            {
+                ids.push(crate::providers::ArtistRelation {
+                    artist_id: artist.id,
+                    kind: crate::providers::ArtistRelationKind::SimilarArtist,
+                });
+                if ids.len() >= limit as usize {
+                    break;
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {
         Ok(vec![
             Library {
@@ -1603,6 +1675,11 @@ fn song_from_dto(song: SongDto) -> Song {
         .artists
         .as_ref()
         .is_some_and(|artists| artists.len() > 1);
+    let music_artist_ids = song
+        .artists
+        .as_ref()
+        .map(|artists| artists.iter().map(|artist| artist.id.clone()).collect())
+        .unwrap_or_else(|| song.artist_id.clone().into_iter().collect());
     let album_loudness = parse_album_loudness(song.replay_gain.as_deref());
 
     Song {
@@ -1633,6 +1710,7 @@ fn song_from_dto(song: SongDto) -> Song {
         album_loudness,
         provider_metadata: crate::domain::models::ProviderItemMetadata {
             ambiguous_music_artist,
+            music_artist_ids,
             ..Default::default()
         },
     }
@@ -1899,6 +1977,18 @@ struct ArtistDto {
 #[derive(Debug, Default, Deserialize)]
 struct ArtistWithAlbumsBody {
     artist: ArtistWithAlbumsDto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ArtistInfo2Body {
+    #[serde(default, rename = "artistInfo2")]
+    artist_info2: ArtistInfo2Dto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ArtistInfo2Dto {
+    #[serde(default, rename = "similarArtist")]
+    similar_artist: Vec<ArtistDto>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2237,6 +2327,28 @@ mod tests {
         let song = song_from_dto(dto);
         assert_eq!(song.artist_id.as_deref(), Some("first"));
         assert!(song.provider_metadata.ambiguous_music_artist);
+        assert_eq!(
+            song.provider_metadata.music_artist_ids,
+            vec!["first", "second"]
+        );
+    }
+
+    #[test]
+    fn optional_similar_artist_response_requires_stable_ids() {
+        let body: ArtistInfo2Body = serde_json::from_value(serde_json::json!({
+            "artistInfo2": {"similarArtist": [{"id":"local-1","name":"Artist"}]}
+        }))
+        .unwrap();
+        assert_eq!(body.artist_info2.similar_artist[0].id, "local-1");
+        let empty: ArtistInfo2Body =
+            serde_json::from_value(serde_json::json!({"artistInfo2": {}})).unwrap();
+        assert!(empty.artist_info2.similar_artist.is_empty());
+        assert!(
+            serde_json::from_value::<ArtistInfo2Body>(serde_json::json!({
+                "artistInfo2": {"similarArtist": [{"name":"Name without ID"}]}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

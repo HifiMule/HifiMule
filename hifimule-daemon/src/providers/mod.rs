@@ -363,8 +363,31 @@ pub struct ProviderChangeMetadata {
     pub suffix: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtistRelationKind {
+    SharedTrackCredit,
+    SimilarArtist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistRelation {
+    pub artist_id: String,
+    pub kind: ArtistRelationKind,
+}
+
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
+    /// Ordered, source-local artist IDs from an explicit provider relation.
+    /// A default unsupported result never implies an empty relation set.
+    async fn related_artists(
+        &self,
+        _artist_id: &str,
+        _limit: u32,
+    ) -> Result<Vec<ArtistRelation>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "artist relationships unavailable".into(),
+        ))
+    }
     async fn list_podcast_shows(
         &self,
         _offset: u32,

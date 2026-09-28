@@ -2701,6 +2701,7 @@ fn map_book_detail(
             part_identities,
             credits,
             ambiguous_music_artist: false,
+            music_artist_ids: Vec::new(),
         },
     })
 }

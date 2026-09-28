@@ -263,6 +263,7 @@ pub(super) async fn start_with_config(
         operation: SessionOperation::StartRadio {
             center: crate::playback::radio::center_for(&first, artist_id.as_deref()),
             source: first,
+            settings: Some(config),
         },
     };
     handle_playback_apply_session_prepared_fenced(
@@ -292,10 +293,11 @@ pub(super) async fn run_radio_worker(
             Ok(Ok(Some(lease))) => lease,
             _ => continue,
         };
-        let (candidates, reason, more_windows) = gather_radio_candidates(&state, &lease).await;
+        let (candidates, reason, more_windows, transition) =
+            gather_radio_candidates(&state, &lease).await;
         let owner = state.playback.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            owner.admit_radio_refill_with_more(lease, candidates, reason, more_windows)
+            owner.admit_radio_refill_plan(lease, candidates, reason, more_windows, transition)
         })
         .await;
     }
@@ -304,11 +306,16 @@ pub(super) async fn run_radio_worker(
 async fn gather_radio_candidates(
     state: &AppState,
     lease: &crate::playback::radio::RefillLease,
-) -> (Vec<selection::SelectionCandidate>, Option<String>, bool) {
-    let config = match path().ok().and_then(|path| selection::load(&path).ok()) {
-        Some(config) => config,
-        None => return (Vec::new(), Some("radio.settingsUnavailable".into()), false),
-    };
+) -> (
+    Vec<selection::SelectionCandidate>,
+    Option<String>,
+    bool,
+    Option<crate::playback::radio::RadioTransition>,
+) {
+    if lease.center.is_none() {
+        return gather_transition_candidates(state, lease).await;
+    }
+    let config = &lease.original_settings;
     let mut failed_source = false;
     let mut more_windows = false;
     let retrieve = async {
@@ -316,7 +323,12 @@ async fn gather_radio_candidates(
         for source in config
             .sources
             .iter()
-            .filter(|source| source.server_id == lease.center.server_id)
+            .filter(|source| {
+                lease
+                    .center
+                    .as_ref()
+                    .is_none_or(|center| source.server_id == center.server_id)
+            })
             .take(selection::MAX_SOURCES)
         {
             if !state.playback.radio_lease_current(lease) {
@@ -354,10 +366,9 @@ async fn gather_radio_candidates(
                         if song.provider_metadata.ambiguous_music_artist {
                             continue;
                         }
-                        if !lease
-                            .center
-                            .matches(&source.server_id, song.artist_id.as_deref())
-                        {
+                        if lease.center.as_ref().is_some_and(|center| {
+                            !center.matches(&source.server_id, song.artist_id.as_deref())
+                        }) {
                             continue;
                         }
                         let identity = crate::playback::model::TrackSource {
@@ -413,17 +424,17 @@ async fn gather_radio_candidates(
     .await
     {
         Ok(pools) => pools,
-        Err(_) => return (Vec::new(), Some("radio.sourceFailure".into()), false),
+        Err(_) => return (Vec::new(), Some("radio.sourceFailure".into()), false, None),
     };
-    let ordered = match selection::select_radio_order(&config, pools.clone()) {
+    let ordered = match selection::select_radio_order(config, pools.clone()) {
         Ok(ordered) => ordered,
         Err(_) => {
             return if failed_source {
-                (Vec::new(), Some("radio.sourceFailure".into()), false)
+                (Vec::new(), Some("radio.sourceFailure".into()), false, None)
             } else if more_windows {
-                (Vec::new(), None, true)
+                (Vec::new(), None, true, None)
             } else {
-                (Vec::new(), Some("radio.exhausted".into()), false)
+                gather_transition_candidates(state, lease).await
             };
         }
     };
@@ -487,9 +498,11 @@ async fn gather_radio_candidates(
     .await
     {
         Ok((selected, failures)) => {
+            let continue_scan =
+                more_windows || (!selected.is_empty() && selected.len() < lease.capacity);
             let reason = if failed_source || failures > 0 {
                 Some("radio.sourceFailure".into())
-            } else if selected.len() < lease.capacity && !more_windows {
+            } else if selected.len() < lease.capacity && !continue_scan {
                 Some("radio.exhausted".into())
             } else {
                 None
@@ -497,9 +510,275 @@ async fn gather_radio_candidates(
             (
                 selected,
                 reason,
-                more_windows && failures == 0 && !failed_source,
+                continue_scan && failures == 0 && !failed_source,
+                None,
             )
         }
-        Err(_) => (Vec::new(), Some("radio.sourceFailure".into()), false),
+        Err(_) => (Vec::new(), Some("radio.sourceFailure".into()), false, None),
+    }
+}
+
+/// One bounded pass through the original scope. Related search and fresh-start
+/// search have independent durable cursors, so a short page never proves that
+/// no eligible artist exists later in the configured scope.
+async fn gather_transition_candidates(
+    state: &AppState,
+    lease: &crate::playback::radio::RefillLease,
+) -> (
+    Vec<selection::SelectionCandidate>,
+    Option<String>,
+    bool,
+    Option<crate::playback::radio::RadioTransition>,
+) {
+    use crate::playback::radio::{ArtistIdentity, RadioTransitionKind};
+    use crate::providers::ArtistRelationKind;
+    let mut ranked = Vec::new();
+    let mut relation_unknown = false;
+    if let Some(center) = &lease.center {
+        let Ok(center_provider) = provider(state, &center.server_id).await else {
+            return (Vec::new(), Some("radio.sourceFailure".into()), false, None);
+        };
+        if !state.playback.radio_lease_current(lease) {
+            return (Vec::new(), None, false, None);
+        }
+        match tokio::time::timeout(
+            DEADLINE,
+            center_provider.related_artists(&center.artist_id, 8),
+        )
+        .await
+        {
+            Ok(Ok(relations)) => {
+                for (index, relation) in relations.into_iter().enumerate() {
+                    if relation.artist_id.is_empty()
+                        || relation.artist_id == center.artist_id
+                        || relation.artist_id.len() > crate::playback::model::MAX_ID_BYTES
+                    {
+                        continue;
+                    }
+                    let kind = match relation.kind {
+                        ArtistRelationKind::SharedTrackCredit => {
+                            RadioTransitionKind::SharedTrackCredit
+                        }
+                        ArtistRelationKind::SimilarArtist => RadioTransitionKind::SimilarArtist,
+                    };
+                    let source_order = lease
+                        .original_settings
+                        .sources
+                        .iter()
+                        .position(|source| source.server_id == center.server_id)
+                        .unwrap_or(usize::MAX);
+                    ranked.push((
+                        ArtistIdentity {
+                            server_id: center.server_id.clone(),
+                            artist_id: relation.artist_id,
+                        },
+                        kind,
+                        index,
+                        source_order,
+                    ));
+                }
+            }
+            Ok(Err(crate::providers::ProviderError::UnsupportedCapability(_))) => {}
+            // Unsupported or unverified metadata cannot establish a link. The
+            // fresh-center search still evaluates the original scope.
+            _ => relation_unknown = true,
+        }
+    }
+    let ranked = crate::playback::radio::rank_relations(ranked);
+    let related_remaining = lease.original_settings.sources.iter().any(|source| {
+        serde_json::to_string(source)
+            .ok()
+            .and_then(|key| {
+                state
+                    .db
+                    .radio_scan_cursor(&lease.session_id, &format!("related:{key}"))
+                    .ok()
+            })
+            .flatten()
+            .is_some()
+    });
+    let related_phase = lease.center.is_some() && !ranked.is_empty() && related_remaining;
+    let phase = if related_phase { "related" } else { "fresh" };
+    let (pools, cursors, failed) = match tokio::time::timeout(DEADLINE, async {
+        let mut pools = Vec::new();
+        let mut cursors = Vec::new();
+        let mut failed = false;
+        for source in &lease.original_settings.sources {
+            if !state.playback.radio_lease_current(lease) {
+                break;
+            }
+            let key = match serde_json::to_string(source) {
+                Ok(key) => format!("{phase}:{key}"),
+                Err(_) => {
+                    failed = true;
+                    continue;
+                }
+            };
+            let cursor = match state.db.radio_scan_cursor(&lease.session_id, &key) {
+                Ok(Some(cursor)) => cursor,
+                Ok(None) => continue,
+                Err(_) => {
+                    failed = true;
+                    continue;
+                }
+            };
+            let Ok(source_provider) = provider(state, &source.server_id).await else {
+                failed = true;
+                continue;
+            };
+            if !state.playback.radio_lease_current(lease) {
+                break;
+            }
+            match selection::fetch_radio_window(source_provider.as_ref(), source, cursor).await {
+                Ok((mut pool, next)) => {
+                    if !state.playback.radio_lease_current(lease) {
+                        break;
+                    }
+                    let mut seen_heard = false;
+                    pool.tracks.retain(|song| {
+                        if song.provider_metadata.ambiguous_music_artist
+                            || song.artist_id.as_deref().is_none_or(str::is_empty)
+                        {
+                            return false;
+                        }
+                        let identity = crate::playback::model::TrackSource {
+                            server_id: source.server_id.clone(),
+                            track_id: song.id.clone(),
+                        };
+                        match (
+                            state.db.radio_is_heard(&lease.session_id, &identity),
+                            state.db.radio_is_excluded(&lease.session_id, &identity),
+                        ) {
+                            (Ok(true), Ok(false)) => seen_heard = true,
+                            (Ok(_), Ok(_)) => {}
+                            _ => failed = true,
+                        }
+                        !state
+                            .db
+                            .radio_has_membership(&lease.session_id, &identity)
+                            .unwrap_or(true)
+                            && !state
+                                .db
+                                .radio_has_occurrence(&lease.session_id, &identity)
+                                .unwrap_or(true)
+                    });
+                    pools.push(pool);
+                    cursors.push((key, cursor, next, seen_heard));
+                }
+                Err(_) => failed = true,
+            }
+        }
+        (pools, cursors, failed)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => return (Vec::new(), Some("radio.sourceFailure".into()), false, None),
+    };
+    if failed {
+        return (Vec::new(), Some("radio.sourceFailure".into()), false, None);
+    }
+    if !state.playback.radio_lease_current(lease) {
+        return (Vec::new(), None, false, None);
+    }
+    let chosen = crate::playback::radio::choose_transition(
+        &lease.original_settings,
+        &pools,
+        &ranked,
+        !related_phase,
+    );
+    if let Some((transition, ordered)) = chosen {
+        let mut evidence = HashMap::new();
+        for pool in pools {
+            for song in pool.tracks {
+                evidence.insert((pool.source.server_id.clone(), song.id.clone()), song);
+            }
+        }
+        let prepared = tokio::time::timeout(DEADLINE, async {
+            let mut selected = Vec::new();
+            let mut failures = 0;
+            for source in ordered {
+                if selected.len() >= lease.capacity
+                    || failures >= crate::playback::radio::MAX_PREPARATION_FAILURES
+                    || !state.playback.radio_lease_current(lease)
+                {
+                    break;
+                }
+                let Ok(source_provider) = provider(state, &source.server_id).await else {
+                    failures += 1;
+                    continue;
+                };
+                if !state.playback.radio_lease_current(lease) {
+                    break;
+                }
+                if let Ok(description) = source_provider.resolve_playback(&source.track_id).await {
+                    if !state.playback.radio_lease_current(lease) {
+                        break;
+                    }
+                    if crate::playback::audio::prepare_selection_source(description)
+                        .await
+                        .is_ok()
+                    {
+                        if !state.playback.radio_lease_current(lease) {
+                            break;
+                        }
+                        if let Some(song) =
+                            evidence.get(&(source.server_id.clone(), source.track_id.clone()))
+                        {
+                            selected.push(selection::SelectionCandidate {
+                                source,
+                                song: song.clone(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                failures += 1;
+            }
+            (selected, failures)
+        })
+        .await;
+        let proposal = (lease.center.as_ref() != Some(&transition.center)).then_some(transition);
+        return match prepared {
+            Ok((selected, failures)) if !selected.is_empty() => (
+                selected,
+                (failures > 0).then(|| "radio.sourceFailure".into()),
+                failures == 0,
+                proposal,
+            ),
+            _ => (Vec::new(), Some("radio.sourceFailure".into()), false, None),
+        };
+    }
+    let mut more = false;
+    for (key, cursor, next, seen_heard) in cursors {
+        if !state.playback.radio_lease_current(lease) {
+            return (Vec::new(), None, false, None);
+        }
+        if !state
+            .db
+            .advance_radio_scan_with_heard(
+                &lease.session_id,
+                lease.queue_revision,
+                &key,
+                cursor,
+                next,
+                seen_heard,
+            )
+            .unwrap_or(false)
+        {
+            return (Vec::new(), Some("radio.sourceFailure".into()), false, None);
+        }
+        more |= next.is_some();
+    }
+    if related_phase {
+        // The next coalesced wake starts the separately namespaced fresh pass.
+        return (Vec::new(), None, true, None);
+    }
+    if more {
+        (Vec::new(), None, true, None)
+    } else if relation_unknown {
+        (Vec::new(), Some("radio.sourceFailure".into()), false, None)
+    } else {
+        (Vec::new(), Some("radio.exhausted".into()), false, None)
     }
 }

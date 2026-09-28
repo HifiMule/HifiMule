@@ -58,3 +58,26 @@ test('Radio waiting state is live, explained and has an accessible retry', async
   assert.deepEqual(calls,['retry']);
   destination.destroy();
 });
+
+test('accepted artist transition keeps its evidence explanation after reconnect', async () => {
+  const {destination,root} = load();
+  const snapshot = { instanceId:'instance',sessionId:'session',queueRevision:'3',mainCurrent:null,
+    queueKind:'radio',radio:{logicalId:'logical',center:{serverId:'one',artistId:'artist'},status:'ready',
+      reason:'radio.similarArtist',transition:{center:{serverId:'one',artistId:'artist'},kind:'similarArtist',reason:'radio.similarArtist'}},
+    current:{occurrenceId:'current',source:{serverId:'one',trackId:'first'}},generationId:'generation' };
+  await destination.receive(snapshot);
+  const status = root.find(node => node.textContent === 'playback.radio.similarArtist');
+  const retry = root.find(node => node.textContent === 'playback.radio.retry');
+  assert.equal(status?.attributes['aria-live'],'polite');
+  assert.equal(retry.hidden,true);
+  destination.destroy();
+});
+
+test('Radio transition and cycle explanations exist in all four locales', () => {
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  for (const locale of ['en','fr','es','de']) {
+    for (const reason of ['snapshotUnavailable','sharedTrackCredit','similarArtist','newStartingPoint','newCycle','cyclePending','exhausted','sourceFailure']) {
+      assert.ok(catalog[locale][`playback.radio.${reason}`]?.trim(), `${locale}: ${reason}`);
+    }
+  }
+});

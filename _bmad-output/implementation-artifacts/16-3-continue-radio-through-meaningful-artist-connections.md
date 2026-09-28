@@ -1,6 +1,9 @@
+---
+baseline_commit: 7bebcb6fc00cfb655ac57e3a65f164210d1878c4
+---
 # Story 16.3: Continue Radio through meaningful artist connections
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -22,26 +25,26 @@ so that its progression feels understandable within my curated libraries rather 
 
 ## Tasks / Subtasks
 
-- [ ] Define the provider relationship and session contracts before implementation (AC: 2–8).
-  - [ ] Inventory actual Jellyfin, Subsonic/OpenSubsonic and other configured provider responses on supported server versions; record supported explicit relation evidence, empty/unsupported/error behavior and whether IDs resolve to local library artists. Expose a bounded, typed optional relation method on `MediaProvider` and implement only verified adapters. Do not treat provider brand or shared genre as capability proof.
-  - [ ] Set deterministic ranking: verified shared track credit with stable artist IDs first, optional explicit server-provided similar-artist list next; within a tier use server-provided order where defined, then original configured source order, then stable `(server_id, artist_id)` tie-break. Deduplicate repeated artist IDs and reject self-links, compilation-only album co-occurrence and cross-server name matches. Use a reason specific to the evidence (“appeared together on a track” or “server suggested a similar artist”).
-  - [ ] Define the immutable, validated, versioned original settings snapshot at Radio start; preserve source order, ordering keys and seed. Define a safe migration for existing Radio sessions whose original snapshot was never stored.
-  - [ ] Capture that snapshot through the trusted explicit settings-start path. `playback.applySession` exposes `StartRadio`; do not trust a client-supplied snapshot there or permit it to widen configured sources. Define and test safe rejection or server-side resolution when the public variant has no trusted snapshot.
-  - [ ] Define cycle number, cycle-scoped heard membership, logical-session exclusions, scan cursor namespace/reset, and how to prove global exhaustion over bounded windows. A failed source is `unknown`, not `empty`.
-- [ ] Extend the existing Radio owner and SQLite model (AC: 1, 4–8).
-  - [ ] Add center-transition kind/evidence/reason, cycle identity and original-settings reference to typed state and versioned persistence. Migrate existing rows without altering Album/Manual restore. Keep indexed membership and paged history; do not load the entire journey into memory or erase exclusions during renewal.
-  - [ ] Extend the existing `RefillLease`/owner admission path so current-center selection, related-center transition, fresh-center transition and cycle renewal are one serialized policy. Persist an accepted center/cycle change and queue append transactionally under the current revision. Reject stale work at every async boundary and final admission.
-  - [ ] Add a centerless Radio lease/wake path after an initial track with missing or ambiguous artist metadata, and after an explicit Retry. Current `reserve_radio_inner` requires a center and 16.2 leaves this state Waiting, so simply extending the existing centered worker would strand the fallback. Preserve the current occurrence and session exclusions.
-  - [ ] Preserve source scan progress across bounded pages; reset or namespace cursors only when center or cycle actually changes. Advance through partial windows until eligibility/exhaustion is known. Give unavailable sources an explicit unknown result and bounded retry eligibility.
-- [ ] Reuse Playback selection and provider boundaries (AC: 1–6).
-  - [ ] Keep `auto_fill::pipeline::run_pipeline` as the pure ordering implementation. Feed it candidates from the original scope for same-artist and fresh-center choices; do not copy the selector, mutate physical sync settings, or use device capacity.
-  - [ ] Resolve relation metadata through provider adapters with the track's portable server identity. Verify the nominated artist has an eligible track in the original scope before transition. Keep existing per-request source/window limits and preparation deadlines unless a measured change is justified and tested.
-  - [ ] Keep the worker outside the audio callback and ensure temporary provider errors cannot be mistaken for cycle exhaustion or a user skip.
-- [ ] Surface accepted transition and waiting explanations (AC: 2–3, 5–9).
-  - [ ] Extend the authoritative Radio snapshot and existing Playing destination/status, using localized, concise relationship/new-start/cycle/waiting text. Include safe provenance, never credentials or authenticated URLs. Preserve Retry, focus and `aria-live` behavior across UI reconnect.
-  - [ ] Keep the settings-view start action as the available Radio entry point. Final bar/menu Play something belongs to 16.6; recording deduplication belongs to 16.4, and Radio gain to 16.5.
+- [x] Define the provider relationship and session contracts before implementation (AC: 2–8).
+  - [x] Inventory actual Jellyfin, Subsonic/OpenSubsonic and other configured provider responses on supported server versions; record supported explicit relation evidence, empty/unsupported/error behavior and whether IDs resolve to local library artists. Expose a bounded, typed optional relation method on `MediaProvider` and implement only verified adapters. Do not treat provider brand or shared genre as capability proof.
+  - [x] Set deterministic ranking: verified shared track credit with stable artist IDs first, optional explicit server-provided similar-artist list next; within a tier use server-provided order where defined, then original configured source order, then stable `(server_id, artist_id)` tie-break. Deduplicate repeated artist IDs and reject self-links, compilation-only album co-occurrence and cross-server name matches. Use a reason specific to the evidence (“appeared together on a track” or “server suggested a similar artist”).
+  - [x] Define the immutable, validated, versioned original settings snapshot at Radio start; preserve source order, ordering keys and seed. Define a safe migration for existing Radio sessions whose original snapshot was never stored.
+  - [x] Capture that snapshot through the trusted explicit settings-start path. `playback.applySession` exposes `StartRadio`; do not trust a client-supplied snapshot there or permit it to widen configured sources. Define and test safe rejection or server-side resolution when the public variant has no trusted snapshot.
+  - [x] Define cycle number, cycle-scoped heard membership, logical-session exclusions, scan cursor namespace/reset, and how to prove global exhaustion over bounded windows. A failed source is `unknown`, not `empty`.
+- [x] Extend the existing Radio owner and SQLite model (AC: 1, 4–8).
+  - [x] Add center-transition kind/evidence/reason, cycle identity and original-settings reference to typed state and versioned persistence. Migrate existing rows without altering Album/Manual restore. Keep indexed membership and paged history; do not load the entire journey into memory or erase exclusions during renewal.
+  - [x] Extend the existing `RefillLease`/owner admission path so current-center selection, related-center transition, fresh-center transition and cycle renewal are one serialized policy. Persist an accepted center/cycle change and queue append transactionally under the current revision. Reject stale work at every async boundary and final admission.
+  - [x] Add a centerless Radio lease/wake path after an initial track with missing or ambiguous artist metadata, and after an explicit Retry. Current `reserve_radio_inner` requires a center and 16.2 leaves this state Waiting, so simply extending the existing centered worker would strand the fallback. Preserve the current occurrence and session exclusions.
+  - [x] Preserve source scan progress across bounded pages; reset or namespace cursors only when center or cycle actually changes. Advance through partial windows until eligibility/exhaustion is known. Give unavailable sources an explicit unknown result and bounded retry eligibility.
+- [x] Reuse Playback selection and provider boundaries (AC: 1–6).
+  - [x] Keep `auto_fill::pipeline::run_pipeline` as the pure ordering implementation. Feed it candidates from the original scope for same-artist and fresh-center choices; do not copy the selector, mutate physical sync settings, or use device capacity.
+  - [x] Resolve relation metadata through provider adapters with the track's portable server identity. Verify the nominated artist has an eligible track in the original scope before transition. Keep existing per-request source/window limits and preparation deadlines unless a measured change is justified and tested.
+  - [x] Keep the worker outside the audio callback and ensure temporary provider errors cannot be mistaken for cycle exhaustion or a user skip.
+- [x] Surface accepted transition and waiting explanations (AC: 2–3, 5–9).
+  - [x] Extend the authoritative Radio snapshot and existing Playing destination/status, using localized, concise relationship/new-start/cycle/waiting text. Include safe provenance, never credentials or authenticated URLs. Preserve Retry, focus and `aria-live` behavior across UI reconnect.
+  - [x] Keep the settings-view start action as the available Radio entry point. Final bar/menu Play something belongs to 16.6; recording deduplication belongs to 16.4, and Radio gain to 16.5.
 - [ ] Verify regressions and platform evidence (AC: 1–9).
-  - [ ] Add deterministic owner, selector, provider-contract and SQLite migration/restart tests for transition ranking, original-settings stability, forged `StartRadio` snapshot rejection, centerless first track followed by fallback and restart, duplicate/stale admission, center/cycle cursor reset, cycle exclusions, partial windows and unknown availability.
+  - [x] Add deterministic owner, selector, provider-contract and SQLite migration/restart tests for transition ranking, original-settings stability, forged `StartRadio` snapshot rejection, centerless first track followed by fallback and restart, duplicate/stale admission, center/cycle cursor reset, cycle exclusions, partial windows and unknown availability.
   - [ ] Extend `scripts/tests/playback-radio-ui.test.mjs` and four-locale catalog parity for explanations. Run focused Rust tests, full relevant daemon/UI quality gates, and the four-platform build matrix; record which provider/server and installed scenarios actually ran.
 
 ## Dev Notes
@@ -91,12 +94,48 @@ Keep policy in `playback/radio.rs`, owner mutation in `playback/session.rs`, dur
 
 ### Agent Model Used
 
-GPT-6 Codex (story preparation)
+GPT-6 Codex (story preparation and implementation)
+
+### Implementation Plan
+
+- Capture validated Playback selection settings at trusted Radio start; restore that immutable snapshot with schema v9 and leave legacy rows without a snapshot safely waiting.
+- Keep current-artist selection first. Rank only stable, source-local shared-track credits or explicit OpenSubsonic similar-artist IDs, and verify candidate tracks against the original configured scope before owner admission.
+- Use durable bounded cursors for related and fresh-center scans; renew only cycle heard membership after verified exhaustion while preserving logical-session exclusions. Fence owner commits by session, generation, revision, center, cycle and refill ID.
+- Surface accepted evidence and waiting reasons through the existing authoritative snapshot and localized Playing status.
 
 ### Debug Log References
+
+- Live read-only contract check, 2026-09-28: Jellyfin 12.1.0 returned stable `ArtistItems` IDs for 400 sampled Audio items, with no multi-credit item in that sample. Its Similar endpoint returned IDs but no documented relationship reason, so the adapter does not use it as similar-artist evidence. Shared-credit behavior is verified with deterministic adapter fixtures.
+- Live read-only contract check, 2026-09-28: Navidrome 0.64.2 / OpenSubsonic 1.16.1 returned `getArtistInfo2` similar-artist IDs for three sampled artists (4, 3, 1); all eight IDs resolved through local `getArtist`. Empty, unsupported and malformed responses are fixture-tested. Audiobookshelf exposes no music relation capability.
+- Local macOS arm64: full daemon suite passed (1,225 unit tests, 6 ignored, plus 5 integration tests); 258 script tests passed with one pre-existing skip; 57 focused Playback UI tests passed; two Python evidence-script unit tests passed; playback-session-evidence integration run passed. UI production build, i18n tests, `cargo fmt --check`, daemon Clippy and `git diff --check` passed. Clippy and Vite reported existing warnings. The first unprivileged evidence run failed because local fixture sockets were sandboxed; the approved run passed.
+- Platform matrix and installed-package testing remain unverified. GitHub's web page is reachable without sign-in and SSH read access works, but this workspace has no `gh` CLI or GitHub API token; the repository's matrix triggers on PR or push to `main`.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Added source-qualified evidence-based Radio transitions, original settings persistence, centerless fresh fallback, cycle renewal, conservative waiting and localized explanations. No external enrichment or server-side writes.
+- Live provider checks are read-only metadata checks. They do not prove a real-library multi-credit Jellyfin transition or an installed-package Radio scenario.
 
 ### File List
+
+- `_bmad-output/implementation-artifacts/16-3-continue-radio-through-meaningful-artist-connections.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/radio.rs`
+- `hifimule-daemon/src/playback/selection.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/providers/audiobookshelf.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc/playback_selection.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/rpc.ts`
+- `scripts/tests/playback-radio-ui.test.mjs`
+
+### Change Log
+
+- 2026-09-28: Implemented story 16.3 Radio continuation and verified local fixtures and read-only live provider metadata. Four-platform CI and installed-package evidence remain pending; story stays in progress.

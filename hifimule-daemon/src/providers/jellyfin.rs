@@ -140,6 +140,39 @@ impl JellyfinProvider {
 
 #[async_trait]
 impl MediaProvider for JellyfinProvider {
+    async fn related_artists(
+        &self,
+        artist_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::providers::ArtistRelation>, ProviderError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut related = Vec::new();
+        let artist = self.get_artist(artist_id).await?;
+        for album in artist.albums.into_iter().take(4) {
+            let tracks = self.get_album(&album.id).await?.tracks;
+            for song in tracks.into_iter().take(400) {
+                let ids = &song.provider_metadata.music_artist_ids;
+                if !ids.iter().any(|id| id == artist_id) {
+                    continue;
+                }
+                for id in ids {
+                    if !id.is_empty() && id != artist_id && seen.insert(id.clone()) {
+                        related.push(crate::providers::ArtistRelation {
+                            artist_id: id.clone(),
+                            kind: crate::providers::ArtistRelationKind::SharedTrackCredit,
+                        });
+                    }
+                }
+            }
+        }
+        related.sort_by(|a, b| a.artist_id.cmp(&b.artist_id));
+        related.truncate(limit.min(8) as usize);
+        Ok(related)
+    }
+
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {
         let views = self
             .client
@@ -1141,6 +1174,11 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         album_loudness: Default::default(),
         provider_metadata: crate::domain::models::ProviderItemMetadata {
             ambiguous_music_artist,
+            music_artist_ids: item
+                .artist_items
+                .as_ref()
+                .map(|items| items.iter().map(|artist| artist.id.clone()).collect())
+                .unwrap_or_default(),
             ..Default::default()
         },
     }
@@ -1293,10 +1331,11 @@ mod tests {
                 id: "second-artist".into(),
                 name: "Artist B".into(),
             });
-        assert!(
-            song_from_item(duet)
-                .provider_metadata
-                .ambiguous_music_artist
+        let duet = song_from_item(duet);
+        assert!(duet.provider_metadata.ambiguous_music_artist);
+        assert_eq!(
+            duet.provider_metadata.music_artist_ids,
+            vec!["artist-id", "second-artist"]
         );
         let song = song_from_item(item);
 

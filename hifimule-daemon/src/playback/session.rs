@@ -144,6 +144,7 @@ enum OwnerCommand {
         Vec<super::selection::SelectionCandidate>,
         Option<String>,
         bool,
+        Option<super::radio::RadioTransition>,
         mpsc::Sender<PResult<bool>>,
     ),
 }
@@ -304,7 +305,12 @@ impl PlaybackSession {
                 .radio
                 .as_ref()
                 .and_then(|radio| radio.center.as_ref())
-                == Some(&lease.center)
+                == lease.center.as_ref()
+            && inner
+                .session
+                .radio
+                .as_ref()
+                .is_some_and(|radio| radio.cycle == lease.cycle)
     }
 
     pub fn admit_radio_refill(
@@ -323,6 +329,17 @@ impl PlaybackSession {
         failure: Option<String>,
         more_windows: bool,
     ) -> PResult<bool> {
+        self.admit_radio_refill_plan(lease, candidates, failure, more_windows, None)
+    }
+
+    pub fn admit_radio_refill_plan(
+        &self,
+        lease: super::radio::RefillLease,
+        candidates: Vec<super::selection::SelectionCandidate>,
+        failure: Option<String>,
+        more_windows: bool,
+        transition: Option<super::radio::RadioTransition>,
+    ) -> PResult<bool> {
         if self.fenced.load(Ordering::Acquire) {
             return Err(owner_stopped());
         }
@@ -333,6 +350,7 @@ impl PlaybackSession {
                 candidates,
                 failure,
                 more_windows,
+                transition,
                 reply,
             ))
             .map_err(admission_error)?;
@@ -1472,7 +1490,14 @@ fn owner_loop(
                 };
                 let _ = reply.send(with_metadata(result, &i));
             }
-            Ok(OwnerCommand::AdmitRadio(lease, candidates, failure, more_windows, reply)) => {
+            Ok(OwnerCommand::AdmitRadio(
+                lease,
+                candidates,
+                failure,
+                more_windows,
+                transition,
+                reply,
+            )) => {
                 let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
@@ -1483,6 +1508,7 @@ fn owner_loop(
                         &candidates,
                         failure,
                         more_windows,
+                        transition,
                         &generation_serial,
                     )
                 };
@@ -1924,9 +1950,11 @@ fn reserve_radio_inner(i: &mut Inner) -> PResult<Option<super::radio::RefillLeas
     {
         return Ok(None);
     }
-    let Some(center) = radio.center.clone() else {
+    let Some(original_settings) = radio.original_settings.clone() else {
         return Ok(None);
     };
+    let center = radio.center.clone();
+    let cycle = radio.cycle;
     let Some(current_id) = i.session.current_occurrence_id.as_ref() else {
         return Ok(None);
     };
@@ -1946,7 +1974,17 @@ fn reserve_radio_inner(i: &mut Inner) -> PResult<Option<super::radio::RefillLeas
     let mut next = i.session.clone();
     if let Some(radio) = next.radio.as_mut() {
         radio.status = super::radio::RadioStatus::Filling;
-        radio.reason = None;
+        if !matches!(
+            radio.reason.as_deref(),
+            Some(
+                "radio.sharedTrackCredit"
+                    | "radio.similarArtist"
+                    | "radio.newStartingPoint"
+                    | "radio.newCycle"
+            )
+        ) {
+            radio.reason = None;
+        }
     }
     i.db.checkpoint_radio_state(&next).map_err(storage)?;
     i.session = next;
@@ -1958,6 +1996,8 @@ fn reserve_radio_inner(i: &mut Inner) -> PResult<Option<super::radio::RefillLeas
         queue_revision: i.session.queue_revision,
         refill_id,
         center,
+        cycle,
+        original_settings,
         capacity,
     }))
 }
@@ -1968,6 +2008,7 @@ fn admit_radio_inner(
     candidates: &[super::selection::SelectionCandidate],
     failure: Option<String>,
     more_windows: bool,
+    transition: Option<super::radio::RadioTransition>,
     generation_serial: &AtomicU64,
 ) -> PResult<bool> {
     if i.radio_inflight.as_deref() != Some(lease.refill_id.as_str()) {
@@ -1983,7 +2024,11 @@ fn admit_radio_inner(
             .radio
             .as_ref()
             .and_then(|radio| radio.center.as_ref())
-            != Some(&lease.center)
+            != lease.center.as_ref()
+        || i.session
+            .radio
+            .as_ref()
+            .is_none_or(|radio| radio.cycle != lease.cycle)
     {
         wake_radio(i);
         return Ok(false);
@@ -2003,15 +2048,57 @@ fn admit_radio_inner(
     let Some(capacity) = super::radio::refill_capacity(count as usize) else {
         return Ok(false);
     };
+    if candidates.is_empty()
+        && failure.as_deref() == Some("radio.exhausted")
+        && !more_windows
+        && i.db
+            .radio_fresh_scan_saw_heard(&i.session.session_id)
+            .map_err(storage)?
+    {
+        let outcome = i.db.playback_outcome(current_id).map_err(storage)?;
+        let all_handled = count == 0
+            && matches!(
+                outcome.as_deref(),
+                Some("naturalCompletion" | "explicitSkip")
+            );
+        let mut next = i.session.clone();
+        if let Some(radio) = next.radio.as_mut() {
+            if all_handled {
+                radio.cycle = radio.cycle.checked_add(1).ok_or_else(|| {
+                    PlaybackError::invalid("INVALID_RADIO_STATE", "Radio cycle overflow")
+                })?;
+                radio.status = super::radio::RadioStatus::Ready;
+                radio.reason = Some("radio.newCycle".into());
+            } else {
+                radio.status = super::radio::RadioStatus::Waiting;
+                radio.reason = Some("radio.cyclePending".into());
+            }
+        }
+        if all_handled {
+            i.db.renew_radio_cycle(&next, lease.cycle)
+                .map_err(storage)?;
+        } else {
+            i.db.checkpoint_radio_state(&next).map_err(storage)?;
+        }
+        i.session = next;
+        i.state_sequence = i.state_sequence.saturating_add(1);
+        return Ok(false);
+    }
     let mut sources = Vec::new();
+    let target_center = transition
+        .as_ref()
+        .map(|item| &item.center)
+        .or(lease.center.as_ref());
     for candidate in candidates {
         if sources.len() >= capacity.min(lease.capacity) {
             break;
         }
-        if !lease.center.matches(
-            &candidate.source.server_id,
-            candidate.song.artist_id.as_deref(),
-        ) {
+        if !target_center.is_some_and(|center| {
+            center.matches(
+                &candidate.source.server_id,
+                candidate.song.artist_id.as_deref(),
+            )
+        }) {
             continue;
         }
         if i.db
@@ -2028,15 +2115,24 @@ fn admit_radio_inner(
     }
     let mut next = i.session.clone();
     if let Some(radio) = next.radio.as_mut() {
+        if !sources.is_empty()
+            && let Some(transition) = transition
+        {
+            radio.center = Some(transition.center.clone());
+            radio.reason = Some(transition.reason.clone());
+            radio.transition = Some(transition);
+        }
         let short_pass = sources.len() < capacity;
         radio.status = if short_pass && !more_windows {
             super::radio::RadioStatus::Waiting
         } else {
             super::radio::RadioStatus::Ready
         };
-        radio.reason = short_pass
-            .then(|| failure.unwrap_or_else(|| "radio.exhausted".into()))
-            .filter(|_| !more_windows);
+        if short_pass && !more_windows {
+            radio.reason = Some(failure.unwrap_or_else(|| "radio.exhausted".into()));
+        } else if sources.is_empty() {
+            radio.reason = None;
+        }
     }
     if sources.is_empty() {
         i.db.checkpoint_radio_state(&next).map_err(storage)?;
@@ -2151,7 +2247,7 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::ReserveRadio(reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
-        OwnerCommand::AdmitRadio(_, _, _, _, reply) => {
+        OwnerCommand::AdmitRadio(_, _, _, _, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
     }
@@ -2804,15 +2900,22 @@ fn apply_inner_with_album_context(
                 QueueKind::Manual
             };
             next_session.radio = match &p.operation {
-                SessionOperation::StartRadio { center, .. } => Some(super::radio::RadioState {
+                SessionOperation::StartRadio {
+                    center, settings, ..
+                } => Some(super::radio::RadioState {
                     logical_id: Uuid::new_v4().to_string(),
                     center: center.clone(),
-                    status: if center.is_some() {
+                    status: if settings.is_some() {
                         super::radio::RadioStatus::Filling
                     } else {
                         super::radio::RadioStatus::Waiting
                     },
-                    reason: center.is_none().then(|| "radio.artistUnavailable".into()),
+                    reason: settings
+                        .is_none()
+                        .then(|| "radio.snapshotUnavailable".into()),
+                    original_settings: settings.clone(),
+                    cycle: 1,
+                    transition: None,
                 }),
                 _ => None,
             };
@@ -4958,6 +5061,15 @@ fn complete_occurrence(
         } else {
             PlaybackStatus::Paused
         };
+    }
+    if let Some(radio) = terminal.session.radio.as_mut()
+        && matches!(
+            radio.reason.as_deref(),
+            Some("radio.cyclePending" | "radio.exhausted")
+        )
+    {
+        radio.status = super::radio::RadioStatus::Ready;
+        radio.reason = None;
     }
     commit_terminal(i, terminal, generation_serial, false)?;
     i.radio_wait_for_transition = false;
