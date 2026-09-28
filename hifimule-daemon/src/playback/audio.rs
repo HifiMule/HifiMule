@@ -1123,6 +1123,40 @@ impl AudioEngine {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_with_response(
+        &self,
+        description: PlaybackDescription,
+        source: super::model::TrackSource,
+        start_ms: u64,
+        generation: String,
+        session: super::PlaybackSession,
+        deadline: std::time::Instant,
+        response: Option<reqwest::Response>,
+    ) -> Result<(), PlaybackPipelineError> {
+        if response.is_none() {
+            return self
+                .start(description, source, start_ms, generation, session, deadline)
+                .await;
+        }
+        let epoch = session.control_epoch();
+        self.start_at_epoch_kind(
+            description,
+            source,
+            start_ms,
+            generation,
+            session,
+            deadline,
+            epoch,
+            1.0,
+            None,
+            None,
+            None,
+            response,
+        )
+        .await
+    }
+
     /// Start only work belonging to the transport command that admitted it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_at_epoch(
@@ -1174,6 +1208,7 @@ impl AudioEngine {
             admitted_suffix,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1203,6 +1238,7 @@ impl AudioEngine {
             admitted_suffix,
             None,
             Some(operation_id),
+            None,
         )
         .await
     }
@@ -1233,6 +1269,7 @@ impl AudioEngine {
             admitted_suffix,
             Some(operation_id),
             None,
+            None,
         )
         .await
     }
@@ -1251,6 +1288,7 @@ impl AudioEngine {
         admitted_suffix: Option<String>,
         seek_operation_id: Option<String>,
         back_operation_id: Option<String>,
+        prepared_response: Option<reqwest::Response>,
     ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
         let duration_ms = u64::from(description.song.duration_seconds).saturating_mul(1000);
@@ -1314,18 +1352,22 @@ impl AudioEngine {
         let representation_name = representation_name(&representation);
         let decoder_hint = decoder_hint(&representation);
         let request = representation.request;
-        let response = tokio::select! {
-            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&request)) => result,
-            _ = async {
-                while generation_serial.load(Ordering::Acquire) == expected_serial
-                    && session.control_epoch() == expected_epoch
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
-            } => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("playback generation was superseded"))),
-        }
-            .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("playback preparation timed out")))?
-            .map_err(|error| error.with_representation(&representation_name))?;
+        let response = if let Some(response) = prepared_response {
+            response
+        } else {
+            tokio::select! {
+                result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&request)) => result,
+                _ = async {
+                    while generation_serial.load(Ordering::Acquire) == expected_serial
+                        && session.control_epoch() == expected_epoch
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                } => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("playback generation was superseded"))),
+            }
+                .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("playback preparation timed out")))?
+                .map_err(|error| error.with_representation(&representation_name))?
+        };
         if generation_serial.load(Ordering::Acquire) != expected_serial
             || session.control_epoch() != expected_epoch
             || session.generation_guard(&generation).is_none()
@@ -1561,6 +1603,26 @@ fn require_preparation_epoch(
         )));
     }
     Ok(())
+}
+
+/// Selection prepares the actual media response before replacing the listening
+/// session. The response is handed to the Play path so this is a single request.
+pub(crate) struct PreparedSelectionSource {
+    pub description: PlaybackDescription,
+    pub response: reqwest::Response,
+}
+
+pub(crate) async fn prepare_selection_source(
+    description: PlaybackDescription,
+) -> Result<PreparedSelectionSource, PlaybackPipelineError> {
+    verify_runtime().map_err(PlaybackPipelineError::decode)?;
+    let representation = select_playback_representation(description.representations.clone())
+        .map_err(PlaybackPipelineError::from_provider_error)?;
+    let response = fetch(&representation.request).await?;
+    Ok(PreparedSelectionSource {
+        description,
+        response,
+    })
 }
 
 async fn fetch(request: &PlaybackRequest) -> Result<reqwest::Response, PlaybackPipelineError> {
@@ -3069,6 +3131,67 @@ mod tests {
             refresh: None,
             expected_content_type: None,
         }
+    }
+
+    #[tokio::test]
+    async fn selection_preparation_rejects_http_failure_without_touching_session() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let session = queued_session();
+        let before = session.snapshot().unwrap();
+        let description = PlaybackDescription {
+            song: unused_description().song,
+            representations: vec![representation(
+                Some("audio/mpeg"),
+                Some("mp3"),
+                &format!("http://{address}/missing"),
+            )],
+        };
+        let result = prepare_selection_source(description).await;
+        server.join().unwrap();
+        assert_eq!(result.err().unwrap().code(), "SOURCE_UNAVAILABLE");
+        let after = session.snapshot().unwrap();
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.queue_revision, before.queue_revision);
+        assert_eq!(after.generation_id, before.generation_id);
+        session.stop_and_join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn selection_preparation_hands_the_open_response_to_play() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 3\r\n\r\nabc",
+                )
+                .unwrap();
+        });
+        let description = PlaybackDescription {
+            song: unused_description().song,
+            representations: vec![representation(
+                Some("audio/mpeg"),
+                Some("mp3"),
+                &format!("http://{address}/track"),
+            )],
+        };
+        let prepared = prepare_selection_source(description).await.unwrap();
+        assert_eq!(prepared.response.bytes().await.unwrap(), b"abc".as_slice());
+        server.join().unwrap();
     }
 
     fn representation(

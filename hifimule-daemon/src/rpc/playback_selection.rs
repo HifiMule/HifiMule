@@ -7,20 +7,20 @@ use serde_json::{Value, json};
 
 use super::{
     AppState, ERR_INVALID_PARAMS, ERR_STORAGE_ERROR, JsonRpcError,
-    handle_playback_apply_session_prepared,
+    handle_playback_apply_session_prepared_fenced,
 };
 use crate::playback::{
     model::{ApplySessionParams, SessionOperation},
     selection::{self, PlaybackSelectionConfig, SelectionError, SelectionKind, SelectionPool},
 };
 
-static START_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static START_EPOCH: AtomicU64 = AtomicU64::new(0);
 const DEADLINE: Duration = Duration::from_secs(15);
 
 #[cfg(test)]
 pub(super) async fn test_ticket() -> u64 {
-    let _guard = START_GATE.lock().await;
+    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
     START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1
 }
 
@@ -161,7 +161,7 @@ pub async fn save_config(state: &AppState, params: Option<Value>) -> Result<Valu
 
 pub async fn cancel(params: Option<Value>) -> Result<Value, JsonRpcError> {
     version(params)?;
-    let _guard = START_GATE.lock().await;
+    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
     START_EPOCH.fetch_add(1, Ordering::AcqRel);
     Ok(json!({"data": {"cancelled": true}}))
 }
@@ -173,7 +173,7 @@ pub async fn start(
 ) -> Result<Value, JsonRpcError> {
     version(params)?;
     let ticket = {
-        let _guard = START_GATE.lock().await;
+        let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
         START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1
     };
     let path = path()?;
@@ -225,17 +225,17 @@ pub(super) async fn start_with_config(
             }
             let provider = provider(state, &source.server_id).await?;
             if let Ok(description) = provider.resolve_playback(&source.track_id).await
-                && !description.representations.is_empty()
+                && let Ok(prepared) =
+                    crate::playback::audio::prepare_selection_source(description).await
             {
-                return Ok((source, description));
+                return Ok((source, prepared));
             }
         }
         Err(error(SelectionError::SourceUnavailable))
     };
-    let (first, description) = tokio::time::timeout(DEADLINE, preflight)
+    let (first, prepared) = tokio::time::timeout(DEADLINE, preflight)
         .await
         .map_err(|_| error(SelectionError::SourceUnavailable))??;
-    let _guard = START_GATE.lock().await;
     if START_EPOCH.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
@@ -248,6 +248,17 @@ pub(super) async fn start_with_config(
         expected_queue_revision: snapshot.queue_revision,
         operation: SessionOperation::PlayTrack { source: first },
     };
-    handle_playback_apply_session_prepared(state, command, mutation_guard, false, Some(description))
-        .await
+    handle_playback_apply_session_prepared_fenced(
+        state,
+        command,
+        mutation_guard,
+        false,
+        Some(prepared),
+        Some(crate::playback::session::ApplyFence {
+            gate: &START_GATE,
+            epoch: &START_EPOCH,
+            expected: ticket,
+        }),
+    )
+    .await
 }

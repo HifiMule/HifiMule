@@ -117,6 +117,12 @@ jobs:
       - name: Verify Playback start failures preserve the session
         run: npm run build:daemon -- test -p hifimule-daemon playback_selection_setup_and_unavailable_source_preserve_current_session
 
+      - name: Verify Playback audio preparation
+        run: npm run build:daemon -- test -p hifimule-daemon selection_preparation_
+
+      - name: Verify Playback owner commit fencing
+        run: npm run build:daemon -- test -p hifimule-daemon superseded_selection_is_rejected_at_owner_commit
+
       - name: Verify source error distinctions
         run: npm run build:daemon -- test -p hifimule-daemon playback_genre_source_distinguishes_removed_source_from_empty_result
 

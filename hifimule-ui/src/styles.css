@@ -2541,6 +2541,9 @@ h2 {
   .destination-hub { padding-inline: var(--space-sm); }
   .playback-destination { padding: var(--space-sm); }
   .playback-destination__paging { flex-wrap: wrap; }
+  .playback-selection-settings__row { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .playback-selection-settings label { min-width: 0; }
+  .playback-selection-settings__controls > button { flex: 1 1 calc(50% - .5rem); min-height: 2.75rem; }
 }
 
 @media (min-width: 600px) and (max-width: 1000px) {
@@ -2549,5 +2552,7 @@ h2 {
 
 @media (forced-colors: active) {
   .destination-hub__item:focus-visible,
-  .playback-destination button:focus-visible { outline: 2px solid Highlight; }
+  .playback-destination button:focus-visible,
+  .playback-selection-settings select:focus-visible,
+  .playback-selection-settings input:focus-visible { outline: 2px solid Highlight; }
 }

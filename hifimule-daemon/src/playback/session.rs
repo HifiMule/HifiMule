@@ -39,6 +39,15 @@ type PResult<T> = std::result::Result<T, PlaybackError>;
 
 type PendingEvents = Arc<Mutex<VecDeque<(u64, u64, String, PlaybackEvent)>>>;
 
+/// A selection request must still be current when the owner applies Play.
+/// The gate makes cancellation and the owner commit one ordered operation.
+#[derive(Clone, Copy)]
+pub(crate) struct ApplyFence {
+    pub gate: &'static Mutex<()>,
+    pub epoch: &'static AtomicU64,
+    pub expected: u64,
+}
+
 // A one-shot test handshake after Apply is dequeued, before locking session state.
 #[cfg(test)]
 type ApplyGate = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
@@ -102,6 +111,7 @@ enum OwnerCommand {
     Apply(
         ApplySessionParams,
         Option<crate::sync::MutationGuard>,
+        Option<ApplyFence>,
         mpsc::Sender<PResult<ApplyResult>>,
     ),
     Preview(
@@ -522,6 +532,17 @@ impl PlaybackSession {
             .unwrap_or_else(|_| Err(owner_stopped()))
     }
 
+    pub(crate) fn apply_with_guard_fenced(
+        &self,
+        p: ApplySessionParams,
+        guard: Option<crate::sync::MutationGuard>,
+        fence: ApplyFence,
+    ) -> PResult<ApplyResult> {
+        self.admit_apply_fenced(p, guard, Some(fence))?
+            .recv()
+            .unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
     pub fn control_with_guard(
         &self,
         p: ControlParams,
@@ -762,12 +783,21 @@ impl PlaybackSession {
         params: ApplySessionParams,
         guard: Option<crate::sync::MutationGuard>,
     ) -> PResult<mpsc::Receiver<PResult<ApplyResult>>> {
+        self.admit_apply_fenced(params, guard, None)
+    }
+
+    fn admit_apply_fenced(
+        &self,
+        params: ApplySessionParams,
+        guard: Option<crate::sync::MutationGuard>,
+        fence: Option<ApplyFence>,
+    ) -> PResult<mpsc::Receiver<PResult<ApplyResult>>> {
         if self.fenced.load(Ordering::Acquire) {
             return Err(owner_stopped());
         }
         let (tx, rx) = mpsc::channel();
         self.command_tx
-            .try_send(OwnerCommand::Apply(params, guard, tx))
+            .try_send(OwnerCommand::Apply(params, guard, fence, tx))
             .map_err(admission_error)?;
         Ok(rx)
     }
@@ -1354,7 +1384,7 @@ fn owner_loop(
                 let i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(with_metadata(list_inner(&i, params), &i));
             }
-            Ok(OwnerCommand::Apply(params, _mutation_guard, reply)) => {
+            Ok(OwnerCommand::Apply(params, _mutation_guard, selection_fence, reply)) => {
                 executing.store(true, Ordering::Release);
                 #[cfg(test)]
                 {
@@ -1365,8 +1395,18 @@ fn owner_loop(
                         let _ = resume.recv();
                     }
                 }
+                let _selection_guard = selection_fence
+                    .as_ref()
+                    .map(|fence| fence.gate.lock().unwrap_or_else(|error| error.into_inner()));
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
-                let result = if fenced.load(Ordering::Acquire) {
+                let result = if selection_fence
+                    .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+                {
+                    Err(PlaybackError::conflict(
+                        "PLAYBACK_SELECTION_CANCELLED",
+                        "Playback selection start was superseded",
+                    ))
+                } else if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
                 } else {
                     prune_dedup(&mut i);
@@ -1766,7 +1806,7 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::SelectOutput(_, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
-        OwnerCommand::Apply(_, _guard, reply) => {
+        OwnerCommand::Apply(_, _guard, _fence, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::Preview(_, _guard, reply) => {
@@ -5382,6 +5422,43 @@ mod tests {
             let _ = reply.recv().unwrap();
         }
         checkpoint.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn superseded_selection_is_rejected_at_owner_commit() {
+        static GATE: Mutex<()> = Mutex::new(());
+        static EPOCH: AtomicU64 = AtomicU64::new(1);
+        let playback =
+            PlaybackSession::restore(Arc::new(Database::memory().unwrap()), "owner".into());
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let before = playback.snapshot().unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *playback.before_apply.lock().unwrap() = Some((started_tx, resume_rx));
+        let worker = playback.clone();
+        let command = params(&before, SessionOperation::Clear);
+        let handle = std::thread::spawn(move || {
+            worker.apply_with_guard_fenced(
+                command,
+                None,
+                ApplyFence {
+                    gate: &GATE,
+                    epoch: &EPOCH,
+                    expected: 1,
+                },
+            )
+        });
+        started_rx.recv().unwrap();
+        EPOCH.store(2, Ordering::Release);
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            handle.join().unwrap().unwrap_err().code,
+            "PLAYBACK_SELECTION_CANCELLED"
+        );
+        let after = playback.snapshot().unwrap();
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.queue_revision, before.queue_revision);
+        assert_eq!(after.generation_id, before.generation_id);
     }
 
     #[tokio::test]

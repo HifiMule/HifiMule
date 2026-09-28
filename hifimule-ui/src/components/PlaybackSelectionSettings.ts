@@ -100,7 +100,7 @@ export class PlaybackSelectionSettings {
     private updateActions(): void {
         this.add.disabled = this.busy || this.saving || this.config.sources.length >= 8 || this.servers.length === 0;
         this.save.disabled = this.busy || this.saving || !this.dirty || this.config.sources.some(source => !source.ref);
-        this.start.disabled = this.busy || this.saving || this.dirty || this.config.sources.length === 0;
+        this.start.disabled = this.busy || this.cancelling || this.saving || this.dirty || this.config.sources.length === 0;
         this.cancel.disabled = !this.busy || this.cancelling;
     }
 
@@ -128,7 +128,7 @@ export class PlaybackSelectionSettings {
             const explanation = document.createElement('span'); explanation.className = 'playback-selection-settings__explanation';
             const remove = document.createElement('button'); remove.type = 'button';
             remove.textContent = t('playback.selection.remove');
-            remove.setAttribute('aria-label', t('playback.selection.remove'));
+            remove.setAttribute('aria-label', `${t('playback.selection.remove')} ${index + 1}`);
             server.addEventListener('change', () => { source.serverId = server.value; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation); });
             kind.addEventListener('change', () => { source.kind = kind.value as PlaybackSelectionKind; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation); });
             ref.addEventListener('change', () => { source.ref = ref.value; this.markDirty(); });
@@ -211,10 +211,12 @@ export class PlaybackSelectionSettings {
     }
 
     private async cancelStart(): Promise<void> {
-        ++this.request; this.cancelling = true; this.updateActions();
+        const request = this.request;
+        this.cancelling = true; this.updateActions();
         try {
             await playbackCancelSelectionStart();
-            if (!this.disposed) {
+            if (!this.disposed && request === this.request && this.busy) {
+                ++this.request;
                 this.busy = false;
                 this.status.textContent = t('playback.selection.cancelled');
             }

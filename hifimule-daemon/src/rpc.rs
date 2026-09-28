@@ -1098,7 +1098,26 @@ async fn handle_playback_apply_session_prepared(
     p: crate::playback::model::ApplySessionParams,
     mutation_guard: Option<crate::sync::MutationGuard>,
     allow_podcast_episode: bool,
-    prepared: Option<crate::providers::PlaybackDescription>,
+    prepared: Option<crate::playback::audio::PreparedSelectionSource>,
+) -> Result<Value, JsonRpcError> {
+    handle_playback_apply_session_prepared_fenced(
+        state,
+        p,
+        mutation_guard,
+        allow_podcast_episode,
+        prepared,
+        None,
+    )
+    .await
+}
+
+async fn handle_playback_apply_session_prepared_fenced(
+    state: &AppState,
+    p: crate::playback::model::ApplySessionParams,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+    allow_podcast_episode: bool,
+    prepared: Option<crate::playback::audio::PreparedSelectionSource>,
+    selection_fence: Option<crate::playback::session::ApplyFence>,
 ) -> Result<Value, JsonRpcError> {
     let added_sources: Vec<_> = match &p.operation {
         crate::playback::model::SessionOperation::PlayTrack { source } => vec![source],
@@ -1141,14 +1160,17 @@ async fn handle_playback_apply_session_prepared(
     };
     let playback = state.playback.clone();
     let owner = playback.clone();
-    let result = tokio::task::spawn_blocking(move || owner.apply_with_guard(p, mutation_guard))
-        .await
-        .map_err(|_| JsonRpcError {
-            code: -32603,
-            message: "Playback owner task failed".into(),
-            data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
-        })?
-        .map_err(playback_error)?;
+    let result = tokio::task::spawn_blocking(move || match selection_fence {
+        Some(fence) => owner.apply_with_guard_fenced(p, mutation_guard, fence),
+        None => owner.apply_with_guard(p, mutation_guard),
+    })
+    .await
+    .map_err(|_| JsonRpcError {
+        code: -32603,
+        message: "Playback owner task failed".into(),
+        data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
+    })?
+    .map_err(playback_error)?;
     if let Some(source) = source.filter(|_| result.start_audio) {
         let manager = state.server_manager.clone();
         let db = state.db.clone();
@@ -1164,7 +1186,7 @@ async fn handle_playback_apply_session_prepared(
             let resolved =
                 tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
                     if let Some(description) = prepared {
-                        return Ok(description);
+                        return Ok((description.description, Some(description.response)));
                     }
                     match crate::server_manager::get_provider_by_server_id(
                         &manager,
@@ -1233,7 +1255,10 @@ async fn handle_playback_apply_session_prepared(
                                     );
                                 }
                             }
-                            provider.resolve_playback(&source.track_id).await
+                            provider
+                                .resolve_playback(&source.track_id)
+                                .await
+                                .map(|description| (description, None))
                         }
                         Err(error) => Err(error),
                     }
@@ -1253,15 +1278,16 @@ async fn handle_playback_apply_session_prepared(
                 }
             };
             let outcome = match resolved {
-                Ok(description) => {
+                Ok((description, response)) => {
                     crate::playback::audio::global()
-                        .start(
+                        .start_with_response(
                             description,
                             source,
                             0,
                             generation.clone(),
                             playback.clone(),
                             deadline,
+                            response,
                         )
                         .await
                 }
