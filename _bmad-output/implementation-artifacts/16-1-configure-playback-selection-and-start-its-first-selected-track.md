@@ -3,7 +3,7 @@ baseline_commit: 30209880f64c5382cbd10537e27c30a20d0fe2cb
 ---
 # Story 16.1: Configure Playback selection and start its first selected track
 
-Status: in-progress
+Status: review
 
 ## Story
 
@@ -39,9 +39,9 @@ so that I can start listening from my curated music without choosing the first t
   - [x] Reuse appropriate selection controls and localization patterns, omitting device-only fields.
   - [x] Fence/cancel pending requests and only commit a prepared result through the main-session Play command. Preserve current session on every failure.
   - [x] Provide keyboard operation, visible focus, accessible names and status/error feedback at responsive sizes.
-- [ ] Verify behavior (AC: 2–9).
+- [x] Verify behavior (AC: 2–9).
   - [x] Test stable ordering equivalence, identity collisions, settings isolation/round trip, stale completion, cancellation, empty/unavailable sources, current-session preservation and simultaneous sync selection.
-  - [ ] Run relevant Rust/UI tests and cross-platform checks; document any platform not actually verified.
+  - [x] Run relevant Rust/UI tests and cross-platform checks; document any platform not actually verified.
 
 ## Dev Notes
 
@@ -92,9 +92,10 @@ GPT-6 Codex (story preparation and implementation)
 - Windows: `scripts/build-daemon.mjs test -p hifimule-daemon` through the controlled native-runtime wrapper — 1,179 passed, 6 ignored, 5 Audiobookshelf contract tests passed. The first direct `cargo test` attempt could not find FFmpeg; the documented wrapper supplied it.
 - Windows: focused Playback selector, RPC failure-preservation, removed/empty genre, and bounded Subsonic genre-page tests passed.
 - Windows: TypeScript `tsc --noEmit`, Vite production build, 7 localization tests, `cargo fmt --check`, and ordinary daemon Clippy passed. `clippy -D warnings` is blocked by existing warnings elsewhere in the daemon; no new warning was reported in the touched modules.
-- macOS and Linux checks are wired into `.github/workflows/build.yml` but have not run in this workspace. Story 15.17 packaged playback verification remains in progress.
+- The Build workflow checks the story on Windows x64, Linux x64, macOS x64 and macOS arm64. Story 15.17 packaged playback verification remains in progress.
 - macOS (2026-09-28): full daemon suite passed (1,193 unit test cases including 6 ignored, plus 5 Audiobookshelf contract tests), 253 Node script tests passed with 1 existing skip, TypeScript/Vite build passed, seven localization tests passed, `cargo fmt --check` passed, and ordinary daemon Clippy passed with existing warnings. Focused tests cover HTTP preparation failure and single-response handoff, owner-commit cancellation, and UI cancellation failure/success.
-- Linux (2026-09-28): three Playback settings UI tests passed in the local Node 24 Bookworm container with a read-only workspace and networking disabled. The complete Node suite could not use the macOS-installed Rollup native package in that container; its Linux package was absent. `actionlint` accepted the four-platform Build workflow. The last published Build run for commit `2202bd8` passed Windows x64, Linux x64, macOS x64 and macOS arm64; it predates the 2026-09-28 patch. Windows and Linux Rust checks for this patch remain unverified until CI runs on the updated code.
+- Linux (2026-09-28): three Playback settings UI tests passed in the local Node 24 Bookworm container with a read-only workspace and networking disabled. The complete Node suite could not use the macOS-installed Rollup native package in that container; its Linux package was absent. `actionlint` accepted the four-platform Build workflow.
+- Build CI run [36396989733](https://github.com/HifiMule/HifiMule/actions/runs/36396989733) for commit `b61a5c392784072c52e8da85ec06b4630bc97ab1` completed successfully on 2026-09-28. Playback evidence jobs passed on Windows x64, Linux x64, macOS x64 and macOS arm64, covering the updated patch. The local macOS rerun at that commit passed the daemon suite (1,193 unit test cases, 6 ignored, plus 5 Audiobookshelf contract tests), Node script suite (253 passed, 1 skipped), Vite production build and `cargo fmt --check`.
 - macOS browser component fixture (2026-09-28): checked the real component at desktop and 375 px widths with two server sources; no horizontal overflow at 375 px. Keyboard Enter activated Start, showed visible focus, and announced the localized result in its live status. This was a temporary component fixture with mocked RPCs, not an installed-app playback test. Story 15.17 packaged playback verification remains in progress.
 
 ### Completion Notes List
@@ -104,7 +105,7 @@ GPT-6 Codex (story preparation and implementation)
 - Added a typed portable `(serverId, trackId)` boundary around the shared pure selector. Playback combines at most eight source pools, preserves colliding provider-local IDs, and admits only one resolved track through the main-session Play path.
 - Added Playback destination controls, status feedback, focus styles and English/French/Spanish/German strings. Added Windows-focused regressions and cross-platform CI commands.
 - Added pre-admission HTTP/representation preparation and owner-commit fencing. A failed cancellation no longer strands the settings UI in its busy state. Narrow controls, numbered Remove names, and forced-color focus styles were verified in the component browser fixture.
-- Remaining before `review`: run the updated patch through Windows and Linux Rust/UI CI. The prior four-platform CI run covers the original Story 16.1 implementation, while the current macOS suite and Linux UI fixture cover this continuation.
+- Cross-platform Build CI passed for the updated patch on Windows x64, Linux x64, macOS x64 and macOS arm64. Story 16.1 is ready for review; Story 15.17 still owns packaged-app playback verification.
 
 ### File List
 
@@ -129,4 +130,4 @@ GPT-6 Codex (story preparation and implementation)
 ### Change Log
 
 - 2026-09-27: Added Playback-owned finite selection, settings persistence, source-scoped RPCs, explicit start/cancel, localized UI and platform CI verification commands. Windows tests and builds pass; story remains in progress pending the recorded gates.
-- 2026-09-28: Preflighted the audio response before Play, fenced selection at owner commit, corrected failed-cancellation UI recovery, and checked keyboard/narrow layout. Added the new regressions to the four-platform CI matrix. macOS full suite and Linux UI tests pass; awaiting CI on the updated patch for Windows/Linux Rust coverage.
+- 2026-09-28: Preflighted the audio response before Play, fenced selection at owner commit, corrected failed-cancellation UI recovery, and checked keyboard/narrow layout. Added the new regressions to the four-platform CI matrix. Updated-patch CI passed on all four targets; advanced the story to review.
