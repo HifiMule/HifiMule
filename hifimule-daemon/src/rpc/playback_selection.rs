@@ -100,6 +100,8 @@ struct OptionsParams {
     schema_version: u32,
     server_id: String,
     kind: SelectionKind,
+    #[serde(default)]
+    offset: u32,
 }
 
 pub async fn options(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
@@ -124,8 +126,18 @@ pub async fn options(state: &AppState, params: Option<Value>) -> Result<Value, J
             json!({"data": {"supported": false, "options": [], "reason": "UNSUPPORTED_CAPABILITY"}}),
         );
     }
-    match tokio::time::timeout(DEADLINE, selection::options(provider.as_ref(), args.kind)).await {
-        Ok(Ok(values)) => Ok(json!({"data": {"supported": true, "options": values}})),
+    if args.offset % selection::MAX_CANDIDATES_PER_SOURCE as u32 != 0 {
+        return Err(error(SelectionError::Setup));
+    }
+    match tokio::time::timeout(
+        DEADLINE,
+        selection::options_page(provider.as_ref(), args.kind, args.offset),
+    )
+    .await
+    {
+        Ok(Ok(page)) => Ok(
+            json!({"data": {"supported": true, "options": page.options, "hasMore": page.has_more}}),
+        ),
         _ => Ok(
             json!({"data": {"supported": false, "options": [], "reason": "PLAYBACK_SELECTION_SOURCE_UNAVAILABLE"}}),
         ),
@@ -139,10 +151,10 @@ pub async fn save_config(state: &AppState, params: Option<Value>) -> Result<Valu
     let validate_sources = async {
         for source in &config.sources {
             let provider = provider(state, &source.server_id).await?;
-            let choices = selection::options(provider.as_ref(), source.kind)
+            if !selection::reference_exists(provider.as_ref(), source)
                 .await
-                .map_err(error)?;
-            if !choices.iter().any(|choice| choice.id == source.ref_id) {
+                .map_err(error)?
+            {
                 return Err(error(SelectionError::Setup));
             }
         }

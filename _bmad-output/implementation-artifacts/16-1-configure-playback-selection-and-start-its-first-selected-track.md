@@ -3,7 +3,7 @@ baseline_commit: 30209880f64c5382cbd10537e27c30a20d0fe2cb
 ---
 # Story 16.1: Configure Playback selection and start its first selected track
 
-Status: review
+Status: done
 
 ## Story
 
@@ -42,6 +42,15 @@ so that I can start listening from my curated music without choosing the first t
 - [x] Verify behavior (AC: 2–9).
   - [x] Test stable ordering equivalence, identity collisions, settings isolation/round trip, stale completion, cancellation, empty/unavailable sources, current-session preservation and simultaneous sync selection.
   - [x] Run relevant Rust/UI tests and cross-platform checks; document any platform not actually verified.
+
+### Review Findings
+
+- [x] [Review][Patch] Valid sources beyond the first 400 cannot be configured or revalidated [hifimule-daemon/src/playback/selection.rs:198]
+- [x] [Review][Patch] Large playlists are fully materialized before the candidate cap applies [hifimule-daemon/src/playback/selection.rs:247]
+- [x] [Review][Patch] A cancelled or superseded selection can still launch audio after owner admission [hifimule-daemon/src/rpc.rs:1184]
+- [x] [Review][Patch] Saving an unrelated setting discards additional ordering keys and a custom track cap [hifimule-ui/src/components/PlaybackSelectionSettings.ts:180]
+- [x] [Review][Patch] Playable tracks without size and bitrate metadata are rejected as empty [hifimule-daemon/src/playback/selection.rs:339]
+- [x] [Review][Patch] One unavailable album aborts an artist source that has other playable albums [hifimule-daemon/src/playback/selection.rs:268]
 
 ## Dev Notes
 
@@ -106,17 +115,20 @@ GPT-6 Codex (story preparation and implementation)
 - Added Playback destination controls, status feedback, focus styles and English/French/Spanish/German strings. Added Windows-focused regressions and cross-platform CI commands.
 - Added pre-admission HTTP/representation preparation and owner-commit fencing. A failed cancellation no longer strands the settings UI in its busy state. Narrow controls, numbered Remove names, and forced-color focus styles were verified in the component browser fixture.
 - Cross-platform Build CI passed for the updated patch on Windows x64, Linux x64, macOS x64 and macOS arm64. Story 16.1 is ready for review; Story 15.17 still owns packaged-app playback verification.
+- Code review closed six findings: paged source choices and exact reference validation, bounded playlist retrieval, a final audio-install selection fence, preservation of advanced saved settings, Playback eligibility for tracks without sync size metadata, and continued artist retrieval after one unavailable album. Local macOS verification passed 1,189 daemon tests (6 ignored), 5 contract tests, 255 Node tests (1 skipped), and the UI production build.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/16-1-configure-playback-selection-and-start-its-first-selected-track.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 - `.github/workflows/build.yml`
+- `hifimule-daemon/src/api.rs`
 - `hifimule-daemon/src/playback/mod.rs`
 - `hifimule-daemon/src/playback/audio.rs`
 - `hifimule-daemon/src/playback/selection.rs`
 - `hifimule-daemon/src/playback/session.rs`
 - `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
 - `hifimule-daemon/src/providers/subsonic.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-daemon/src/rpc/playback_selection.rs`
@@ -131,3 +143,4 @@ GPT-6 Codex (story preparation and implementation)
 
 - 2026-09-27: Added Playback-owned finite selection, settings persistence, source-scoped RPCs, explicit start/cancel, localized UI and platform CI verification commands. Windows tests and builds pass; story remains in progress pending the recorded gates.
 - 2026-09-28: Preflighted the audio response before Play, fenced selection at owner commit, corrected failed-cancellation UI recovery, and checked keyboard/narrow layout. Added the new regressions to the four-platform CI matrix. Updated-patch CI passed on all four targets; advanced the story to review.
+- 2026-09-28: Applied all six code-review patches and passed local daemon, contract, Node, TypeScript and UI build verification; marked the story done.

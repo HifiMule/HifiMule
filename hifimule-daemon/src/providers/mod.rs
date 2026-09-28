@@ -480,6 +480,18 @@ pub trait MediaProvider: Send + Sync {
 
     async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistWithTracks, ProviderError>;
 
+    /// Playback selection reads only a finite prefix. Providers must bound the
+    /// retrieval itself; truncating a fully loaded playlist here is insufficient.
+    async fn get_playlist_tracks_bounded(
+        &self,
+        _playlist_id: &str,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "bounded playlist retrieval is unavailable".into(),
+        ))
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
 
     async fn download_url(

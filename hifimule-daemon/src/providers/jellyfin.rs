@@ -322,6 +322,30 @@ impl MediaProvider for JellyfinProvider {
         })
     }
 
+    async fn get_playlist_tracks_bounded(
+        &self,
+        playlist_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        self.client
+            .get_playlist_items_via_user_library_page(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                playlist_id,
+                Some(limit),
+            )
+            .await
+            .map_err(Self::map_error)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .take(limit as usize)
+                    .map(song_from_item)
+                    .collect()
+            })
+    }
+
     async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
         let item = self
             .client
@@ -1504,6 +1528,29 @@ mod tests {
         assert_eq!(playlists[0].name, "Road Trip");
         assert_eq!(playlist.playlist.duration_seconds, Some(10));
         assert_eq!(playlist.tracks[0].id, "song1");
+    }
+
+    #[tokio::test]
+    async fn playback_playlist_retrieval_requests_a_server_side_limit() {
+        let mut server = Server::new_async().await;
+        let _tracks = server
+            .mock("GET", "/Users/user1/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("ParentId".into(), "playlist2".into()),
+                Matcher::UrlEncoded("Limit".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"song1","Name":"First","Type":"Audio"},{"Id":"song2","Name":"Second","Type":"Audio"}],"TotalRecordCount":2,"StartIndex":0}"#)
+            .create_async()
+            .await;
+        let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+        let tracks = provider
+            .get_playlist_tracks_bounded("playlist2", 1)
+            .await
+            .unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "song1");
     }
 
     #[tokio::test]

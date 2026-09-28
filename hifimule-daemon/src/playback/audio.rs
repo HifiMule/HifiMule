@@ -1133,6 +1133,7 @@ impl AudioEngine {
         session: super::PlaybackSession,
         deadline: std::time::Instant,
         response: Option<reqwest::Response>,
+        selection_fence: Option<super::session::ApplyFence>,
     ) -> Result<(), PlaybackPipelineError> {
         if response.is_none() {
             return self
@@ -1153,6 +1154,7 @@ impl AudioEngine {
             None,
             None,
             response,
+            selection_fence,
         )
         .await
     }
@@ -1209,6 +1211,7 @@ impl AudioEngine {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1238,6 +1241,7 @@ impl AudioEngine {
             admitted_suffix,
             None,
             Some(operation_id),
+            None,
             None,
         )
         .await
@@ -1270,6 +1274,7 @@ impl AudioEngine {
             Some(operation_id),
             None,
             None,
+            None,
         )
         .await
     }
@@ -1289,8 +1294,16 @@ impl AudioEngine {
         seek_operation_id: Option<String>,
         back_operation_id: Option<String>,
         prepared_response: Option<reqwest::Response>,
+        selection_fence: Option<super::session::ApplyFence>,
     ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
+        if selection_fence
+            .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+        {
+            return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                "playback selection was superseded"
+            )));
+        }
         let duration_ms = u64::from(description.song.duration_seconds).saturating_mul(1000);
         // Persisted sessions intentionally omit transient Completed metadata.
         // Once the same duration is resolved, an explicit Resume from its
@@ -1307,6 +1320,13 @@ impl AudioEngine {
         };
         let _start_guard = self.starts.lock().await;
         require_preparation_epoch(&session, expected_epoch)?;
+        if selection_fence
+            .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+        {
+            return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                "playback selection was superseded"
+            )));
+        }
         session
             .selected_output(&generation)
             .map_err(PlaybackPipelineError::output_policy)?;
@@ -1556,14 +1576,23 @@ impl AudioEngine {
             successor_slot_free,
             successor_coordinator: AtomicBool::new(false),
         });
+        let _selection_guard = selection_fence
+            .as_ref()
+            .map(|fence| fence.gate.lock().unwrap_or_else(|error| error.into_inner()));
         let installed = install_session.with_current_generation(&install_generation, || {
             if install_session.control_epoch() != expected_epoch {
+                return false;
+            }
+            if selection_fence
+                .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+            {
                 return false;
             }
             *self.current.lock().unwrap_or_else(|e| e.into_inner()) = pipeline.take();
             let _ = installed_tx.send(());
             true
         }) == Some(true);
+        drop(_selection_guard);
         if !installed {
             drop(installed_tx);
             if let Some(pipeline) = pipeline {

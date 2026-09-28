@@ -180,34 +180,51 @@ pub struct SelectionOption {
     pub name: String,
 }
 
-/// Options are resolved by portable server identity and never by the UI's browsed server.
-/// The bounded catalog is also the reference validation surface for settings writes.
-pub async fn options(
-    provider: &dyn MediaProvider,
-    kind: SelectionKind,
-) -> Result<Vec<SelectionOption>, SelectionError> {
-    let mode = match kind {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionOptionPage {
+    pub options: Vec<SelectionOption>,
+    pub has_more: bool,
+}
+
+fn browse_mode(kind: SelectionKind) -> BrowseMode {
+    match kind {
         SelectionKind::Playlist => BrowseMode::Playlists,
         SelectionKind::Artist => BrowseMode::Artists,
         SelectionKind::Genre => BrowseMode::Genres,
-    };
-    if !provider.capabilities().browse.list_modes.contains(&mode) {
+    }
+}
+
+/// Options are resolved by portable server identity and paged for the UI.
+pub async fn options_page(
+    provider: &dyn MediaProvider,
+    kind: SelectionKind,
+    offset: u32,
+) -> Result<SelectionOptionPage, SelectionError> {
+    if !provider
+        .capabilities()
+        .browse
+        .list_modes
+        .contains(&browse_mode(kind))
+    {
         return Err(SelectionError::SourceUnavailable);
     }
+    let limit = MAX_CANDIDATES_PER_SOURCE as u32;
     let values = match kind {
         SelectionKind::Playlist => provider
             .list_playlists()
             .await
             .map_err(|_| SelectionError::SourceUnavailable)?
             .into_iter()
-            .take(MAX_CANDIDATES_PER_SOURCE)
+            .skip(offset as usize)
+            .take(MAX_CANDIDATES_PER_SOURCE + 1)
             .map(|p| SelectionOption {
                 id: p.id,
                 name: p.name,
             })
             .collect(),
         SelectionKind::Artist => provider
-            .list_artists(None, None, 0, MAX_CANDIDATES_PER_SOURCE as u32)
+            .list_artists(None, None, offset, limit + 1)
             .await
             .map_err(|_| SelectionError::SourceUnavailable)?
             .0
@@ -218,7 +235,7 @@ pub async fn options(
             })
             .collect(),
         SelectionKind::Genre => provider
-            .list_genres(None, 0, MAX_CANDIDATES_PER_SOURCE as u32)
+            .list_genres(None, offset, limit + 1)
             .await
             .map_err(|_| SelectionError::SourceUnavailable)?
             .0
@@ -229,40 +246,78 @@ pub async fn options(
             })
             .collect(),
     };
-    Ok(values)
+    let mut options: Vec<SelectionOption> = values;
+    let has_more = options.len() > MAX_CANDIDATES_PER_SOURCE;
+    options.truncate(MAX_CANDIDATES_PER_SOURCE);
+    Ok(SelectionOptionPage { options, has_more })
+}
+
+/// Validate an exact reference independently of the UI's current page.
+pub async fn reference_exists(
+    provider: &dyn MediaProvider,
+    source: &SelectionSource,
+) -> Result<bool, SelectionError> {
+    if !provider
+        .capabilities()
+        .browse
+        .list_modes
+        .contains(&browse_mode(source.kind))
+    {
+        return Err(SelectionError::SourceUnavailable);
+    }
+    match source.kind {
+        SelectionKind::Playlist => Ok(provider
+            .list_playlists()
+            .await
+            .map_err(|_| SelectionError::SourceUnavailable)?
+            .iter()
+            .any(|item| item.id == source.ref_id)),
+        SelectionKind::Artist => Ok(provider.get_artist(&source.ref_id).await.is_ok()),
+        SelectionKind::Genre => {
+            let mut offset = 0;
+            loop {
+                let page = options_page(provider, source.kind, offset).await?;
+                if page.options.iter().any(|item| item.id == source.ref_id) {
+                    return Ok(true);
+                }
+                if !page.has_more {
+                    return Ok(false);
+                }
+                let next = offset.saturating_add(MAX_CANDIDATES_PER_SOURCE as u32);
+                if next == offset {
+                    return Ok(false);
+                }
+                offset = next;
+            }
+        }
+    }
 }
 
 pub async fn fetch_source(
     provider: &dyn MediaProvider,
     source: &SelectionSource,
 ) -> Result<SelectionPool, SelectionError> {
-    if matches!(source.kind, SelectionKind::Artist | SelectionKind::Genre)
-        && !options(provider, source.kind)
-            .await?
-            .iter()
-            .any(|choice| choice.id == source.ref_id)
-    {
+    if matches!(source.kind, SelectionKind::Genre) && !reference_exists(provider, source).await? {
         return Err(SelectionError::SourceUnavailable);
     }
     let mut tracks = match source.kind {
-        SelectionKind::Playlist => {
-            provider
-                .get_playlist(&source.ref_id)
-                .await
-                .map_err(|_| SelectionError::SourceUnavailable)?
-                .tracks
-        }
+        SelectionKind::Playlist => provider
+            .get_playlist_tracks_bounded(&source.ref_id, MAX_CANDIDATES_PER_SOURCE as u32)
+            .await
+            .map_err(|_| SelectionError::SourceUnavailable)?,
         SelectionKind::Artist => {
             let artist = provider
                 .get_artist(&source.ref_id)
                 .await
                 .map_err(|_| SelectionError::SourceUnavailable)?;
             let mut all = Vec::new();
+            let had_albums = !artist.albums.is_empty();
+            let mut loaded_album = false;
             for album in artist.albums.into_iter().take(MAX_ARTIST_ALBUMS) {
-                let result = provider
-                    .get_album(&album.id)
-                    .await
-                    .map_err(|_| SelectionError::SourceUnavailable)?;
+                let Ok(result) = provider.get_album(&album.id).await else {
+                    continue;
+                };
+                loaded_album = true;
                 all.extend(
                     result
                         .tracks
@@ -272,6 +327,9 @@ pub async fn fetch_source(
                 if all.len() >= MAX_CANDIDATES_PER_SOURCE {
                     break;
                 }
+            }
+            if !loaded_album && had_albums {
+                return Err(SelectionError::SourceUnavailable);
             }
             all
         }
@@ -356,6 +414,15 @@ pub fn select(
             identities.insert(id.clone(), candidate.source);
             let mut normalized = candidate.song;
             normalized.id = id;
+            // Playback has no byte budget. The shared sync selector still needs a
+            // positive estimate to admit an otherwise playable track.
+            if normalized.size_bytes == Some(0)
+                || (normalized.size_bytes.is_none()
+                    && (normalized.bitrate_kbps.unwrap_or(0) == 0
+                        || normalized.duration_seconds == 0))
+            {
+                normalized.size_bytes = Some(1);
+            }
             candidates.push(Candidate::new(normalized));
         }
     }
@@ -500,6 +567,29 @@ mod tests {
             ),
             Err(SelectionError::Empty)
         ));
+    }
+
+    #[test]
+    fn playable_track_without_sync_size_metadata_is_selected() {
+        let config = PlaybackSelectionConfig {
+            sources: vec![source("server")],
+            ..Default::default()
+        };
+        let mut track = song("stream-only", "Playable");
+        track.size_bytes = None;
+        track.bitrate_kbps = None;
+        assert_eq!(
+            select(
+                &config,
+                vec![SelectionPool {
+                    source: source("server"),
+                    tracks: vec![track],
+                }],
+            )
+            .unwrap()[0]
+                .track_id,
+            "stream-only"
+        );
     }
 
     #[test]

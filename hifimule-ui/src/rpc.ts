@@ -428,8 +428,8 @@ export interface PlaybackSelectionOption { id: string; name: string }
 export async function playbackGetSelectionConfig(): Promise<PlaybackSelectionConfig> {
     return (await rpcCall('playback.getSelectionConfig', { schemaVersion: 1 })).data;
 }
-export async function playbackSelectionOptions(serverId: string, kind: PlaybackSelectionKind): Promise<{ supported: boolean; options: PlaybackSelectionOption[]; reason?: string }> {
-    return (await rpcCall('playback.selectionOptions', { schemaVersion: 1, serverId, kind })).data;
+export async function playbackSelectionOptions(serverId: string, kind: PlaybackSelectionKind, offset = 0): Promise<{ supported: boolean; options: PlaybackSelectionOption[]; hasMore?: boolean; reason?: string }> {
+    return (await rpcCall('playback.selectionOptions', { schemaVersion: 1, serverId, kind, offset })).data;
 }
 export async function playbackSaveSelectionConfig(config: PlaybackSelectionConfig): Promise<void> {
     await rpcCall('playback.saveSelectionConfig', config);

@@ -1160,6 +1160,7 @@ async fn handle_playback_apply_session_prepared_fenced(
     };
     let playback = state.playback.clone();
     let owner = playback.clone();
+    let audio_fence = selection_fence;
     let result = tokio::task::spawn_blocking(move || match selection_fence {
         Some(fence) => owner.apply_with_guard_fenced(p, mutation_guard, fence),
         None => owner.apply_with_guard(p, mutation_guard),
@@ -1182,6 +1183,11 @@ async fn handle_playback_apply_session_prepared_fenced(
             .cloned();
         let session_id = result.session_id.clone();
         tokio::spawn(async move {
+            if audio_fence
+                .is_some_and(|fence| fence.epoch.load(AtomicOrdering::Acquire) != fence.expected)
+            {
+                return;
+            }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             let resolved =
                 tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
@@ -1288,6 +1294,7 @@ async fn handle_playback_apply_session_prepared_fenced(
                             playback.clone(),
                             deadline,
                             response,
+                            audio_fence,
                         )
                         .await
                 }
@@ -17662,5 +17669,34 @@ mod tests {
             selection::fetch_source(provider.as_ref(), &missing).await,
             Err(selection::SelectionError::SourceUnavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn playback_genre_reference_can_be_found_after_first_options_page() {
+        use crate::playback::selection::{self, SelectionKind, SelectionSource};
+        let genres = (0..401)
+            .map(|index| crate::domain::models::Genre {
+                id: format!("genre-{index}"),
+                name: format!("Genre {index}"),
+                song_count: Some(0),
+                cover_art_id: None,
+            })
+            .collect();
+        let provider = FakeBrowseProvider::new(vec![BrowseMode::Genres], genres);
+        let first = selection::options_page(provider.as_ref(), SelectionKind::Genre, 0)
+            .await
+            .unwrap();
+        assert_eq!(first.options.len(), 400);
+        assert!(first.has_more);
+        let source = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Genre,
+            ref_id: "genre-400".into(),
+        };
+        assert!(
+            selection::reference_exists(provider.as_ref(), &source)
+                .await
+                .unwrap()
+        );
     }
 }

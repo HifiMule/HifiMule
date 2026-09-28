@@ -125,43 +125,63 @@ export class PlaybackSelectionSettings {
             for (const value of kinds) kind.add(new Option(t(`playback.selection.kind.${value}`), value));
             kind.value = source.kind;
             const ref = document.createElement('select'); ref.setAttribute('aria-label', t('playback.selection.input'));
+            const more = document.createElement('button'); more.type = 'button';
+            more.textContent = t('playback.selection.more'); more.hidden = true;
             const explanation = document.createElement('span'); explanation.className = 'playback-selection-settings__explanation';
             const remove = document.createElement('button'); remove.type = 'button';
             remove.textContent = t('playback.selection.remove');
             remove.setAttribute('aria-label', `${t('playback.selection.remove')} ${index + 1}`);
-            server.addEventListener('change', () => { source.serverId = server.value; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation); });
-            kind.addEventListener('change', () => { source.kind = kind.value as PlaybackSelectionKind; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation); });
+            server.addEventListener('change', () => { source.serverId = server.value; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation, more); });
+            kind.addEventListener('change', () => { source.kind = kind.value as PlaybackSelectionKind; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation, more); });
             ref.addEventListener('change', () => { source.ref = ref.value; this.markDirty(); });
             remove.addEventListener('click', () => { this.config.sources.splice(index, 1); this.markDirty(); this.renderRows(); });
             row.append(this.label('playback.selection.server', server), this.label('playback.selection.kind', kind),
-                this.label('playback.selection.input', ref), remove, explanation);
+                this.label('playback.selection.input', ref), more, remove, explanation);
             this.rows.append(row);
-            void this.loadOptions(source, ref, explanation);
+            void this.loadOptions(source, ref, explanation, more);
         });
         this.updateActions();
     }
 
-    private async loadOptions(source: PlaybackSelectionSource, select: HTMLSelectElement, explanation: HTMLElement): Promise<void> {
+    private async loadOptions(source: PlaybackSelectionSource, select: HTMLSelectElement, explanation: HTMLElement, more: HTMLButtonElement, offset = 0): Promise<void> {
         const request = (this.optionRequests.get(select) ?? 0) + 1;
         this.optionRequests.set(select, request);
         select.disabled = true;
-        select.replaceChildren(new Option(t('playback.selection.loading'), ''));
+        more.disabled = true;
+        if (offset === 0) {
+            more.hidden = true;
+            select.replaceChildren(new Option(t('playback.selection.loading'), ''));
+        }
         try {
-            const result = await playbackSelectionOptions(source.serverId, source.kind);
+            const result = await playbackSelectionOptions(source.serverId, source.kind, offset);
             if (this.disposed || request !== this.optionRequests.get(select) || !select.isConnected) return;
             if (!result.supported) {
                 explanation.textContent = t(result.reason === 'UNSUPPORTED_CAPABILITY'
                     ? 'playback.selection.unsupported' : 'playback.selection.unavailable');
+                more.hidden = true;
                 return;
             }
-            explanation.textContent = result.options.length ? '' : t('playback.selection.no_inputs');
-            select.replaceChildren(new Option(t('playback.selection.choose'), ''));
-            for (const option of result.options as PlaybackSelectionOption[]) select.add(new Option(option.name, option.id));
+            if (offset === 0) select.replaceChildren(new Option(t('playback.selection.choose'), ''));
+            for (const option of result.options as PlaybackSelectionOption[]) {
+                const existing = Array.from(select.options).find(item => item.value === option.id);
+                if (existing) existing.textContent = option.name;
+                else select.add(new Option(option.name, option.id));
+            }
+            if (source.ref && !Array.from(select.options).some(item => item.value === source.ref)) {
+                select.add(new Option(source.ref, source.ref));
+            }
             select.value = source.ref;
-            if (!select.value) source.ref = '';
-            select.disabled = result.options.length === 0;
+            explanation.textContent = select.options.length > 1 ? '' : t('playback.selection.no_inputs');
+            select.disabled = select.options.length <= 1;
+            more.hidden = !result.hasMore;
+            more.disabled = false;
+            more.onclick = () => void this.loadOptions(source, select, explanation, more, offset + result.options.length);
         } catch {
-            if (!this.disposed && select.isConnected) explanation.textContent = t('playback.selection.unavailable');
+            if (!this.disposed && request === this.optionRequests.get(select) && select.isConnected) {
+                explanation.textContent = t('playback.selection.unavailable');
+                select.disabled = offset === 0;
+                more.disabled = false;
+            }
         }
         this.updateActions();
     }
@@ -171,8 +191,11 @@ export class PlaybackSelectionSettings {
         if (!Number.isSafeInteger(seed) || seed < 0 || seed > 4294967295 || this.config.sources.some(source => !source.ref)) {
             this.status.textContent = t('playback.selection.invalid'); return;
         }
+        const ordering = this.ordering.value === this.config.ordering[0]
+            ? [...this.config.ordering]
+            : [this.ordering.value as PlaybackSelectionOrdering];
         const config: PlaybackSelectionConfig = { schemaVersion: 1, sources: this.config.sources.map(source => ({ ...source })),
-            ordering: [this.ordering.value as PlaybackSelectionOrdering], seed, maxTracks: 16 };
+            ordering, seed, maxTracks: this.config.maxTracks };
         const revision = this.editRevision;
         this.saving = true; this.updateActions();
         try {

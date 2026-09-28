@@ -9,6 +9,7 @@ class Element {
   children = []; listeners = new Map(); attributes = {}; parentElement = null;
   textContent = ''; disabled = false; connectedRoot = false; value = '';
   get isConnected() { return this.connectedRoot || Boolean(this.parentElement?.isConnected); }
+  get options() { return this.tagName === 'select' ? this.children : undefined; }
   append(...children) {
     for (const child of children) { child.parentElement = this; this.children.push(child); }
   }
@@ -20,7 +21,7 @@ class Element {
   add(option) { this.append(option); if (!this.value) this.value = option.value; }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(key, handler) { this.listeners.set(key, handler); }
-  click() { if (!this.disabled) this.listeners.get('click')?.(); }
+  click() { if (!this.disabled) { this.listeners.get('click')?.(); this.onclick?.(); } }
   find(predicate) { return predicate(this) ? this : this.children.map(child => child.find(predicate)).find(Boolean); }
   all(predicate) { return (predicate(this) ? [this] : []).concat(this.children.flatMap(child => child.all(predicate))); }
 }
@@ -121,5 +122,45 @@ test('start reports empty, missing setup and unavailable source separately', asy
     await tick();
     assert.equal(status(root).textContent, `playback.selection.${expected}`);
   }
+  settings.destroy();
+});
+
+test('saving a seed edit preserves advanced ordering and track cap', async () => {
+  let saved;
+  const advanced = { ...config, ordering: ['favorite', 'quality'], maxTracks: 37 };
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => advanced,
+    serverList: async () => [server],
+    playbackSelectionOptions: async () => ({ supported: true, options: [{ id: 'list', name: 'List' }] }),
+    playbackSaveSelectionConfig: async value => { saved = value; },
+  });
+  await tick();
+  const seed = root.find(node => node.tagName === 'input');
+  seed.value = '8'; seed.listeners.get('input')();
+  button(root, 'playback.selection.save').click();
+  await tick();
+  assert.deepEqual(Array.from(saved.ordering), ['favorite', 'quality']);
+  assert.equal(saved.maxTracks, 37);
+  settings.destroy();
+});
+
+test('source options can be paged beyond the first page', async () => {
+  const offsets = [];
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => config,
+    serverList: async () => [server],
+    playbackSelectionOptions: async (_serverId, _kind, offset) => {
+      offsets.push(offset);
+      return offset === 0
+        ? { supported: true, options: Array.from({ length: 400 }, (_, index) => ({ id: index === 0 ? 'list' : `id-${index}`, name: `Source ${index}` })), hasMore: true }
+        : { supported: true, options: [{ id: 'later', name: 'Later' }], hasMore: false };
+    },
+  });
+  await tick(); await tick();
+  assert.equal(button(root, 'playback.selection.more').disabled, false);
+  button(root, 'playback.selection.more').click();
+  await tick();
+  assert.deepEqual(offsets, [0, 400]);
+  assert.ok(root.all(node => node.tagName === 'option').some(option => option.value === 'later'));
   settings.destroy();
 });

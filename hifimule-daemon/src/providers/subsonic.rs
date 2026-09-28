@@ -26,6 +26,7 @@ const API_VERSION: &str = "1.16.1";
 const REDACTED: &str = "[REDACTED]";
 const SUBSONIC_SECRET_QUERY_KEYS: &[&str] = &["password", "u", "p", "t", "s"];
 const SONG_CHANGE_PAGE_SIZE: usize = 500;
+const PLAYBACK_PLAYLIST_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(test))]
 const MAX_SONG_DUMP_PAGES: usize = 2000;
 #[cfg(test)]
@@ -383,6 +384,21 @@ impl MediaProvider for SubsonicProvider {
             playlist: playlist_from_with_songs_dto(playlist.playlist),
             tracks,
         })
+    }
+
+    async fn get_playlist_tracks_bounded(
+        &self,
+        playlist_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let playlist = self.client.get_playlist_limited(playlist_id).await?;
+        Ok(playlist
+            .playlist
+            .entry
+            .into_iter()
+            .take(limit as usize)
+            .map(song_from_dto)
+            .collect())
     }
 
     async fn create_playlist(
@@ -1070,6 +1086,14 @@ impl SubsonicClient {
         self.get("getPlaylist", &[("id", id)]).await
     }
 
+    async fn get_playlist_limited(&self, id: &str) -> Result<PlaylistWithSongsBody, ProviderError> {
+        let url = self.signed_url("getPlaylist", &[("id", id)])?;
+        let envelope: SubsonicEnvelope<PlaylistWithSongsBody> = self
+            .get_envelope_url_with_limit(url, Some(PLAYBACK_PLAYLIST_RESPONSE_BYTES))
+            .await?;
+        Ok(envelope.response.body)
+    }
+
     async fn create_playlist(
         &self,
         name: &str,
@@ -1287,9 +1311,34 @@ impl SubsonicClient {
         &self,
         url: String,
     ) -> Result<SubsonicEnvelope<T>, ProviderError> {
-        let response = self.http.get(url).send().await.map_err(map_reqwest_error)?;
+        self.get_envelope_url_with_limit(url, None).await
+    }
+
+    async fn get_envelope_url_with_limit<T: DeserializeOwned + Default>(
+        &self,
+        url: String,
+        byte_limit: Option<usize>,
+    ) -> Result<SubsonicEnvelope<T>, ProviderError> {
+        let mut response = self.http.get(url).send().await.map_err(map_reqwest_error)?;
         let status = response.status();
-        let bytes = response.bytes().await.map_err(map_reqwest_error)?;
+        let mut bytes = Vec::new();
+        if let Some(limit) = byte_limit
+            && response
+                .content_length()
+                .is_some_and(|size| size > limit as u64)
+        {
+            return Err(ProviderError::UnsupportedCapability(
+                "playlist response exceeds Playback selection limit".into(),
+            ));
+        }
+        while let Some(chunk) = response.chunk().await.map_err(map_reqwest_error)? {
+            if byte_limit.is_some_and(|limit| bytes.len().saturating_add(chunk.len()) > limit) {
+                return Err(ProviderError::UnsupportedCapability(
+                    "playlist response exceeds Playback selection limit".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
 
         if !status.is_success() {
             return Err(match status.as_u16() {
@@ -2618,9 +2667,14 @@ mod tests {
 
         let playlists = provider.list_playlists().await.expect("playlists");
         let playlist = provider.get_playlist("playlist1").await.expect("playlist");
+        let bounded = provider
+            .get_playlist_tracks_bounded("playlist1", 1)
+            .await
+            .expect("bounded playlist");
 
         assert_eq!(playlists[0].cover_art_id.as_deref(), Some("playlist-cover"));
         assert_eq!(playlist.tracks[0].id, "song1");
+        assert_eq!(bounded.len(), 1);
     }
 
     #[tokio::test]

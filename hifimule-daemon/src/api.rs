@@ -1455,6 +1455,18 @@ impl JellyfinClient {
         user_id: &str,
         playlist_id: &str,
     ) -> Result<Vec<JellyfinItem>> {
+        self.get_playlist_items_via_user_library_page(url, token, user_id, playlist_id, None)
+            .await
+    }
+
+    pub async fn get_playlist_items_via_user_library_page(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<JellyfinItem>> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -1467,6 +1479,11 @@ impl JellyfinClient {
             .append_pair("IncludeItemTypes", "Audio,MusicVideo")
             .append_pair("Fields", "MediaSources")
             .append_pair("Recursive", "true");
+        if let Some(limit) = limit {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("Limit", &limit.to_string());
+        }
 
         let response = self.client.get(endpoint).headers(headers).send().await?;
         let status = response.status();
