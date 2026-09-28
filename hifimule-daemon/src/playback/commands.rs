@@ -522,7 +522,7 @@ pub(crate) fn authorize_prepared_back(
 /// before the owner candidate, cancel pending provider/HTTP work on revocation,
 /// and do not allocate another source until the worker releases its old slot.
 #[allow(clippy::too_many_arguments)]
-fn resolved_gain(
+pub(crate) fn resolved_gain(
     playback: &PlaybackSession,
     queue_kind: super::model::QueueKind,
     queue_revision: u64,

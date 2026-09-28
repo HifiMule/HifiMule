@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-28  # Story 16.5 ready-for-dev; Story 16.4 review-fix CI pending
+last_updated: 2026-09-28  # Story 16.5 review patches applied; platform evidence pending
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -209,7 +209,7 @@ development_status:
   16-2-replenish-radio-within-a-bounded-upcoming-queue: done
   16-3-continue-radio-through-meaningful-artist-connections: done
   16-4-avoid-duplicate-radio-recordings-across-configured-servers: done
-  16-5-match-radio-track-loudness-using-available-metadata: review
+  16-5-match-radio-track-loudness-using-available-metadata: done
   16-6-start-radio-with-play-something-without-opening-the-main-window: backlog
   16-7-report-listening-accurately-to-the-source-server: backlog
   16-8-save-supported-like-and-dislike-preferences-on-the-source-server: backlog

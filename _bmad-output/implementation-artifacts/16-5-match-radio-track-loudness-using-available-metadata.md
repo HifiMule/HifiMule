@@ -4,7 +4,7 @@ baseline_commit: 06bcd8490f19bd4e7c820b2d876722cf09b71d0a
 
 # Story 16.5: Match Radio track loudness using available metadata
 
-Status: review
+Status: done
 
 ## Story
 
@@ -45,6 +45,13 @@ so that music from different albums has more consistent listening levels without
   - [ ] Test owner/admission and SQLite migration/reopen: source-copy-specific policy, identical track IDs on different servers, manual repetitions, new Radio, album/standalone/Preview dispatch, paused restoration, stale resolve after replacement/seek/queue edit, and corrupted/future policy. Exercise CPAL and Pulse call sites.
   - [x] Use two known-level Radio tracks with distinct gain/peak tags through provider → prepared decoder → boundary consumer; compare independent expected scalars and packed-f32 samples, including tail, seek and Pause replay. Assert exact frame/boundary markers and no accidental gain-square. Test album session on the same fixtures to prove common gain persists.
   - [x] Run focused and full affected daemon tests via the controlled `npm run build:daemon -- test -p hifimule-daemon ...` wrapper, formatting, Clippy, and four shipping-platform source/fixture jobs. If UI/wire contracts change, run TypeScript/build and localization parity. Record actual installed/physical-output tests separately and leave unrun rows unverified.
+
+### Review Findings
+
+- [x] [Review][Patch] Output recreation bypasses the first Radio policy freeze (AC 1, 6) [`hifimule-daemon/src/rpc.rs:349`]
+- [x] [Review][Patch] Restore accepts corrupt or future frozen Radio policies (AC 3, 6) [`hifimule-daemon/src/playback/persistence.rs:650`]
+
+Review resolution (2026-09-28): Output recreation now freezes or reuses the selected Radio occurrence's policy through the command path before starting audio. Restore validates every Radio policy and checks the current gain/suffix against its frozen decision; invalid stored data enters restore error state. Focused policy and legacy restore tests, the full daemon test suite, formatting, and normal Clippy passed locally. The full suite required local loopback access for Mockito fixtures; platform CI and installed/physical output checks remain open.
 
 ## Dev Notes
 

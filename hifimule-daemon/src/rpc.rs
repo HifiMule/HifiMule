@@ -349,6 +349,12 @@ pub async fn run_server(
                 let resume_epoch = snapshot.resume_epoch;
                 let gain = f32::from_bits(snapshot.gain_bits);
                 let admitted_suffix = snapshot.qualified_suffix.clone();
+                let queue_kind = if snapshot.mode == crate::playback::model::PlaybackMode::Preview {
+                    crate::playback::model::QueueKind::Manual
+                } else {
+                    snapshot.queue_kind
+                };
+                let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
                 let result = if let Some(current) = snapshot.current {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     let resolve = async {
@@ -370,6 +376,29 @@ pub async fn run_server(
                     };
                     match resolved {
                         Some(Ok(Ok(description))) => {
+                            let Some((gain, admitted_suffix)) =
+                                crate::playback::commands::resolved_gain(
+                                    &playback,
+                                    queue_kind,
+                                    queue_revision,
+                                    &generation,
+                                    resume_epoch,
+                                    &current,
+                                    &description.song,
+                                    gain,
+                                    admitted_suffix,
+                                )
+                            else {
+                                playback.publish_event_at_epoch(
+                                    generation,
+                                    crate::playback::model::PlaybackEvent::Failed {
+                                        code: "RADIO_POLICY_UNAVAILABLE".into(),
+                                        retryable: true,
+                                    },
+                                    resume_epoch,
+                                );
+                                continue;
+                            };
                             crate::playback::audio::global()
                                 .start_at_epoch_with_gain(
                                     description,

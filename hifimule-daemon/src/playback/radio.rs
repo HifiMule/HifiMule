@@ -413,16 +413,19 @@ mod tests {
         song.content_type = Some("audio/flac".into());
         song.track_loudness =
             crate::domain::models::TrackLoudnessEvidence::open_subsonic(-3.0, 0.8);
-        let decision = restored
-            .freeze_radio_policy(
-                &before.generation_id,
-                restored.control_epoch(),
-                before.queue_revision.parse().unwrap(),
-                before.current.as_ref().unwrap(),
-                &song,
-            )
-            .unwrap()
-            .unwrap();
+        // Output recreation and ordinary commands share this resolution path.
+        let decision = crate::playback::commands::resolved_gain(
+            &restored,
+            before.queue_kind,
+            before.queue_revision.parse().unwrap(),
+            &before.generation_id,
+            restored.control_epoch(),
+            before.current.as_ref().unwrap(),
+            &song,
+            f32::from_bits(before.gain_bits),
+            before.qualified_suffix,
+        )
+        .unwrap();
         assert!(decision.0 < 1.0);
         assert_eq!(
             f32::from_bits(restored.snapshot().unwrap().gain_bits),

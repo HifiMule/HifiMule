@@ -640,17 +640,20 @@ impl Database {
         let mut after = -1i64;
         let mut found = false;
         let mut expected_album_current_policy = None;
+        let mut expected_radio_current_policy = None;
         let mut scanned = 0i64;
         let mut album_membership = super::model::album_membership_hasher();
         loop {
-            let mut stmt = tx.prepare("SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 200")?;
+            let mut stmt = tx.prepare("SELECT occurrence_id,ordinal,server_id,track_id,radio_policy_json FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 200")?;
             let rows = stmt
-                .query_map(params![session.session_id, after], occurrence_from_row)?
+                .query_map(params![session.session_id, after], |row| {
+                    Ok((occurrence_from_row(row)?, row.get::<_, Option<String>>(4)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             if rows.is_empty() {
                 break;
             }
-            for row in rows {
+            for (row, radio_policy_json) in rows {
                 if uuid::Uuid::parse_str(&row.occurrence_id).is_err()
                     || row.source.validate().is_err()
                     || row.ordinal > i64::MAX as u64
@@ -664,6 +667,22 @@ impl Database {
                     expected_album_current_policy = session.album_context.as_ref().map(|context| {
                         (context.scalar_for(&row).to_bits(), context.suffix_for(&row))
                     });
+                }
+                if session.queue_kind == super::model::QueueKind::Radio {
+                    let policy = radio_policy_json
+                        .map(|json| -> Result<super::loudness::FrozenTrackPolicy> {
+                            let policy: super::loudness::FrozenTrackPolicy =
+                                serde_json::from_str(&json)?;
+                            policy.validate().map_err(|reason| anyhow!(reason))?;
+                            Ok(policy)
+                        })
+                        .transpose()?;
+                    if is_current {
+                        expected_radio_current_policy = Some(policy.map_or_else(
+                            || (1.0f32.to_bits(), None),
+                            |frozen| (frozen.policy.scalar_bits, frozen.qualified_suffix),
+                        ));
+                    }
                 }
                 if session.queue_kind == super::model::QueueKind::Album
                     && session.album_context.as_ref().is_some_and(|context| {
@@ -706,6 +725,16 @@ impl Database {
         }
         if session.queue_kind == super::model::QueueKind::Album
             && expected_album_current_policy.as_ref()
+                != Some(&(
+                    session.current_gain_bits,
+                    session.current_qualified_suffix.clone(),
+                ))
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        if session.queue_kind == super::model::QueueKind::Radio
+            && count > 0
+            && expected_radio_current_policy.as_ref()
                 != Some(&(
                     session.current_gain_bits,
                     session.current_qualified_suffix.clone(),
@@ -2853,6 +2882,11 @@ mod tests {
                 .unwrap(),
             quiet
         );
+        let mut loaded = db.load_playback_session().unwrap().unwrap();
+        db.validate_playback_session(&loaded).unwrap();
+        loaded.current_gain_bits = 1.0f32.to_bits();
+        assert!(db.validate_playback_session(&loaded).is_err());
+        loaded.current_gain_bits = quiet.policy.scalar_bits;
         let mut wrong_copy = first.clone();
         wrong_copy.source.server_id = "other-server".into();
         assert!(db.radio_track_policy(&session_id, &wrong_copy).is_err());
@@ -2861,6 +2895,13 @@ mod tests {
             [&second.occurrence_id],
         ).unwrap();
         assert!(db.radio_track_policy(&session_id, &second).is_err());
+        assert!(db.validate_playback_session(&loaded).is_err());
+        let restored = super::super::session::PlaybackSession::restore(
+            std::sync::Arc::new(db),
+            "corrupt-radio-policy".into(),
+        );
+        assert_eq!(restored.snapshot().unwrap().restoration.status, "error");
+        restored.stop_and_join().unwrap();
     }
 
     #[test]
