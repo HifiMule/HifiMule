@@ -9,6 +9,7 @@ import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } 
 import { PlaybackControls } from './components/PlaybackControls';
 import { DestinationHub } from './components/DestinationHub';
 import { PlaybackDestination } from './components/PlaybackDestination';
+import { localContentRoute } from './localContentRoute';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -315,10 +316,27 @@ async function routeFromDaemonState(state: any): Promise<void> {
     const selectedServerPortableId: string | null = state?.selectedServerPortableId ?? null;
 
     if (servers.length === 0) {
-        disposePlaybackControls();
-        const { initLoginView } = await import('./login');
-        initLoginView(() => { reloadFromDaemon(); });
-        return;
+        const localRoute = await localContentRoute(0);
+        if (localRoute !== 'main') {
+            disposePlaybackControls();
+            activePlaybackDestination?.destroy(); activePlaybackDestination = null;
+        }
+        if (localRoute === 'onboarding') {
+            const { initLoginView } = await import('./login');
+            initLoginView(() => { reloadFromDaemon(); });
+            return;
+        }
+        if (localRoute === 'error') {
+            const root = document.querySelector('.app-container');
+            if (root) {
+                const explanation = document.createElement('p'); explanation.setAttribute('role', 'status');
+                explanation.textContent = t('playback.snapshots.loadError');
+                const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = t('playback.retry');
+                retry.addEventListener('click', () => void reloadFromDaemon());
+                root.replaceChildren(explanation, retry);
+            }
+            return;
+        }
     }
 
     renderMainLayout(state);
@@ -332,6 +350,7 @@ async function routeFromDaemonState(state: any): Promise<void> {
     } else {
         renderLibraryNoServerSelected();
     }
+    if (servers.length === 0) showSurface('playback', false);
 }
 
 /** Re-fetches daemon state and re-routes (after login/select/remove/logout). */
@@ -431,6 +450,7 @@ async function fitMainWindowToMonitor() {
 }
 
 function renderMainLayout(_state: any = null) {
+    activePlaybackDestination?.destroy(); activePlaybackDestination = null;
     const root = document.querySelector('.app-container');
     if (!root) return;
 

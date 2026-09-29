@@ -2530,6 +2530,28 @@ h2 {
 .destination-hub__issues { display: grid; gap: .25rem; margin-block-start: .35rem; }
 .destination-hub__issue { color: var(--amber-warn); font-size: .8rem; }
 .playback-destination { min-width: 0; padding: var(--space-md); }
+.playback-snapshots { margin-block-end: var(--space-md); padding: 1rem; border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--surface-fill); }
+.playback-snapshots__actions { display: flex; align-items: end; flex-wrap: wrap; gap: .6rem; }
+.playback-snapshots label { display: grid; flex: 1 1 14rem; min-width: 0; gap: .35rem; }
+.playback-snapshots input { width: 100%; min-width: 0; box-sizing: border-box; }
+.playback-snapshots input, .playback-snapshots button { padding: .5rem .7rem; color: inherit; background: var(--surface-raised); border: 1px solid var(--surface-border); border-radius: var(--radius); }
+.playback-snapshots button { cursor: pointer; overflow-wrap: anywhere; }
+.playback-snapshots button:disabled { opacity: .55; cursor: default; }
+.playback-snapshots input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.playback-snapshots__explanation, .playback-snapshots__track > span { color: var(--ink-dim); }
+.playback-snapshots__track { display: grid; flex: 1; min-width: 0; gap: .25rem; }
+.playback-snapshots__list { list-style: none; }
+.playback-snapshots__list > li > button { width: 100%; text-align: start; }
+.playback-snapshots__panel { margin-block-start: 1rem; }
+.playback-snapshots [hidden] { display: none !important; }
+.playback-snapshots .playback-destination__source { display: flex; align-items: center; gap: .3rem; font-size: .85rem; }
+@media (max-width: 599px) {
+  .playback-snapshots { padding: .65rem; }
+  .playback-snapshots__actions > button { flex: 1 1 100%; min-height: 2.75rem; }
+}
+@media (forced-colors: active) {
+  .playback-snapshots input:focus-visible { outline-color: Highlight; }
+}
 .playback-destination__queue { display: grid; gap: 1px; padding: 0; list-style-position: inside; }
 .playback-destination__row, .playback-destination__empty { padding: .65rem; overflow-wrap: anywhere; background: var(--surface-fill); border-block-end: 1px solid var(--surface-border-soft); }
 .playback-destination__row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }

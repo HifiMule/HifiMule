@@ -492,3 +492,43 @@ Playback persistence schema **v13** adds two independent tables. Existing transp
 `playback_feedback_dispositions` contains schema-v1 `(session_id, logical_session_id, occurrence_id, rejected=1)` rows, keyed by session and occurrence and bounded to 10,000. Dislike inserts a rejection in its own committed transaction before remote journal insertion, so remote or journal failure does not erase it. Like deletes only that occurrence's rejection; neutral and other occurrences of the same track have no effect. Idempotent operation replay cannot reapply an older Dislike after a newer Like. Paused restoration retains rejections, including departed Preview occurrences. Ordinary queue replacement keeps the logical session and its history; session replacement/deletion and Radio logical-session replacement delete expired dispositions using database triggers. These rows never become Radio exclusions or alter terminal listening outcomes.
 
 `is_playback_occurrence_rejected(session, occurrence)` supports the current feedback view. `rejected_playback_occurrences(session)` returns the bounded set of exact rejected occurrence IDs for Story 16.9 snapshot filtering, including Preview occurrences no longer displayed. Filtering must never infer rejection from the track ID, recording identity, remote preference, or delivery status.
+
+
+## Immutable listening snapshots (Story 16.9, playback schema v14)
+
+Migration remains in `Database::init_playback_inner`, in the existing transaction.
+Versions 1–13 upgrade through their existing migrations; future playback versions
+are rejected. The new tables have no live-session or server foreign keys/cleanup
+triggers, so clear, replacement, source removal and restart do not remove saves.
+
+| Table | Stored contract |
+| --- | --- |
+| `playback_listening_snapshots` | `creation_seq` autoincrement primary key; unique `snapshot_id` and `operation_id`; checked schema/policy version 1; canonical request JSON; immutable name and UTC creation time; captured instance/session/optional Radio logical ID; nonnegative queue revision; optional main occurrence; nonnegative entry count |
+| `playback_listening_snapshot_entries` | Primary key `(snapshot_id,ordinal)`; unique `(snapshot_id,occurrence_id)`; nonnegative ordinal; original occurrence and portable source IDs; checked history/current/upcoming origin; frozen local label/icon and optional title/artist/album/duration |
+
+Headers have a descending creation-sequence list index; entry primary keys support
+ordered keyset paging. There is no uniqueness constraint on track or recording
+identity. Count, first ordinal and last ordinal are validated before a committed
+artifact is returned: a nonempty artifact must contain exactly ordinals 0..count-1.
+Unsupported saved versions and corrupt/gapped counts are explicit errors.
+Header/entries are inserted atomically using SQL window ordering, with a final
+count check before commit. Trigger-injected failures and process interruption
+before commit leave no partial artifact; earlier saves remain intact.
+
+Snapshot policy 1 reads `playback_occurrences`, closed `playback_attempts`, and
+`playback_feedback_dispositions` in that transaction. Source configuration is read
+only to freeze a safe name/icon, falling back to portable ID. Metadata is copied
+only when already available for the main current source; Preview metadata is not
+used. No credentials, authenticated URLs, remote reporting rows, full library
+metadata or source-copy substitutions are stored. A changing `sourceAvailable`
+read badge does not mutate frozen labels or references.
+
+Committed operation identity is retained for the entire lifetime of a snapshot,
+independently of the generic playback command cache. No expiry, prune, rename or
+delete operation is provided by this story. Blank/omitted requested names share a
+canonical null name, while the generated default display name is persisted once.
+The detailed policy, errors, recovery rules, paging wire contract and measured
+single-connection contention limits are documented in the API contract's Story
+16.9 section. The previous `rejected_playback_occurrences` vector helper remains
+for other consumers; snapshot capture uses a transaction-local SQL anti-join and
+does not use that helper as a separate acceptance read.

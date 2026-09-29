@@ -936,8 +936,9 @@ cursor; Stop records no outcome; exact-end seek does not advance. Failed atomic
 writes retain the prior coherent state. Schema v2 adds outcomes, and restoration
 returns paused with the complete queue and local outcomes intact.
 
-Each new Retry/replay attempt resets its current occurrence disposition to pending
-(SQL NULL). The last sanitized failure code is retained until successful recovery.
+Each Retry/replay creates a new attempt with a pending disposition (SQL NULL).
+The occurrence retains its first terminal outcome; subsequent explicit skips are
+recorded on later attempts. The last sanitized failure code is retained until successful recovery.
 Terminal disposition, failure code, current occurrence, cursor and checkpoint
 sequence commit together. A failed terminal write stops audio and retains one
 identity-fenced recovery plan; Next and seek cannot bypass it. Storage Retry
@@ -1260,7 +1261,7 @@ a no-op and empty remove is invalid. Queue edits never call provider playlist,
 basket, manifest, sync or physical-device mutations.
 
 Snapshots expose `mainCurrent` independently from Preview's active `current` and
-`queueKind: "album" | "manual"`. An accepted manual edit freezes the current
+`queueKind: "album" | "manual" | "radio"`. An accepted manual edit freezes the current
 album member's admitted gain/representation while future manual occurrences use
 unity gain. A new album Play restores album policy. Persistence schema v5 derives
 legacy queue kind from the validated v4 album context and restores accepted edits
@@ -1353,3 +1354,118 @@ Explicit Dislike persists local rejection before inserting the remote operation.
 Four concurrent feedback RPCs are allowed, with busy rejection rather than an unbounded wait. Provider phases have a 25-second deadline; adapter response bodies are limited to 64 KiB (Jellyfin whole-response deadline: 8 seconds). The UI serializes at most 16 queued clicks, preserves their captured occurrence and drops unsent work on occurrence replacement/disconnection. It refreshes source state every five seconds when idle and after reconnect; responses from prior occurrences, instances or actions cannot repaint current controls. Keyboard buttons remain mounted, with explicit accessible names, pressed state from fresh server evidence, and polite status announcements in all four locales.
 
 The version gate, exact provider routes, measured effects and platform verification limits are documented in [the feedback contract](playback-feedback-contract.md).
+
+
+## Immutable local listening snapshots (Story 16.9)
+
+These authenticated local RPCs use schema version 1, camelCase, and the existing
+JSON-RPC `result: {data: ...}` success envelope. Only `playback.saveSnapshot` is a
+mutation. They do not call a provider, modify a basket/device, prepare audio, or
+change the playback generation, cursor, revision, reporting or feedback state.
+
+| Method | Parameters | `result.data` |
+| --- | --- | --- |
+| `playback.saveSnapshot` | `schemaVersion:1`, UUID `operationId`, observed UUID `instanceId`, UUID `sessionId`, decimal string `expectedQueueRevision`, required nullable UUID `expectedMainOccurrenceId`, optional string `name` | `{schemaVersion:1,status:"saved",snapshot}` or `{schemaVersion:1,status:"empty",reason:"noMainSelection"\|"noEligibleOccurrences"}` |
+| `playback.listSnapshots` | `schemaVersion:1`, optional nullable `cursor`, optional `limit` | `{schemaVersion:1,snapshots,nextCursor}`; newest creation sequence first |
+| `playback.getSnapshot` | `schemaVersion:1`, exactly one of UUID `snapshotId` or UUID `operationId` | Immutable summary, or `SNAPSHOT_NOT_FOUND` |
+| `playback.listSnapshotEntries` | `schemaVersion:1`, UUID `snapshotId`, optional nullable `cursor`, optional `limit` | `{schemaVersion:1,snapshotId,entries,nextCursor,totalCount}` in saved ordinal order |
+
+Summary fields are `schemaVersion`, `policyVersion`, `snapshotId`, `operationId`,
+`name`, RFC 3339 UTC `createdAt`, captured `instanceId`, `sessionId`, nullable
+`logicalSessionId`, `queueRevision`, nullable `mainOccurrenceId`, and `entryCount`.
+The internal canonical request and complete entry array are never returned with
+summaries. Entries expose decimal `ordinal`, original `occurrenceId`, portable
+`source:{serverId,trackId}`, `origin:history|current|upcoming`, frozen `sourceLabel`,
+nullable `sourceIcon`, `title`, `artist`, `album`, `durationMs`, and current local
+`sourceAvailable`. Ordinals, counts and revisions are decimal strings. Optional
+durations are integer milliseconds from 0 through 9007199254740991.
+
+Limits default to 50 and must be 1–200. Keyset cursors are `1:list:<creationSeq>`
+and `1:entries:<snapshotUUID>:<ordinal>`; clients treat these as opaque. Malformed,
+negative, overflowing, future-version and cross-snapshot cursors are rejected.
+Inserting a newer snapshot does not change the remaining pages of an older list
+traversal. Each read returns at most one page; the UI retains 50 rows and at most
+64 previous cursors, with First page available for older navigation.
+
+Policy 1 captures H + C + U under the serialized owner and one SQLite transaction:
+
+- H contains retained rows before current with a closed main attempt, ordered by
+  first closed attempt sequence. Never-entered, jumped-over rows are not history.
+- C is the canonical main current, including paused/stopped/unavailable/completed
+  current. U is accepted queue order after it. These positions take precedence
+  over earlier visits after Back or reordering.
+- Any committed main `explicitSkip` attempt or exact local dislike disposition
+  rejects the occurrence. Like clears only that occurrence's dislike; neutral
+  does not, and Like never clears a skip. Remote report/feedback success is not
+  consulted. Technical failure, interruption, Back and restart alone do not reject.
+- Each occurrence ID appears at most once. Distinct occurrences of the same
+  source/track or recording remain distinct. Removed/replaced rows and all
+  auditions are excluded. Preview saves the preserved main session.
+
+A new save validates the observed baseline and refuses restoration errors or a
+pending terminal write. One save is admitted at a time; excess admission is busy.
+The mutation guard and permit belong to actual owner work through commit/rollback,
+including when the requester disconnects. SQL copies rows without a Rust history
+array. No source configuration, online source, browse selection or device is
+required. Frozen local names/icons and available main metadata survive source
+removal. Unknown titles use the original provider track ID in the UI.
+
+The caller supplies one operation UUID per explicit save. A matching committed
+operation is recovered **before** live-instance/session/revision validation,
+including after restart or queue replacement. Changed canonical intent with the
+same operation ID returns `SNAPSHOT_OPERATION_REUSED`. Name comparison uses the
+trimmed optional requested name; blank/missing names use one persisted English
+“Listening snapshot” plus timestamp fallback. Names allow 1–120 Unicode scalar
+values after trimming, reject control characters, and may repeat across distinct
+saves. Snapshots and successful operation identities never expire automatically.
+Empty results and rolled-back transactions retain no success identity.
+
+The UI writes a bounded versioned recovery record to localStorage before send.
+It preserves the exact payload across view disposal/reload and does not start a
+replacement while unresolved. A 15-second UI deadline means result unknown, not
+failure or cancellation. Recovery looks up the operation and, on the same daemon,
+retries exactly that request. Not-found plus an observed new daemon requires a
+second authoritative lookup before reporting no committed save. Committed results
+remain successful even if clearing local recovery storage fails. Saved inspection
+is independent of live polling and stays reachable without configured servers;
+failed local-content lookup offers Retry instead of first-run onboarding.
+
+Typed errors are carried in `error.data.code`: `INVALID_SNAPSHOT_REQUEST`,
+`INVALID_SNAPSHOT_NAME`, `INVALID_SNAPSHOT_CURSOR`, `STALE_INSTANCE`,
+`STALE_SESSION`, `QUEUE_CONFLICT`, `STALE_MAIN_OCCURRENCE`,
+`SNAPSHOT_OPERATION_REUSED`, `SNAPSHOT_NOT_FOUND`, `SNAPSHOT_STORAGE_FAILED`,
+`SNAPSHOT_CORRUPT`, `UNSUPPORTED_SNAPSHOT_VERSION`, `PLAYBACK_BUSY`,
+`TERMINAL_PENDING`, and `RESTORE_FAILED`. Existing shutdown admission can return
+`DAEMON_STOPPED` in `error.data.errorCode`. SQL diagnostics and filesystem paths
+are not exposed. Read failures are recoverable; storage/transport uncertainty on
+save must be reconciled by operation identity before starting another operation.
+
+### Local resource evidence and limitations (2026-09-29)
+
+macOS arm64 debug build, file-backed bundled SQLite, two unavailable sources,
+five closed attempts per occurrence, concurrent real `autofill_history` upserts,
+a queued native Pause, and a separate synthetic PCM consumer. Budgets for this
+probe: queued control below 2 seconds, capture incremental process peak RSS below
+32 MiB, and zero synthetic consumer underruns. This is a measured local budget,
+not a claim about installed targets or an active-player memory budget.
+
+| Retained rows | Save | Capture + queued control (ms) | DB hold (ms) | Owner hold (ms) | Queued Pause (ms) | Process peak RSS (bytes) | Peak growth during operation (bytes) |
+| ---: | :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | no | 1.234 | 0 | 0 | 1.233 | 22102016 | 212992 |
+| 10 | yes | 2.460 | 1.133 | 1.707 | 2.439 | 23117824 | 1114112 |
+| 10000 | no | 2.088 | 0 | 0 | 2.088 | 26476544 | 262144 |
+| 10000 | yes | 99.957 | 97.571 | 97.822 | 99.936 | 27312128 | 1146880 |
+| 100000 | no | 7.268 | 0 | 0 | 7.267 | 26640384 | 262144 |
+| 100000 | yes | 1038.718 | 1031.700 | 1032.508 | 1038.685 | 27770880 | 1163264 |
+
+All six runs completed without control timeouts or synthetic PCM underruns.
+`getrusage` process peaks include fixture setup; peak growth is not an allocation
+profile. SQLite materialization still grows with history and delays controls and
+sync DB writes for the transaction duration. The PCM probe exercises the existing
+consumer on another thread with supplied samples; it is not installed hardware
+playback or decoder/network continuity evidence. Reproduce with
+`SNAPSHOT_BENCH_ROWS=10|10000|100000 SNAPSHOT_BENCH_SAVE=0|1` and the ignored test
+`playback::session::export::tests::snapshot_resource_measurement` via the controlled
+daemon build wrapper. Windows x64, Linux x64, macOS x64 and installed save/reopen/
+offline/Preview/audio checks remain unverified here; retain these gaps for 16.14.
+Story 15.17 remains in progress.

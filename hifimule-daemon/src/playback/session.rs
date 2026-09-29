@@ -2,6 +2,7 @@ use super::model::*;
 use super::reporting::{HeardEvidence, LiveReportRow, LiveStatusSample, TerminalReason};
 mod album_admission;
 pub(crate) use album_admission::{AlbumAdmission, AlbumReservation};
+mod export;
 mod feedback;
 mod output_selection;
 use crate::db::Database;
@@ -64,6 +65,7 @@ type ApplyGate = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
 
 #[derive(Clone)]
 pub struct PlaybackSession {
+    snapshot_save_gate: Arc<AtomicBool>,
     feedback_verification: Arc<Mutex<Option<feedback::Verification>>>,
     instance_id: String,
     inner: Arc<Mutex<Inner>>,
@@ -99,6 +101,12 @@ pub enum NativeControlIntent {
 }
 
 enum OwnerCommand {
+    SaveSnapshot(
+        super::export::SaveSnapshotParams,
+        Option<crate::sync::MutationGuard>,
+        export::SavePermit,
+        mpsc::Sender<PResult<super::export::SaveSnapshotResult>>,
+    ),
     FeedbackTarget(
         super::feedback::FeedbackQuery,
         mpsc::Sender<PResult<super::feedback::FeedbackTarget>>,
@@ -753,6 +761,7 @@ impl PlaybackSession {
             .expect("playback owner thread must start");
         Self {
             instance_id: owner_id,
+            snapshot_save_gate: Arc::new(AtomicBool::new(false)),
             feedback_verification: Arc::new(Mutex::new(None)),
             output_gate,
             control_epoch,
@@ -1648,6 +1657,18 @@ fn owner_loop(
             }
         }
         match command {
+            Ok(OwnerCommand::SaveSnapshot(params, _guard, _permit, reply)) => {
+                let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    export::capture(&i, &params)
+                };
+                // Commit/rollback is complete before acknowledging: a caller
+                // may immediately admit its next explicit save after the reply.
+                drop(_permit);
+                let _ = reply.send(with_metadata(result, &i));
+            }
             Ok(OwnerCommand::ReserveAlbum(params, guard, reply)) => {
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
@@ -2572,6 +2593,9 @@ fn with_metadata<T>(result: PResult<T>, i: &Inner) -> PResult<T> {
 }
 fn reject_unstarted(command: OwnerCommand) {
     match command {
+        OwnerCommand::SaveSnapshot(_, _guard, _permit, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
         OwnerCommand::ReserveAlbum(_, _, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }

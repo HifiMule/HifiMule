@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
+mod playback_export;
 mod playback_feedback;
 pub(crate) mod playback_selection;
 
@@ -676,6 +677,12 @@ async fn handler(
             Ok(serde_json::json!({ "data": { "accepted": true } }))
         }
         "playback.retryCheckpoint" => handle_playback_retry_checkpoint(&state, payload.params),
+        "playback.saveSnapshot" => {
+            playback_export::save(&state, payload.params, mutation_guard.take()).await
+        }
+        "playback.listSnapshots" | "playback.getSnapshot" | "playback.listSnapshotEntries" => {
+            playback_export::read(&state, &payload.method, payload.params).await
+        }
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
         "playback.listLiveReports" => {
             handle_playback_list_live_reports(&state, payload.params).await
@@ -842,6 +849,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playlist.create"
             | "playback.applySession"
             | "playback.setFeedback"
+            | "playback.saveSnapshot"
             | "playback.saveSelectionConfig"
             | "playback.startSelection"
             | "playback.cancelSelectionStart"
@@ -10784,6 +10792,10 @@ mod tests {
     #[tokio::test]
     async fn playback_contract_is_exact_bounded_offline_and_conflict_shaped() {
         let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        assert!(is_mutating_method("playback.saveSnapshot"));
+        assert!(!is_mutating_method("playback.listSnapshots"));
+        assert!(!is_mutating_method("playback.getSnapshot"));
+        assert!(!is_mutating_method("playback.listSnapshotEntries"));
         assert!(is_mutating_method("playback.applySession"));
         assert!(is_mutating_method("playback.playEpisode"));
         assert!(is_mutating_method("playback.seek"));

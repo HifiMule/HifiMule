@@ -7,6 +7,7 @@ import { t } from '../i18n';
 import { playbackStore } from '../state/playback';
 import { formatServerIdentity } from '../serverIdentity';
 import { PlaybackSelectionSettings } from './PlaybackSelectionSettings';
+import { PlaybackSnapshots } from './PlaybackSnapshots';
 
 type Section = 'upcoming' | 'history';
 interface PageLocation { cursor: string | null; aroundOccurrenceId: string | null }
@@ -40,6 +41,7 @@ export class PlaybackDestination {
     private labelTimer?: ReturnType<typeof setTimeout>;
     private focusAfterLoad?: { occurrenceId: string | null; action: string };
     private readonly selectionSettings: PlaybackSelectionSettings;
+    private readonly snapshots: PlaybackSnapshots;
 
     constructor(container: HTMLElement) {
         container.classList.add('playback-destination');
@@ -72,13 +74,14 @@ export class PlaybackDestination {
         this.selectionSettings = new PlaybackSelectionSettings();
         this.body.append(this.selectionSettings.element, this.radioStatus, this.radioRetry, this.status, this.error, this.retry,
             this.regionElement(this.regions.upcoming), this.regionElement(this.regions.history));
-        container.replaceChildren(this.body);
+        this.snapshots = new PlaybackSnapshots(show => { this.body.hidden = show; });
+        container.replaceChildren(this.snapshots.element, this.body);
         this.unsubscribe = playbackStore.subscribe(snapshot => void this.receive(snapshot));
         void this.loadLabels();
     }
 
     focus(): void {
-        if (!this.disposed) this.regions.upcoming.heading.focus();
+        if (!this.disposed && !this.snapshots.focus()) this.regions.upcoming.heading.focus();
     }
 
     focusSettings(): void {
@@ -88,6 +91,7 @@ export class PlaybackDestination {
     destroy(): void {
         this.disposed = true; this.unsubscribe?.();
         this.selectionSettings.destroy();
+        this.snapshots.destroy();
         for (const region of Object.values(this.regions)) this.cancelRetry(region);
         if (this.labelTimer !== undefined) clearTimeout(this.labelTimer);
     }

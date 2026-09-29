@@ -6,6 +6,7 @@ pub mod config;
 mod continuity;
 pub mod decoder;
 pub mod devices;
+pub mod export;
 pub mod feedback;
 mod http_source;
 pub(crate) mod loudness;

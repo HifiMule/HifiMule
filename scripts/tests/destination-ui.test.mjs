@@ -65,6 +65,8 @@ function load(relative, mocks, runtime = {}) {
     CSS: { escape: value => String(value) },
     setTimeout: () => 1, clearTimeout() {}, require: name => name === '../rpc'
       ? { isPlaybackQueueConflict: () => false, ...mocks[name] }
+      : name === './PlaybackSnapshots'
+        ? { PlaybackSnapshots: class { element = document.createElement('section'); destroy() {} focus() { return false; } } }
       : name === './PlaybackSelectionSettings'
         ? { PlaybackSelectionSettings: class {
           element = document.createElement('section');

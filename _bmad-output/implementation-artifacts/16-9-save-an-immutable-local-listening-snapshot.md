@@ -1,6 +1,10 @@
+---
+baseline_commit: 7be8cb52458212e5071fed31632aa787bbda7171
+---
+
 # Story 16.9: Save an immutable local listening snapshot
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -26,24 +30,24 @@ Dependencies: Epic 15 playback foundation and Stories 16.1–16.8. The current c
 
 ## Tasks / Subtasks
 
-- [ ] Implement the local snapshot contract and migration (AC: 1–8).
-  - [ ] Add `playback/export.rs` with typed save/read contracts, validation, inclusion policy, and persistence helpers; register it in `playback/mod.rs`. Keep remote export implementations out of this story.
-  - [ ] Extend `Database::init_playback_inner` in `playback/persistence.rs` from current playback schema v13 to v14, or the next unclaimed version if the baseline has moved. Add independent snapshot headers/entries and indexes in the existing migration transaction. Preserve v1–v13 upgrade/rollback behavior and unsupported-future-version rejection.
-  - [ ] Materialize the frozen sequence and source/display fallbacks atomically, with committed-operation uniqueness and bounded page reads. Save rows must survive deletion/replacement of live session rows and server records.
-- [ ] Integrate capture with the session owner and RPC boundary (AC: 1–6, 8–9).
-  - [ ] Add a serialized owner save command, optionally split into `playback/session/export.rs`. Resolve the canonical main session, validate the observed baseline, reject pending terminal-persistence/restoration errors, and retain the mutation guard through commit/rollback.
-  - [ ] Evaluate retained occurrences, main attempts, current/upcoming membership, and `playback_feedback_dispositions` within the same transaction. Implement the explicit ordering/rejection rules below; never construct saves from live UI pages or reporting rows.
-  - [ ] Add the four RPC methods below, preferably through `rpc/playback_export.rs`, with mutation classification only for save. Reuse authenticated local JSON-RPC and the existing Tauri proxy.
-  - [ ] Verify saved-operation recovery before live-session freshness checks, reject operation-ID reuse with changed intent, and keep later queue/disposition changes from affecting committed content.
-- [ ] Add local save and read-only inspection to Playback (AC: 4–8).
-  - [ ] Compose a focused `PlaybackSnapshots.ts` component into `PlaybackDestination.ts` using existing queue row/source badge styling. Provide naming, save state, saved-list access, bounded entry navigation, and a return to the live queue.
-  - [ ] Preserve one unresolved save request's operation ID and exact payload outside the disposable component, including navigation/reload/reopen, and reconcile it before another save. Bind saved-page requests to snapshot ID and component request generation, independently of live playback polling.
-  - [ ] Keep local snapshots reachable after the last source is removed, including after restart; narrowly adjust `main.ts` first-run routing while preserving onboarding for a genuinely empty installation.
-  - [ ] Add English, French, Spanish, and German labels, keyboard navigation, visible focus, polite result/error announcements, and explicit Preview/main-session and unavailable-source explanations.
-- [ ] Prove persistence, sequencing, UI, and resource behavior (AC: 1–9).
-  - [ ] Add meaningful Rust inclusion/transaction/owner/RPC tests, file-backed restart and failure-injection tests, and Node UI tests with exact sequence assertions from the matrix below.
-  - [ ] Measure capture duration, DB/owner lock time, queued control latency, and memory for short and long histories; record the result rather than claiming that pagination or `spawn_blocking` makes capture free.
-  - [ ] Run the focused regression/build checks and affected platform checks. Update API/data-model docs with policy, schema, paging, retention, errors, and measured limitations; correct adjacent stale Retry/attempt and queue-kind statements. Leave unavailable installed checks identified as gaps.
+- [x] Implement the local snapshot contract and migration (AC: 1–8).
+  - [x] Add `playback/export.rs` with typed save/read contracts, validation, inclusion policy, and persistence helpers; register it in `playback/mod.rs`. Keep remote export implementations out of this story.
+  - [x] Extend `Database::init_playback_inner` in `playback/persistence.rs` from current playback schema v13 to v14, or the next unclaimed version if the baseline has moved. Add independent snapshot headers/entries and indexes in the existing migration transaction. Preserve v1–v13 upgrade/rollback behavior and unsupported-future-version rejection.
+  - [x] Materialize the frozen sequence and source/display fallbacks atomically, with committed-operation uniqueness and bounded page reads. Save rows must survive deletion/replacement of live session rows and server records.
+- [x] Integrate capture with the session owner and RPC boundary (AC: 1–6, 8–9).
+  - [x] Add a serialized owner save command, optionally split into `playback/session/export.rs`. Resolve the canonical main session, validate the observed baseline, reject pending terminal-persistence/restoration errors, and retain the mutation guard through commit/rollback.
+  - [x] Evaluate retained occurrences, main attempts, current/upcoming membership, and `playback_feedback_dispositions` within the same transaction. Implement the explicit ordering/rejection rules below; never construct saves from live UI pages or reporting rows.
+  - [x] Add the four RPC methods below, preferably through `rpc/playback_export.rs`, with mutation classification only for save. Reuse authenticated local JSON-RPC and the existing Tauri proxy.
+  - [x] Verify saved-operation recovery before live-session freshness checks, reject operation-ID reuse with changed intent, and keep later queue/disposition changes from affecting committed content.
+- [x] Add local save and read-only inspection to Playback (AC: 4–8).
+  - [x] Compose a focused `PlaybackSnapshots.ts` component into `PlaybackDestination.ts` using existing queue row/source badge styling. Provide naming, save state, saved-list access, bounded entry navigation, and a return to the live queue.
+  - [x] Preserve one unresolved save request's operation ID and exact payload outside the disposable component, including navigation/reload/reopen, and reconcile it before another save. Bind saved-page requests to snapshot ID and component request generation, independently of live playback polling.
+  - [x] Keep local snapshots reachable after the last source is removed, including after restart; narrowly adjust `main.ts` first-run routing while preserving onboarding for a genuinely empty installation.
+  - [x] Add English, French, Spanish, and German labels, keyboard navigation, visible focus, polite result/error announcements, and explicit Preview/main-session and unavailable-source explanations.
+- [x] Prove persistence, sequencing, UI, and resource behavior (AC: 1–9).
+  - [x] Add meaningful Rust inclusion/transaction/owner/RPC tests, file-backed restart and failure-injection tests, and Node UI tests with exact sequence assertions from the matrix below.
+  - [x] Measure capture duration, DB/owner lock time, queued control latency, and memory for short and long histories; record the result rather than claiming that pagination or `spawn_blocking` makes capture free.
+  - [x] Run the focused regression/build checks and affected platform checks. Update API/data-model docs with policy, schema, paging, retention, errors, and measured limitations; correct adjacent stale Retry/attempt and queue-kind statements. Leave unavailable installed checks identified as gaps.
 
 ## Dev Notes
 
@@ -238,23 +242,62 @@ The persistent `project-context.md` still calls the project greenfield; current 
 
 ### Agent Model Used
 
-GPT-6 (Codex), story preparation.
+GPT-6 (Codex), story implementation.
 
 ### Debug Log References
+
+- Final validation (2026-09-29, macOS arm64): controlled `build-daemon.mjs test --workspace` passed 1,329 daemon unit tests, 5 daemon integration tests, 7 i18n tests, 19 lifecycle tests and 10 native UI tests (1,370 total). Eight daemon tests are ignored by the normal suite: seven existing exclusions plus the resource probe, which was explicitly run for all six cases. Full Node suite passed 287 tests with one existing skip. TypeScript/Vite production build, `cargo fmt --all --check`, and `git diff --check` passed. Clippy completed with existing repository warnings and no warnings in the new snapshot modules.
+- Final logs: `/private/tmp/hifimule-16-9-workspace.log`, `/private/tmp/hifimule-16-9-node.log`, `/private/tmp/hifimule-16-9-clippy.log`; resource logs `/private/tmp/hifimule-snapshot-bench-{10,10000,100000}-{0,1}.log`. Durable measurements and reproduction details are in `docs/api-contracts-hifimule-daemon.md`.
+- Added deterministic owner tests for Preview-only empty capture, album/Radio provenance and replacement, feedback admission before/after capture, neutral/Like semantics, later queue reorder and Next, dropped replies and shutdown ownership. Added file-backed process interruption before commit, v13 migration rollback, and strict required-nullable wire validation. Save admission now releases its permit before acknowledgement, after commit/rollback, preventing a subsequent explicit save from racing the permit cleanup.
+- Browser verification used the real component/CSS with local RPC fixtures: desktop English inspection; 360 px German, French and Spanish layouts without horizontal overflow; preserved repeated entries, unavailable-source/provider-ID fallbacks, heading focus and Escape return focus. Temporary browser fixture and server were removed/stopped. This is browser layout evidence, not an installed Tauri end-to-end claim.
+- Resource probe: 10/10,000/100,000 retained rows, five attempts per occurrence, with/without capture, two unavailable sources, concurrent real sync-history DB writes and synthetic PCM consumption. At 100,000 rows capture held the DB/owner for about 1.032 seconds; queued Pause took 1.039 seconds and incremental peak RSS was about 1.1 MiB. All six cases met the explicit local 2-second/32-MiB probe limits with zero synthetic underruns. Installed hardware playback and Windows/Linux/macOS x64 evidence remain unverified for 16.14; Story 15.17 remains in-progress.
+
+- UI implementation: focused save/list/inspection component, bounded 50-entry pages and 64-cursor navigation history, durable single-operation recovery coordinator with 15-second unknown-result deadlines, safe zero-server routing, four-locale labels and keyboard focus. Full Node suite: 286 pass, 1 existing skip. UI TypeScript/Vite build and 7 i18n tests pass.
+
+- Owner/RPC integration: serialized capture with one active save, lifetime-bound mutation guard, recovery before freshness, Preview metadata isolation, bounded blocking read admission. RPC classification red test confirmed the missing mutation route; 1,320 daemon unit tests and 5 integration tests now pass (7 existing ignored).
+
+- Storage implementation: independent v14 schema, SQL window ordering and transaction-bound rejection checks, durable canonical operation identity, bounded keyset reads. Initial schema test failed as expected; storage tests pass. Full daemon regression: 1,316 unit tests and 5 integration tests pass (7 existing ignored), using localhost permission for mock providers.
 
 - Create-story preparation: 2026-09-29. Requirements, backend, and UI/history research performed against clean baseline `f01a9b5`.
 - Validation: create-story checklist applied to requirements, inclusion, atomicity, operation recovery, migration, offline inspection, file locations, and verification scope. Implementation evidence belongs here after development.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Preparation closes the snapshot identity, capture boundary, naming/listing, disposition, duplicate retention, Preview-only, paging and persistence gates. Tasks remain unchecked because implementation has not begun.
+- Implemented policy-1 immutable local H+C+U capture in schema v14, preserving distinct occurrence/source references, local acceptance semantics and frozen display fallbacks. SQL materializes the complete artifact in one owner/SQLite boundary without a Rust history array.
+- Added durable operation recovery before live freshness checks, bounded blocking admission and mutation ownership, four strict local RPCs, integrity validation and keyset paging. Saved artifacts survive live replacement, restart and source removal without automatic expiry.
+- Added Playback naming/save/recovery/inspection UI, one persisted unresolved request, 50-row pages and bounded cursor history, safe zero-server routing, four-locale explanations and keyboard/status behavior. Saving does not change playback, provider preferences, server playlists, physical baskets or devices.
+- Updated API and data-model documentation, including adjacent Retry/attempt and Radio queue-kind corrections, measured contention and explicit platform gaps. Full available regression and quality checks pass. Definition of Done: PASS for this story's implementation and available-runner evidence; status is review, with installed-platform gaps explicitly retained as required by the story.
 
 ### File List
+
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/data-models-hifimule-daemon.md`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/components/PlaybackDestination.ts`
+- `hifimule-ui/src/components/PlaybackSnapshots.ts`
+- `hifimule-ui/src/state/snapshotSaves.ts`
+- `hifimule-ui/src/localContentRoute.ts`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/styles.css`
+- `hifimule-i18n/catalog.json`
+- `scripts/tests/snapshot-ui.test.mjs`
+- `scripts/tests/destination-ui.test.mjs`
+- `scripts/tests/playback-radio-ui.test.mjs`
+
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/export.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_export.rs`
+
+- `hifimule-daemon/src/playback/export.rs`
+- `hifimule-daemon/src/playback/export_tests.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
 
 - `_bmad-output/implementation-artifacts/16-9-save-an-immutable-local-listening-snapshot.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ## Change Log
 
+- 2026-09-29: Implemented immutable local listening snapshots, v14 persistence and recovery, owner/RPC integration, paged offline Playback inspection, localization, regression/crash/race tests and resource measurements; marked review. Installed-platform gaps remain explicit; Story 15.17 is unchanged.
 - 2026-09-29: Created Story 16.9 with immutable local capture, occurrence-level inclusion, durable operation identity, paged offline inspection, and implementation/test guardrails; marked ready-for-dev.

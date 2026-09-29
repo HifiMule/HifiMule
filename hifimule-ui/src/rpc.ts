@@ -416,6 +416,40 @@ export async function playbackSelectOutput(outputId: string, observed: PlaybackS
     })).data;
 }
 
+export interface SaveSnapshotRequest {
+    schemaVersion: 1; operationId: string; instanceId: string; sessionId: string;
+    expectedQueueRevision: string; expectedMainOccurrenceId: string | null; name?: string;
+}
+export interface ListeningSnapshotSummary {
+    schemaVersion: 1; policyVersion: 1; snapshotId: string; operationId: string;
+    name: string; createdAt: string; instanceId: string; sessionId: string;
+    logicalSessionId: string | null; queueRevision: string; mainOccurrenceId: string | null; entryCount: string;
+}
+export interface ListeningSnapshotEntry {
+    ordinal: string; occurrenceId: string; source: { serverId: string; trackId: string };
+    origin: 'history' | 'current' | 'upcoming'; sourceLabel: string; sourceIcon: string | null;
+    title: string | null; artist: string | null; album: string | null; durationMs: number | null; sourceAvailable: boolean;
+}
+export type SaveSnapshotResult = { schemaVersion: 1; status: 'saved'; snapshot: ListeningSnapshotSummary }
+    | { schemaVersion: 1; status: 'empty'; reason: 'noMainSelection' | 'noEligibleOccurrences' };
+export interface ListeningSnapshotPage {
+    schemaVersion: 1; snapshotId: string; entries: ListeningSnapshotEntry[]; nextCursor: string | null; totalCount: string;
+}
+export async function playbackSaveSnapshot(request: SaveSnapshotRequest): Promise<SaveSnapshotResult> {
+    return (await rpcCall('playback.saveSnapshot', request)).data;
+}
+export async function playbackListSnapshots(cursor: string | null = null, limit = 50): Promise<{
+    schemaVersion: 1; snapshots: ListeningSnapshotSummary[]; nextCursor: string | null;
+}> {
+    return (await rpcCall('playback.listSnapshots', { schemaVersion: 1, cursor, limit })).data;
+}
+export async function playbackGetSnapshot(locator: { snapshotId: string } | { operationId: string }): Promise<ListeningSnapshotSummary> {
+    return (await rpcCall('playback.getSnapshot', { schemaVersion: 1, ...locator })).data;
+}
+export async function playbackListSnapshotEntries(snapshotId: string, cursor: string | null = null, limit = 50): Promise<ListeningSnapshotPage> {
+    return (await rpcCall('playback.listSnapshotEntries', { schemaVersion: 1, snapshotId, cursor, limit })).data;
+}
+
 export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
     const result = await rpcCall('playback.getSession', { schemaVersion: 1 });
     return result.data;

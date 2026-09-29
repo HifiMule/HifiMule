@@ -35,6 +35,7 @@ function load() {
     '../state/playback':{playbackStore},
     '../serverIdentity':{formatServerIdentity:() => ({label:'server'})},
     './PlaybackSelectionSettings':{PlaybackSelectionSettings:class { element = new Element('section'); destroy() {} }},
+    './PlaybackSnapshots':{PlaybackSnapshots:class { element = new Element('section'); destroy() {} focus() { return false; } }},
   })[name]});
   const root = new Element('div');
   return { destination:new exports.PlaybackDestination(root),root,calls };

@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 13;
+pub const PERSISTENCE_VERSION: i64 = 14;
 type RadioRow = (
     String,
     Option<String>,
@@ -298,6 +298,7 @@ impl Database {
         CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_insert AFTER INSERT ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=NEW.session_id AND logical_session_id<>NEW.logical_id; END;
         CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_replace AFTER UPDATE OF logical_id ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=NEW.session_id AND logical_session_id<>NEW.logical_id; END;
         CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_delete AFTER DELETE ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=OLD.session_id AND logical_session_id=OLD.logical_id; END;")?;
+        super::export::migrate(&tx)?;
         let key_pattern = format!("mbrec:{}:%", super::recording::RESOLVER_VERSION);
         let unknown: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording WHERE resolver_version<>?1 OR recording_key NOT LIKE ?2 UNION SELECT 1 FROM playback_radio_recording_membership WHERE recording_key NOT LIKE ?2)", params![super::recording::RESOLVER_VERSION,key_pattern], |row|row.get(0))?;
         if unknown {
@@ -3030,7 +3031,7 @@ mod tests {
             .unwrap()
             .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, PERSISTENCE_VERSION);
     }
 
     #[test]
@@ -3170,7 +3171,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 13);
+        assert_eq!(PERSISTENCE_VERSION, 14);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);
@@ -4051,6 +4052,49 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source.track_id, "committed-track");
+    }
+
+    #[test]
+    fn listening_snapshot_schema_is_independent_and_versioned() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('playback_listening_snapshots','playback_listening_snapshot_entries')", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(PERSISTENCE_VERSION, 14);
+    }
+
+    #[test]
+    fn snapshot_v13_upgrade_and_failure_leave_prior_schema_and_rows_intact() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        db.conn.lock().unwrap().execute_batch("DROP TABLE playback_listening_snapshot_entries; DROP TABLE playback_listening_snapshots; UPDATE playback_schema SET version=13;").unwrap();
+        assert!(db.init_playback_inner(true).is_err());
+        {
+            let conn = db.conn.lock().unwrap();
+            let version: i64 = conn
+                .query_row("SELECT version FROM playback_schema", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 13);
+            let tables: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name='playback_listening_snapshots'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(tables, 0);
+        }
+        db.init_playback().unwrap();
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT version FROM playback_schema", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
     }
 
     #[test]
