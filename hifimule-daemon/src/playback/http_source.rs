@@ -5,7 +5,7 @@ use bytes::Bytes;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,11 @@ pub(crate) struct HttpSource {
     validator: Option<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
     preparation: Preparation,
     adaptation_scope: Option<super::adaptation::ObservationScope>,
+    adaptation_required_bytes_per_second: Option<u64>,
+    compressed_buffer_ms: Arc<AtomicU64>,
+    compressed_low_water_ms: u64,
+    pcm_buffer_ms: Arc<AtomicU64>,
+    pcm_low_water_ms: u64,
     delivery_elapsed: Duration,
     delivered_bytes: u64,
     cache_confirmed: bool,
@@ -121,6 +126,11 @@ impl HttpSource {
             position: 0,
             preparation,
             adaptation_scope: None,
+            adaptation_required_bytes_per_second: None,
+            compressed_buffer_ms: Arc::new(AtomicU64::new(super::adaptation::STARTUP_BUFFER_MS)),
+            compressed_low_water_ms: super::adaptation::STARTUP_BUFFER_MS,
+            pcm_buffer_ms: Arc::new(AtomicU64::new(super::adaptation::STARTUP_BUFFER_MS)),
+            pcm_low_water_ms: super::adaptation::STARTUP_BUFFER_MS,
             delivery_elapsed: Duration::ZERO,
             delivered_bytes: 0,
             cache_confirmed,
@@ -129,11 +139,19 @@ impl HttpSource {
         }
     }
 
-    pub fn with_adaptation_scope(mut self, server_id: String, representation_id: String) -> Self {
+    pub fn with_adaptation_scope(
+        mut self,
+        server_id: String,
+        representation_id: String,
+        required_bytes_per_second: Option<u64>,
+        pcm_buffer_ms: Arc<AtomicU64>,
+    ) -> Self {
         self.adaptation_scope = Some(super::adaptation::ObservationScope {
             server_id,
             representation_id,
         });
+        self.adaptation_required_bytes_per_second = required_bytes_per_second;
+        self.pcm_buffer_ms = pcm_buffer_ms;
         self
     }
 }
@@ -169,41 +187,17 @@ impl Read for HttpSource {
                 self.complete = true;
                 return Ok(0);
             };
-            if let Some(scope) = self.adaptation_scope.clone() {
+            if self.adaptation_scope.is_some() {
                 let elapsed_ms =
                     u64::try_from(delivery_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let eligibility = if self.cache_confirmed {
-                    super::adaptation::SampleEligibility::Cached
-                } else if self.seeked {
-                    super::adaptation::SampleEligibility::RangeOrSeek
-                } else if elapsed_ms < 250 {
-                    super::adaptation::SampleEligibility::TooShort
-                } else {
-                    super::adaptation::SampleEligibility::Eligible
-                };
-                super::adaptation::record(
-                    scope,
-                    super::adaptation::DeliveryObservation {
-                        monotonic_ms: super::adaptation::monotonic_ms(),
-                        bytes: chunk.len() as u64,
-                        elapsed_ms,
-                        compressed_buffer_ms: if eligibility
-                            == super::adaptation::SampleEligibility::Eligible
-                        {
-                            0
-                        } else {
-                            500
-                        },
-                        pcm_buffer_ms: if eligibility
-                            == super::adaptation::SampleEligibility::Eligible
-                        {
-                            0
-                        } else {
-                            500
-                        },
-                        eligibility,
-                    },
-                );
+                if elapsed_ms >= 250 {
+                    self.compressed_low_water_ms = self
+                        .compressed_low_water_ms
+                        .min(self.compressed_buffer_ms.load(Ordering::Acquire));
+                    self.pcm_low_water_ms = self
+                        .pcm_low_water_ms
+                        .min(self.pcm_buffer_ms.load(Ordering::Acquire));
+                }
             }
             // The retained network chunk has an explicit share of the byte
             // budget. Do not retain an arbitrarily large upstream allocation.
@@ -381,8 +375,8 @@ impl Drop for HttpSource {
                 monotonic_ms: super::adaptation::monotonic_ms(),
                 bytes: self.delivered_bytes,
                 elapsed_ms,
-                compressed_buffer_ms: if self.complete { 500 } else { 0 },
-                pcm_buffer_ms: if self.complete { 500 } else { 0 },
+                compressed_buffer_ms: self.compressed_low_water_ms,
+                pcm_buffer_ms: self.pcm_low_water_ms,
                 eligibility,
             },
         );
@@ -397,6 +391,15 @@ impl super::streaming::CompressedSource for HttpSource {
     }
     fn preparation(&self) -> Option<Preparation> {
         Some(self.preparation.clone())
+    }
+    fn update_compressed_buffer_bytes(&self, bytes: usize) {
+        let milliseconds = self
+            .adaptation_required_bytes_per_second
+            .filter(|required| *required > 0)
+            .map(|required| (bytes as u64).saturating_mul(1_000) / required)
+            .unwrap_or(500);
+        self.compressed_buffer_ms
+            .store(milliseconds, Ordering::Release);
     }
 }
 fn validate_chunk_length(length: usize) -> io::Result<()> {

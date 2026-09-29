@@ -695,6 +695,7 @@ fn frozen_gain_survives_transport_seek_failures_and_restore_retry() {
             },
             duration_ms: Some(10_000),
             representation: "flac".into(),
+            selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("flac"),
             seek: SeekCapability::jellyfin_pcm_wav(),
         },
     );
@@ -868,6 +869,7 @@ fn non_unity_handoff_and_storage_retry_preserve_frozen_member_policy() {
         },
         duration_ms: 10_000,
         representation: "mp3".into(),
+        selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("mp3"),
         predecessor_position_ms: 9_500,
         successor_offset_frames: 1200,
         sample_rate: 48_000,

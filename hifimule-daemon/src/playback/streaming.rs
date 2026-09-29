@@ -22,6 +22,7 @@ pub trait CompressedSource: Read + Seek + Send {
     fn preparation(&self) -> Option<super::http_source::Preparation> {
         None
     }
+    fn update_compressed_buffer_bytes(&self, _bytes: usize) {}
 }
 impl CompressedSource for std::fs::File {
     fn length(&self) -> Option<u64> {
@@ -225,6 +226,10 @@ impl BoundedHttpReader {
                 ));
             }
             let next = if let Some(source) = self.source.as_mut() {
+                let buffered = self.buffer.len().saturating_sub(
+                    usize::try_from(self.position.saturating_sub(self.base)).unwrap_or(usize::MAX),
+                );
+                source.update_compressed_buffer_bytes(buffered);
                 let mut bytes = vec![0u8; COMPRESSED_CHUNK_BYTES];
                 match source.read(&mut bytes) {
                     Ok(0) => Err(tokio::sync::mpsc::error::TryRecvError::Disconnected),

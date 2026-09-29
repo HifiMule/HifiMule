@@ -599,6 +599,7 @@ fn production_gain(
         gain,
         Some(suffix),
         pcm,
+        None,
         cancel,
     );
     done.store(true, Ordering::Release);

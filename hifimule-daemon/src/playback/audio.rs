@@ -358,6 +358,8 @@ struct PreparedSuccessor {
     duration_ms: u64,
     metadata: PlaybackTrackMetadata,
     representation: String,
+    selected_quality: super::model::SelectedPlaybackQuality,
+    pcm_buffer_ms: Arc<AtomicU64>,
     preparation: super::http_source::Preparation,
     seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     gain: f32,
@@ -611,6 +613,27 @@ fn representation_name(representation: &crate::providers::PlaybackRepresentation
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn selected_quality(
+    representation: &crate::providers::PlaybackRepresentation,
+    reason: super::adaptation::AdaptationReason,
+) -> super::model::SelectedPlaybackQuality {
+    let reduced = reason == super::adaptation::AdaptationReason::ReducedBufferPressure;
+    let expose_reason = !matches!(
+        reason,
+        super::adaptation::AdaptationReason::Startup
+            | super::adaptation::AdaptationReason::Sustainable
+    );
+    super::model::SelectedPlaybackQuality {
+        representation_id: representation.id.0.clone(),
+        codec: representation.codec.clone(),
+        container: representation.container.clone(),
+        bitrate_kbps: representation.bitrate_kbps,
+        reduced,
+        reason: expose_reason.then(|| reason.wire_code().to_owned()),
+        policy_version: super::adaptation::POLICY_VERSION,
+    }
+}
+
 fn qualified_gain_suffix(
     gain: f32,
     suffix: Option<&str>,
@@ -829,13 +852,14 @@ impl AudioEngine {
             album: description.song.album_title.clone(),
         };
         let gain = f32::from_bits(candidate.gain_bits);
-        let (representation, _adaptation_reason) = if gain.to_bits() == 1.0f32.to_bits() {
+        let representations = description.representations;
+        let (mut representation, mut adaptation_reason) = if gain.to_bits() == 1.0f32.to_bits() {
             super::adaptation::select_for_boundary(
                 &candidate.successor.source.server_id,
-                description.representations,
+                representations.clone(),
             )
         } else {
-            select_playback_representation(description.representations).map(|representation| {
+            select_playback_representation(representations.clone()).map(|representation| {
                 (
                     representation,
                     super::adaptation::AdaptationReason::AlbumGainConstraint,
@@ -843,6 +867,41 @@ impl AudioEngine {
             })
         }
         .map_err(PlaybackPipelineError::from_provider_error)?;
+        let policy_deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(super::adaptation::PREPARATION_DEADLINE_MS);
+        let deadline = deadline.min(policy_deadline);
+        let mut response = tokio::select! {
+            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&representation.request)) => {
+                result.map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("successor timeout")))??
+            },
+            _ = ticket.cancelled() => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("successor preparation was superseded"))),
+        };
+        // Evidence can change while the first request is opening. Before the
+        // successor is published or claimed, allow exactly one bounded
+        // replacement and keep the same generation/fence authority.
+        if gain.to_bits() == 1.0f32.to_bits()
+            && super::adaptation::MAX_SUCCESSOR_REPLACEMENTS > 0
+            && ticket.is_current()
+            && !ticket.fence.claimed()
+        {
+            let (reconsidered, reason) = super::adaptation::select_for_boundary(
+                &candidate.successor.source.server_id,
+                representations,
+            )
+            .map_err(PlaybackPipelineError::from_provider_error)?;
+            if reconsidered.id != representation.id {
+                drop(response);
+                representation = reconsidered;
+                adaptation_reason = reason;
+                response = tokio::select! {
+                    result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&representation.request)) => {
+                        result.map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("successor replacement timeout")))??
+                    },
+                    _ = ticket.cancelled() => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("successor replacement was superseded"))),
+                };
+            }
+        }
+        let selected_quality = selected_quality(&representation, adaptation_reason);
         let qualified_suffix = qualified_gain_suffix(
             gain,
             description.song.suffix.as_deref(),
@@ -854,19 +913,15 @@ impl AudioEngine {
         let seek_mechanism = representation
             .seek_mechanism
             .filter(|_| representation.request.range_supported && duration_ms > 0);
-        let response = tokio::select! {
-            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&representation.request)) => {
-                result.map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("successor timeout")))??
-            },
-            _ = ticket.cancelled() => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("successor preparation was superseded"))),
-        };
         if !ticket.is_current() {
             return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
                 "successor preparation was superseded"
             )));
         }
         let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
+        let pcm_buffer_ms = Arc::new(AtomicU64::new(super::adaptation::STARTUP_BUFFER_MS));
         let representation_id = representation.id.0.clone();
+        let required_bytes_per_second = representation.quality.required_bytes_per_second;
         let source = super::http_source::HttpSource::new(
             representation.request,
             response,
@@ -875,6 +930,8 @@ impl AudioEngine {
         .with_adaptation_scope(
             candidate.successor.source.server_id.clone(),
             representation_id,
+            required_bytes_per_second,
+            pcm_buffer_ms.clone(),
         );
         let reader = BoundedHttpReader::from_source(source, cancel.clone(), high_water);
         let token = super::continuity::HandoffToken {
@@ -895,6 +952,8 @@ impl AudioEngine {
             duration_ms,
             metadata,
             representation: representation_name,
+            selected_quality,
+            pcm_buffer_ms,
             preparation,
             seek_mechanism,
             gain,
@@ -1377,6 +1436,12 @@ impl AudioEngine {
             )));
         }
         let representation_name = representation_name(&representation);
+        let selected_quality = selected_quality(
+            &representation,
+            super::adaptation::AdaptationReason::Startup,
+        );
+        let representation_id = representation.id.0.clone();
+        let required_bytes_per_second = representation.quality.required_bytes_per_second;
         let decoder_hint = decoder_hint(&representation);
         let request = representation.request;
         let response = if let Some(response) = prepared_response {
@@ -1424,8 +1489,15 @@ impl AudioEngine {
         let worker_handoff = handoff.clone();
         let worker_position = position_ms.clone();
         let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
+        let pcm_buffer_ms = Arc::new(AtomicU64::new(super::adaptation::STARTUP_BUFFER_MS));
         let source_reader =
-            super::http_source::HttpSource::new(request, response, preparation.clone());
+            super::http_source::HttpSource::new(request, response, preparation.clone())
+                .with_adaptation_scope(
+                    source.server_id.clone(),
+                    representation_id,
+                    required_bytes_per_second,
+                    pcm_buffer_ms.clone(),
+                );
         let reader = BoundedHttpReader::from_source(
             source_reader,
             cancel.clone(),
@@ -1443,6 +1515,7 @@ impl AudioEngine {
                 metadata,
                 duration_ms: Some(duration_ms),
                 representation: representation_name.clone(),
+                selected_quality,
                 seek: super::model::SeekCapability::unavailable(if seek_candidate {
                     "seek.validating"
                 } else {
@@ -1492,6 +1565,7 @@ impl AudioEngine {
                     event_epoch.clone(),
                     start_ms,
                     worker_pcm_high_water,
+                    pcm_buffer_ms,
                     worker_endpoint,
                     worker_position,
                     worker_output_control.clone(),
@@ -1757,6 +1831,7 @@ fn run_output(
     event_epoch: Arc<AtomicU64>,
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
+    pcm_buffer_ms: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
     _output_control: Arc<OutputControl>,
@@ -1856,6 +1931,7 @@ fn run_output(
             gain,
             qualified_suffix.as_deref(),
             decoder_pcm,
+            Some(pcm_buffer_ms),
             decoder_cancel,
         )
     });
@@ -2173,6 +2249,8 @@ fn run_output(
                 duration_ms,
                 metadata,
                 representation,
+                selected_quality,
+                pcm_buffer_ms,
                 preparation,
                 seek_mechanism,
                 gain,
@@ -2194,6 +2272,7 @@ fn run_output(
                     metadata: metadata.clone(),
                     duration_ms,
                     representation: representation.clone(),
+                    selected_quality,
                     predecessor_position_ms: match seek_qualified.load(Ordering::Acquire) {
                         0 => provider_duration_ms,
                         verified => verified,
@@ -2227,6 +2306,7 @@ fn run_output(
                     gain,
                     qualified_suffix.as_deref(),
                     queue,
+                    Some(pcm_buffer_ms),
                     decoder_cancel,
                 )
             });

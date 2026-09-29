@@ -4,7 +4,7 @@ baseline_commit: c595ff1613b5b149674ca9b617d53bbf3be5b755
 
 # Story 16.12: Adapt playback quality at track boundaries using buffer health
 
-Status: review
+Status: done
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created -->
 
@@ -125,6 +125,20 @@ This story includes provider alternative discovery, deterministic quality orderi
   - [x] Update `docs/api-contracts-hifimule-daemon.md`, `docs/data-models-hifimule-daemon.md`, `docs/playback.md` and `docs/architecture-hifimule-daemon.md` with representation identity, quality ordering, estimator units/thresholds, public status contract, cutoff and failure behavior.
   - [x] Expose only the bounded playback-health signal needed by Story 16.13; do not implement sync throttling here or conflate slow device writes with source delivery.
   - [x] Extend `docs/playback-installed-test-checklist.md` and the existing `docs/playback-evidence/` conventions with a reproducible network-profile/evidence format for Story 16.14 sustained and installed validation.
+
+### Review Findings
+
+- [x] [Review][Patch] Make recovery use the declared 120-second evidence window instead of requiring an exact 60-second retained span [hifimule-daemon/src/playback/adaptation.rs:215]
+- [x] [Review][Patch] Feed actual compressed and PCM buffer health into observations instead of fabricating depletion from chunk latency [hifimule-daemon/src/playback/http_source.rs:172]
+- [x] [Review][Patch] Aggregate independent delivery observations so one response and its duplicate drop record cannot satisfy the minimum evidence count [hifimule-daemon/src/playback/http_source.rs:172]
+- [x] [Review][Patch] Commit selected representation and reason only after successor preparation is admitted successfully [hifimule-daemon/src/playback/adaptation.rs:145]
+- [x] [Review][Patch] Publish the album-gain-constrained original representation instead of stale adaptive state [hifimule-daemon/src/playback/audio.rs:832]
+- [x] [Review][Patch] Bound and evict runtime history, selected IDs, and reasons across server and representation scopes [hifimule-daemon/src/playback/adaptation.rs:83]
+- [x] [Review][Patch] Carry authoritative provider representation metadata into initial Resolved quality state [hifimule-daemon/src/playback/session.rs:5078]
+- [x] [Review][Patch] Preserve truthful buffering/retry behavior when no lower representation is sustainable [hifimule-daemon/src/playback/adaptation.rs:163]
+- [x] [Review][Patch] Scope original Subsonic observations by materially compatible representation characteristics [hifimule-daemon/src/providers/subsonic.rs:725]
+- [x] [Review][Patch] Implement the bounded pre-claim successor revocation and reprepare policy through SuccessorFence [hifimule-daemon/src/playback/audio.rs:831]
+- [x] [Review][Patch] Add the required deterministic selection profiles, boundary races, provider downgrade/recovery integration, and reproducible evidence corpus [hifimule-daemon/src/playback/adaptation.rs:289]
 
 ## Dev Notes
 
@@ -268,6 +282,7 @@ GPT-5 Codex
 - Published authoritative sanitized quality state through Rust/TypeScript and an accessible localized live-region explanation.
 - Documented thresholds, ownership, failure/cutoff behavior, and the Story 16.14 evidence format without claiming installed-platform certification.
 - Verification: adaptation tests, selector test, 72 Subsonic provider tests, frontend production build, locale parity, and full workspace suite (1,338 daemon passed / 8 intentional ignores plus all other workspace suites) passed. Normal all-target Clippy passed with existing warnings; strict warnings-as-errors remains pre-existing debt.
+- Review fixes: replaced chunk-level fabricated samples with complete-request delivery observations backed by actual compressed/PCM depth, corrected 120-second recovery, bounded global policy state, deferred selection commit until fenced presentation, carried authoritative quality metadata through handoff, implemented one bounded pre-claim reconsideration, and added deterministic/provider evidence coverage.
 
 ### Change Log
 

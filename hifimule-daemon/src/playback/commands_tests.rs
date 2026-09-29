@@ -98,6 +98,7 @@ impl Fixture {
                 },
                 duration_ms: Some(10_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::jellyfin_pcm_wav(),
             },
         );

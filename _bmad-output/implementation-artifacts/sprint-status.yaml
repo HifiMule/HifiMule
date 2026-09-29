@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-29  # Story 16.12 implementation complete; ready for review
+last_updated: 2026-09-29  # Story 16.12 code review complete; 11 patches applied
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -216,7 +216,7 @@ development_status:
   16-9-save-an-immutable-local-listening-snapshot: done  # three review patches applied; installed-platform verification gaps remain recorded
   16-10-save-a-listening-snapshot-as-playlists-on-its-source-servers: done  # code review: 13 patches applied; installed provider/platform evidence gaps remain recorded
   16-11-add-a-listening-snapshot-to-a-connected-device-basket-or-replace-it: done  # code review: 11 patches applied
-  16-12-adapt-playback-quality-at-track-boundaries-using-buffer-health: review
+  16-12-adapt-playback-quality-at-track-boundaries-using-buffer-health: done  # code review: 11 patches applied
   16-13-protect-playback-during-sync-without-unnecessary-throttling: backlog
   16-14-keep-long-listening-sessions-bounded-and-recoverable: backlog
   epic-16-retrospective: optional

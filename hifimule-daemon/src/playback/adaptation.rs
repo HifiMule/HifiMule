@@ -12,6 +12,8 @@ pub const OBSERVATION_WINDOW_MS: u64 = 60_000;
 pub const RECOVERY_WINDOW_MS: u64 = 120_000;
 pub const MIN_ELIGIBLE_SAMPLES: usize = 3;
 pub const MAX_SAMPLES_PER_SCOPE: usize = 16;
+pub const MAX_OBSERVATION_SCOPES: usize = 64;
+pub const MAX_SELECTED_SERVERS: usize = 16;
 pub const DOWNGRADE_HEADROOM_PERCENT: u64 = 125;
 pub const RECOVERY_HEADROOM_PERCENT: u64 = 175;
 pub const STARTUP_BUFFER_MS: u64 = 100;
@@ -75,6 +77,16 @@ impl AdaptationReason {
             Self::AlbumGainConstraint => "albumGainConstraint",
         }
     }
+
+    pub fn from_wire_code(value: Option<&str>) -> Self {
+        match value {
+            Some("reducedBufferPressure") => Self::ReducedBufferPressure,
+            Some("recoveredCapacity") => Self::RecoveredCapacity,
+            Some("noSustainableAlternative") => Self::NoSustainableAlternative,
+            Some("albumGainConstraint") => Self::AlbumGainConstraint,
+            _ => Self::Sustainable,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +101,7 @@ pub struct CapacityEvidence {
 #[derive(Debug, Default)]
 pub struct AdaptationHistory {
     scopes: HashMap<ObservationScope, VecDeque<DeliveryObservation>>,
+    scope_order: VecDeque<ObservationScope>,
 }
 
 #[derive(Default)]
@@ -96,6 +109,7 @@ struct RuntimePolicy {
     history: AdaptationHistory,
     selected: HashMap<String, String>,
     reasons: HashMap<String, AdaptationReason>,
+    server_order: VecDeque<String>,
 }
 
 static RUNTIME: OnceLock<Mutex<RuntimePolicy>> = OnceLock::new();
@@ -128,7 +142,7 @@ pub(crate) fn select_for_boundary(
     crate::providers::ProviderError,
 > {
     let ordered = crate::providers::select_ordered_playback_representations(representations)?;
-    let mut runtime = RUNTIME
+    let runtime = RUNTIME
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -138,27 +152,26 @@ pub(crate) fn select_for_boundary(
         .and_then(|id| ordered.iter().position(|candidate| &candidate.id.0 == id));
     let Some(index) = current_index else {
         let selected = ordered.into_iter().next().unwrap();
-        runtime
-            .selected
-            .insert(server_id.into(), selected.id.0.clone());
-        runtime
-            .reasons
-            .insert(server_id.into(), AdaptationReason::Startup);
         return Ok((selected, AdaptationReason::Startup));
     };
     let scope = ObservationScope {
         server_id: server_id.into(),
         representation_id: ordered[index].id.0.clone(),
     };
-    let Some(evidence) = runtime.history.evidence(&scope, monotonic_ms()) else {
+    let now_ms = monotonic_ms();
+    let Some(downgrade_evidence) = runtime
+        .history
+        .evidence(&scope, now_ms, OBSERVATION_WINDOW_MS)
+    else {
         return Ok((
             ordered.into_iter().nth(index).unwrap(),
             AdaptationReason::Sustainable,
         ));
     };
     let current_required = ordered[index].quality.required_bytes_per_second;
-    if evidence.depleted
-        && current_required.is_some_and(|required| !sustainable(required, evidence, false))
+    if downgrade_evidence.depleted
+        && current_required
+            .is_some_and(|required| !sustainable(required, downgrade_evidence, false))
     {
         let chosen = ordered
             .iter()
@@ -167,37 +180,31 @@ pub(crate) fn select_for_boundary(
                 candidate
                     .quality
                     .required_bytes_per_second
-                    .is_none_or(|required| sustainable(required, evidence, false))
+                    .is_some_and(|required| sustainable(required, downgrade_evidence, false))
             })
-            .cloned()
-            .unwrap_or_else(|| ordered.last().unwrap().clone());
-        runtime
-            .selected
-            .insert(server_id.into(), chosen.id.0.clone());
-        runtime
-            .reasons
-            .insert(server_id.into(), AdaptationReason::ReducedBufferPressure);
-        return Ok((chosen, AdaptationReason::ReducedBufferPressure));
+            .cloned();
+        return Ok(match chosen {
+            Some(chosen) => (chosen, AdaptationReason::ReducedBufferPressure),
+            None => (
+                ordered.into_iter().nth(index).unwrap(),
+                AdaptationReason::NoSustainableAlternative,
+            ),
+        });
     }
-    if index > 0 {
-        if let Some(chosen) = ordered[..index]
+    if index > 0
+        && let Some(recovery_evidence) =
+            runtime.history.evidence(&scope, now_ms, RECOVERY_WINDOW_MS)
+        && let Some(chosen) = ordered[..index]
             .iter()
             .find(|candidate| {
                 candidate
                     .quality
                     .required_bytes_per_second
-                    .is_some_and(|required| sustainable(required, evidence, true))
+                    .is_some_and(|required| sustainable(required, recovery_evidence, true))
             })
             .cloned()
-        {
-            runtime
-                .selected
-                .insert(server_id.into(), chosen.id.0.clone());
-            runtime
-                .reasons
-                .insert(server_id.into(), AdaptationReason::RecoveredCapacity);
-            return Ok((chosen, AdaptationReason::RecoveredCapacity));
-        }
+    {
+        return Ok((chosen, AdaptationReason::RecoveredCapacity));
     }
     Ok((
         ordered.into_iter().nth(index).unwrap(),
@@ -205,6 +212,7 @@ pub(crate) fn select_for_boundary(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn selected_status(server_id: &str) -> Option<(String, AdaptationReason)> {
     let runtime = RUNTIME
         .get()?
@@ -220,8 +228,31 @@ pub(crate) fn selected_status(server_id: &str) -> Option<(String, AdaptationReas
     ))
 }
 
+pub(crate) fn commit_selection(server_id: &str, representation_id: &str, reason: AdaptationReason) {
+    let mut runtime = RUNTIME
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !runtime.selected.contains_key(server_id) {
+        runtime.server_order.push_back(server_id.to_owned());
+    }
+    runtime
+        .selected
+        .insert(server_id.to_owned(), representation_id.to_owned());
+    runtime.reasons.insert(server_id.to_owned(), reason);
+    while runtime.server_order.len() > MAX_SELECTED_SERVERS {
+        if let Some(expired) = runtime.server_order.pop_front() {
+            runtime.selected.remove(&expired);
+            runtime.reasons.remove(&expired);
+        }
+    }
+}
+
 impl AdaptationHistory {
     pub fn observe(&mut self, scope: ObservationScope, sample: DeliveryObservation) {
+        if !self.scopes.contains_key(&scope) {
+            self.scope_order.push_back(scope.clone());
+        }
         let samples = self.scopes.entry(scope).or_default();
         samples.push_back(sample);
         while samples.len() > MAX_SAMPLES_PER_SCOPE {
@@ -232,16 +263,26 @@ impl AdaptationHistory {
         }) {
             samples.pop_front();
         }
+        while self.scope_order.len() > MAX_OBSERVATION_SCOPES {
+            if let Some(expired) = self.scope_order.pop_front() {
+                self.scopes.remove(&expired);
+            }
+        }
     }
 
-    pub fn evidence(&self, scope: &ObservationScope, now_ms: u64) -> Option<CapacityEvidence> {
+    pub fn evidence(
+        &self,
+        scope: &ObservationScope,
+        now_ms: u64,
+        window_ms: u64,
+    ) -> Option<CapacityEvidence> {
         let eligible: Vec<_> = self
             .scopes
             .get(scope)?
             .iter()
             .copied()
             .filter(|sample| {
-                now_ms.saturating_sub(sample.monotonic_ms) <= OBSERVATION_WINDOW_MS
+                now_ms.saturating_sub(sample.monotonic_ms) <= window_ms
                     && sample.bytes_per_second().is_some()
             })
             .collect();
@@ -279,7 +320,7 @@ pub fn sustainable(
     evidence.bytes_per_second.saturating_mul(100)
         >= required_bytes_per_second.saturating_mul(headroom)
         && (!recovery
-            || evidence.newest_ms.saturating_sub(evidence.oldest_ms) >= OBSERVATION_WINDOW_MS)
+            || evidence.newest_ms.saturating_sub(evidence.oldest_ms) >= RECOVERY_WINDOW_MS)
 }
 
 #[cfg(test)]
@@ -334,15 +375,18 @@ mod tests {
             b.clone(),
             sample(2_000, 1, 0, 0, SampleEligibility::Eligible),
         );
-        assert!(history.evidence(&a, 2_000).is_none());
+        assert!(history.evidence(&a, 2_000, OBSERVATION_WINDOW_MS).is_none());
         history.observe(
             a.clone(),
             sample(3_000, 25_000, 50, 50, SampleEligibility::Eligible),
         );
-        let evidence = history.evidence(&a, 3_000).unwrap();
+        let evidence = history.evidence(&a, 3_000, OBSERVATION_WINDOW_MS).unwrap();
         assert_eq!(evidence.bytes_per_second, 25_000);
         assert!(evidence.depleted);
-        assert_ne!(history.evidence(&b, 3_000), history.evidence(&a, 3_000));
+        assert_ne!(
+            history.evidence(&b, 3_000, OBSERVATION_WINDOW_MS),
+            history.evidence(&a, 3_000, OBSERVATION_WINDOW_MS)
+        );
         for at in 4..30 {
             history.observe(
                 a.clone(),
@@ -371,9 +415,180 @@ mod tests {
         };
         assert!(!sustainable(32_000, burst, true));
         let recovered = CapacityEvidence {
-            newest_ms: 60_000,
+            newest_ms: RECOVERY_WINDOW_MS,
             ..burst
         };
         assert!(sustainable(32_000, recovered, true));
+    }
+
+    fn representation(
+        id: &str,
+        required_bytes_per_second: u64,
+        provenance: crate::providers::PlaybackProvenance,
+    ) -> crate::providers::PlaybackRepresentation {
+        crate::providers::PlaybackRepresentation {
+            id: crate::providers::RepresentationId(id.into()),
+            quality: crate::providers::PlaybackQuality {
+                tier: 100,
+                required_bytes_per_second: Some(required_bytes_per_second),
+            },
+            codec: Some("mp3".into()),
+            container: Some("mp3".into()),
+            bitrate_kbps: Some((required_bytes_per_second / 125) as u32),
+            sample_rate: None,
+            bit_depth: None,
+            provenance,
+            seek_mechanism: None,
+            request: crate::providers::PlaybackRequest {
+                url: reqwest::Url::parse(&format!("https://example.invalid/{id}")).unwrap(),
+                headers: reqwest::header::HeaderMap::new(),
+                range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
+            },
+        }
+    }
+
+    fn install_slow_evidence(server_id: &str, representation_id: &str, rate: u64) {
+        let now = monotonic_ms();
+        for age in [2_000, 1_000, 0] {
+            record(
+                ObservationScope {
+                    server_id: server_id.into(),
+                    representation_id: representation_id.into(),
+                },
+                sample(
+                    now.saturating_sub(age),
+                    rate,
+                    50,
+                    500,
+                    SampleEligibility::Eligible,
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_selection_downgrades_without_committing_before_handoff() {
+        let server = "selection-downgrade-fixture";
+        commit_selection(server, "original-high", AdaptationReason::Sustainable);
+        install_slow_evidence(server, "original-high", 30_000);
+        let (selected, reason) = select_for_boundary(
+            server,
+            vec![
+                representation(
+                    "original-high",
+                    100_000,
+                    crate::providers::PlaybackProvenance::Original,
+                ),
+                representation(
+                    "fallback-low",
+                    20_000,
+                    crate::providers::PlaybackProvenance::Alternative,
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(selected.id.0, "fallback-low");
+        assert_eq!(reason, AdaptationReason::ReducedBufferPressure);
+        assert_eq!(selected_status(server).unwrap().0, "original-high");
+    }
+
+    #[test]
+    fn no_sustainable_fallback_keeps_current_and_reports_limitation() {
+        let server = "selection-exhausted-fixture";
+        commit_selection(server, "original-high", AdaptationReason::Sustainable);
+        install_slow_evidence(server, "original-high", 30_000);
+        let (selected, reason) = select_for_boundary(
+            server,
+            vec![
+                representation(
+                    "original-high",
+                    100_000,
+                    crate::providers::PlaybackProvenance::Original,
+                ),
+                representation(
+                    "fallback-too-large",
+                    40_000,
+                    crate::providers::PlaybackProvenance::Alternative,
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(selected.id.0, "original-high");
+        assert_eq!(reason, AdaptationReason::NoSustainableAlternative);
+    }
+
+    #[test]
+    fn scope_history_evicts_old_identities() {
+        let mut history = AdaptationHistory::default();
+        for index in 0..=MAX_OBSERVATION_SCOPES {
+            history.observe(
+                ObservationScope {
+                    server_id: format!("server-{index}"),
+                    representation_id: "original".into(),
+                },
+                sample(1, 1, 500, 500, SampleEligibility::Eligible),
+            );
+        }
+        assert_eq!(history.scopes.len(), MAX_OBSERVATION_SCOPES);
+        assert!(
+            !history
+                .scopes
+                .keys()
+                .any(|scope| scope.server_id == "server-0")
+        );
+    }
+
+    #[test]
+    fn startup_cache_seek_partial_failure_and_short_samples_never_become_capacity() {
+        let mut history = AdaptationHistory::default();
+        let scope = ObservationScope {
+            server_id: "excluded".into(),
+            representation_id: "original".into(),
+        };
+        for (index, eligibility) in [
+            SampleEligibility::Startup,
+            SampleEligibility::Cached,
+            SampleEligibility::RangeOrSeek,
+            SampleEligibility::Partial,
+            SampleEligibility::Failed,
+            SampleEligibility::TooShort,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            history.observe(
+                scope.clone(),
+                sample(index as u64 * 1_000, 1_000_000, 0, 0, eligibility),
+            );
+        }
+        assert!(
+            history
+                .evidence(&scope, 10_000, RECOVERY_WINDOW_MS)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recovery_requires_the_full_recovery_window_not_a_fast_burst() {
+        let burst = CapacityEvidence {
+            bytes_per_second: 100_000,
+            eligible_samples: 16,
+            oldest_ms: 60_000,
+            newest_ms: 119_999,
+            depleted: false,
+        };
+        assert!(!sustainable(40_000, burst, true));
+        assert!(sustainable(
+            40_000,
+            CapacityEvidence {
+                oldest_ms: 0,
+                newest_ms: RECOVERY_WINDOW_MS,
+                ..burst
+            },
+            true
+        ));
     }
 }

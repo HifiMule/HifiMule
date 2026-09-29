@@ -1412,6 +1412,7 @@ fn owner_loop(
                         metadata,
                         duration_ms,
                         representation,
+                        selected_quality,
                         predecessor_position_ms,
                         successor_offset_frames,
                         sample_rate,
@@ -1424,6 +1425,7 @@ fn owner_loop(
                             metadata.clone(),
                             *duration_ms,
                             representation.clone(),
+                            selected_quality.clone(),
                             *predecessor_position_ms,
                             *successor_offset_frames,
                             *sample_rate,
@@ -5079,20 +5081,22 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             metadata,
             duration_ms,
             representation,
+            selected_quality,
             seek,
         } => {
+            super::adaptation::commit_selection(
+                &metadata.source.server_id,
+                &selected_quality.representation_id,
+                if selected_quality.reduced {
+                    super::adaptation::AdaptationReason::ReducedBufferPressure
+                } else {
+                    super::adaptation::AdaptationReason::Startup
+                },
+            );
             i.playback.metadata = Some(metadata);
             i.playback.duration_ms = duration_ms;
             i.playback.representation = Some(representation.clone());
-            i.playback.selected_quality = Some(super::model::SelectedPlaybackQuality {
-                representation_id: representation.clone(),
-                codec: None,
-                container: Some(representation.clone()),
-                bitrate_kbps: None,
-                reduced: false,
-                reason: None,
-                policy_version: super::adaptation::POLICY_VERSION,
-            });
+            i.playback.selected_quality = Some(selected_quality);
             if seek.reason.as_deref() != Some("seek.validating")
                 && i.playback.pending_seek.is_none()
                 && i.playback.status == PlaybackStatus::Loading
@@ -5332,6 +5336,7 @@ fn reconcile_presented_handoff(i: &mut Inner, generation_serial: &AtomicU64) -> 
         metadata,
         duration_ms,
         representation,
+        selected_quality,
         predecessor_position_ms,
         successor_offset_frames,
         sample_rate,
@@ -5346,6 +5351,7 @@ fn reconcile_presented_handoff(i: &mut Inner, generation_serial: &AtomicU64) -> 
             metadata,
             duration_ms,
             representation,
+            selected_quality,
             predecessor_position_ms,
             successor_offset_frames,
             sample_rate,
@@ -5363,6 +5369,7 @@ fn adopt_presented_handoff(
     metadata: PlaybackTrackMetadata,
     duration_ms: u64,
     representation: String,
+    selected_quality: super::model::SelectedPlaybackQuality,
     predecessor_position_ms: u64,
     successor_offset_frames: u64,
     sample_rate: u32,
@@ -5421,17 +5428,12 @@ fn adopt_presented_handoff(
     i.session = next;
     i.checkpointed_position_ms = i.session.position_ms;
     i.radio_wait_for_transition = false;
-    let selected_quality = super::adaptation::selected_status(&metadata.source.server_id).map(
-        |(representation_id, reason)| super::model::SelectedPlaybackQuality {
-            representation_id,
-            codec: None,
-            container: Some(representation.clone()),
-            bitrate_kbps: None,
-            reduced: reason == super::adaptation::AdaptationReason::ReducedBufferPressure,
-            reason: (reason == super::adaptation::AdaptationReason::ReducedBufferPressure)
-                .then(|| reason.wire_code().into()),
-            policy_version: super::adaptation::POLICY_VERSION,
-        },
+    let committed_reason =
+        super::adaptation::AdaptationReason::from_wire_code(selected_quality.reason.as_deref());
+    super::adaptation::commit_selection(
+        &metadata.source.server_id,
+        &selected_quality.representation_id,
+        committed_reason,
     );
     i.playback = PlaybackState {
         status: if i.output_gate.load(Ordering::Acquire) {
@@ -5454,7 +5456,7 @@ fn adopt_presented_handoff(
         metadata: Some(metadata),
         duration_ms: Some(duration_ms),
         representation: Some(representation.clone()),
-        selected_quality,
+        selected_quality: Some(selected_quality),
         seek,
         pending_seek: None,
         seek_outcome: None,
@@ -7094,6 +7096,7 @@ mod tests {
                 },
                 duration_ms: Some(40_000),
                 representation: "flac".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("flac"),
                 seek: SeekCapability::unavailable("test"),
             },
         );
@@ -7239,6 +7242,7 @@ mod tests {
             },
             duration_ms: 1_000,
             representation: "flac".into(),
+            selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("flac"),
             predecessor_position_ms: 900,
             successor_offset_frames: 12_000,
             sample_rate: 48_000,
@@ -8702,6 +8706,7 @@ mod tests {
                 },
                 duration_ms: Some(10_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::jellyfin_pcm_wav(),
             },
         );
@@ -8839,6 +8844,7 @@ mod tests {
                 },
                 duration_ms: Some(10_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::jellyfin_pcm_wav(),
             },
         );
@@ -9101,6 +9107,7 @@ mod tests {
             },
             duration_ms: Some(10_000),
             representation: "wav".into(),
+            selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
             seek: SeekCapability::unavailable("seek.validating"),
         };
         let qualified = PlaybackEvent::SeekQualified {
@@ -9335,6 +9342,7 @@ mod tests {
                 },
                 duration_ms: Some(8_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::jellyfin_pcm_wav(),
             },
         );
@@ -9428,6 +9436,7 @@ mod tests {
                 },
                 duration_ms: Some(8_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::unavailable("test"),
             },
         );
@@ -9693,6 +9702,7 @@ mod tests {
                 },
                 duration_ms: Some(10_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::jellyfin_pcm_wav(),
             },
         );
@@ -9921,6 +9931,7 @@ mod tests {
                 },
                 duration_ms: Some(10_000),
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 seek: SeekCapability::unavailable("seek.validating"),
             },
         );

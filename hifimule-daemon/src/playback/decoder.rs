@@ -149,6 +149,7 @@ pub fn decode_stream_with_seek(
         1.0,
         None,
         pcm,
+        None,
         cancel,
     )
 }
@@ -168,6 +169,7 @@ pub fn decode_stream_with_seek_and_gain(
     gain: f32,
     qualified_suffix: Option<&str>,
     pcm: Arc<ArrayQueue<f32>>,
+    pcm_buffer_ms: Option<Arc<AtomicU64>>,
     cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<DecodeSummary> {
     if !gain.is_finite() || gain <= 0.0 {
@@ -441,6 +443,14 @@ pub fn decode_stream_with_seek_and_gain(
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
+        if let Some(buffer_ms) = &pcm_buffer_ms {
+            let samples_per_second =
+                u64::from(output_rate).saturating_mul(u64::from(output_channels));
+            buffer_ms.store(
+                (pcm.len() as u64).saturating_mul(1_000) / samples_per_second.max(1),
+                Ordering::Release,
+            );
+        }
         let mut packet = ffmpeg::Packet::empty();
         match packet.read(&mut input) {
             Ok(()) => {}
@@ -638,6 +648,7 @@ mod tests {
             gain,
             Some("wav"),
             pcm,
+            None,
             cancel,
         )
         .unwrap();

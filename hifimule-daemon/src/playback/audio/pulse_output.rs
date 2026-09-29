@@ -97,6 +97,7 @@ pub(super) fn run_output(
     event_epoch: Arc<AtomicU64>,
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
+    pcm_buffer_ms: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
     _output_control: Arc<OutputControl>,
@@ -162,6 +163,7 @@ pub(super) fn run_output(
             gain,
             qualified_suffix.as_deref(),
             decoder_pcm,
+            Some(pcm_buffer_ms),
             decoder_cancel,
         )
     });
@@ -287,6 +289,8 @@ pub(super) fn run_output(
                     duration_ms,
                     metadata,
                     representation,
+                    selected_quality,
+                    pcm_buffer_ms,
                     preparation,
                     seek_mechanism,
                     gain,
@@ -308,6 +312,7 @@ pub(super) fn run_output(
                         metadata: metadata.clone(),
                         duration_ms,
                         representation: representation.clone(),
+                        selected_quality,
                         predecessor_position_ms: match seek_qualified.load(Ordering::Acquire) {
                             0 => provider_duration_ms,
                             verified => verified,
@@ -345,6 +350,7 @@ pub(super) fn run_output(
                             gain,
                             qualified_suffix.as_deref(),
                             queue,
+                            Some(pcm_buffer_ms),
                             decoder_cancel,
                         )
                     },

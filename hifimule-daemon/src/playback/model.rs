@@ -229,6 +229,21 @@ pub struct SelectedPlaybackQuality {
     pub policy_version: u8,
 }
 
+impl SelectedPlaybackQuality {
+    #[cfg(test)]
+    pub fn fixture(representation_id: impl Into<String>) -> Self {
+        Self {
+            representation_id: representation_id.into(),
+            codec: None,
+            container: None,
+            bitrate_kbps: None,
+            reduced: false,
+            reason: None,
+            policy_version: super::adaptation::POLICY_VERSION,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackTrackMetadata {
@@ -345,6 +360,7 @@ pub enum PlaybackEvent {
         metadata: PlaybackTrackMetadata,
         duration_ms: Option<u64>,
         representation: String,
+        selected_quality: SelectedPlaybackQuality,
         seek: SeekCapability,
     },
     SeekQualified {
@@ -358,6 +374,7 @@ pub enum PlaybackEvent {
         metadata: PlaybackTrackMetadata,
         duration_ms: u64,
         representation: String,
+        selected_quality: SelectedPlaybackQuality,
         predecessor_position_ms: u64,
         successor_offset_frames: u64,
         sample_rate: u32,

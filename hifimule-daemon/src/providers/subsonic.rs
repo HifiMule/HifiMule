@@ -724,8 +724,10 @@ impl MediaProvider for SubsonicProvider {
         })?;
         let mut representations = vec![PlaybackRepresentation {
             id: crate::providers::RepresentationId(format!(
-                "subsonic-original-{}",
-                song.suffix.as_deref().unwrap_or("unknown")
+                "subsonic-original-{}-{}kbps",
+                song.suffix.as_deref().unwrap_or("unknown"),
+                song.bitrate_kbps
+                    .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
             )),
             quality: crate::providers::PlaybackQuality {
                 tier: 100,
@@ -3157,6 +3159,56 @@ mod tests {
                 .map(|(_, value)| value.into_owned())
                 .as_deref(),
             Some("raw")
+        );
+    }
+
+    #[tokio::test]
+    async fn navidrome_high_bitrate_playback_exposes_stable_scoped_fallback() {
+        let mut server = Server::new_async().await;
+        let _song = server
+            .mock("GET", "/rest/getSong.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "song1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""song":{"id":"song1","title":"Track","duration":319,"suffix":"flac","bitRate":320}"#,
+            ))
+            .create_async()
+            .await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.0","openSubsonic":true}}"#)
+            .create_async()
+            .await;
+        let provider = SubsonicProvider::from_client_for_tests(
+            SubsonicClient::new(server.url(), USERNAME, PASSWORD).expect("client"),
+            true,
+        );
+
+        let playback = provider.resolve_playback("song1").await.expect("playback");
+
+        assert_eq!(playback.representations.len(), 2);
+        assert_eq!(
+            playback.representations[0].id.0,
+            "subsonic-original-flac-320kbps"
+        );
+        assert_eq!(playback.representations[1].id.0, "navidrome-mp3-192");
+        assert_eq!(
+            playback.representations[1]
+                .request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "maxBitRate")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("192")
         );
     }
 

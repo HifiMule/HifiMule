@@ -145,6 +145,7 @@ mod tests {
                 },
                 duration_ms: 9_000,
                 representation: "wav".into(),
+                selected_quality: crate::playback::model::SelectedPlaybackQuality::fixture("wav"),
                 predecessor_position_ms: 8_000,
                 successor_offset_frames: 0,
                 sample_rate: 48_000,
