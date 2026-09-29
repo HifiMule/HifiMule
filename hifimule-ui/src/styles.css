@@ -2522,6 +2522,8 @@ h2 {
 .playback-selection-settings__row { display: flex; align-items: end; flex-wrap: wrap; gap: .5rem; }
 .playback-selection-settings label { display: grid; gap: .2rem; min-width: 8rem; flex: 1 1 10rem; }
 .playback-selection-settings select, .playback-selection-settings input { min-width: 0; width: 100%; padding: .45rem; color: inherit; background: var(--surface-raised); border: 1px solid var(--surface-border); border-radius: var(--radius); }
+.playback-selection-settings select { color-scheme: dark; }
+.playback-selection-settings select option { color: var(--ink); background: var(--panel-bg); }
 .playback-selection-settings__controls { display: flex; flex-wrap: wrap; gap: .5rem; }
 .playback-selection-settings button { padding: .45rem .7rem; color: inherit; background: var(--surface-raised); border: 1px solid var(--surface-border); border-radius: var(--radius); cursor: pointer; }
 .playback-selection-settings button:disabled { opacity: .55; cursor: default; }
