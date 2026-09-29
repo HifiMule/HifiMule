@@ -4,7 +4,7 @@ use crate::domain::models::{
     SearchResult, Seconds, Song,
 };
 use crate::providers::{
-    BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, MediaProvider,
+    BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, LiveStatusRequest, MediaProvider,
     PlaybackDescription, PlaybackProvenance, PlaybackRepresentation, PlaybackRequest,
     ProviderChangeContext, ProviderChangeMetadata, ProviderCredentials, ProviderError,
     ProviderSyncedSong, SUBSONIC_PLAYLISTS_LIBRARY_ID, ScrobbleRequest, ScrobbleSubmission,
@@ -717,6 +717,41 @@ impl MediaProvider for SubsonicProvider {
         }
     }
 
+    async fn report_live_status(&self, request: LiveStatusRequest) -> Result<(), ProviderError> {
+        self.client.verify_live_navidrome().await?;
+        let extensions: OpenSubsonicExtensionsBody =
+            self.client.get("getOpenSubsonicExtensions", &[]).await?;
+        if !extensions
+            .open_subsonic_extensions
+            .iter()
+            .any(|extension| extension.name == "playbackReport" && extension.versions.contains(&1))
+        {
+            return Err(ProviderError::UnsupportedCapability(
+                "playbackReport v1 is not advertised".into(),
+            ));
+        }
+        let position_ms = request.position_ms.to_string();
+        let _: NoBody = self
+            .client
+            .get(
+                "reportPlayback",
+                &[
+                    ("mediaId", &request.song_id),
+                    ("mediaType", "song"),
+                    ("positionMs", &position_ms),
+                    ("state", request.state.as_str()),
+                    ("ignoreScrobble", "true"),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn report_live_completed(&self, song_id: &str) -> Result<(), ProviderError> {
+        self.client.verify_live_navidrome().await?;
+        self.client.scrobble(song_id, true).await
+    }
+
     fn change_metadata(&self, event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         Self::change_metadata_from_version(event.version.as_deref())
     }
@@ -1129,12 +1164,34 @@ impl SubsonicClient {
     }
 
     async fn ping(&self) -> Result<PingResult, ProviderError> {
-        let envelope: SubsonicEnvelope<NoBody> = self.get_envelope("ping", &[]).await?;
+        let envelope: SubsonicEnvelope<PingBody> = self.get_envelope("ping", &[]).await?;
         Ok(PingResult {
             open_subsonic: envelope.response.open_subsonic.unwrap_or(false),
             server_version: envelope.response.server_version,
             server_type: envelope.response.server_type,
+            implementation_version: envelope.response.body.implementation_version,
         })
+    }
+
+    async fn verify_live_navidrome(&self) -> Result<(), ProviderError> {
+        let ping = self.ping().await?;
+        let verified_version = ping
+            .implementation_version
+            .as_deref()
+            .is_some_and(|version| {
+                version.strip_prefix("0.64.2").is_some_and(|suffix| {
+                    suffix.is_empty() || suffix.starts_with(' ') || suffix.starts_with('(')
+                })
+            });
+        if !ping.open_subsonic
+            || !is_navidrome_server_type(ping.server_type.as_deref())
+            || !verified_version
+        {
+            return Err(ProviderError::UnsupportedCapability(
+                "live reporting is not verified for this server version".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn get_artists(&self) -> Result<ArtistsBody, ProviderError> {
@@ -2002,6 +2059,7 @@ struct PingResult {
     open_subsonic: bool,
     server_version: Option<String>,
     server_type: Option<String>,
+    implementation_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2012,6 +2070,25 @@ struct ApiErrorDto {
 
 #[derive(Debug, Default, Deserialize)]
 struct NoBody {}
+
+#[derive(Debug, Default, Deserialize)]
+struct PingBody {
+    #[serde(default, rename = "serverVersion")]
+    implementation_version: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenSubsonicExtensionsBody {
+    #[serde(default, rename = "openSubsonicExtensions")]
+    open_subsonic_extensions: Vec<OpenSubsonicExtension>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSubsonicExtension {
+    name: String,
+    #[serde(default)]
+    versions: Vec<u32>,
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct ArtistsBody {
@@ -3783,6 +3860,111 @@ mod tests {
             })
             .await;
 
+        assert!(matches!(
+            result,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_status_uses_advertised_navidrome_report_with_counting_disabled() {
+        let mut server = Server::new_async().await;
+        let _ping = server.mock("GET", "/rest/ping.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2 (fixture)","openSubsonic":true}}"#)
+            .create_async().await;
+        let _extensions = server.mock("GET", "/rest/getOpenSubsonicExtensions.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonicExtensions":[{"name":"playbackReport","versions":[1]}]}}"#)
+            .create_async().await;
+        let _report = server
+            .mock("GET", "/rest/reportPlayback.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                for (key, value) in [
+                    ("mediaId", "song1"),
+                    ("mediaType", "song"),
+                    ("positionMs", "1234"),
+                    ("state", "paused"),
+                    ("ignoreScrobble", "true"),
+                ] {
+                    matchers.push(Matcher::UrlEncoded(key.into(), value.into()));
+                }
+                matchers
+            }))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+        provider
+            .report_live_status(crate::providers::LiveStatusRequest {
+                song_id: "song1".into(),
+                position_ms: 1234,
+                state: crate::providers::LivePlaybackState::Paused,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_completed_submits_once_only_for_verified_navidrome_version() {
+        let mut server = Server::new_async().await;
+        let _ping = server.mock("GET", "/rest/ping.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2 (fixture)","openSubsonic":true}}"#)
+            .create_async().await;
+        let _report = server
+            .mock("GET", "/rest/scrobble.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "song1".into()));
+                matchers.push(Matcher::UrlEncoded("submission".into(), "true".into()));
+                matchers
+            }))
+            .expect(1)
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        provider(&server)
+            .await
+            .report_live_completed("song1")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_completion_rejects_other_navidrome_version_before_scrobble() {
+        let mut server = Server::new_async().await;
+        let _ping = server.mock("GET", "/rest/ping.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.3","openSubsonic":true}}"#)
+            .create_async().await;
+        let result = provider(&server).await.report_live_completed("song1").await;
+        assert!(matches!(
+            result,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_status_rejects_missing_playback_report_extension() {
+        let mut server = Server::new_async().await;
+        let _ping = server.mock("GET", "/rest/ping.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2","openSubsonic":true}}"#)
+            .create_async().await;
+        let _extensions = server.mock("GET", "/rest/getOpenSubsonicExtensions.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonicExtensions":[]}}"#)
+            .create_async().await;
+        let result = provider(&server)
+            .await
+            .report_live_status(crate::providers::LiveStatusRequest {
+                song_id: "song1".into(),
+                position_ms: 0,
+                state: crate::providers::LivePlaybackState::Playing,
+            })
+            .await;
         assert!(matches!(
             result,
             Err(ProviderError::UnsupportedCapability(_))

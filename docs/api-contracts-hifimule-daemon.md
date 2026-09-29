@@ -795,6 +795,12 @@ The playback worker is joined after successful preservation and sync drain. A jo
 
 `playback.getSession` includes an additive `playback` object with safe metadata, representation, duration, status (`idle`, `loading`, `active`, `paused`, `stopped`, `completed`, `error`) and a sanitized `{ code, retryable }` failure. It never includes provider requests or credentials.
 
+## Live listening reports (Story 16.7)
+
+`playback.listLiveReports` is read-only and accepts `{ "schemaVersion": 1, "sessionId": "<UUID>" }`. It returns `{ "data": { "reports": [...] } }` with at most 50 newest operations from that logical session. Each row includes operation, occurrence, attempt, portable server, and server-local track IDs; heard and duration milliseconds; status; attempt count; and an allowlisted diagnostic category. Credentials, authenticated URLs, and provider response bodies never appear. The UI explains `ineligible`, `pending`, `sending`, `confirmed`, `failed`, `ambiguous`, and `unsupported` separately. `confirmed` means the source server accepted the completion request, not that HifiMule independently reconciled a play count.
+
+The daemon alone sends live status and completed-listen requests to the frozen source. Only Navidrome 0.64.2 with OpenSubsonic and advertised `playbackReport` v1 has a verified live status route. Status uses `reportPlayback(ignoreScrobble=true)`, so it cannot count a play. Eligible completion uses legacy `scrobble(submission=true)` once. Jellyfin 12.1.0, other Subsonic-compatible versions, and Audiobookshelf live music reporting remain disabled pending separate provider contracts. Rockbox device scrobbling and Audiobookshelf book/podcast continuity retain their existing paths.
+
 ## Full-track preview overlay (Story 15.11)
 
 `playback.previewTrack` accepts `{ schemaVersion, instanceId, sessionId, commandId, expectedQueueRevision, expectedGenerationId, source: { serverId, trackId } }`. Admission preserves the canonical main queue and its logical session identity, checkpoints its actual committed cursor and intent, and starts a separately identified full-track audition at position zero. A later Preview replaces only the audition and retains the original main checkpoint. Preview does not advance `queueRevision`.

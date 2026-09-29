@@ -284,6 +284,15 @@ test('all new bar labels are translated in every shipped locale', () => {
   }
 });
 
+test('live listening outcomes have distinct explanations in every locale', () => {
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  for (const locale of ['en','fr','es','de']) {
+    for (const status of ['source','ineligible','pending','sending','confirmed','failed','ambiguous','unsupported']) {
+      assert.ok(catalog[locale][`playback.reporting.${status}`], `${locale}: ${status}`);
+    }
+  }
+});
+
 test('initial read failure offers local browsing and refresh without pretending playback paused', async () => {
   let failing = true; let browsed = 0;
   const current = snapshot('playing');

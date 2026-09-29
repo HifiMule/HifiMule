@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 11;
+pub const PERSISTENCE_VERSION: i64 = 12;
 type RadioRow = (
     String,
     Option<String>,
@@ -248,6 +248,31 @@ impl Database {
             CREATE TRIGGER IF NOT EXISTS playback_book_mapping_queue AFTER UPDATE OF session_id,queue_revision ON playback_sessions BEGIN DELETE FROM playback_book_mapping WHERE session_id<>NEW.session_id OR queue_revision<>NEW.queue_revision; END;
             CREATE TRIGGER IF NOT EXISTS playback_book_continuity_current AFTER UPDATE OF current_occurrence_id,session_id ON playback_sessions BEGIN DELETE FROM playback_book_continuity WHERE session_id<>NEW.session_id OR occurrence_id<>COALESCE(NEW.current_occurrence_id,''); END;
             CREATE TRIGGER IF NOT EXISTS playback_book_continuity_occurrence AFTER DELETE ON playback_occurrences BEGIN DELETE FROM playback_book_continuity WHERE occurrence_id=OLD.occurrence_id; END;")?;
+        // Version 12: source-frozen live listening journal. No credential or
+        // authenticated URL is persisted. Sending rows become ambiguous on
+        // restart instead of replaying a potentially accepted write.
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_live_reports (
+            operation_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK(schema_version=1),
+            session_id TEXT NOT NULL,
+            occurrence_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            server_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('completed')),
+            heard_ms INTEGER NOT NULL CHECK(heard_ms>=0),
+            duration_ms INTEGER CHECK(duration_ms>0),
+            terminal_reason TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ineligible','pending','sending','confirmed','failed','ambiguous','unsupported')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+            next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            diagnostic TEXT,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            UNIQUE(session_id,occurrence_id,kind)
+        );
+        CREATE INDEX IF NOT EXISTS playback_live_reports_status ON playback_live_reports(status,created_at);
+        CREATE INDEX IF NOT EXISTS playback_live_reports_session ON playback_live_reports(session_id,created_at);")?;
         let key_pattern = format!("mbrec:{}:%", super::recording::RESOLVER_VERSION);
         let unknown: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording WHERE resolver_version<>?1 OR recording_key NOT LIKE ?2 UNION SELECT 1 FROM playback_radio_recording_membership WHERE recording_key NOT LIKE ?2)", params![super::recording::RESOLVER_VERSION,key_pattern], |row|row.get(0))?;
         if unknown {
@@ -2980,7 +3005,7 @@ mod tests {
             .unwrap()
             .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[test]
@@ -3120,7 +3145,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 11);
+        assert_eq!(PERSISTENCE_VERSION, 12);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);

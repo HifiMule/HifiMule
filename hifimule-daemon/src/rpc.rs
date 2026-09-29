@@ -366,6 +366,15 @@ pub async fn run_server(
         state.server_manager.clone(),
         config.shutdown.clone(),
     ));
+    let (live_status_tx, live_status_rx) = tokio::sync::mpsc::channel(256);
+    state.playback.register_live_status_sender(live_status_tx);
+    let _live_reporter = tokio::spawn(crate::playback::reporting::run_reporter(
+        state.db.clone(),
+        state.server_manager.clone(),
+        state.playback.clone(),
+        live_status_rx,
+        config.shutdown.clone(),
+    ));
     native_bridge
         .publish(crate::playback::native::start_ingress(playback_commands))
         .map_err(|_| "native playback ingress was initialized twice".to_string())?;
@@ -662,6 +671,9 @@ async fn handler(
         }
         "playback.retryCheckpoint" => handle_playback_retry_checkpoint(&state, payload.params),
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
+        "playback.listLiveReports" => {
+            handle_playback_list_live_reports(&state, payload.params).await
+        }
         "playback.getSelectionConfig" => playback_selection::get_config(payload.params).await,
         "playback.saveSelectionConfig" => {
             playback_selection::save_config(&state, payload.params).await
@@ -948,6 +960,41 @@ async fn handle_playback_get_session(
         .map_err(playback_task_error)?
         .map(|data| serde_json::json!({"data":data}))
         .map_err(playback_error)
+}
+
+async fn handle_playback_list_live_reports(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Params {
+        schema_version: u32,
+        session_id: String,
+    }
+    let p: Params =
+        serde_json::from_value(params.unwrap_or(Value::Null)).map_err(|_| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.listLiveReports parameters".into(),
+            data: Some(serde_json::json!({"code":"INVALID_REPORT_QUERY"})),
+        })?;
+    if p.schema_version != 1 || uuid::Uuid::parse_str(&p.session_id).is_err() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.listLiveReports parameters".into(),
+            data: Some(serde_json::json!({"code":"INVALID_REPORT_QUERY"})),
+        });
+    }
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_live_reports(&p.session_id, 50))
+        .await
+        .map_err(playback_task_error)?
+        .map(|reports| serde_json::json!({"data":{"reports": reports}}))
+        .map_err(|_| JsonRpcError {
+            code: -32603,
+            message: "Live reports unavailable".into(),
+            data: Some(serde_json::json!({"code":"REPORT_QUERY_FAILED"})),
+        })
 }
 
 async fn handle_playback_list_occurrences(
@@ -10719,6 +10766,7 @@ mod tests {
         assert!(is_mutating_method("playback.seek"));
         assert!(is_mutating_method("playback.retryRestore"));
         assert!(!is_mutating_method("playback.getSession"));
+        assert!(!is_mutating_method("playback.listLiveReports"));
         assert!(!is_mutating_method("playback.listOccurrences"));
 
         let initial = handle_playback_get_session(&state, Some(json!({"schemaVersion": 1})))
@@ -10727,6 +10775,13 @@ mod tests {
         let snapshot = &initial["data"];
         assert_eq!(snapshot["schemaVersion"], 1);
         assert!(snapshot.get("schema_version").is_none());
+        let report_list = handle_playback_list_live_reports(
+            &state,
+            Some(json!({"schemaVersion": 1, "sessionId": snapshot["sessionId"]})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report_list["data"]["reports"].as_array().unwrap().len(), 0);
         let command_id = uuid::Uuid::new_v4().to_string();
         let applied = handle_playback_apply_session(
             &state,

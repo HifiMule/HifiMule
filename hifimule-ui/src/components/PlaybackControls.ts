@@ -1,4 +1,4 @@
-import { playbackControl, playbackDescribeOccurrences, playbackStartSelection, OccurrenceDisplay, playbackListOutputs, playbackSeek, playbackSelectOutput, serverList, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
+import { playbackControl, playbackDescribeOccurrences, playbackStartSelection, OccurrenceDisplay, playbackListOutputs, playbackListLiveReports, type LiveReport, playbackSeek, playbackSelectOutput, serverList, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
 import { formatServerIdentity } from '../serverIdentity';
 import { playbackStore } from '../state/playback';
@@ -10,6 +10,10 @@ export class PlaybackControls {
     private interactionEpoch = 0;
     private resizeObserver?: ResizeObserver;
     private repaintTimer: ReturnType<typeof setInterval> | undefined;
+    private reportTimer: ReturnType<typeof setInterval> | undefined;
+    private reportRequest = 0;
+    private reports: LiveReport[] = [];
+    private readonly reportStatus = document.createElement('div');
     private snapshot: PlaybackSessionSnapshot | undefined;
     private busy = false;
     private startBusy = false;
@@ -192,7 +196,9 @@ export class PlaybackControls {
         actions.className = 'playback-controls__actions';
         actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.playSomething, this.startRoute, this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
         this.messages.className = 'playback-controls__messages';
-        this.messages.append(this.status, this.startStatus, this.seekStatus, this.error);
+        this.reportStatus.setAttribute('role', 'status');
+        this.reportStatus.setAttribute('aria-live', 'polite');
+        this.messages.append(this.status, this.startStatus, this.seekStatus, this.error, this.reportStatus);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
         this.back.hidden = this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
@@ -204,6 +210,9 @@ export class PlaybackControls {
                 else void this.refreshOutputs(false);
             },
         );
+        if (typeof globalThis.setInterval === 'function') {
+            this.reportTimer = globalThis.setInterval(() => void this.refreshLiveReports(), 5000);
+        }
         this.unsubscribeConnection = playbackStore.subscribeConnection(state => {
             if (this.disposed) return;
             if (state !== 'fresh') {
@@ -230,6 +239,7 @@ export class PlaybackControls {
         this.unsubscribePlayback?.();
         this.unsubscribePlayback = undefined;
         if (this.repaintTimer !== undefined) globalThis.clearInterval(this.repaintTimer);
+        if (this.reportTimer !== undefined) globalThis.clearInterval(this.reportTimer);
         window.removeEventListener('pagehide', this.onPageHide);
     }
     openOutputChoice(): void {
@@ -264,6 +274,10 @@ export class PlaybackControls {
                 if (!this.scrubbing && !this.seekBusy && !snapshot.playback.pendingSeek
                     && snapshot.playback.seekOutcome?.status !== 'pending') this.scrubPreviewMs = undefined;
                 this.loadMetadata(snapshot);
+                if (!previous || snapshot.sessionId !== previous.sessionId || snapshot.current?.occurrenceId !== previous.current?.occurrenceId) {
+                    this.reports = [];
+                    void this.refreshLiveReports();
+                }
                 this.render(snapshot);
                 if (!previous || snapshot.instanceId !== previous.instanceId) {
                     this.resetOutput = false;
@@ -273,6 +287,12 @@ export class PlaybackControls {
             }
     }
     private render(snapshot: PlaybackSessionSnapshot): void {
+        this.reportStatus.replaceChildren(...this.reports.slice(0, 3).map(report => {
+            const line = document.createElement('div');
+            const source = this.serverIdentities.get(report.serverId)?.label ?? t('playback.reporting.source');
+            line.textContent = `${source} (${report.occurrenceId.slice(0, 8)}): ${t(`playback.reporting.${report.status}`)}`;
+            return line;
+        }));
         const metadata = snapshot.playback.metadata ?? (snapshot.mode === 'main' ? this.metadata : undefined);
         this.setText(this.title, snapshot.current ? metadata?.title ?? t('playback.unknown_track') : t('playback.nothing_selected'));
         this.setText(this.artist, snapshot.current ? metadata?.artist ?? '' : '');
@@ -341,6 +361,18 @@ export class PlaybackControls {
         for (const [button, hint] of this.hints) hint.hidden = button.hidden;
         this.renderOptions();
         this.renderTimeline();
+    }
+
+    private async refreshLiveReports(): Promise<void> {
+        const sessionId = this.snapshot?.sessionId;
+        if (!sessionId || this.disposed) return;
+        const request = ++this.reportRequest;
+        try {
+            const reports = await playbackListLiveReports(sessionId);
+            if (this.disposed || request !== this.reportRequest || this.snapshot?.sessionId !== sessionId) return;
+            this.reports = reports;
+            if (this.snapshot) this.render(this.snapshot);
+        } catch { /* Playback remains usable; the next refresh can recover status. */ }
     }
 
     private invalidateInteractions(clearCommandError = false, preserveStart = false): void {

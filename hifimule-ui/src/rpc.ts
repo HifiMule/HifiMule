@@ -421,6 +421,16 @@ export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
     return result.data;
 }
 
+export type LiveReportStatus = 'ineligible' | 'pending' | 'sending' | 'confirmed' | 'failed' | 'ambiguous' | 'unsupported';
+export interface LiveReport {
+    operationId: string; sessionId: string; occurrenceId: string; serverId: string;
+    status: LiveReportStatus; diagnostic: string | null;
+}
+export async function playbackListLiveReports(sessionId: string): Promise<LiveReport[]> {
+    const result = await rpcCall('playback.listLiveReports', { schemaVersion: 1, sessionId });
+    return result.data.reports;
+}
+
 export type PlaybackSelectionKind = 'playlist' | 'artist' | 'genre';
 export type PlaybackSelectionOrdering = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery' | 'rarity';
 export interface PlaybackSelectionSource { serverId: string; kind: PlaybackSelectionKind; ref: string }

@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-29",
+  "host": "macOS arm64",
+  "scope": "Controlled test accounts; track identifiers are SHA-256 prefixes; request credentials and URLs omitted",
+  "observations": [
+    {
+      "provider": "Jellyfin",
+      "serverVersion": "12.1.0",
+      "trackSha256Prefix": "03575a38be",
+      "trackDurationSeconds": 38,
+      "requests": [
+        { "method": "POST", "path": "/Sessions/Playing", "body": { "ItemId": "<track>", "PositionTicks": 0, "PlayMethod": "DirectPlay", "PlaySessionId": "<fresh-id>" }, "httpStatus": 204, "playCountAfter": 1 },
+        { "method": "POST", "path": "/Sessions/Playing/Stopped", "body": { "ItemId": "<track>", "PositionTicks": 10000000, "PlaySessionId": "<same-id>", "Failed": false }, "httpStatus": 204, "playCountAfter": 1 }
+      ],
+      "playCountBefore": 0,
+      "conclusion": "Session start counts an early listen. Live session status must remain disabled for this version."
+    },
+    {
+      "provider": "Jellyfin",
+      "serverVersion": "12.1.0",
+      "trackSha256Prefix": "494866f054",
+      "trackDurationSeconds": 39,
+      "requests": [
+        { "method": "POST", "path": "/UserPlayedItems/<track>?userId=<user>", "httpStatus": 200, "playCountAfter": 1 },
+        { "method": "POST", "path": "/UserPlayedItems/<track>?userId=<user>", "httpStatus": 200, "playCountAfter": 1 }
+      ],
+      "playCountBefore": 0,
+      "conclusion": "Explicit marking did not count a deliberate repeat in this probe; it cannot satisfy occurrence-level repeat reporting without further verification."
+    },
+    {
+      "provider": "Navidrome",
+      "serverVersion": "0.64.2 (10114574)",
+      "protocolVersion": "1.16.1",
+      "trackSha256Prefix": "a72ecdee3b",
+      "trackDurationSeconds": 14,
+      "requests": [
+        { "method": "GET", "path": "/rest/scrobble.view", "params": { "id": "<track>", "submission": "false" }, "apiStatus": "ok", "playCountAfter": 0, "visibleInNowPlaying": true },
+        { "method": "GET", "path": "/rest/scrobble.view", "params": { "id": "<track>", "submission": "true" }, "apiStatus": "ok", "playCountAfter": 1 }
+      ],
+      "playCountBefore": 0,
+      "conclusion": "Legacy now-playing and completed submissions have distinct observed effects."
+    },
+    {
+      "provider": "Navidrome",
+      "serverVersion": "0.64.2 (10114574)",
+      "advertisedExtension": { "name": "playbackReport", "versions": [1] },
+      "trackSha256Prefix": "a6369393b1",
+      "trackDurationSeconds": 82,
+      "requests": [
+        { "method": "GET", "path": "/rest/reportPlayback.view", "params": { "mediaId": "<track>", "mediaType": "song", "positionMs": 0, "state": "starting", "ignoreScrobble": true }, "apiStatus": "ok" },
+        { "method": "GET", "path": "/rest/reportPlayback.view", "params": { "mediaId": "<track>", "mediaType": "song", "positionMs": 1000, "state": "playing", "ignoreScrobble": true }, "apiStatus": "ok" },
+        { "method": "GET", "path": "/rest/reportPlayback.view", "params": { "mediaId": "<track>", "mediaType": "song", "positionMs": 82000, "state": "stopped", "ignoreScrobble": true }, "apiStatus": "ok", "playCountAfter": 0 },
+        { "method": "GET", "path": "/rest/scrobble.view", "params": { "id": "<track>", "submission": "true" }, "apiStatus": "ok", "playCountAfter": 1 },
+        { "method": "GET", "path": "/rest/scrobble.view", "params": { "id": "<track>", "submission": "true" }, "apiStatus": "ok", "playCountAfter": 2 }
+      ],
+      "playCountBefore": 0,
+      "conclusion": "ignoreScrobble prevented a status-only timeline from counting; completed scrobble is non-idempotent."
+    },
+    {
+      "provider": "Navidrome",
+      "serverVersion": "0.64.2 (10114574)",
+      "trackSha256Prefix": "9cdc29b0d5",
+      "trackDurationSeconds": 48,
+      "requests": [
+        { "path": "/rest/reportPlayback.view", "state": "starting", "positionMs": 0, "ignoreScrobble": true, "apiStatus": "ok" },
+        { "path": "/rest/reportPlayback.view", "state": "playing", "positionMs": 1000, "ignoreScrobble": true, "apiStatus": "ok" },
+        { "path": "/rest/reportPlayback.view", "state": "paused", "positionMs": 1000, "ignoreScrobble": true, "apiStatus": "ok" },
+        { "path": "/rest/reportPlayback.view", "state": "starting", "positionMs": 20000, "ignoreScrobble": true, "apiStatus": "ok" },
+        { "path": "/rest/reportPlayback.view", "state": "playing", "positionMs": 21000, "ignoreScrobble": true, "apiStatus": "ok" },
+        { "path": "/rest/reportPlayback.view", "state": "stopped", "positionMs": 48000, "ignoreScrobble": true, "apiStatus": "ok", "playCountAfter": 0 }
+      ],
+      "playCountBefore": 0,
+      "invalidMediaId": { "path": "/rest/reportPlayback.view", "apiStatus": "failed", "errorCode": 70 },
+      "conclusion": "The tested pause, position jump, restart, and stop sequence remained status-only; an invalid ID is a definite API rejection."
+    }
+  ],
+  "unverified": [
+    "Jellyfin session progress, pause, seek and failed stop side effects",
+    "Navidrome reportPlayback counting when ignoreScrobble=false",
+    "Non-Navidrome Subsonic/OpenSubsonic implementations and versions",
+    "Windows and Linux installed-app behavior"
+  ]
+}

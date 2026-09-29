@@ -14,6 +14,7 @@ mod output;
 pub mod persistence;
 pub mod radio;
 pub mod recording;
+pub mod reporting;
 pub mod selection;
 pub mod session;
 pub mod streaming;

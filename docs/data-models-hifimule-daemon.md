@@ -1,6 +1,6 @@
 # Data Models — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-29 | **Scan depth:** Deep
 
 ---
 
@@ -471,3 +471,8 @@ Credentials are split across two locations:
 The neutral domain adds `PodcastShow { type, id, title, description, coverArtId, episodeCount }`, `PodcastEpisode { type, id, showId, showTitle, title, description, durationSeconds, publishedAt, coverArtId }`, `PodcastShowDetail`, and `PodcastSearchResult`. Books map into existing `Album`/`Song` fields, with `ProviderItemMetadata` carrying stable identity, ordered part IDs, chapter markers, and author/narrator presentation credits. Audiobookshelf IDs encode library, item, media, and part or episode identity; titles and local paths are display data only.
 
 `AutoFillPipeline.podcast_retention` stores the role-specific podcast selection policy with recent count, mode, and selected show IDs. It is ignored for music servers. Playback continuity and verified whole-book mapping are persisted in `playback_book_continuity` and `playback_book_mapping` by `playback/persistence.rs`; ordinary device sync does not write listening progress. See the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) for data flow and evidence boundaries.
+# Live listening report journal (Story 16.7)
+
+Playback persistence schema v12 adds `playback_live_reports`. A row is keyed by a random operation ID and unique `(session_id, occurrence_id, kind)` where `kind=completed`. It freezes logical session, occurrence, attempt, portable source server, server-local track, terminal reason, bounded heard milliseconds, and optional known duration. No credential or stream URL is stored. Status is `ineligible`, `pending`, `sending`, `confirmed`, `failed`, `ambiguous`, or `unsupported`; `attempt_count`, `next_attempt_at`, creation/update timestamps, and an allowlisted diagnostic explain processing without storing provider response text.
+
+Only known-duration playback with at least `min(ceil(duration/2), 240000 ms)` of generation-fenced consumed audio qualifies for the verified Navidrome contract. Pause, buffering, skipped-over seek duration, and restored cursor add no heard time. Replayed audio counts when consumed again. Technical failure, output loss, and shutdown do not qualify; output loss closes the current audible segment, and a later explicit resume starts new evidence at its cursor. The queue holds at most 256 pending/sending operations and the journal at most 2048 rows. Terminal rows older than 90 days are pruned on insertion. A worker sends one completion at a time; a pre-send unavailable source is deferred with bounded exponential backoff for at most five claims. An interrupted sending row becomes `ambiguous` on restart and is never automatically replayed.

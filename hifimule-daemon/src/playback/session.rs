@@ -1,4 +1,5 @@
 use super::model::*;
+use super::reporting::{HeardEvidence, LiveStatusSample, TerminalReason};
 mod album_admission;
 pub(crate) use album_admission::{AlbumAdmission, AlbumReservation};
 mod output_selection;
@@ -177,6 +178,9 @@ struct Inner {
     instance_id: String,
     session: PersistedSession,
     preview: Option<ActivePreview>,
+    reporting_main: Option<HeardEvidence>,
+    reporting_preview: Option<HeardEvidence>,
+    reporting_status_tx: Option<tokio::sync::mpsc::Sender<Option<LiveStatusSample>>>,
     preview_return_pending: bool,
     generation_id: String,
     state_sequence: u64,
@@ -278,6 +282,60 @@ struct OwnerResources {
     fenced: Arc<AtomicBool>,
     health: Arc<Mutex<PlaybackHealth>>,
     generation_serial: Arc<AtomicU64>,
+}
+
+impl PlaybackSession {
+    pub fn register_live_status_sender(
+        &self,
+        sender: tokio::sync::mpsc::Sender<Option<LiveStatusSample>>,
+    ) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.reporting_status_tx = Some(sender);
+    }
+
+    /// Snapshot of the frozen source currently associated with audible output.
+    /// This is consumed by the reporting worker, never by the audio callback.
+    pub fn live_status_sample(&self) -> Option<LiveStatusSample> {
+        let i = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        live_status_sample_inner(&i)
+    }
+}
+
+fn live_status_sample_inner(i: &Inner) -> Option<LiveStatusSample> {
+    let evidence = if i.preview.is_some() {
+        i.reporting_preview.as_ref()
+    } else {
+        i.reporting_main.as_ref()
+    }?;
+    if evidence.session_id != i.session.session_id
+        || evidence.generation_id() != i.generation_id
+        || evidence.terminal().is_some()
+        || active_occurrence_id(&i).as_deref() != Some(evidence.occurrence_id.as_str())
+    {
+        return None;
+    }
+    let state = match active_state(&i) {
+        TransportState::Playing if i.playback.status == PlaybackStatus::Active => {
+            crate::providers::LivePlaybackState::Playing
+        }
+        TransportState::Paused | TransportState::Buffering => {
+            crate::providers::LivePlaybackState::Paused
+        }
+        _ => return None,
+    };
+    Some(LiveStatusSample {
+        session_id: evidence.session_id.clone(),
+        occurrence_id: evidence.occurrence_id.clone(),
+        server_id: evidence.server_id.clone(),
+        track_id: evidence.track_id.clone(),
+        generation_id: i.generation_id.clone(),
+        position_ms: if let Some(preview) = i.preview.as_ref() {
+            preview.position_ms
+        } else {
+            i.session.position_ms
+        },
+        state,
+    })
 }
 
 impl PlaybackSession {
@@ -593,6 +651,9 @@ impl PlaybackSession {
             instance_id,
             session,
             preview: None,
+            reporting_main: None,
+            reporting_preview: None,
+            reporting_status_tx: None,
             preview_return_pending: false,
             generation_id: Uuid::new_v4().to_string(),
             state_sequence: 0,
@@ -1184,9 +1245,11 @@ fn owner_loop(
         while let Ok(control) = control_rx.try_recv() {
             match control {
                 OwnerControl::Stop => {
-                    album_admission::cancel_pending(
-                        &mut inner.lock().unwrap_or_else(|e| e.into_inner()),
-                    );
+                    let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    freeze_live_shutdown(&mut i);
+                    publish_health(&i, &health);
+                    album_admission::cancel_pending(&mut i);
+                    drop(i);
                     while let Ok(command) = command_rx.try_recv() {
                         reject_unstarted(command);
                     }
@@ -1206,6 +1269,9 @@ fn owner_loop(
                     }
                     let result =
                         sample_progress(&mut i, &ingress).and_then(|()| checkpoint_inner(&mut i));
+                    if fenced.load(Ordering::Acquire) && result.is_ok() {
+                        freeze_live_shutdown(&mut i);
+                    }
                     publish_health(&i, &health);
                     let _ = reply.send(result);
                 }
@@ -1446,6 +1512,13 @@ fn owner_loop(
                         ) {
                             continue;
                         }
+                        if let Some(evidence) = if i.preview.is_some() {
+                            i.reporting_preview.as_mut()
+                        } else {
+                            i.reporting_main.as_mut()
+                        } {
+                            evidence.sample(&generation_id, position_ms, true);
+                        }
                         if i.preview.is_some() {
                             if let Some(preview) = i.preview.as_mut() {
                                 preview.position_ms = position_ms;
@@ -1501,6 +1574,14 @@ fn owner_loop(
                     if output_lost {
                         i.output_gate.store(false, Ordering::Release);
                         let _ = sample_progress(&mut i, &ingress);
+                        // A lost output closes this audible segment. A later
+                        // explicit resume starts fresh evidence at its cursor.
+                        if let Some(mut evidence) = i.reporting_main.take() {
+                            evidence.freeze(i.playback.duration_ms, TerminalReason::OutputLoss);
+                        }
+                        if let Some(mut evidence) = i.reporting_preview.take() {
+                            evidence.freeze(i.playback.duration_ms, TerminalReason::OutputLoss);
+                        }
                         if let Some(position) =
                             super::audio::global().captured_position(&generation_id)
                         {
@@ -1522,6 +1603,7 @@ fn owner_loop(
                     if output_lost || checkpoint_seek {
                         let _ = checkpoint_inner(&mut i);
                     }
+                    publish_health(&i, &health);
                 }
             }
         }
@@ -1949,6 +2031,15 @@ fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<(
             .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
         p.pending = None;
         if p.generation_id == i.generation_id && p.occurrence_id == active_occurrence_id(i) {
+            let audible = active_state(i) == TransportState::Playing
+                && i.playback.status == PlaybackStatus::Active;
+            if let Some(evidence) = if i.preview.is_some() {
+                i.reporting_preview.as_mut()
+            } else {
+                i.reporting_main.as_mut()
+            } {
+                evidence.sample(&p.generation_id, position, audible);
+            }
             if let Some(preview) = i.preview.as_mut() {
                 if !preview.seek_discontinuous && position >= preview.position_ms {
                     preview.contiguous_heard_ms = preview.contiguous_heard_ms.max(position);
@@ -1962,6 +2053,62 @@ fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<(
         }
     }
     Ok(())
+}
+
+fn ensure_reporting_evidence(i: &mut Inner) {
+    if let Some(preview) = i.preview.as_ref() {
+        let id = &preview.occurrence.occurrence_id;
+        if i.reporting_preview
+            .as_ref()
+            .is_none_or(|e| e.occurrence_id != *id)
+        {
+            i.reporting_preview = Some(HeardEvidence::new(
+                &i.session.session_id,
+                id,
+                id,
+                &preview.occurrence.source.server_id,
+                &preview.occurrence.source.track_id,
+                &i.generation_id,
+                preview.position_ms,
+            ));
+        } else if let Some(evidence) = i.reporting_preview.as_mut() {
+            evidence.discontinuity(&i.generation_id, preview.position_ms);
+        }
+        return;
+    }
+    let Some(id) = i.session.current_occurrence_id.as_deref() else {
+        return;
+    };
+    let (Ok(Some(attempt_id)), Ok(Some(occurrence))) = (
+        i.db.active_playback_attempt(),
+        i.db.playback_occurrence(&i.session.session_id, id),
+    ) else {
+        return;
+    };
+    if i.reporting_main.as_ref().is_none_or(|e| {
+        e.session_id != i.session.session_id || e.occurrence_id != id || e.attempt_id != attempt_id
+    }) {
+        i.reporting_main = Some(HeardEvidence::new(
+            &i.session.session_id,
+            id,
+            &attempt_id,
+            &occurrence.source.server_id,
+            &occurrence.source.track_id,
+            &i.generation_id,
+            i.session.position_ms,
+        ));
+    } else if let Some(evidence) = i.reporting_main.as_mut() {
+        evidence.discontinuity(&i.generation_id, i.session.position_ms);
+    }
+}
+
+fn freeze_live_shutdown(i: &mut Inner) {
+    if let Some(evidence) = i.reporting_main.as_mut() {
+        evidence.freeze(i.playback.duration_ms, TerminalReason::Shutdown);
+    }
+    if let Some(evidence) = i.reporting_preview.as_mut() {
+        evidence.freeze(i.playback.duration_ms, TerminalReason::Shutdown);
+    }
 }
 
 fn refresh_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
@@ -2025,6 +2172,9 @@ fn publish_health(i: &Inner, health: &Mutex<PlaybackHealth>) {
         persistence: i.persistence.clone(),
     };
     wake_radio(i);
+    if let Some(sender) = i.reporting_status_tx.as_ref() {
+        let _ = sender.try_send(live_status_sample_inner(i));
+    }
 }
 
 fn wake_radio(i: &Inner) {
@@ -2454,6 +2604,9 @@ fn retry_restore_inner(
         },
         session: loaded,
         preview: None,
+        reporting_main: None,
+        reporting_preview: None,
+        reporting_status_tx: inner.reporting_status_tx.clone(),
         preview_return_pending: false,
         generation_id: Uuid::new_v4().to_string(),
         state_sequence: next_sequence,
@@ -3376,6 +3529,10 @@ fn finish_preview(
             "there is no active preview",
         ));
     }
+    let was_audible = i
+        .preview
+        .as_ref()
+        .is_some_and(|preview| preview.state == TransportState::Playing);
     super::audio::global().control(ControlAction::Pause);
     if disposition != "naturalCompletion"
         && let Some(position) = super::audio::global().captured_position(&i.generation_id)
@@ -3434,6 +3591,15 @@ fn finish_preview(
         return Err(storage(anyhow::anyhow!(
             "preview terminal persistence failed"
         )));
+    }
+    if let Some(mut evidence) = i.reporting_preview.take() {
+        evidence.sample(&i.generation_id, preview.position_ms, was_audible);
+        evidence.freeze(
+            i.playback.duration_ms,
+            live_terminal_reason(terminal_disposition),
+        );
+        // Reporting storage failure cannot interrupt the audio return path.
+        let _ = i.db.record_live_report(&evidence);
     }
     i.preview = None;
     i.preview_return_pending = should_resume;
@@ -4878,6 +5044,7 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 i.session.state = TransportState::Playing;
             }
             i.playback.status = PlaybackStatus::Active;
+            ensure_reporting_evidence(i);
         }
         PlaybackEvent::Buffering if i.output_gate.load(Ordering::Acquire) => {
             if let Some(preview) = i.preview.as_mut() {
@@ -4904,6 +5071,13 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             .as_ref()
             .is_some_and(|pending| pending.operation_id == operation_id) =>
         {
+            if let Some(evidence) = if i.preview.is_some() {
+                i.reporting_preview.as_mut()
+            } else {
+                i.reporting_main.as_mut()
+            } {
+                evidence.discontinuity(&i.generation_id, actual_position_ms);
+            }
             if let Some(preview) = i.preview.as_mut() {
                 preview.position_ms = actual_position_ms;
             } else {
@@ -5381,6 +5555,23 @@ fn commit_terminal(
         freeze_terminal(i, terminal);
         return Err(storage(error));
     }
+    if !terminal.preserve_existing_outcome
+        && let Some(mut evidence) = i.reporting_main.take()
+    {
+        if evidence.session_id == i.session.session_id
+            && evidence.occurrence_id == terminal.occurrence_id
+        {
+            evidence.freeze(
+                i.playback.duration_ms,
+                live_terminal_reason(terminal.outcome),
+            );
+            // The intent is committed before any worker can send it. A journal
+            // failure is reported separately and never reverses audio state.
+            let _ = i.db.record_live_report(&evidence);
+        } else {
+            i.reporting_main = Some(evidence);
+        }
+    }
     let changed = terminal.session.current_occurrence_id != i.session.current_occurrence_id;
     if changed || recovery {
         i.control_epoch.fetch_add(1, Ordering::AcqRel);
@@ -5420,6 +5611,19 @@ fn commit_terminal(
     response.resume_epoch = i.control_epoch.load(Ordering::Acquire);
     response.seek_epoch = response.resume_epoch;
     Ok(response)
+}
+
+fn live_terminal_reason(outcome: &str) -> TerminalReason {
+    match outcome {
+        "naturalCompletion" => TerminalReason::NaturalEnd,
+        "explicitSkip" | "restarted" | "backNavigation" => TerminalReason::Skip,
+        "stopped" => TerminalReason::Stop,
+        "returned" => TerminalReason::Return,
+        "replaced" | "superseded" => TerminalReason::Replacement,
+        "technicalFailure" => TerminalReason::TechnicalFailure,
+        "outputLoss" => TerminalReason::OutputLoss,
+        _ => TerminalReason::Shutdown,
+    }
 }
 
 fn freeze_terminal(i: &mut Inner, terminal: PendingTerminal) {
@@ -6413,6 +6617,95 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("naturalCompletion")
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn audible_completion_journals_frozen_source_once() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        let (status_tx, mut status_rx) = tokio::sync::mpsc::channel(64);
+        playback.register_live_status_sender(status_tx);
+        let initial = playback.snapshot().unwrap();
+        let source = TrackSource {
+            server_id: "portable-source".into(),
+            track_id: "shared-track-id".into(),
+        };
+        let applied = playback
+            .apply(params(
+                &initial,
+                SessionOperation::PlayTrack {
+                    source: source.clone(),
+                },
+            ))
+            .unwrap();
+        playback.publish_event(
+            applied.generation_id.clone(),
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: source.clone(),
+                    title: "Test".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(40_000),
+                representation: "flac".into(),
+                seek: SeekCapability::unavailable("test"),
+            },
+        );
+        playback.publish_event(applied.generation_id.clone(), PlaybackEvent::Active);
+        playback.publish_event(
+            applied.generation_id.clone(),
+            PlaybackEvent::Completed {
+                position_ms: 40_000,
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let reports = db.list_live_reports(&applied.session_id, 10).unwrap();
+            if reports.len() == 1 {
+                assert_eq!(reports[0].server_id, source.server_id);
+                assert_eq!(reports[0].track_id, source.track_id);
+                assert_eq!(
+                    reports[0].status,
+                    super::super::reporting::LiveReportStatus::Pending
+                );
+                assert_eq!(reports[0].heard_ms, 40_000);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owner did not journal completion"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut saw_playing = false;
+        let mut saw_stopped = false;
+        while let Ok(event) = status_rx.try_recv() {
+            match event {
+                Some(sample) if sample.state == crate::providers::LivePlaybackState::Playing => {
+                    assert_eq!(sample.server_id, source.server_id);
+                    saw_playing = true;
+                }
+                None if saw_playing => saw_stopped = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_playing && saw_stopped,
+            "owner status transitions: playing={saw_playing}, stopped={saw_stopped}"
+        );
+        playback.publish_event(
+            applied.generation_id,
+            PlaybackEvent::Completed {
+                position_ms: 40_000,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            db.list_live_reports(&applied.session_id, 10).unwrap().len(),
+            1
         );
         playback.stop_and_join().unwrap();
     }
@@ -8602,6 +8895,96 @@ mod tests {
             .filter(|outcome| outcome.disposition == "interrupted")
             .count();
         assert_eq!(interrupted_count, 1);
+    }
+
+    #[test]
+    fn full_preview_reports_once_without_replacing_main_evidence() {
+        let (db, playback, main) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let resumed = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: SCHEMA_VERSION,
+                    instance_id: main.instance_id.clone(),
+                    session_id: main.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: main.generation_id.clone(),
+                    occurrence_id: main.current.as_ref().unwrap().occurrence_id.clone(),
+                    action: ControlAction::Resume,
+                },
+                None,
+            )
+            .unwrap();
+        playback.publish_event(resumed.generation_id.clone(), PlaybackEvent::Active);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while playback.inner.lock().unwrap().reporting_main.is_none() {
+            assert!(Instant::now() < deadline, "main evidence did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let main_attempt = playback
+            .inner
+            .lock()
+            .unwrap()
+            .reporting_main
+            .as_ref()
+            .unwrap()
+            .attempt_id
+            .clone();
+        let preview = playback
+            .preview_with_guard(
+                preview_params(&playback.snapshot().unwrap(), "full-preview"),
+                None,
+            )
+            .unwrap();
+        let preview_id = preview.current.as_ref().unwrap().occurrence_id.clone();
+        playback.publish_event(
+            preview.generation_id.clone(),
+            PlaybackEvent::Resolved {
+                metadata: PlaybackTrackMetadata {
+                    source: preview.current.as_ref().unwrap().source.clone(),
+                    title: "Preview".into(),
+                    artist: None,
+                    album: None,
+                },
+                duration_ms: Some(8_000),
+                representation: "wav".into(),
+                seek: SeekCapability::unavailable("test"),
+            },
+        );
+        playback.publish_event(preview.generation_id.clone(), PlaybackEvent::Active);
+        playback.publish_event(
+            preview.generation_id,
+            PlaybackEvent::Completed { position_ms: 8_000 },
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let reports = db.list_live_reports(&main.session_id, 10).unwrap();
+            if reports.len() == 1 {
+                assert_eq!(reports[0].occurrence_id, preview_id);
+                assert_eq!(
+                    reports[0].status,
+                    super::super::reporting::LiveReportStatus::Pending
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preview did not journal its listen"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(playback.snapshot().unwrap().mode, PlaybackMode::Main);
+        assert_eq!(
+            playback
+                .inner
+                .lock()
+                .unwrap()
+                .reporting_main
+                .as_ref()
+                .unwrap()
+                .attempt_id,
+            main_attempt
+        );
     }
 
     #[test]

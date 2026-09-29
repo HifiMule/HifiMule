@@ -587,6 +587,22 @@ pub trait MediaProvider: Send + Sync {
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
 
+    /// Status-only timeline update for a verified server contract. Adapters must
+    /// ensure this operation cannot itself increment a play count.
+    async fn report_live_status(&self, _request: LiveStatusRequest) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "live reporting is not verified for this provider".into(),
+        ))
+    }
+
+    /// One non-idempotent completed-listen submission. The caller journals intent
+    /// and must never blindly retry an ambiguous result.
+    async fn report_live_completed(&self, _song_id: &str) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "live reporting is not verified for this provider".into(),
+        ))
+    }
+
     async fn list_genres(
         &self,
         _library_id: Option<&str>,
@@ -914,6 +930,32 @@ impl fmt::Debug for ProviderCredentials {
             .field("credential", &self.credential)
             .finish()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivePlaybackState {
+    Starting,
+    Playing,
+    Paused,
+    Stopped,
+}
+
+impl LivePlaybackState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Playing => "playing",
+            Self::Paused => "paused",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveStatusRequest {
+    pub song_id: String,
+    pub position_ms: u64,
+    pub state: LivePlaybackState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
