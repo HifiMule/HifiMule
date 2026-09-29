@@ -54,6 +54,7 @@ pub struct CommitBasketExportParams {
     pub snapshot_id: String,
     pub target_device_id: String,
     pub action: BasketExportAction,
+    pub target_connection_revision: String,
     pub expected_basket_hash: String,
 }
 
@@ -89,6 +90,7 @@ pub struct BasketExportPlan {
     pub target_name: String,
     pub target_icon: Option<String>,
     pub action: BasketExportAction,
+    pub target_connection_revision: String,
     pub observed_basket_hash: String,
     pub snapshot_entry_count: String,
     pub projected_entry_count: String,
@@ -132,6 +134,8 @@ pub fn validate_commit(p: &CommitBasketExportParams) -> Result<String, PlaybackE
     })?;
     if Uuid::parse_str(&p.operation_id).is_err()
         || p.operation_id.len() != 36
+        || p.target_connection_revision.is_empty()
+        || p.target_connection_revision.len() > 32
         || p.expected_basket_hash.len() != 64
         || !p
             .expected_basket_hash
@@ -185,6 +189,19 @@ pub(crate) fn migrate(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 }
 
 impl Database {
+    pub fn replay_basket_export(
+        &self,
+        p: &CommitBasketExportParams,
+    ) -> Result<Option<BasketExportOperation>, PlaybackError> {
+        let canonical = validate_commit(p)?;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        match load(&conn, &p.operation_id)? {
+            Some((stored, operation)) if stored == canonical => Ok(Some(operation)),
+            Some(_) => Err(error("BASKET_EXPORT_OPERATION_REUSED", true)),
+            None => Ok(None),
+        }
+    }
+
     pub fn list_basket_exports(
         &self,
         p: ListBasketExportsParams,
@@ -361,6 +378,7 @@ mod tests {
             snapshot_id,
             target_device_id: "device-a".into(),
             action: BasketExportAction::Replace,
+            target_connection_revision: "1".into(),
             expected_basket_hash: "a".repeat(64),
         };
         let db = Database::new(path.clone()).unwrap();
@@ -373,6 +391,13 @@ mod tests {
             .record_basket_export_intent(&request, &"a".repeat(64), &"b".repeat(64))
             .unwrap();
         assert_eq!(same.operation_id, operation_id);
+        assert_eq!(
+            db.replay_basket_export(&request)
+                .unwrap()
+                .unwrap()
+                .operation_id,
+            operation_id
+        );
         let mut mismatch = request.clone();
         mismatch.target_device_id = "device-b".into();
         assert_eq!(

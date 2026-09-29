@@ -4,7 +4,7 @@ baseline_commit: 0357befb460cbc4277f1a59e32fc3dc250cee816
 
 # Story 16.11: Add a listening snapshot to a connected device basket or replace it
 
-Status: review
+Status: done
 
 ## Story
 
@@ -211,3 +211,18 @@ GPT-5 Codex
 
 - 2026-09-29: Added target-bound listening-snapshot basket export foundation; validation remains in progress because the full regression gate is not green.
 - 2026-09-29: User-confirmed full regression pass; completed schema v16/list/recover contract and moved story to review.
+- 2026-09-29: Code-review patches applied: hardened persistence evidence and exact hash journaling, froze the physical connection revision, completed collision/deadline admission, serialized legacy UI saves, mutation-admitted recovery, and added UI recovery controls.
+
+### Review Findings
+
+- [x] [Review][Patch] Preserve authoritative persistence evidence so recovery cannot misclassify a post-rename uncertainty as confirmed rollback [hifimule-daemon/src/device/mod.rs:1465]
+- [x] [Review][Patch] Compute and journal Add's actual pre/post basket hashes inside the per-device commit boundary [hifimule-daemon/src/rpc/playback_export.rs:353]
+- [x] [Review][Patch] Freeze and revalidate destination identity/revision in addition to the manifest device ID [hifimule-daemon/src/playback/basket_export.rs:43]
+- [x] [Review][Patch] Complete preflight validation for portable sources, source locks, item types, and every enabled sync route [hifimule-daemon/src/rpc/playback_export.rs:155]
+- [x] [Review][Patch] Serialize or await every overlapping legacy basket save before authoritative mutation [hifimule-ui/src/state/basket.ts:62]
+- [x] [Review][Patch] Prevent basket edits started during planning/confirmation from suppressing post-commit authoritative hydration [hifimule-ui/src/components/PlaybackSnapshots.ts:155]
+- [x] [Review][Patch] Route and classify snapshot-basket recovery as a mutating RPC [hifimule-daemon/src/rpc.rs:692]
+- [x] [Review][Patch] Replay an existing operation ID before rerunning live snapshot/provider preflight [hifimule-daemon/src/rpc/playback_export.rs:343]
+- [x] [Review][Patch] Detect Add collisions against existing basket entries that the raw-ID-keyed UI cannot faithfully represent [hifimule-daemon/src/rpc/playback_export.rs:127]
+- [x] [Review][Patch] Expose retained commit-uncertain basket exports and an explicit recovery action in the saved-snapshot UI [hifimule-ui/src/components/PlaybackSnapshots.ts:145]
+- [x] [Review][Patch] Bound provider planning with per-call and overall deadlines plus cancellation [hifimule-daemon/src/rpc/playback_export.rs:155]

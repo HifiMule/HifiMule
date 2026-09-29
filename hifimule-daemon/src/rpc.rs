@@ -879,6 +879,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playback.saveSnapshot"
             | "playback.startSnapshotPlaylistExport"
             | "playback.commitSnapshotBasketExport"
+            | "playback.recoverSnapshotBasketExport"
             | "playback.retrySnapshotPlaylistExport"
             | "playback.reconcileSnapshotPlaylistExport"
             | "playback.cancelSnapshotPlaylistExport"
@@ -4565,9 +4566,24 @@ async fn handle_manifest_save_basket(
         .and_then(Value::as_str)
         .map(str::to_owned);
     if let (Some(target_device_id), Some(expected_hash)) = (target_device_id, expected_hash) {
+        let connection_revision = state
+            .device_manager
+            .get_basket_target(&target_device_id)
+            .await
+            .map(|(_, revision)| revision)
+            .ok_or_else(|| JsonRpcError {
+                code: -32010,
+                message: "Basket target unavailable".into(),
+                data: None,
+            })?;
         return match state
             .device_manager
-            .update_basket_checked(&target_device_id, Some(&expected_hash), move |_| Ok(items))
+            .update_basket_checked(
+                &target_device_id,
+                &connection_revision,
+                Some(&expected_hash),
+                move |_| Ok(items),
+            )
             .await
         {
             Ok((manifest, hash)) => Ok(

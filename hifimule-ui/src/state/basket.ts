@@ -44,6 +44,7 @@ class BasketStore extends EventTarget {
     private physicalTargetAvailable = false;
     private saveGeneration = 0;
     private inFlightSave: Promise<void> = Promise.resolve();
+    private authoritativeGeneration: number | null = null;
     private targetDeviceId: string | null = null;
     private basketHash: string | null = null;
 
@@ -56,19 +57,23 @@ class BasketStore extends EventTarget {
     private saveTimeout: number | null = null;
     private async saveBasketToDaemon() {
         if (this._syncingFromDaemon) return;
+        if (this.authoritativeGeneration !== null) return;
         if (this.saveTimeout !== null) {
             window.clearTimeout(this.saveTimeout);
         }
         this.saveTimeout = window.setTimeout(async () => {
             this.saveTimeout = null;
             const generation = ++this.saveGeneration;
-            this.inFlightSave = (async () => { try {
+            const save = async () => { try {
                 const result=await rpcCall('manifest_save_basket', { basketItems: this.getItems(), targetDeviceId:this.targetDeviceId, expectedBasketHash:this.basketHash });
                 if(result?.basketHash)this.basketHash=result.basketHash;
             } catch (e) {
                 console.error("Failed to save basket to daemon:", e);
                 window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: 'Failed to save basket to device' } }));
-            } })();
+            } };
+            // Preserve every outstanding save. Replacing this promise would let
+            // an older request finish after an authoritative export.
+            this.inFlightSave = this.inFlightSave.then(save, save);
             await this.inFlightSave;
             if (generation !== this.saveGeneration) return;
         }, 1000);
@@ -206,13 +211,24 @@ class BasketStore extends EventTarget {
     /** Fence legacy whole-vector saves before a daemon-authoritative export. */
     public async prepareAuthoritativeMutation(): Promise<number> {
         await this.flushPendingSave();
-        return ++this.saveGeneration;
+        const generation = ++this.saveGeneration;
+        this.authoritativeGeneration = generation;
+        return generation;
     }
 
     public hydrateAuthoritative(items: BasketItem[], generation: number, basketHash?:string|null): void {
-        if (generation !== this.saveGeneration) return;
+        if (generation !== this.authoritativeGeneration) return;
         if(basketHash)this.basketHash=basketHash;
         this.hydrateFromDaemon(items);
+        this.authoritativeGeneration = null;
+    }
+
+    public releaseAuthoritativeMutation(generation: number): void {
+        if (generation !== this.authoritativeGeneration) return;
+        this.authoritativeGeneration = null;
+        // Persist edits made while confirmation was open only when no daemon
+        // result replaced them.
+        if (this._dirty) void this.saveBasketToDaemon();
     }
 
     public setDaemonContext(targetDeviceId:string|null,basketHash:string|null):void {

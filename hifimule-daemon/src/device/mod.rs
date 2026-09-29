@@ -22,6 +22,8 @@ pub fn canonical_basket_hash(items: &[BasketItem]) -> String {
 #[derive(Debug)]
 pub enum CheckedManifestUpdateError {
     Conflict { authoritative_hash: String },
+    TargetChanged,
+    CommitUncertain(anyhow::Error),
     Unavailable(anyhow::Error),
 }
 
@@ -29,6 +31,8 @@ impl std::fmt::Display for CheckedManifestUpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Conflict { .. } => write!(f, "basket revision conflict"),
+            Self::TargetChanged => write!(f, "basket target connection changed"),
+            Self::CommitUncertain(error) => error.fmt(f),
             Self::Unavailable(error) => error.fmt(f),
         }
     }
@@ -1336,6 +1340,21 @@ impl DeviceManager {
         }
     }
 
+    /// Returns the manifest plus the connection-observation token for a stable
+    /// physical target. The token changes when a device is disconnected and
+    /// rediscovered, even if a copied manifest reuses the same device id.
+    pub async fn get_basket_target(&self, device_id: &str) -> Option<(DeviceManifest, String)> {
+        let state = self.state.read().await;
+        state.connected_devices.values().find_map(|device| {
+            (device.manifest.device_id == device_id).then(|| {
+                (
+                    device.manifest.clone(),
+                    device.observation_token.to_string(),
+                )
+            })
+        })
+    }
+
     pub async fn select_playback(&self) {
         let token = self.begin_destination_mutation();
         let mut state = self.state.write().await;
@@ -1409,6 +1428,7 @@ impl DeviceManager {
     pub async fn update_basket_checked<F>(
         &self,
         device_id: &str,
+        expected_connection_revision: &str,
         expected_hash: Option<&str>,
         mutation: F,
     ) -> std::result::Result<(DeviceManifest, String), CheckedManifestUpdateError>
@@ -1442,6 +1462,9 @@ impl DeviceManager {
         let connected = state.connected_devices.get_mut(&path).ok_or_else(|| {
             CheckedManifestUpdateError::Unavailable(anyhow::anyhow!("Device not in connected map"))
         })?;
+        if connected.observation_token.to_string() != expected_connection_revision {
+            return Err(CheckedManifestUpdateError::TargetChanged);
+        }
         let before = connected.manifest.clone();
         let before_hash = canonical_basket_hash(&before.basket_items);
         if expected_hash.is_some_and(|expected| expected != before_hash) {
@@ -1463,11 +1486,18 @@ impl DeviceManager {
             crate::device::write_manifest(device_io, &snapshot).await
         };
         if let Err(error) = persisted {
+            let uncertain = !is_mtp || error.is::<ManifestCacheCommitUncertain>();
             let mut state = self.state.write().await;
             if let Some(connected) = state.connected_devices.get_mut(&path) {
-                connected.manifest = before;
+                // Once persistence may have crossed its commit point, retaining
+                // the post-state is safer than manufacturing rollback evidence.
+                connected.manifest = if uncertain { snapshot } else { before };
             }
-            return Err(CheckedManifestUpdateError::Unavailable(error));
+            return Err(if uncertain {
+                CheckedManifestUpdateError::CommitUncertain(error)
+            } else {
+                CheckedManifestUpdateError::Unavailable(error)
+            });
         }
         let hash = canonical_basket_hash(&snapshot.basket_items);
         Ok((snapshot, hash))

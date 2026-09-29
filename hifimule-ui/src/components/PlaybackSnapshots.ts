@@ -1,4 +1,4 @@
-import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackGetSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, playbackPlanSnapshotBasketExport, playbackCommitSnapshotBasketExport, getDaemonState, type SnapshotBasketAction, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot, type Destination } from '../rpc';
+import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackGetSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, playbackPlanSnapshotBasketExport, playbackCommitSnapshotBasketExport, playbackListSnapshotBasketExports, playbackRecoverSnapshotBasketExport, getDaemonState, type SnapshotBasketAction, type SnapshotBasketOperation, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot, type Destination } from '../rpc';
 import { t } from '../i18n';
 import { withDeadline } from '../lifecycleDeadline';
 import { playbackStore } from '../state/playback';
@@ -141,7 +141,7 @@ export class PlaybackSnapshots {
         this.heading.textContent = snapshot.name;
         this.details.textContent = `${new Date(snapshot.createdAt).toLocaleString()} · ${t('playback.snapshots.count', { count: snapshot.entryCount })}`;
         this.exportName.value=snapshot.name;this.exportStatus.replaceChildren();this.exportButton.disabled=false;
-        this.basketStatus.replaceChildren();void this.refreshBasketTarget(snapshot.snapshotId);
+        this.basketStatus.replaceChildren();void this.refreshBasketTarget(snapshot.snapshotId);void this.loadBasketRecoveries(snapshot.snapshotId);
         this.onSavedView(true); this.heading.focus(); void this.loadPage(); void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(v=>{if(v[0])this.renderExport(v[0]);}).catch(error=>{if(!this.disposed&&this.selection?.snapshotId===snapshot.snapshotId)this.exportStatus.textContent=message(snapshotErrorCode(error));});
     }
     private async refreshBasketTarget(snapshotId:string):Promise<void>{
@@ -152,10 +152,22 @@ export class PlaybackSnapshots {
             this.basketTarget.textContent=this.target?t('playback.snapshots.basket.target',{name:this.target.name,id:this.target.deviceId}):t('playback.snapshots.basket.unavailable');
         }catch{if(!this.disposed&&request===this.basketRequest){this.target=undefined;this.basketAdd.disabled=true;this.basketReplace.disabled=true;this.basketTarget.textContent=t('playback.snapshots.basket.unavailable');}}
     }
+    private async loadBasketRecoveries(snapshotId:string):Promise<void>{
+        try{const operations=await playbackListSnapshotBasketExports(snapshotId);if(this.disposed||this.selection?.snapshotId!==snapshotId)return;
+            const uncertain=operations.filter(operation=>operation.state==='commitUncertain');
+            if(uncertain.length)this.renderBasketRecoveries(uncertain);
+        }catch{/* A recovery listing failure must not disable a new export. */}
+    }
+    private renderBasketRecoveries(operations:SnapshotBasketOperation[]):void{
+        const list=document.createElement('ul');
+        for(const operation of operations){const row=document.createElement('li');row.append(document.createTextNode(t('playback.snapshots.basket.state.commitUncertain')));row.append(button('playback.snapshots.export.reconcile',()=>void playbackRecoverSnapshotBasketExport(operation.operationId).then(result=>{if(result.state==='commitConfirmed'&&result.basketItems)basketStore.hydrateFromDaemon(result.basketItems);void this.loadBasketRecoveries(operation.snapshotId);})));list.append(row);}
+        this.basketStatus.replaceChildren(list);
+    }
     private async confirmBasketExport(action:SnapshotBasketAction):Promise<void>{
         const snapshot=this.selection,target=this.target;if(!snapshot||!target||this.disposed)return;
         const request=++this.basketRequest;this.basketAdd.disabled=true;this.basketReplace.disabled=true;this.basketStatus.textContent=t('playback.snapshots.basket.planning');
-        try{const generation=await basketStore.prepareAuthoritativeMutation();const plan=await playbackPlanSnapshotBasketExport(snapshot.snapshotId,target.deviceId,action);
+        let generation:number|undefined;
+        try{generation=await basketStore.prepareAuthoritativeMutation();const plan=await playbackPlanSnapshotBasketExport(snapshot.snapshotId,target.deviceId,action);
             if(this.disposed||request!==this.basketRequest||this.selection?.snapshotId!==snapshot.snapshotId||this.target?.deviceId!==target.deviceId)return;
             if(!plan.faithful){this.basketStatus.textContent=t('playback.snapshots.basket.blocked',{reasons:plan.limitations.map(v=>t(`playback.snapshots.basket.reason.${v.code}`)).join(', ')});return;}
             const prompt=action==='replace'?'playback.snapshots.basket.confirmReplace':'playback.snapshots.basket.confirmAdd';
@@ -165,7 +177,7 @@ export class PlaybackSnapshots {
             if(result.state==='commitConfirmed'&&result.basketItems){basketStore.hydrateAuthoritative(result.basketItems,generation,result.postBasketHash);this.basketStatus.textContent=t(`playback.snapshots.basket.success.${action}`,{name:plan.targetName});}
             else this.basketStatus.textContent=t(`playback.snapshots.basket.state.${result.state}`);
         }catch(error){if(!this.disposed&&request===this.basketRequest)this.basketStatus.textContent=message(snapshotErrorCode(error));}
-        finally{if(!this.disposed&&request===this.basketRequest){this.basketAdd.disabled=!this.target;this.basketReplace.disabled=!this.target;}}
+        finally{if(generation!==undefined)basketStore.releaseAuthoritativeMutation(generation);if(!this.disposed&&request===this.basketRequest){this.basketAdd.disabled=!this.target;this.basketReplace.disabled=!this.target;}}
     }
     private async confirmExport():Promise<void>{
         const snapshot=this.selection;if(!snapshot||this.disposed)return;const request=++this.request;this.exportButton.disabled=true;this.exportStatus.textContent=t('playback.snapshots.export.planning');

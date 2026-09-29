@@ -82,9 +82,9 @@ async fn basket_plan(
     p: PlanBasketExportParams,
 ) -> Result<BasketExportPlan, JsonRpcError> {
     validate_plan(&p).map_err(playback_error)?;
-    let manifest = state
+    let (manifest, target_connection_revision) = state
         .device_manager
-        .get_manifest_for_device(&p.target_device_id)
+        .get_basket_target(&p.target_device_id)
         .await
         .ok_or_else(|| {
             playback_error(crate::playback::export::error(
@@ -126,7 +126,13 @@ async fn basket_plan(
     }
     let mut identities = std::collections::HashSet::new();
     let mut raw_ids = std::collections::HashMap::<String, String>::new();
+    let planning_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     for entry in &entries {
+        if tokio::time::Instant::now() >= planning_deadline {
+            return Err(playback_error(crate::playback::export::error(
+                "BASKET_EXPORT_PLANNING_TIMEOUT",
+            )));
+        }
         let ordinal = entry.ordinal.clone();
         let server_id = entry.source.server_id.clone();
         let track_id = entry.source.track_id.clone();
@@ -152,15 +158,18 @@ async fn basket_plan(
             });
             continue;
         }
-        let provider = match crate::server_manager::get_provider_by_server_id(
-            &state.server_manager,
-            &state.db,
-            &server_id,
+        let provider = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::server_manager::get_provider_by_server_id(
+                &state.server_manager,
+                &state.db,
+                &server_id,
+            ),
         )
         .await
         {
-            Ok(provider) => provider,
-            Err(_) => {
+            Ok(Ok(provider)) => provider,
+            Ok(Err(_)) | Err(_) => {
                 limitations.push(BasketExportLimitation {
                     ordinal,
                     code: "sourceUnavailable".into(),
@@ -170,9 +179,14 @@ async fn basket_plan(
                 continue;
             }
         };
-        let song = match provider.get_song(&track_id).await {
-            Ok(song) => song,
-            Err(_) => {
+        let song = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provider.get_song(&track_id),
+        )
+        .await
+        {
+            Ok(Ok(song)) => song,
+            Ok(Err(_)) | Err(_) => {
                 limitations.push(BasketExportLimitation {
                     ordinal,
                     code: "trackUnavailable".into(),
@@ -233,6 +247,22 @@ async fn basket_plan(
             track_id: "".into(),
         });
     }
+    if p.action == BasketExportAction::Add {
+        for item in &items {
+            if manifest
+                .basket_items
+                .iter()
+                .any(|existing| existing.id == item.id && existing.server_id != item.server_id)
+            {
+                limitations.push(BasketExportLimitation {
+                    ordinal: "0".into(),
+                    code: "rawIdCollisionUnsupported".into(),
+                    server_id: item.server_id.clone().unwrap_or_default(),
+                    track_id: item.id.clone(),
+                });
+            }
+        }
+    }
     let projected_items = projected(p.action, &manifest, &items);
     Ok(BasketExportPlan {
         schema_version: 1,
@@ -245,6 +275,7 @@ async fn basket_plan(
             .unwrap_or_else(|| manifest.device_id.clone()),
         target_icon: manifest.icon.clone(),
         action: p.action,
+        target_connection_revision,
         observed_basket_hash: crate::device::canonical_basket_hash(&manifest.basket_items),
         snapshot_entry_count: entries.len().to_string(),
         projected_entry_count: projected_items.len().to_string(),
@@ -340,6 +371,9 @@ pub(super) async fn basket_export_write(
         .acquire_owned()
         .await
         .map_err(|_| playback_error(crate::playback::export::error("PLAYBACK_BUSY")))?;
+    if let Some(prior) = state.db.replay_basket_export(&p).map_err(playback_error)? {
+        return Ok(json!({"data":prior}));
+    }
     let plan = basket_plan(
         state,
         PlanBasketExportParams {
@@ -350,20 +384,31 @@ pub(super) async fn basket_export_write(
         },
     )
     .await?;
-    let current = state
+    if plan.target_connection_revision != p.target_connection_revision {
+        return Err(playback_error(crate::playback::export::error(
+            "BASKET_EXPORT_TARGET_CHANGED",
+        )));
+    }
+    let (current, current_connection_revision) = state
         .device_manager
-        .get_manifest_for_device(&p.target_device_id)
+        .get_basket_target(&p.target_device_id)
         .await
         .ok_or_else(|| {
             playback_error(crate::playback::export::error(
                 "BASKET_EXPORT_TARGET_UNAVAILABLE",
             ))
         })?;
+    if current_connection_revision != p.target_connection_revision {
+        return Err(playback_error(crate::playback::export::error(
+            "BASKET_EXPORT_TARGET_CHANGED",
+        )));
+    }
+    let current_hash = crate::device::canonical_basket_hash(&current.basket_items);
     let projected_items = projected(p.action, &current, &plan.items);
     let post_hash = crate::device::canonical_basket_hash(&projected_items);
     let prior = state
         .db
-        .record_basket_export_intent(&p, &plan.observed_basket_hash, &post_hash)
+        .record_basket_export_intent(&p, &current_hash, &post_hash)
         .map_err(playback_error)?;
     if prior.state != BasketExportState::IntentRecorded {
         return Ok(json!({"data":prior}));
@@ -402,7 +447,8 @@ pub(super) async fn basket_export_write(
         .device_manager
         .update_basket_checked(
             &p.target_device_id,
-            (p.action == BasketExportAction::Replace).then_some(p.expected_basket_hash.as_str()),
+            &p.target_connection_revision,
+            Some(current_hash.as_str()),
             move |existing| {
                 Ok(match action {
                     BasketExportAction::Add => merge_add(existing, &planned),
@@ -438,7 +484,7 @@ pub(super) async fn basket_export_write(
                 .map_err(playback_error)?;
             Ok(json!({"data":operation}))
         }
-        Err(_) => {
+        Err(crate::device::CheckedManifestUpdateError::CommitUncertain(_)) => {
             let operation = state
                 .db
                 .finish_basket_export(
@@ -447,6 +493,32 @@ pub(super) async fn basket_export_write(
                     None,
                     None,
                     Some("manifestPersistenceUncertain"),
+                )
+                .map_err(playback_error)?;
+            Ok(json!({"data":operation}))
+        }
+        Err(crate::device::CheckedManifestUpdateError::TargetChanged) => {
+            let operation = state
+                .db
+                .finish_basket_export(
+                    &p.operation_id,
+                    BasketExportState::Conflict,
+                    None,
+                    None,
+                    Some("targetChanged"),
+                )
+                .map_err(playback_error)?;
+            Ok(json!({"data":operation}))
+        }
+        Err(crate::device::CheckedManifestUpdateError::Unavailable(_)) => {
+            let operation = state
+                .db
+                .finish_basket_export(
+                    &p.operation_id,
+                    BasketExportState::Failed,
+                    Some(&current_hash),
+                    Some(&current.basket_items),
+                    Some("confirmedRollback"),
                 )
                 .map_err(playback_error)?;
             Ok(json!({"data":operation}))
