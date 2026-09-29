@@ -162,6 +162,7 @@ export class PlaybackSnapshots {
             this.list.replaceChildren(...rows); this.pageStatus.textContent = rows.length ? '' : t('playback.snapshots.none');
         } catch (error) {
             if (!current()) return;
+            this.nextCursor = null;
             this.list.replaceChildren(); this.pageStatus.textContent = message(snapshotErrorCode(error)); this.retry.hidden = false;
         } finally { if (current()) { this.loading = false; this.paging(); } }
     }

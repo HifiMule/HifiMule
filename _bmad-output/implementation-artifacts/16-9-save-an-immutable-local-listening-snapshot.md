@@ -4,7 +4,7 @@ baseline_commit: 7be8cb52458212e5071fed31632aa787bbda7171
 
 # Story 16.9: Save an immutable local listening snapshot
 
-Status: review
+Status: done
 
 ## Story
 
@@ -48,6 +48,12 @@ Dependencies: Epic 15 playback foundation and Stories 16.1–16.8. The current c
   - [x] Add meaningful Rust inclusion/transaction/owner/RPC tests, file-backed restart and failure-injection tests, and Node UI tests with exact sequence assertions from the matrix below.
   - [x] Measure capture duration, DB/owner lock time, queued control latency, and memory for short and long histories; record the result rather than claiming that pagination or `spawn_blocking` makes capture free.
   - [x] Run the focused regression/build checks and affected platform checks. Update API/data-model docs with policy, schema, paging, retention, errors, and measured limitations; correct adjacent stale Retry/attempt and queue-kind statements. Leave unavailable installed checks identified as gaps.
+
+### Review Findings
+
+- [x] [Review][Patch] Preserve the active Playback view when routing through an existing main layout (P2) [hifimule-ui/src/main.ts:453]
+- [x] [Review][Patch] Keep saved inspection reachable when recovery storage is unavailable (P2) [hifimule-ui/src/localContentRoute.ts:8]
+- [x] [Review][Patch] Restore paging cursor state after a saved-page request fails (P3) [hifimule-ui/src/components/PlaybackSnapshots.ts:163]
 
 ## Dev Notes
 
@@ -299,5 +305,6 @@ GPT-6 (Codex), story implementation.
 
 ## Change Log
 
+- 2026-09-29: Code review fixed three UI edge cases: preserving the active Playback destination on existing-layout routing, permitting zero-server saved inspection despite recovery-storage failure, and clearing stale paging cursors after read errors. Full Node suite: 289 passed, 1 existing skip; UI build and diff check passed. Marked done; installed-platform evidence gaps remain tracked for 16.14.
 - 2026-09-29: Implemented immutable local listening snapshots, v14 persistence and recovery, owner/RPC integration, paged offline Playback inspection, localization, regression/crash/race tests and resource measurements; marked review. Installed-platform gaps remain explicit; Story 15.17 is unchanged.
 - 2026-09-29: Created Story 16.9 with immutable local capture, occurrence-level inclusion, durable operation identity, paged offline inspection, and implementation/test guardrails; marked ready-for-dev.

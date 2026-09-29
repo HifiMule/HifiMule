@@ -83,6 +83,22 @@ test('floating controls are a retained final library child outside both content 
   assert.ok(shell.indexOf('id="playback-controls-container"') < shell.indexOf('slot="end"'));
 });
 
+test('rerouting an existing main layout preserves the active Playback destination', () => {
+  const source = readFileSync(new URL('../../hifimule-ui/src/main.ts', import.meta.url), 'utf8');
+  const syntax = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const declaration = syntax.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'renderMainLayout');
+  assert.ok(declaration);
+  const rendered = ts.transpileModule(declaration.getText(syntax), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  let destroyed = 0;
+  const destination = { destroy() { destroyed++; } };
+  const existingLayout = { querySelector: selector => selector === '#server-hub-container' ? {} : null };
+  const context = { document: { querySelector: selector => selector === '.app-container' ? existingLayout : null }, destination };
+  vm.runInNewContext(`let activePlaybackDestination = destination; ${rendered} renderMainLayout();`, context);
+  assert.equal(destroyed, 0);
+});
+
 test('destination hub omits Playback because the bar owns that surface switch', async () => {
   const calls = [];
   const state = { destinationRevision: '4', destinations: [

@@ -450,7 +450,6 @@ async function fitMainWindowToMonitor() {
 }
 
 function renderMainLayout(_state: any = null) {
-    activePlaybackDestination?.destroy(); activePlaybackDestination = null;
     const root = document.querySelector('.app-container');
     if (!root) return;
 
@@ -460,6 +459,7 @@ function renderMainLayout(_state: any = null) {
     // index.html ships a static `.split-panel` placeholder that must be replaced
     // on first render.
     if (root.querySelector('#server-hub-container')) return;
+    activePlaybackDestination?.destroy(); activePlaybackDestination = null;
 
     root.innerHTML = `
     <sl-split-panel primary="end" position="32" class="split-panel">

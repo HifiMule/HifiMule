@@ -86,11 +86,14 @@ test('a hung save becomes result-unknown without cancelling or replacing its dur
 
 test('zero-server startup distinguishes saved content, unresolved save, genuine first-run and read failure',async()=>{
   const rpc={playbackListSnapshots:async(cursor,limit)=>{assert.equal(limit,1);return {snapshots:[]};}};
-  const saves={pending:null};
+  const saves={pending:null,state:{kind:'idle'}};
   const {localContentRoute}=load('localContentRoute.ts',{'./rpc':rpc,'./state/snapshotSaves':{snapshotSaves:saves}});
   assert.equal(await localContentRoute(0),'onboarding');
   saves.pending={operationId:randomUUID()};assert.equal(await localContentRoute(0),'main');saves.pending=null;
   rpc.playbackListSnapshots=async()=>({snapshots:[{}]});assert.equal(await localContentRoute(0),'main');
+  saves.state={kind:'error',code:'SNAPSHOT_RECOVERY_STORAGE'};
+  assert.equal(await localContentRoute(0),'main');
+  rpc.playbackListSnapshots=async()=>({snapshots:[]});assert.equal(await localContentRoute(0),'error');
   rpc.playbackListSnapshots=async()=>{throw new Error('db busy');};assert.equal(await localContentRoute(0),'error');
   assert.equal(await localContentRoute(1),'main');
 });
@@ -142,6 +145,28 @@ test('saved pages remain bounded, read-only, focus-stable and independent of liv
   assert.ok(all(c.view.element).filter(e=>e.dataset.occurrenceId).every(row=>!all(row).some(e=>e.tagName==='button')));
   const before=requests;c.live({...observed(),mode:'preview'});c.connection('stale');await flush();assert.equal(requests,before);
   assert.equal(all(c.view.element).find(e=>e.textContent==='playback.snapshots.save').disabled,true);
+  c.view.destroy();
+});
+
+test('failed saved-page navigation leaves Previous pointing to the last loaded page',async()=>{
+  const requested=[];
+  const c=component({
+    playbackListSnapshots:async()=>({snapshots:[header()],nextCursor:null}),
+    playbackListSnapshotEntries:async(_id,cursor)=>{
+      requested.push(cursor);
+      if (cursor==='page-2') throw new Error('temporary read failure');
+      return {snapshotId:'saved',entries:[entry(0)],nextCursor:'page-2'};
+    },
+  });
+  c.view.showList();await flush();
+  all(c.view.element).find(e=>e.textContent.startsWith('saved ·')).click();await flush();
+  const next=all(c.view.element).find(e=>e.textContent==='playback.queue.next');
+  const previous=all(c.view.element).find(e=>e.textContent==='playback.queue.previous');
+  next.click();await flush();
+  assert.equal(next.disabled,true);
+  previous.click();await flush();
+  assert.deepEqual(requested,[null,'page-2',null]);
+  assert.equal(c.view.cursor,null);
   c.view.destroy();
 });
 
