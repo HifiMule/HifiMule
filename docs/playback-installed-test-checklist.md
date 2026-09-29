@@ -901,6 +901,14 @@ The Story 16.6 review patch built an ARM64 DMG with SHA-256 `3db56d10fda1e029ffb
 A final rebuild after the activation route-ready guard produced SHA-256 `34694c545dadfefdfcdf77208cd6e5749ed84297b875e0c3b0e37b303db752b3` and passed strict code-signature verification. This final DMG has not been installed or smoke tested; the isolated observations above apply to the preceding package hash only.
 # Story 16.14 network-profile evidence handoff
 
+## Story 16.13 controlled coexistence
+
+Run the fixed profiles in [`playback-evidence/16-13-coexistence-template.md`](./playback-evidence/16-13-coexistence-template.md) against the same workload and observation interval. Preserve playback-only, sync-only, and combined raw runs. Record physical output/buffering separately from callback counters, provider staging separately from device-writer rate, every sanitized decision/reason/scope, and recovery time.
+
+The healthy/device-limited case passes only with zero protection decisions and combined median sync throughput within 5% of sync-only. The constrained shared-source case must delay only future matching-source admissions and return to normal after the full recovery policy. Exercise cancellation during a wait, multi-source fairness, seek/output/session replacement, Pause expiry, Stop/end, Preview isolation, and Quit/checkpoint ordering. Slow device writes alone must produce no restriction.
+
+These controlled results do not certify sustained installed behavior. Story 16.14 owns installed Windows x64, Linux x64, macOS x64, and macOS ARM64 soak/release evidence; leave unavailable rows explicitly unverified.
+
 For each installed run, record: build/commit, OS and architecture, provider/server version,
 portable server ID hash, representation IDs and sanitized descriptors, profile phases in monotonic
 milliseconds, delivered bytes and eligible duration, compressed/PCM high-water bytes, buffering

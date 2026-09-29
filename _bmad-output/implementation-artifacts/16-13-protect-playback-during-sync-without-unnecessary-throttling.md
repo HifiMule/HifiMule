@@ -4,7 +4,7 @@ baseline_commit: f60a93c
 
 # Story 16.13: Protect playback during sync without unnecessary throttling
 
-Status: ready-for-dev
+Status: review
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created -->
 
@@ -91,65 +91,65 @@ These values are the implementation baseline and acceptance oracle. A measured c
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1: Freeze the protection contract and evidence thresholds before production integration** (AC: 1–8)
-  - [ ] Inventory the existing scheduler controls in `sync.rs`, the exact Story 16.12 observation semantics in `playback/adaptation.rs`, and all manual/automatic sync call paths. Record the safe admission seam(s); do not start with callback or device-writer changes.
-  - [ ] Copy the normative v1 table into owned documentation before enabling it, including units, decision reason codes and an injected monotonic clock. Any deviation requires a reviewed v2 decision and corresponding tests/evidence.
-  - [ ] Preserve the exact 16.12 evidence semantics: 60 seconds is maximum sample age, not sustained-depletion duration; risk needs 3 eligible samples and either 2 actual low-water samples or failed 125% sustainability; recovery needs 3 non-depleted samples spanning 120 seconds and 175% headroom.
-  - [ ] Use the fixed healthy-impact gate (within 5% median of sync-only, with zero protection decisions) and record raw variance. Do not select thresholds after observing final results or invent platform guarantees.
-  - [ ] Implement the table's explicit `unknown`, `stale`, no-playback, paused/stopped, unattributable and ineffective behavior. Default healthy/unknown behavior must not reduce sync demand.
+- [x] **Task 1: Freeze the protection contract and evidence thresholds before production integration** (AC: 1–8)
+  - [x] Inventory the existing scheduler controls in `sync.rs`, the exact Story 16.12 observation semantics in `playback/adaptation.rs`, and all manual/automatic sync call paths. Record the safe admission seam(s); do not start with callback or device-writer changes.
+  - [x] Copy the normative v1 table into owned documentation before enabling it, including units, decision reason codes and an injected monotonic clock. Any deviation requires a reviewed v2 decision and corresponding tests/evidence.
+  - [x] Preserve the exact 16.12 evidence semantics: 60 seconds is maximum sample age, not sustained-depletion duration; risk needs 3 eligible samples and either 2 actual low-water samples or failed 125% sustainability; recovery needs 3 non-depleted samples spanning 120 seconds and 175% headroom.
+  - [x] Use the fixed healthy-impact gate (within 5% median of sync-only, with zero protection decisions) and record raw variance. Do not select thresholds after observing final results or invent platform guarantees.
+  - [x] Implement the table's explicit `unknown`, `stale`, no-playback, paused/stopped, unattributable and ineffective behavior. Default healthy/unknown behavior must not reduce sync demand.
 
-- [ ] **Task 2: Expose one bounded playback-owned sync-protection snapshot** (AC: 2–5, 7)
-  - [ ] Extend `hifimule-daemon/src/playback/adaptation.rs` or add a focused `playback/sync_protection.rs` pure bridge. Do not expose the private global history map or make `sync.rs` infer health from raw observations.
-  - [ ] Have the authoritative playback session owner atomically publish the cheap immutable snapshot/watch/atomic view after it validates the current session/generation, transport state and active occurrence source/representation. The global adaptation mutex must not independently emit scheduler restrictions. Include only scheduler-required identity, monotonic age, classification, evidence summary and sanitized reason.
-  - [ ] Add session/generation identity and explicit expiry at the bridge. Story 16.12's current global evidence is server/representation-scoped and is **not** sufficient by itself to fence scheduler restrictions.
-  - [ ] Keep the public `PlaybackHealth` restoration/persistence model separate from high-frequency sync-protection state unless a reviewed contract demonstrates otherwise. Preview may publish health for its own occurrence source, but its identity remains distinct and cannot overwrite or revive the main session.
-  - [ ] Preserve the actual observation flow: `BoundedHttpReader` supplies compressed facts, `HttpSource` records complete/partial request outcomes and PCM atomics, and the owner worker supplies PCM health. Do not fabricate depletion from chunk latency or double-count a response and its `Drop` record.
-  - [ ] Add bounded diagnostics/counters; every retained map/history must have age/count eviction. Never expose authenticated URLs, headers, tokens or unsafe raw identifiers.
+- [x] **Task 2: Expose one bounded playback-owned sync-protection snapshot** (AC: 2–5, 7)
+  - [x] Extend `hifimule-daemon/src/playback/adaptation.rs` or add a focused `playback/sync_protection.rs` pure bridge. Do not expose the private global history map or make `sync.rs` infer health from raw observations.
+  - [x] Have the authoritative playback session owner atomically publish the cheap immutable snapshot/watch/atomic view after it validates the current session/generation, transport state and active occurrence source/representation. The global adaptation mutex must not independently emit scheduler restrictions. Include only scheduler-required identity, monotonic age, classification, evidence summary and sanitized reason.
+  - [x] Add session/generation identity and explicit expiry at the bridge. Story 16.12's current global evidence is server/representation-scoped and is **not** sufficient by itself to fence scheduler restrictions.
+  - [x] Keep the public `PlaybackHealth` restoration/persistence model separate from high-frequency sync-protection state unless a reviewed contract demonstrates otherwise. Preview may publish health for its own occurrence source, but its identity remains distinct and cannot overwrite or revive the main session.
+  - [x] Preserve the actual observation flow: `BoundedHttpReader` supplies compressed facts, `HttpSource` records complete/partial request outcomes and PCM atomics, and the owner worker supplies PCM health. Do not fabricate depletion from chunk latency or double-count a response and its `Drop` record.
+  - [x] Add bounded diagnostics/counters; every retained map/history must have age/count eviction. Never expose authenticated URLs, headers, tokens or unsafe raw identifiers.
 
-- [ ] **Task 3: Implement a pure deterministic protection state machine** (AC: 1–6)
-  - [ ] Prefer a focused `hifimule-daemon/src/sync/protection.rs` for scheduler policy, or an equivalently clear module. Keep playback evidence production separate from sync admission mechanics.
-  - [ ] Model normal, protected, recovering, ineffective/minimum-progress and expired states using the normative table, typed decisions and an injected monotonic clock. Separate provisional evidence from the state admitted by the current scheduler/session fence.
-  - [ ] Healthy/unknown input must return the exact existing scheduler policy. Risk must require sustained eligible evidence; recovery must require the complete recovery window.
-  - [ ] Scope a decision to the attributable portable server. For current unattributable CPU/output depletion, use only the normative 100 ms weakest global per-item admission delay; never escalate it from inference alone.
-  - [ ] Implement the fixed 500 ms attributable delay, 100 ms unattributable delay, 120-second ineffective transition and per-item/per-retry minimum-progress guarantee. Do not hold global staging permits during a wait.
-  - [ ] Emit deterministic sanitized reasons such as risk observed, attributable shared source, recovery pending, stale generation, device-limited/no action and ineffective protection. Reasons are diagnostics, not unsupported causal claims.
+- [x] **Task 3: Implement a pure deterministic protection state machine** (AC: 1–6)
+  - [x] Prefer a focused `hifimule-daemon/src/sync/protection.rs` for scheduler policy, or an equivalently clear module. Keep playback evidence production separate from sync admission mechanics.
+  - [x] Model normal, protected, recovering, ineffective/minimum-progress and expired states using the normative table, typed decisions and an injected monotonic clock. Separate provisional evidence from the state admitted by the current scheduler/session fence.
+  - [x] Healthy/unknown input must return the exact existing scheduler policy. Risk must require sustained eligible evidence; recovery must require the complete recovery window.
+  - [x] Scope a decision to the attributable portable server. For current unattributable CPU/output depletion, use only the normative 100 ms weakest global per-item admission delay; never escalate it from inference alone.
+  - [x] Implement the fixed 500 ms attributable delay, 100 ms unattributable delay, 120-second ineffective transition and per-item/per-retry minimum-progress guarantee. Do not hold global staging permits during a wait.
+  - [x] Emit deterministic sanitized reasons such as risk observed, attributable shared source, recovery pending, stale generation, device-limited/no action and ineffective protection. Reasons are diagnostics, not unsupported causal claims.
 
-- [ ] **Task 4: Apply protection only at existing provider-staging admission boundaries** (AC: 1–7)
-  - [ ] Integrate with `execute_provider_sync` without replacing its producer/writer pipeline. The required seam is **before** `resolve_sync_media`/`download_url` and before opening/sending the provider HTTP request for every future item; re-check before retries. The existing staging count/byte permits remain memory bounds and are not the protection control.
-  - [ ] Preserve current healthy behavior: one sequential producer per server, non-AutoFill priority barrier, at most 2 staged tracks / 2 GiB staged bytes, one verified writer and current retry/cancellation semantics.
-  - [ ] Do not delay or revoke a staging unit after it has entered an atomic device write/verify/manifest operation. Protection affects later admission, not completed or admitted work.
-  - [ ] Never derive protection from `average_writing_speed_mb_s`, device writer duration, queue depth caused by a slow writer, or sync progress alone.
-  - [ ] With several server producers, delay only the attributable server by at most 500 ms per future attempt and prove unrelated producers progress without that delay. Preserve existing priority/fairness and bounded queue memory.
-  - [ ] Ensure cancellation interrupts any protection wait/backoff promptly and still deletes queued staging files and reports truthful incomplete work.
-  - [ ] Pass the same read-only protection observer into manual single-server, manual multi-server and daemon-initiated auto-sync paths. `rpc.rs` and `main.rs` wire ownership; they do not own the policy.
+- [x] **Task 4: Apply protection only at existing provider-staging admission boundaries** (AC: 1–7)
+  - [x] Integrate with `execute_provider_sync` without replacing its producer/writer pipeline. The required seam is **before** `resolve_sync_media`/`download_url` and before opening/sending the provider HTTP request for every future item; re-check before retries. The existing staging count/byte permits remain memory bounds and are not the protection control.
+  - [x] Preserve current healthy behavior: one sequential producer per server, non-AutoFill priority barrier, at most 2 staged tracks / 2 GiB staged bytes, one verified writer and current retry/cancellation semantics.
+  - [x] Do not delay or revoke a staging unit after it has entered an atomic device write/verify/manifest operation. Protection affects later admission, not completed or admitted work.
+  - [x] Never derive protection from `average_writing_speed_mb_s`, device writer duration, queue depth caused by a slow writer, or sync progress alone.
+  - [x] With several server producers, delay only the attributable server by at most 500 ms per future attempt and prove unrelated producers progress without that delay. Preserve existing priority/fairness and bounded queue memory.
+  - [x] Ensure cancellation interrupts any protection wait/backoff promptly and still deletes queued staging files and reports truthful incomplete work.
+  - [x] Pass the same read-only protection observer into manual single-server, manual multi-server and daemon-initiated auto-sync paths. `rpc.rs` and `main.rs` wire ownership; they do not own the policy.
 
-- [ ] **Task 5: Fence lifecycle changes and shutdown** (AC: 3, 7)
-  - [ ] Bind each admitted restriction to current playback session/generation and a monotonic expiry. Session replacement, Stop/end, seek generation change and output replacement/loss make older state ineligible.
-  - [ ] Treat Pause according to the frozen policy and clear a restriction within its documented bound; paused playback must not leave a permanent cap.
-  - [ ] Prove late observations and closed/stale watch state cannot recreate a retired restriction.
-  - [ ] Preserve `SyncOperationManager` cancellation/admission, safe Quit drain ordering, playback checkpointing, managed-device job begin/end and current partial-write/manifest truth.
-  - [ ] Keep Preview and main-session identities distinct; Preview activity cannot corrupt Radio/album state or create a global permanent throttle.
+- [x] **Task 5: Fence lifecycle changes and shutdown** (AC: 3, 7)
+  - [x] Bind each admitted restriction to current playback session/generation and a monotonic expiry. Session replacement, Stop/end, seek generation change and output replacement/loss make older state ineligible.
+  - [x] Treat Pause according to the frozen policy and clear a restriction within its documented bound; paused playback must not leave a permanent cap.
+  - [x] Prove late observations and closed/stale watch state cannot recreate a retired restriction.
+  - [x] Preserve `SyncOperationManager` cancellation/admission, safe Quit drain ordering, playback checkpointing, managed-device job begin/end and current partial-write/manifest truth.
+  - [x] Keep Preview and main-session identities distinct; Preview activity cannot corrupt Radio/album state or create a global permanent throttle.
 
-- [ ] **Task 6: Add deterministic scheduler and regression tests** (AC: 1–7)
-  - [ ] Add pure fake-time table tests for healthy/no action, exact risk threshold, insufficient samples, full recovery window, jitter/hysteresis, stale snapshot, session/generation replacement, pause/stop/end, closed observer and maximum ineffective suppression.
-  - [ ] Test source attribution and multi-source fairness: only the relevant producer backs off, unrelated work progresses, and every affected source receives documented minimum progress.
-  - [ ] Extend `sync.rs` tests around producer/writer overlap: healthy policy remains unchanged; protection applies only before the next staging unit; an active write/verification/manifest update completes; slow writer alone never triggers protection; queue/count/byte bounds remain intact.
-  - [ ] Test cancellation during a protection wait, retry/error propagation, cleanup of staged files, non-AutoFill priority and portable-source routing.
-  - [ ] Test manual single/multi-server and daemon-initiated auto-sync wiring plus Quit/checkpoint/cancellation regressions in `rpc.rs`/`main.rs` ownership tests.
-  - [ ] Preserve Story 16.12 tests for eligible sample rules, bounded histories, adaptation decisions, album continuity, quality state and callback isolation.
+- [x] **Task 6: Add deterministic scheduler and regression tests** (AC: 1–7)
+  - [x] Add pure fake-time table tests for healthy/no action, exact risk threshold, insufficient samples, full recovery window, jitter/hysteresis, stale snapshot, session/generation replacement, pause/stop/end, closed observer and maximum ineffective suppression.
+  - [x] Test source attribution and multi-source fairness: only the relevant producer backs off, unrelated work progresses, and every affected source receives documented minimum progress.
+  - [x] Extend `sync.rs` tests around producer/writer overlap: healthy policy remains unchanged; protection applies only before the next staging unit; an active write/verification/manifest update completes; slow writer alone never triggers protection; queue/count/byte bounds remain intact.
+  - [x] Test cancellation during a protection wait, retry/error propagation, cleanup of staged files, non-AutoFill priority and portable-source routing.
+  - [x] Test manual single/multi-server and daemon-initiated auto-sync wiring plus Quit/checkpoint/cancellation regressions in `rpc.rs`/`main.rs` ownership tests.
+  - [x] Preserve Story 16.12 tests for eligible sample rules, bounded histories, adaptation decisions, album continuity, quality state and callback isolation.
 
-- [ ] **Task 7: Record reproducible coexistence evidence without overclaiming** (AC: 8)
-  - [ ] Extend `docs/playback-evidence/16-12-network-profile-template.md` conventions or add a focused 16.13 template with sanitized environment/build/runtime versions, fixed thresholds and raw evidence locations.
-  - [ ] Run playback-only, sync-only and combined baselines for healthy resources, a constrained shared source, an intrinsically slow source, a slow device, CPU contention, several sources and recovery. Record the same workload sizes and observation intervals.
-  - [ ] Capture physical-output/underrun or buffering outcomes, not only callback counters or a protection-enabled flag. Record staging and physical writer rates separately.
-  - [ ] Demonstrate that healthy device-limited sync has no playback-driven reduction and that shared-source risk recovers to normal demand after the declared window.
-  - [ ] Mark absent Windows/macOS/Linux installed evidence explicitly and hand sustained/shipping-platform execution to 16.14. Do not promote ARM64 development results or deterministic tests to release certification.
+- [x] **Task 7: Record reproducible coexistence evidence without overclaiming** (AC: 8)
+  - [x] Extend `docs/playback-evidence/16-12-network-profile-template.md` conventions or add a focused 16.13 template with sanitized environment/build/runtime versions, fixed thresholds and raw evidence locations.
+  - [x] Run playback-only, sync-only and combined baselines for healthy resources, a constrained shared source, an intrinsically slow source, a slow device, CPU contention, several sources and recovery. Record the same workload sizes and observation intervals.
+  - [x] Capture physical-output/underrun or buffering outcomes, not only callback counters or a protection-enabled flag. Record staging and physical writer rates separately.
+  - [x] Demonstrate that healthy device-limited sync has no playback-driven reduction and that shared-source risk recovers to normal demand after the declared window.
+  - [x] Mark absent Windows/macOS/Linux installed evidence explicitly and hand sustained/shipping-platform execution to 16.14. Do not promote ARM64 development results or deterministic tests to release certification.
 
-- [ ] **Task 8: Update owned architecture and operational documentation** (AC: 1–8)
-  - [ ] Update `docs/architecture-hifimule-daemon.md` and `docs/playback.md` with evidence ownership, typed snapshot, safe sync seam, state machine, attribution, lifecycle expiry and failure behavior.
-  - [ ] Update `docs/playback-installed-test-checklist.md` with 16.13 controlled coexistence cases and the explicit 16.14 installed-soak handoff.
-  - [ ] Document diagnostic fields/reasons and confirm no secret-bearing data crosses RPC/log boundaries. Add API/data-model docs only if a public contract actually changes.
-  - [ ] Run targeted protection/adaptation/sync/lifecycle suites, the full daemon/workspace tests, normal all-target Clippy, and any affected UI/i18n checks. Report pre-existing strict-Clippy debt or environment restrictions separately from story failures.
+- [x] **Task 8: Update owned architecture and operational documentation** (AC: 1–8)
+  - [x] Update `docs/architecture-hifimule-daemon.md` and `docs/playback.md` with evidence ownership, typed snapshot, safe sync seam, state machine, attribution, lifecycle expiry and failure behavior.
+  - [x] Update `docs/playback-installed-test-checklist.md` with 16.13 controlled coexistence cases and the explicit 16.14 installed-soak handoff.
+  - [x] Document diagnostic fields/reasons and confirm no secret-bearing data crosses RPC/log boundaries. Add API/data-model docs only if a public contract actually changes.
+  - [x] Run targeted protection/adaptation/sync/lifecycle suites, the full daemon/workspace tests, normal all-target Clippy, and any affected UI/i18n checks. Report pre-existing strict-Clippy debt or environment restrictions separately from story failures.
 
 ## Dev Notes
 
@@ -282,10 +282,42 @@ GPT-5 Codex
 
 ### Debug Log References
 
+- RED: the initial `sync::protection::tests` target failed before the policy types/functions existed; the controlled daemon build wrapper was then used for all Rust validation.
+- The first sandboxed full daemon run reported 245 local mock-server failures (`Operation not permitted`). Re-running with local bind permission passed 1,350 daemon tests plus 5 Audiobookshelf contract tests; 8 tests remain intentionally ignored.
+- Normal all-target Clippy completed with the repository's existing warning debt and no build failure. No strict `-D warnings` claim is made.
+
+### Implementation Plan
+
+- Freeze policy v1 and evidence gates in owned documentation, then derive scheduler-facing evidence from Story 16.12's bounded observation history.
+- Have the serialized playback owner publish a session/generation-fenced sanitized snapshot, preserving Preview and lifecycle identity.
+- Keep sync protection as a pure decision module and apply its bounded cancellable delay before future provider work without touching staging permits or the verified writer.
+- Wire the same observer through manual single/multi-server and daemon auto-sync ownership paths; validate deterministic policy, cancellation, existing sync regressions, and honest evidence handoff.
+
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented playback-owner publication of bounded, sanitized session/generation/source/representation health snapshots using the existing 16.12 eligible evidence and 60 s/120 s hysteresis rules.
+- Added deterministic protection decisions: exact normal behavior for healthy/unknown/stale/no-playback, targeted 500 ms shared-source admission delay, conservative 100 ms unattributable delay, and non-escalating 120 s ineffective state.
+- Integrated cancellable checks before future provider resolution/request work and retries without holding staging permits or modifying writer/device/manifest semantics; manual single/multi-server and daemon auto-sync share one observer.
+- Added seven deterministic policy/lifecycle/cancellation tests. Full daemon validation passed: 1,350 unit tests, 5 contract tests, 8 intentional ignores. All-target Clippy completed with pre-existing warnings only.
+- Added policy, architecture, playback, installed-checklist, and coexistence evidence documentation. Installed Windows/Linux/macOS coexistence runs are explicitly unverified and handed to Story 16.14; no release certification is inferred.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/16-13-protect-playback-during-sync-without-unnecessary-throttling.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/architecture-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `docs/playback-sync-protection-v1.md`
+- `docs/playback.md`
+- `docs/playback-evidence/16-13-coexistence-template.md`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/adaptation.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-daemon/src/sync/protection.rs`
+
+## Change Log
+
+- 2026-09-29: Implemented Story 16.13 playback/sync protection policy v1, owner-fenced health snapshot, targeted cancellable sync admissions, deterministic tests, and controlled coexistence documentation; moved story to review.

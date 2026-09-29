@@ -98,6 +98,21 @@ pub struct CapacityEvidence {
     pub depleted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncEvidenceClass {
+    Unknown,
+    Healthy,
+    Risk,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SyncEvidence {
+    pub class: SyncEvidenceClass,
+    pub eligible_samples: usize,
+    pub newest_ms: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct AdaptationHistory {
     scopes: HashMap<ObservationScope, VecDeque<DeliveryObservation>>,
@@ -132,6 +147,53 @@ pub fn record(scope: ObservationScope, sample: DeliveryObservation) {
         .unwrap_or_else(|error| error.into_inner())
         .history
         .observe(scope, sample);
+}
+
+pub(crate) fn sync_evidence(
+    scope: &ObservationScope,
+    required_bytes_per_second: Option<u64>,
+    now_ms: u64,
+) -> SyncEvidence {
+    let runtime = RUNTIME
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(risk) = runtime
+        .history
+        .evidence(scope, now_ms, OBSERVATION_WINDOW_MS)
+    else {
+        return SyncEvidence {
+            class: SyncEvidenceClass::Unknown,
+            eligible_samples: 0,
+            newest_ms: now_ms,
+        };
+    };
+    let unsustainable =
+        required_bytes_per_second.is_some_and(|required| !sustainable(required, risk, false));
+    if risk.depleted || unsustainable {
+        return SyncEvidence {
+            class: SyncEvidenceClass::Risk,
+            eligible_samples: risk.eligible_samples,
+            newest_ms: risk.newest_ms,
+        };
+    }
+    let recovered = runtime
+        .history
+        .evidence(scope, now_ms, RECOVERY_WINDOW_MS)
+        .is_some_and(|evidence| {
+            !evidence.depleted
+                && required_bytes_per_second
+                    .is_some_and(|required| sustainable(required, evidence, true))
+        });
+    SyncEvidence {
+        class: if recovered {
+            SyncEvidenceClass::Healthy
+        } else {
+            SyncEvidenceClass::Recovering
+        },
+        eligible_samples: risk.eligible_samples,
+        newest_ms: risk.newest_ms,
+    }
 }
 
 pub(crate) fn select_for_boundary(

@@ -8362,6 +8362,7 @@ async fn handle_sync_execute(
         let device_manager = state.device_manager.clone();
         let state_tx = state.state_tx.clone();
         let db = state.db.clone();
+        let protection_observer = state.playback.sync_protection_observer();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
@@ -8396,7 +8397,7 @@ async fn handle_sync_execute(
                 }
                 (default_provider, providers)
             };
-            let result = crate::sync::execute_provider_sync(
+            let result = crate::sync::execute_provider_sync_with_protection(
                 &delta,
                 &target,
                 crate::sync::ProviderSyncSource {
@@ -8407,6 +8408,7 @@ async fn handle_sync_execute(
                 op_manager.clone(),
                 op_id.clone(),
                 device_manager.clone(),
+                Some(protection_observer),
             )
             .await;
             let all_errors = match result {
@@ -8453,6 +8455,7 @@ async fn handle_sync_execute(
         let device_manager = state.device_manager.clone();
         let state_tx = state.state_tx.clone();
         let db = state.db.clone();
+        let protection_observer = state.playback.sync_protection_observer();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
@@ -8476,7 +8479,7 @@ async fn handle_sync_execute(
                 }
             };
 
-            let result = crate::sync::execute_provider_sync(
+            let result = crate::sync::execute_provider_sync_with_protection(
                 &delta,
                 &target,
                 crate::sync::ProviderSyncSource {
@@ -8487,6 +8490,7 @@ async fn handle_sync_execute(
                 op_manager.clone(),
                 op_id.clone(),
                 device_manager.clone(),
+                Some(protection_observer),
             )
             .await;
 

@@ -82,6 +82,7 @@ pub struct PlaybackSession {
     fenced: Arc<AtomicBool>,
     ingress: Arc<Mutex<ProgressIngress>>,
     health: Arc<Mutex<PlaybackHealth>>,
+    sync_protection: crate::sync::protection::Observer,
     worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
@@ -220,6 +221,7 @@ struct Inner {
     dirty: bool,
     checkpointed_position_ms: u64,
     playback: PlaybackState,
+    sync_protection: crate::sync::protection::Observer,
     radio_inflight: Option<String>,
     radio_wake: Option<tokio::sync::mpsc::Sender<()>>,
     radio_resume_after_refill: bool,
@@ -670,6 +672,7 @@ impl PlaybackSession {
         };
         let output_gate = Arc::new(AtomicBool::new(false));
         let control_epoch = Arc::new(AtomicU64::new(0));
+        let sync_protection = crate::sync::protection::Observer::default();
         let inner = Arc::new(Mutex::new(Inner {
             album: Default::default(),
             pending_terminal: None,
@@ -710,6 +713,7 @@ impl PlaybackSession {
                 status: restored_playback_status,
                 ..Default::default()
             },
+            sync_protection: sync_protection.clone(),
             radio_inflight: None,
             radio_wake: None,
             radio_resume_after_refill: false,
@@ -776,6 +780,7 @@ impl PlaybackSession {
             fenced,
             ingress,
             health,
+            sync_protection,
             worker: Arc::new(Mutex::new(Some(worker))),
         }
     }
@@ -801,6 +806,10 @@ impl PlaybackSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub(crate) fn sync_protection_observer(&self) -> crate::sync::protection::Observer {
+        self.sync_protection.clone()
     }
 
     pub fn instance_id(&self) -> String {
@@ -2267,10 +2276,89 @@ fn publish_health(i: &Inner, health: &Mutex<PlaybackHealth>) {
         restoration: i.restoration.clone(),
         persistence: i.persistence.clone(),
     };
+    publish_sync_protection(i);
     wake_radio(i);
     if let Some(sender) = i.reporting_status_tx.as_ref() {
         let _ = sender.try_send(live_status_sample_inner(i));
     }
+}
+
+fn publish_sync_protection(i: &Inner) {
+    use crate::sync::protection::{Health, POLICY_VERSION, Snapshot};
+    let now_ms = super::adaptation::monotonic_ms();
+    let active = matches!(
+        active_state(i),
+        TransportState::Playing | TransportState::Buffering
+    );
+    let paused = active_state(i) == TransportState::Paused;
+    if !active && !paused {
+        i.sync_protection.publish(None);
+        return;
+    }
+    if paused {
+        let retained = i
+            .sync_protection
+            .snapshot()
+            .filter(|snapshot| {
+                snapshot.session_id == i.session.session_id
+                    && snapshot.generation_id == i.generation_id
+                    && now_ms <= snapshot.observed_ms.saturating_add(5_000)
+            })
+            .map(|mut snapshot| {
+                snapshot.expires_ms = snapshot.observed_ms.saturating_add(5_000);
+                snapshot
+            });
+        i.sync_protection.publish(retained);
+        return;
+    }
+    let (Some(metadata), Some(quality)) = (&i.playback.metadata, &i.playback.selected_quality)
+    else {
+        i.sync_protection.publish(None);
+        return;
+    };
+    let scope = super::adaptation::ObservationScope {
+        server_id: metadata.source.server_id.clone(),
+        representation_id: quality.representation_id.clone(),
+    };
+    let required = quality
+        .bitrate_kbps
+        .map(|kbps| u64::from(kbps).saturating_mul(1_000) / 8);
+    let evidence = super::adaptation::sync_evidence(&scope, required, now_ms);
+    let previous = i.sync_protection.snapshot();
+    let health = match evidence.class {
+        super::adaptation::SyncEvidenceClass::Unknown => Health::Unknown,
+        super::adaptation::SyncEvidenceClass::Healthy => Health::Healthy,
+        super::adaptation::SyncEvidenceClass::Risk => Health::Risk,
+        super::adaptation::SyncEvidenceClass::Recovering => Health::Recovering,
+    };
+    let risk_started_ms = if matches!(health, Health::Risk | Health::Recovering) {
+        previous
+            .as_ref()
+            .filter(|snapshot| {
+                snapshot.session_id == i.session.session_id
+                    && snapshot.generation_id == i.generation_id
+                    && matches!(snapshot.health, Health::Risk | Health::Recovering)
+            })
+            .and_then(|snapshot| snapshot.risk_started_ms)
+            .or(Some(now_ms))
+    } else {
+        None
+    };
+    i.sync_protection.publish(Some(Snapshot {
+        policy_version: POLICY_VERSION,
+        session_id: i.session.session_id.clone(),
+        generation_id: i.generation_id.clone(),
+        preview: i.preview.is_some(),
+        server_id: Some(metadata.source.server_id.clone()),
+        representation_id: quality.representation_id.clone(),
+        observed_ms: evidence.newest_ms,
+        expires_ms: evidence
+            .newest_ms
+            .saturating_add(super::adaptation::OBSERVATION_WINDOW_MS),
+        risk_started_ms,
+        eligible_samples: evidence.eligible_samples,
+        health,
+    }));
 }
 
 fn wake_radio(i: &Inner) {
@@ -2707,6 +2795,7 @@ fn retry_restore_inner(
             status: restored_playback_status,
             ..Default::default()
         },
+        sync_protection: inner.sync_protection.clone(),
         session: loaded,
         preview: None,
         reporting_main: None,

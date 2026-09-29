@@ -60,7 +60,7 @@ single-representation until their server/version transcode contracts receive equ
 Portable-device transcoding profiles never participate.
 
 Policy v1 uses monotonic delivery time, a 60,000 ms observation window, at least three eligible
-samples, 125% downgrade headroom, 175% recovery headroom, and a 60,000 ms recovery span. History
+samples, 125% downgrade headroom, 175% recovery headroom, and a 120,000 ms recovery span. History
 is scoped by portable server identity plus stable representation identity and is bounded to 16
 samples per scope (120,000 ms maximum age). Explicit cache hits, startup/short samples (<250 ms),
 range/seek reads, partial bodies, and failures do not establish capacity. Unknown capacity keeps
@@ -71,3 +71,9 @@ prepared-successor contract, the 60-second preparation deadline, and generation/
 fences remain authoritative. A claimed successor is retained. Non-unity album gain deliberately
 constrains the occurrence to its qualified original representation. No mid-track replacement,
 automatic skip, output reroute, or synthetic reporting transition is permitted.
+
+# Playback protection during device sync (policy v1)
+
+The serialized playback owner publishes a separate daemon-internal snapshot after validating the current session, generation, occurrence source, representation, and transport. This state is not the persisted `PlaybackHealth` model and contains no URL, token, header, or raw provider request. Stop/end, generation or output replacement, and expired evidence invalidate it; Pause retains it for at most five seconds. Preview remains a distinct occurrence identity.
+
+The sync scheduler reads the snapshot outside the audio callback. Current attributable risk adds one cancellable 500 ms delay before the matching server producer's next item/request admission; current unattributable output depletion adds only 100 ms. No staging permit is held during the wait. Healthy, unknown, stale, unrelated-source, and slow-device-only cases use the exact normal scheduler. Recovery requires the full 120-second evidence span and 175% headroom. After 120 seconds of continuing protection the diagnostic becomes `ineffectiveProtection`, but the same bounded delay and minimum progress remain—sync is never silently paused or cancelled. Full thresholds and reason codes are in [Playback/Sync Protection Policy v1](./playback-sync-protection-v1.md).

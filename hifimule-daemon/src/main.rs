@@ -477,6 +477,7 @@ pub fn start_daemon_core(
             let state_tx_clone = state_tx.clone();
             let jellyfin_client = Arc::new(api::JellyfinClient::new());
             let som_events = Arc::clone(&sync_operation_manager);
+            let playback_events = playback.clone();
             let device_events = tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
                     // Removal/failure bookkeeping must continue after admission closes so a
@@ -558,12 +559,14 @@ pub fn start_daemon_core(
                                     let som = Arc::clone(&som_events);
                                     let state_tx_sync = state_tx_clone.clone();
                                     let device_id = manifest_device_id.clone();
+                                    let protection_observer = playback_events.sync_protection_observer();
 
                                     if let Some((provider, server_id)) = get_selected_provider(&db).await {
                                         tokio::spawn(async move {
                                             daemon_log!("[AutoSync] Starting auto-sync via provider");
                                             if let Err(e) = run_auto_sync_via_provider(
                                                 provider, server_id, dm, som, state_tx_sync, device_id,
+                                                protection_observer,
                                             ).await {
                                                 daemon_log!("[AutoSync] Provider auto-sync failed: {}", e);
                                             }
@@ -1747,6 +1750,7 @@ async fn run_auto_sync_via_provider(
     sync_op_manager: Arc<sync::SyncOperationManager>,
     state_tx: std::sync::mpsc::Sender<DaemonState>,
     device_id: String,
+    protection_observer: sync::protection::Observer,
 ) -> anyhow::Result<()> {
     let _ = state_tx.send(DaemonState::Syncing);
 
@@ -1952,7 +1956,7 @@ async fn run_auto_sync_via_provider(
         None
     };
 
-    let result = sync::execute_provider_sync(
+    let result = sync::execute_provider_sync_with_protection(
         &delta,
         &target,
         sync::ProviderSyncSource {
@@ -1963,6 +1967,7 @@ async fn run_auto_sync_via_provider(
         sync_op_manager.clone(),
         operation_id.clone(),
         device_manager.clone(),
+        Some(protection_observer),
     )
     .await;
 

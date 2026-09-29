@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+pub(crate) mod protection;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock, Semaphore, mpsc};
 
@@ -2405,6 +2407,27 @@ pub async fn execute_provider_sync(
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+    execute_provider_sync_with_protection(
+        delta,
+        target,
+        source,
+        operation_manager,
+        operation_id,
+        device_manager,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn execute_provider_sync_with_protection(
+    delta: &SyncDelta,
+    target: &SyncTarget,
+    source: ProviderSyncSource,
+    operation_manager: Arc<SyncOperationManager>,
+    operation_id: String,
+    device_manager: Arc<crate::device::DeviceManager>,
+    protection_observer: Option<protection::Observer>,
+) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
     let device_path = target.path.as_path();
     let device_io = Arc::clone(&target.io);
     let ProviderSyncSource {
@@ -2528,6 +2551,7 @@ pub async fn execute_provider_sync(
         let producer_priority_barrier = Arc::clone(&priority_barrier);
         let producer_reader_started = Arc::clone(&reader_started);
         let producer_reader_bytes = Arc::clone(&reader_bytes);
+        let producer_protection_observer = protection_observer.clone();
         let staged_tx = staged_tx.clone();
         tokio::spawn(async move {
         let mut errors = Vec::new();
@@ -2558,6 +2582,14 @@ pub async fn execute_provider_sync(
                 .is_cancelled(&producer_operation_id)
                 .await
             {
+                break;
+            }
+            if !wait_for_protection_admission(
+                producer_protection_observer.as_ref(),
+                add_item.server_id.as_deref().or(server_id.as_deref()),
+                &producer_operation_manager,
+                &producer_operation_id,
+            ).await {
                 break;
             }
             crate::daemon_log!(
@@ -2660,6 +2692,14 @@ pub async fn execute_provider_sync(
                                 add_item.name,
                                 first_error
                             );
+                            if !wait_for_protection_admission(
+                                producer_protection_observer.as_ref(),
+                                add_item.server_id.as_deref().or(server_id.as_deref()),
+                                &producer_operation_manager,
+                                &producer_operation_id,
+                            ).await {
+                                return Err(first_error);
+                            }
                             producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await
                         }
                     }
@@ -3686,6 +3726,34 @@ pub async fn execute_provider_sync(
     }
 
     Ok((synced_items, errors))
+}
+
+async fn wait_for_protection_admission(
+    observer: Option<&protection::Observer>,
+    producer_server_id: Option<&str>,
+    operation_manager: &SyncOperationManager,
+    operation_id: &str,
+) -> bool {
+    let snapshot = observer.and_then(protection::Observer::snapshot);
+    let decision = protection::decide(
+        snapshot.as_ref(),
+        producer_server_id,
+        crate::playback::adaptation::monotonic_ms(),
+    );
+    if decision.delay_ms == 0 {
+        return true;
+    }
+    crate::daemon_log!(
+        "[Sync] Playback protection v{}: reason={} delay_ms={} server={}",
+        protection::POLICY_VERSION,
+        decision.reason.code(),
+        decision.delay_ms,
+        producer_server_id.unwrap_or("unattributed")
+    );
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(decision.delay_ms)) => true,
+        _ = wait_for_operation_cancellation(operation_manager, operation_id) => false,
+    }
 }
 
 fn provider_sync_staging_prefix(operation_id: &str) -> String {
