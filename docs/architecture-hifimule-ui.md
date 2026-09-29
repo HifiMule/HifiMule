@@ -28,6 +28,8 @@ The daemon listens on an available loopback port published in the private `owner
 
 `BasketSidebar` orchestrates selected device basket, capacity, auto-fill, sync status, and manifest repair entry points. `InitDeviceModal` and `RepairModal` cover setup and dirty-manifest reconciliation. Audiobookshelf role-specific folder settings and sync policy are sent to the daemon, which remains the source of truth for actual device writes.
 
+Saved snapshots expose separate Add-to-basket and Replace-basket controls only for the selected configured physical destination. The target name and stable ID are visible before confirmation; Replace uses a target-named destructive prompt. `PlaybackSnapshots` fences planning and completion by snapshot, device, operation request generation, and component lifetime. Before planning it drains pending and dispatched legacy basket saves; after confirmed commit it hydrates `basketStore` only from the daemon-authoritative returned vector. Preflight limitations remain visible and never become optimistic local mutations.
+
 ## Build and tests
 
 `package.json` provides `dev`, `build` (`tsc && vite build`), `preview`, and `tauri` scripts. The Tauri crate uses the shared workspace version. Run `rtk npm run build` from `hifimule-ui/` for the frontend and use the root build wrapper plus `scripts/prepare-sidecar.mjs` before packaging the desktop app. Node tests under `hifimule-ui/tests/` cover browse, playback, Audiobookshelf, and policy helpers; `scripts/tests/` covers UI and runtime contracts. See [Development Guide](./development-guide.md).

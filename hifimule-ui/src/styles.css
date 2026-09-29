@@ -2545,12 +2545,15 @@ h2 {
 .playback-snapshots__panel { margin-block-start: 1rem; }
 .playback-snapshots__export-status ul { margin: .5rem 0; padding-inline-start: 1.25rem; }
 .playback-snapshots__export-status li { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.playback-snapshots__basket-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: .5rem; }
+.playback-snapshots__basket-actions button:last-child { border-color: var(--amber-warn); }
 .playback-snapshots button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .playback-snapshots [hidden] { display: none !important; }
 .playback-snapshots .playback-destination__source { display: flex; align-items: center; gap: .3rem; font-size: .85rem; }
 @media (max-width: 599px) {
   .playback-snapshots { padding: .65rem; }
   .playback-snapshots__actions > button { flex: 1 1 100%; min-height: 2.75rem; }
+  .playback-snapshots__basket-actions > button { flex: 1 1 100%; min-height: 2.75rem; }
 }
 @media (forced-colors: active) {
   .playback-snapshots input:focus-visible { outline-color: Highlight; }

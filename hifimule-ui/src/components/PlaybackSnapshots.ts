@@ -1,8 +1,9 @@
-import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackGetSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot } from '../rpc';
+import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackGetSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, playbackPlanSnapshotBasketExport, playbackCommitSnapshotBasketExport, getDaemonState, type SnapshotBasketAction, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot, type Destination } from '../rpc';
 import { t } from '../i18n';
 import { withDeadline } from '../lifecycleDeadline';
 import { playbackStore } from '../state/playback';
 import { snapshotSaves, snapshotErrorCode, type SnapshotSaveState } from '../state/snapshotSaves';
+import { basketStore } from '../state/basket';
 
 function button(key: string, action: () => void): HTMLButtonElement {
     const value = document.createElement('button'); value.type = 'button'; value.textContent = t(key);
@@ -44,6 +45,10 @@ export class PlaybackSnapshots {
     private readonly exportName = document.createElement('input');
     private readonly exportButton = button('playback.snapshots.export.action', () => void this.confirmExport());
     private readonly exportStatus = document.createElement('div');
+    private readonly basketAdd = button('playback.snapshots.basket.add', () => void this.confirmBasketExport('add'));
+    private readonly basketReplace = button('playback.snapshots.basket.replace', () => void this.confirmBasketExport('replace'));
+    private readonly basketTarget = document.createElement('p');
+    private readonly basketStatus = document.createElement('div');
     private readonly retry = button('playback.retry', () => void this.loadPage());
     private readonly first = button('playback.snapshots.first', () => { this.cursor = null; this.previous = []; void this.loadPage(); });
     private readonly prev = button('playback.queue.previous', () => { this.cursor = this.previous.pop() ?? null; void this.loadPage(); });
@@ -59,10 +64,12 @@ export class PlaybackSnapshots {
     private nextCursor: string | null = null;
     private previous: (string | null)[] = [];
     private request = 0;
+    private basketRequest = 0;
     private loading = false;
     private disposed = false;
     private exportPoll?: ReturnType<typeof setTimeout>;
     private requiresRefresh = false;
+    private target?: Extract<Destination, {kind:'device'}>;
     private readonly unsubscribers: (() => void)[] = [];
 
     constructor(private readonly onSavedView: (show: boolean) => void) {
@@ -80,7 +87,9 @@ export class PlaybackSnapshots {
         paging.append(this.first, this.prev, this.next);
         const exportLabel=document.createElement('label');exportLabel.textContent=t('playback.snapshots.export.name');this.exportName.maxLength=120;this.exportName.setAttribute('aria-label',t('playback.snapshots.export.name'));exportLabel.append(this.exportName);
         this.exportStatus.setAttribute('role','status');this.exportStatus.setAttribute('aria-live','polite');this.exportStatus.className='playback-snapshots__export-status';
-        this.panel.append(this.back, this.savedList, this.heading, this.details, exportLabel, this.exportButton, this.exportStatus, this.pageStatus, this.retry, this.list, paging);
+        const basketActions=document.createElement('div');basketActions.className='playback-snapshots__basket-actions';basketActions.append(this.basketAdd,this.basketReplace);
+        this.basketStatus.setAttribute('role','status');this.basketStatus.setAttribute('aria-live','polite');this.basketStatus.className='playback-snapshots__export-status';
+        this.panel.append(this.back, this.savedList, this.heading, this.details, this.basketTarget, basketActions, this.basketStatus, exportLabel, this.exportButton, this.exportStatus, this.pageStatus, this.retry, this.list, paging);
         this.element.append(toolbar, this.explanation, this.saveStatus, this.recover, this.refresh, this.openResult, this.panel);
         this.element.addEventListener('keydown', event => { if (event.key === 'Escape' && !this.panel.hidden) { event.preventDefault(); this.showLive(); } });
         this.unsubscribers.push(playbackStore.subscribe(s => { this.observed = s; this.renderSave(); }));
@@ -93,7 +102,7 @@ export class PlaybackSnapshots {
         }));
         if (snapshotSaves.pending) void snapshotSaves.recover();
     }
-    destroy(): void { this.disposed = true; ++this.request; if(this.exportPoll)clearTimeout(this.exportPoll);for (const unsubscribe of this.unsubscribers) unsubscribe(); }
+    destroy(): void { this.disposed = true; ++this.request;++this.basketRequest; if(this.exportPoll)clearTimeout(this.exportPoll);for (const unsubscribe of this.unsubscribers) unsubscribe(); }
     focus(): boolean { if (this.panel.hidden || this.disposed) return false; this.heading.focus(); return true; }
     private async refreshLive(): Promise<void> {
         this.requiresRefresh = true; this.renderSave();
@@ -132,7 +141,31 @@ export class PlaybackSnapshots {
         this.heading.textContent = snapshot.name;
         this.details.textContent = `${new Date(snapshot.createdAt).toLocaleString()} · ${t('playback.snapshots.count', { count: snapshot.entryCount })}`;
         this.exportName.value=snapshot.name;this.exportStatus.replaceChildren();this.exportButton.disabled=false;
+        this.basketStatus.replaceChildren();void this.refreshBasketTarget(snapshot.snapshotId);
         this.onSavedView(true); this.heading.focus(); void this.loadPage(); void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(v=>{if(v[0])this.renderExport(v[0]);}).catch(error=>{if(!this.disposed&&this.selection?.snapshotId===snapshot.snapshotId)this.exportStatus.textContent=message(snapshotErrorCode(error));});
+    }
+    private async refreshBasketTarget(snapshotId:string):Promise<void>{
+        const request=++this.basketRequest;
+        try{const state=await getDaemonState();if(this.disposed||request!==this.basketRequest||this.selection?.snapshotId!==snapshotId)return;
+            this.target=state.destinations.find((destination):destination is Extract<Destination,{kind:'device'}>=>destination.kind==='device'&&destination.selected);
+            const unavailable=!this.target;this.basketAdd.disabled=unavailable;this.basketReplace.disabled=unavailable;
+            this.basketTarget.textContent=this.target?t('playback.snapshots.basket.target',{name:this.target.name,id:this.target.deviceId}):t('playback.snapshots.basket.unavailable');
+        }catch{if(!this.disposed&&request===this.basketRequest){this.target=undefined;this.basketAdd.disabled=true;this.basketReplace.disabled=true;this.basketTarget.textContent=t('playback.snapshots.basket.unavailable');}}
+    }
+    private async confirmBasketExport(action:SnapshotBasketAction):Promise<void>{
+        const snapshot=this.selection,target=this.target;if(!snapshot||!target||this.disposed)return;
+        const request=++this.basketRequest;this.basketAdd.disabled=true;this.basketReplace.disabled=true;this.basketStatus.textContent=t('playback.snapshots.basket.planning');
+        try{const generation=await basketStore.prepareAuthoritativeMutation();const plan=await playbackPlanSnapshotBasketExport(snapshot.snapshotId,target.deviceId,action);
+            if(this.disposed||request!==this.basketRequest||this.selection?.snapshotId!==snapshot.snapshotId||this.target?.deviceId!==target.deviceId)return;
+            if(!plan.faithful){this.basketStatus.textContent=t('playback.snapshots.basket.blocked',{reasons:plan.limitations.map(v=>t(`playback.snapshots.basket.reason.${v.code}`)).join(', ')});return;}
+            const prompt=action==='replace'?'playback.snapshots.basket.confirmReplace':'playback.snapshots.basket.confirmAdd';
+            if(!window.confirm(t(prompt,{name:plan.targetName,count:plan.snapshotEntryCount})))return;
+            const result=await playbackCommitSnapshotBasketExport(plan);
+            if(this.disposed||request!==this.basketRequest||this.selection?.snapshotId!==snapshot.snapshotId||this.target?.deviceId!==target.deviceId)return;
+            if(result.state==='commitConfirmed'&&result.basketItems){basketStore.hydrateAuthoritative(result.basketItems,generation,result.postBasketHash);this.basketStatus.textContent=t(`playback.snapshots.basket.success.${action}`,{name:plan.targetName});}
+            else this.basketStatus.textContent=t(`playback.snapshots.basket.state.${result.state}`);
+        }catch(error){if(!this.disposed&&request===this.basketRequest)this.basketStatus.textContent=message(snapshotErrorCode(error));}
+        finally{if(!this.disposed&&request===this.basketRequest){this.basketAdd.disabled=!this.target;this.basketReplace.disabled=!this.target;}}
     }
     private async confirmExport():Promise<void>{
         const snapshot=this.selection;if(!snapshot||this.disposed)return;const request=++this.request;this.exportButton.disabled=true;this.exportStatus.textContent=t('playback.snapshots.export.planning');

@@ -8,6 +8,34 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use tokio::time::{Duration, sleep};
 
+/// Stable basket representation policy. The hash deliberately excludes every
+/// non-basket manifest field so auto-fill/profile/sync changes do not create a
+/// false basket conflict.
+pub const BASKET_POLICY_VERSION: u32 = 1;
+
+pub fn canonical_basket_hash(items: &[BasketItem]) -> String {
+    let payload = serde_json::to_vec(&(BASKET_POLICY_VERSION, items))
+        .expect("BasketItem serialization is infallible");
+    blake3::hash(&payload).to_hex().to_string()
+}
+
+#[derive(Debug)]
+pub enum CheckedManifestUpdateError {
+    Conflict { authoritative_hash: String },
+    Unavailable(anyhow::Error),
+}
+
+impl std::fmt::Display for CheckedManifestUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { .. } => write!(f, "basket revision conflict"),
+            Self::Unavailable(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CheckedManifestUpdateError {}
+
 #[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaRole {
@@ -1373,6 +1401,76 @@ impl DeviceManager {
             sync_manifest_directory,
         )
         .await
+    }
+
+    /// Result-bearing compare-and-mutate boundary used by snapshot basket
+    /// export. Identity resolution, basket hash verification, mutation and
+    /// persistence all happen under the same per-device commit lock.
+    pub async fn update_basket_checked<F>(
+        &self,
+        device_id: &str,
+        expected_hash: Option<&str>,
+        mutation: F,
+    ) -> std::result::Result<(DeviceManifest, String), CheckedManifestUpdateError>
+    where
+        F: FnOnce(&[BasketItem]) -> std::result::Result<Vec<BasketItem>, anyhow::Error>,
+    {
+        let commit_lock = {
+            let mut locks = self
+                .manifest_commit_locks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::sync::Arc::clone(
+                locks
+                    .entry(device_id.to_string())
+                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _commit = commit_lock.lock().await;
+        let mut state = self.state.write().await;
+        let path = state
+            .connected_devices
+            .iter()
+            .find_map(|(path, connected)| {
+                (connected.manifest.device_id == device_id).then(|| path.clone())
+            })
+            .ok_or_else(|| {
+                CheckedManifestUpdateError::Unavailable(anyhow::anyhow!(
+                    "Device is no longer connected: {device_id}"
+                ))
+            })?;
+        let connected = state.connected_devices.get_mut(&path).ok_or_else(|| {
+            CheckedManifestUpdateError::Unavailable(anyhow::anyhow!("Device not in connected map"))
+        })?;
+        let before = connected.manifest.clone();
+        let before_hash = canonical_basket_hash(&before.basket_items);
+        if expected_hash.is_some_and(|expected| expected != before_hash) {
+            return Err(CheckedManifestUpdateError::Conflict {
+                authoritative_hash: before_hash,
+            });
+        }
+        connected.manifest.basket_items =
+            mutation(&before.basket_items).map_err(CheckedManifestUpdateError::Unavailable)?;
+        let snapshot = connected.manifest.clone();
+        let device_io = std::sync::Arc::clone(&connected.device_io);
+        let is_mtp = connected.device_class == DeviceClass::Mtp;
+        drop(state);
+        let persisted = if is_mtp {
+            let local_path = crate::paths::get_local_mtp_manifest_path(device_id)
+                .map_err(CheckedManifestUpdateError::Unavailable)?;
+            persist_local_manifest_atomic(&local_path, &snapshot).await
+        } else {
+            crate::device::write_manifest(device_io, &snapshot).await
+        };
+        if let Err(error) = persisted {
+            let mut state = self.state.write().await;
+            if let Some(connected) = state.connected_devices.get_mut(&path) {
+                connected.manifest = before;
+            }
+            return Err(CheckedManifestUpdateError::Unavailable(error));
+        }
+        let hash = canonical_basket_hash(&snapshot.basket_items);
+        Ok((snapshot, hash))
     }
 
     async fn update_manifest_for_device_with_cache_path<F, P>(

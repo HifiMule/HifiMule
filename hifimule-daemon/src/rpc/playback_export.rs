@@ -1,4 +1,5 @@
 use super::*;
+use crate::playback::basket_export::*;
 use crate::playback::export::*;
 use crate::playback::server_export::*;
 use serde_json::json;
@@ -9,6 +10,8 @@ static READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 static EXPORT_PARTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+static BASKET_EXPORTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 fn parse<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T, JsonRpcError> {
     serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|_| playback_error(error("INVALID_SNAPSHOT_REQUEST")))
@@ -72,6 +75,383 @@ pub(super) async fn read(
 fn export_parse<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T, JsonRpcError> {
     serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|_| playback_error(crate::playback::export::error("INVALID_SNAPSHOT_REQUEST")))
+}
+
+async fn basket_plan(
+    state: &AppState,
+    p: PlanBasketExportParams,
+) -> Result<BasketExportPlan, JsonRpcError> {
+    validate_plan(&p).map_err(playback_error)?;
+    let manifest = state
+        .device_manager
+        .get_manifest_for_device(&p.target_device_id)
+        .await
+        .ok_or_else(|| {
+            playback_error(crate::playback::export::error(
+                "BASKET_EXPORT_TARGET_UNAVAILABLE",
+            ))
+        })?;
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = state
+            .db
+            .list_listening_snapshot_entries(ListSnapshotEntriesParams {
+                schema_version: 1,
+                snapshot_id: p.snapshot_id.clone(),
+                cursor,
+                limit: Some(200),
+            })
+            .map_err(playback_error)?;
+        entries.extend(page.entries);
+        if entries.len() > MAX_ENTRIES {
+            return Err(playback_error(crate::playback::export::error(
+                "BASKET_EXPORT_TOO_LARGE",
+            )));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let mut limitations = Vec::new();
+    let mut items = Vec::new();
+    if entries.is_empty() {
+        limitations.push(BasketExportLimitation {
+            ordinal: "0".into(),
+            code: "emptySnapshot".into(),
+            server_id: "".into(),
+            track_id: "".into(),
+        });
+    }
+    let mut identities = std::collections::HashSet::new();
+    let mut raw_ids = std::collections::HashMap::<String, String>::new();
+    for entry in &entries {
+        let ordinal = entry.ordinal.clone();
+        let server_id = entry.source.server_id.clone();
+        let track_id = entry.source.track_id.clone();
+        let identity = (server_id.clone(), track_id.clone());
+        if !identities.insert(identity) {
+            limitations.push(BasketExportLimitation {
+                ordinal,
+                code: "repeatUnsupported".into(),
+                server_id,
+                track_id,
+            });
+            continue;
+        }
+        if raw_ids
+            .insert(track_id.clone(), server_id.clone())
+            .is_some_and(|prior| prior != server_id)
+        {
+            limitations.push(BasketExportLimitation {
+                ordinal,
+                code: "rawIdCollisionUnsupported".into(),
+                server_id,
+                track_id,
+            });
+            continue;
+        }
+        let provider = match crate::server_manager::get_provider_by_server_id(
+            &state.server_manager,
+            &state.db,
+            &server_id,
+        )
+        .await
+        {
+            Ok(provider) => provider,
+            Err(_) => {
+                limitations.push(BasketExportLimitation {
+                    ordinal,
+                    code: "sourceUnavailable".into(),
+                    server_id,
+                    track_id,
+                });
+                continue;
+            }
+        };
+        let song = match provider.get_song(&track_id).await {
+            Ok(song) => song,
+            Err(_) => {
+                limitations.push(BasketExportLimitation {
+                    ordinal,
+                    code: "trackUnavailable".into(),
+                    server_id,
+                    track_id,
+                });
+                continue;
+            }
+        };
+        if song.id != track_id {
+            limitations.push(BasketExportLimitation {
+                ordinal,
+                code: "identityChanged".into(),
+                server_id,
+                track_id,
+            });
+            continue;
+        }
+        let Some(size_bytes) = song.size_bytes.filter(|size| *size > 0) else {
+            limitations.push(BasketExportLimitation {
+                ordinal,
+                code: "sizeUnavailable".into(),
+                server_id,
+                track_id,
+            });
+            continue;
+        };
+        let Some(size_ticks) = i64::from(song.duration_seconds).checked_mul(10_000_000) else {
+            limitations.push(BasketExportLimitation {
+                ordinal,
+                code: "metadataOverflow".into(),
+                server_id,
+                track_id,
+            });
+            continue;
+        };
+        items.push(crate::device::BasketItem {
+            id: song.id,
+            name: song.title,
+            item_type: "Audio".into(),
+            server_id: Some(server_id),
+            artist: song.artist_name,
+            child_count: 1,
+            size_ticks,
+            size_bytes,
+        });
+    }
+    let source_count = items
+        .iter()
+        .filter_map(|item| item.server_id.as_deref())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if manifest.auto_sync_on_connect && source_count > 1 {
+        limitations.push(BasketExportLimitation {
+            ordinal: "0".into(),
+            code: "autoSyncMixedSourceUnsupported".into(),
+            server_id: "".into(),
+            track_id: "".into(),
+        });
+    }
+    let projected_items = projected(p.action, &manifest, &items);
+    Ok(BasketExportPlan {
+        schema_version: 1,
+        snapshot_id: p.snapshot_id,
+        target_device_id: p.target_device_id,
+        target_name: manifest
+            .name
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| manifest.device_id.clone()),
+        target_icon: manifest.icon.clone(),
+        action: p.action,
+        observed_basket_hash: crate::device::canonical_basket_hash(&manifest.basket_items),
+        snapshot_entry_count: entries.len().to_string(),
+        projected_entry_count: projected_items.len().to_string(),
+        faithful: limitations.is_empty(),
+        limitations,
+        items,
+    })
+}
+
+pub(super) async fn basket_export_read(
+    state: &AppState,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let value = match method {
+        "playback.planSnapshotBasketExport" => {
+            let p: PlanBasketExportParams = export_parse(params)?;
+            json!(basket_plan(state, p).await?)
+        }
+        "playback.getSnapshotBasketExport" => {
+            let p: BasketExportLocator = export_parse(params)?;
+            if p.schema_version != 1 {
+                return Err(playback_error(crate::playback::export::error(
+                    "INVALID_BASKET_EXPORT_REQUEST",
+                )));
+            }
+            json!(
+                state
+                    .db
+                    .get_basket_export(&p.operation_id)
+                    .map_err(playback_error)?
+            )
+        }
+        "playback.listSnapshotBasketExports" => {
+            let p: ListBasketExportsParams = export_parse(params)?;
+            json!(state.db.list_basket_exports(p).map_err(playback_error)?)
+        }
+        _ => {
+            let p: BasketExportLocator = export_parse(params)?;
+            if p.schema_version != 1 {
+                return Err(playback_error(crate::playback::export::error(
+                    "INVALID_BASKET_EXPORT_REQUEST",
+                )));
+            }
+            let operation = state
+                .db
+                .get_basket_export(&p.operation_id)
+                .map_err(playback_error)?;
+            if operation.state != BasketExportState::CommitUncertain {
+                json!(operation)
+            } else {
+                let manifest = state
+                    .device_manager
+                    .get_manifest_for_device(&operation.target_device_id)
+                    .await;
+                let current = manifest
+                    .as_ref()
+                    .map(|m| crate::device::canonical_basket_hash(&m.basket_items));
+                let recovered = if current.as_deref() == operation.post_basket_hash.as_deref() {
+                    state.db.finish_basket_export(
+                        &operation.operation_id,
+                        BasketExportState::CommitConfirmed,
+                        current.as_deref(),
+                        manifest.as_ref().map(|m| m.basket_items.as_slice()),
+                        Some("reconciledPostHash"),
+                    )
+                } else if current.as_deref() == Some(operation.pre_basket_hash.as_str()) {
+                    state.db.finish_basket_export(
+                        &operation.operation_id,
+                        BasketExportState::Failed,
+                        current.as_deref(),
+                        manifest.as_ref().map(|m| m.basket_items.as_slice()),
+                        Some("confirmedRollback"),
+                    )
+                } else {
+                    Ok(operation)
+                }
+                .map_err(playback_error)?;
+                json!(recovered)
+            }
+        }
+    };
+    Ok(json!({"data":value}))
+}
+
+pub(super) async fn basket_export_write(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let p: CommitBasketExportParams = export_parse(params)?;
+    let _permit = BASKET_EXPORTS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| playback_error(crate::playback::export::error("PLAYBACK_BUSY")))?;
+    let plan = basket_plan(
+        state,
+        PlanBasketExportParams {
+            schema_version: p.schema_version,
+            snapshot_id: p.snapshot_id.clone(),
+            target_device_id: p.target_device_id.clone(),
+            action: p.action,
+        },
+    )
+    .await?;
+    let current = state
+        .device_manager
+        .get_manifest_for_device(&p.target_device_id)
+        .await
+        .ok_or_else(|| {
+            playback_error(crate::playback::export::error(
+                "BASKET_EXPORT_TARGET_UNAVAILABLE",
+            ))
+        })?;
+    let projected_items = projected(p.action, &current, &plan.items);
+    let post_hash = crate::device::canonical_basket_hash(&projected_items);
+    let prior = state
+        .db
+        .record_basket_export_intent(&p, &plan.observed_basket_hash, &post_hash)
+        .map_err(playback_error)?;
+    if prior.state != BasketExportState::IntentRecorded {
+        return Ok(json!({"data":prior}));
+    }
+    if !plan.faithful {
+        let operation = state
+            .db
+            .finish_basket_export(
+                &p.operation_id,
+                BasketExportState::Failed,
+                None,
+                None,
+                Some("preflightLimitations"),
+            )
+            .map_err(playback_error)?;
+        return Ok(json!({"data":operation}));
+    }
+    if p.action == BasketExportAction::Replace
+        && plan.observed_basket_hash != p.expected_basket_hash
+    {
+        let operation = state
+            .db
+            .finish_basket_export(
+                &p.operation_id,
+                BasketExportState::Conflict,
+                Some(&plan.observed_basket_hash),
+                None,
+                Some("basketChanged"),
+            )
+            .map_err(playback_error)?;
+        return Ok(json!({"data":operation}));
+    }
+    let action = p.action;
+    let planned = plan.items;
+    match state
+        .device_manager
+        .update_basket_checked(
+            &p.target_device_id,
+            (p.action == BasketExportAction::Replace).then_some(p.expected_basket_hash.as_str()),
+            move |existing| {
+                Ok(match action {
+                    BasketExportAction::Add => merge_add(existing, &planned),
+                    BasketExportAction::Replace => planned,
+                })
+            },
+        )
+        .await
+    {
+        Ok((manifest, hash)) => {
+            let operation = state
+                .db
+                .finish_basket_export(
+                    &p.operation_id,
+                    BasketExportState::CommitConfirmed,
+                    Some(&hash),
+                    Some(&manifest.basket_items),
+                    None,
+                )
+                .map_err(playback_error)?;
+            Ok(json!({"data":operation}))
+        }
+        Err(crate::device::CheckedManifestUpdateError::Conflict { authoritative_hash }) => {
+            let operation = state
+                .db
+                .finish_basket_export(
+                    &p.operation_id,
+                    BasketExportState::Conflict,
+                    Some(&authoritative_hash),
+                    None,
+                    Some("basketChanged"),
+                )
+                .map_err(playback_error)?;
+            Ok(json!({"data":operation}))
+        }
+        Err(_) => {
+            let operation = state
+                .db
+                .finish_basket_export(
+                    &p.operation_id,
+                    BasketExportState::CommitUncertain,
+                    None,
+                    None,
+                    Some("manifestPersistenceUncertain"),
+                )
+                .map_err(playback_error)?;
+            Ok(json!({"data":operation}))
+        }
+    }
 }
 
 pub(super) async fn export_read(

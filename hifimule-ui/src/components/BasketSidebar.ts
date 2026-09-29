@@ -297,6 +297,7 @@ export class BasketSidebar {
                 try {
                     const res = await rpcCall('manifest_get_basket') as any;
                     if (res?.basketItems && Array.isArray(res.basketItems)) {
+                        basketStore.setDaemonContext(res.targetDeviceId ?? currentDeviceId,res.basketHash ?? null);
                         basketStore.hydrateFromDaemon(res.basketItems);
                     }
                 } catch (err) {

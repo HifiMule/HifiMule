@@ -689,6 +689,15 @@ async fn handler(
         | "playback.listSnapshotPlaylistExports" => {
             playback_export::export_read(&state, &payload.method, payload.params).await
         }
+        "playback.planSnapshotBasketExport"
+        | "playback.getSnapshotBasketExport"
+        | "playback.listSnapshotBasketExports"
+        | "playback.recoverSnapshotBasketExport" => {
+            playback_export::basket_export_read(&state, &payload.method, payload.params).await
+        }
+        "playback.commitSnapshotBasketExport" => {
+            playback_export::basket_export_write(&state, payload.params).await
+        }
         "playback.startSnapshotPlaylistExport"
         | "playback.retrySnapshotPlaylistExport"
         | "playback.reconcileSnapshotPlaylistExport"
@@ -869,6 +878,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playback.setFeedback"
             | "playback.saveSnapshot"
             | "playback.startSnapshotPlaylistExport"
+            | "playback.commitSnapshotBasketExport"
             | "playback.retrySnapshotPlaylistExport"
             | "playback.reconcileSnapshotPlaylistExport"
             | "playback.cancelSnapshotPlaylistExport"
@@ -4511,6 +4521,8 @@ async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcEr
     Ok(serde_json::json!({
         "basketItems": basket_items,
         "serverId": selected_portable,
+        "targetDeviceId": device.as_ref().map(|manifest| manifest.device_id.clone()),
+        "basketHash": device.as_ref().map(|manifest| crate::device::canonical_basket_hash(&manifest.basket_items)),
     }))
 }
 
@@ -4544,6 +4556,39 @@ async fn handle_manifest_save_basket(
     // removed servers (Story 2.13).
     let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
     let items = reconcile_basket_server_ids(items, &servers);
+    let target_device_id = params
+        .get("targetDeviceId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let expected_hash = params
+        .get("expectedBasketHash")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let (Some(target_device_id), Some(expected_hash)) = (target_device_id, expected_hash) {
+        return match state
+            .device_manager
+            .update_basket_checked(&target_device_id, Some(&expected_hash), move |_| Ok(items))
+            .await
+        {
+            Ok((manifest, hash)) => Ok(
+                serde_json::json!({"basketItems":manifest.basket_items,"targetDeviceId":target_device_id,"basketHash":hash}),
+            ),
+            Err(crate::device::CheckedManifestUpdateError::Conflict { authoritative_hash }) => {
+                Err(JsonRpcError {
+                    code: -32009,
+                    message: "Basket changed".into(),
+                    data: Some(
+                        serde_json::json!({"code":"BASKET_CONFLICT","basketHash":authoritative_hash,"targetDeviceId":target_device_id}),
+                    ),
+                })
+            }
+            Err(error) => Err(JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: error.to_string(),
+                data: None,
+            }),
+        };
+    }
 
     match state.device_manager.save_basket(items).await {
         Ok(_) => Ok(Value::Bool(true)),

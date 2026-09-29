@@ -539,3 +539,9 @@ does not use that helper as a separate acceptance read.
 `playback_server_export_parts` stores one ordered row per frozen portable source with its ordered occurrence-preserving track-ID plan, state, attempt/generation fence, expected and confirmed counts, known remote playlist identity, diagnostic code, and retry boundary. Valid part states are `planned`, `unsupported`, `denied`, `pending`, `creating`, `populating`, `partial`, `succeeded`, `failed`, `ambiguous`, `unresolved`, and `canceled`. Aggregate state is derived from parts.
 
 Bounds are explicit: 480 UTF-8 bytes/120 characters per name, 10,000 occurrences, 32 sources, 1,000 IDs per provider create/append request, four concurrently active source parts, five retry attempts with a 300-second backoff cap, and 30-day operation/part retention. Snapshot rows remain immutable. Migration v15 is transactional, retains all v1-v14 data, and remains distinct from RPC schema version 1.
+
+# Snapshot basket-export journal
+
+`playback_basket_exports` stores the operation UUID, canonical request, frozen snapshot and durable device IDs, action, pre/post canonical basket hashes, terminal authoritative basket when confirmed, reason, and retention timestamps. States are `intentRecorded`, `commitConfirmed`, `conflict`, `failed`, and `commitUncertain`. Startup turns an unacknowledged intent into `commitUncertain`; recovery compares the exact connected target against both persisted hashes rather than replaying the mutation. Rows are retained for 30 days.
+
+Basket policy version 1 hashes stable JSON for `(policyVersion, ordered full basket vector)` and excludes unrelated manifest fields. Basket provider identity is `(serverId, id)`; provider `id` is never replaced with an occurrence key. Replace assigns the validated vector once. Add preserves the latest existing vector and appends only identities not already present.

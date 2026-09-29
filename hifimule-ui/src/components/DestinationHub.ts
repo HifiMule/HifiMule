@@ -207,6 +207,7 @@ export class DestinationHub {
             if (destination.kind === 'device') {
                 const basket = await import('../rpc').then(({ rpcCall }) => rpcCall('manifest_get_basket')) as any;
                 if (!current()) return;
+                basketStore.setDaemonContext(basket?.targetDeviceId ?? destination.deviceId,basket?.basketHash ?? null);
                 basketStore.hydrateFromDaemon(basket?.basketItems ?? []);
             }
             const updated = await getDaemonState();

@@ -1494,3 +1494,9 @@ Provider support matrix:
 | Audiobookshelf/default | disabled | unsupported | no write | no retry |
 
 Automated fixtures cover request ordering and duplicate parameter preservation. Configured Jellyfin 12.1.0/Navidrome 0.64.2 contents and installed Windows/macOS/Linux behavior remain explicit external evidence items; unit tests do not claim those environments were exercised.
+
+# Listening snapshot device-basket export (schemaVersion 1)
+
+`playback.planSnapshotBasketExport` accepts a frozen `snapshotId`, durable `targetDeviceId`, and `add` or `replace`. It is read-only and returns the target name/icon/identity, canonical ordered-basket hash, counts, fidelity flag, and ordered structured limitations. `playback.commitSnapshotBasketExport` adds an operation UUID and expected hash. `playback.getSnapshotBasketExport` reads durable state; `playback.recoverSnapshotBasketExport` reconciles an uncertain operation against the exact target's pre/post hashes.
+
+All params use camelCase, reject unknown fields, and require `schemaVersion: 1`. Replace requires the planned hash exactly. Add re-resolves the durable device under its manifest commit lock and merges against the latest basket using `(portable serverId, provider trackId)` identity, preserving the existing vector and metadata. The current basket/UI/sync representation cannot safely expose repeated occurrences or identical raw IDs across sources, so preflight blocks and discloses those cases. Provider-unavailable, missing/changed tracks, missing authoritative sizes, metadata overflow, and unsafe mixed-source auto-sync are likewise explicit limitations. Export never starts sync or deletes device media.

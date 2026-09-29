@@ -42,6 +42,10 @@ class BasketStore extends EventTarget {
     private _dirty: boolean = false;
     private activeServerId: string | null = null;
     private physicalTargetAvailable = false;
+    private saveGeneration = 0;
+    private inFlightSave: Promise<void> = Promise.resolve();
+    private targetDeviceId: string | null = null;
+    private basketHash: string | null = null;
 
     constructor() {
         super();
@@ -57,12 +61,16 @@ class BasketStore extends EventTarget {
         }
         this.saveTimeout = window.setTimeout(async () => {
             this.saveTimeout = null;
-            try {
-                await rpcCall('manifest_save_basket', { basketItems: this.getItems() });
+            const generation = ++this.saveGeneration;
+            this.inFlightSave = (async () => { try {
+                const result=await rpcCall('manifest_save_basket', { basketItems: this.getItems(), targetDeviceId:this.targetDeviceId, expectedBasketHash:this.basketHash });
+                if(result?.basketHash)this.basketHash=result.basketHash;
             } catch (e) {
                 console.error("Failed to save basket to daemon:", e);
                 window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: 'Failed to save basket to device' } }));
-            }
+            } })();
+            await this.inFlightSave;
+            if (generation !== this.saveGeneration) return;
         }, 1000);
     }
 
@@ -189,8 +197,26 @@ class BasketStore extends EventTarget {
             this.saveTimeout = null;
             // Let errors propagate — the caller (device switch) must not proceed
             // if the current device's basket could not be persisted.
-            await rpcCall('manifest_save_basket', { basketItems: this.getItems() });
+            const result=await rpcCall('manifest_save_basket', { basketItems: this.getItems(), targetDeviceId:this.targetDeviceId, expectedBasketHash:this.basketHash });
+            if(result?.basketHash)this.basketHash=result.basketHash;
         }
+        await this.inFlightSave;
+    }
+
+    /** Fence legacy whole-vector saves before a daemon-authoritative export. */
+    public async prepareAuthoritativeMutation(): Promise<number> {
+        await this.flushPendingSave();
+        return ++this.saveGeneration;
+    }
+
+    public hydrateAuthoritative(items: BasketItem[], generation: number, basketHash?:string|null): void {
+        if (generation !== this.saveGeneration) return;
+        if(basketHash)this.basketHash=basketHash;
+        this.hydrateFromDaemon(items);
+    }
+
+    public setDaemonContext(targetDeviceId:string|null,basketHash:string|null):void {
+        this.targetDeviceId=targetDeviceId;this.basketHash=basketHash;
     }
 
     public hydrateFromDaemon(items: BasketItem[]) {
