@@ -258,6 +258,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feedback_navidrome_oversized_mutation_reply_blocks_opposing_intent() {
+        use crate::playback::feedback::*;
+        use std::sync::atomic::AtomicBool;
+        // Exercise both the Content-Length and streamed-body limits for star and unstar.
+        for (value, endpoint, opposite, blocked_endpoint) in [
+            (Preference::Like, "star", Preference::Neutral, "unstar"),
+            (Preference::Neutral, "unstar", Preference::Like, "star"),
+        ] {
+            for chunked in [false, true] {
+                let mut server = Server::new_async().await;
+                let _ping = server.mock("GET", "/rest/ping.view").match_query(Matcher::Any)
+                    .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2 (10114574)","openSubsonic":true}}"#)
+                    .create_async().await;
+                let _song = server.mock("GET", "/rest/getSong.view")
+                    .match_query(Matcher::UrlEncoded("id".into(), "track".into()))
+                    .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","song":{"id":"track"}}}"#)
+                    .create_async().await;
+                let path = format!("/rest/{endpoint}.view");
+                let mut reply = server
+                    .mock("GET", path.as_str())
+                    .match_query(Matcher::UrlEncoded("id".into(), "track".into()))
+                    .with_status(200)
+                    .expect(1);
+                reply = if chunked {
+                    reply.with_chunked_body(|writer| {
+                        writer.write_all(&vec![b'x'; MAX_FEEDBACK_RESPONSE_BYTES + 1])
+                    })
+                } else {
+                    reply.with_body("x".repeat(MAX_FEEDBACK_RESPONSE_BYTES + 1))
+                };
+                let sent = reply.create_async().await;
+                let blocked_path = format!("/rest/{blocked_endpoint}.view");
+                let blocked = server
+                    .mock("GET", blocked_path.as_str())
+                    .match_query(Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let provider = crate::providers::subsonic::SubsonicProvider::from_stored_config(
+                    ProviderCredentials {
+                        server_url: server.url(),
+                        credential: CredentialKind::Password {
+                            username: "user".into(),
+                            password: "secret".into(),
+                        },
+                    },
+                    true,
+                    None,
+                )
+                .unwrap();
+                let db = crate::db::Database::memory().unwrap();
+                db.init_playback().unwrap();
+                let target = FeedbackTarget {
+                    session_id: "session".into(),
+                    logical_session_id: "session".into(),
+                    occurrence_id: "occ".into(),
+                    source: crate::playback::model::TrackSource {
+                        server_id: "server".into(),
+                        track_id: "track".into(),
+                    },
+                };
+                let scope = account_scope("user");
+                db.record_feedback(&target, &scope, value, "sent").unwrap();
+                db.record_feedback(&target, &scope, opposite, "opposed")
+                    .unwrap();
+                let row = db.claim_feedback().unwrap().unwrap();
+                deliver_feedback(&db, &row, &provider, &AtomicBool::new(false))
+                    .await
+                    .unwrap();
+                let settled = db.feedback_operation("sent").unwrap().unwrap();
+                assert_eq!(settled.status, FeedbackOperationStatus::Ambiguous);
+                assert_eq!(
+                    settled.diagnostic,
+                    Some(FeedbackDiagnostic::TransportAmbiguous)
+                );
+                assert_eq!(
+                    db.feedback_operation("opposed").unwrap().unwrap().status,
+                    FeedbackOperationStatus::Conflict
+                );
+                assert!(db.claim_feedback().unwrap().is_none());
+                sent.assert_async().await;
+                blocked.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn feedback_delivery_confirms_only_readback_and_never_replays_failures() {
         use crate::playback::feedback::*;
         use std::sync::atomic::AtomicBool;

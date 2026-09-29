@@ -50,7 +50,7 @@ pub(super) async fn read(state: &AppState, params: Option<Value>) -> Result<Valu
         .try_acquire_owned()
         .map_err(|_| error("FEEDBACK_BUSY"))?;
     let frozen = target(state, query.clone()).await?;
-    let before = state
+    let watermarks = state
         .db
         .feedback_before_read(&frozen.source)
         .map_err(|_| error("FEEDBACK_JOURNAL_UNAVAILABLE"))?;
@@ -73,10 +73,10 @@ pub(super) async fn read(state: &AppState, params: Option<Value>) -> Result<Valu
     .await;
     match result {
         Ok(Ok(Ok(remote))) => {
-            if let Some(before) = before
-                .as_ref()
-                .filter(|before| before.account_scope == remote.account_scope)
-            {
+            let before = watermarks
+                .iter()
+                .find(|row| row.account_scope == remote.account_scope);
+            if let Some(before) = before {
                 state
                     .db
                     .reconcile_feedback(&frozen.source, &remote.account_scope, before, remote.value)
@@ -90,11 +90,7 @@ pub(super) async fn read(state: &AppState, params: Option<Value>) -> Result<Valu
             view.preference = Some(remote.value);
             view.read_status = FeedbackReadStatus::Known;
             view.diagnostic = None;
-            if !read_is_current(
-                before.as_ref(),
-                view.operation.as_ref(),
-                &remote.account_scope,
-            ) {
+            if !read_is_current(before, view.operation.as_ref(), &remote.account_scope) {
                 view.preference = None;
                 view.read_status = FeedbackReadStatus::Unknown;
             }
@@ -108,7 +104,7 @@ pub(super) async fn read(state: &AppState, params: Option<Value>) -> Result<Valu
             view.diagnostic = Some(FeedbackDiagnostic::ProviderUnsupported);
         }
         _ => {
-            view.operation = before;
+            view.operation = watermarks.into_iter().next();
         }
     }
     if target(state, query).await? != frozen {
@@ -204,6 +200,122 @@ mod tests {
             .unwrap();
         assert!(!read_is_current(Some(&ambiguous), Some(&newer), "account"));
         assert!(read_is_current(Some(&ambiguous), None, "different-account"));
+
+        db.record_feedback(&target, "other-account", Preference::Like, "other-op")
+            .unwrap();
+        let watermarks = db.feedback_before_read(&target.source).unwrap();
+        assert_eq!(watermarks.len(), 2);
+        let before = watermarks.iter().find(|row| row.account_scope == "account");
+        assert!(read_is_current(before, Some(&newer), "account"));
+        let concurrent = db
+            .record_feedback(&target, "account", Preference::Like, "concurrent")
+            .unwrap();
+        assert!(!read_is_current(before, Some(&concurrent), "account"));
+    }
+
+    #[tokio::test]
+    async fn feedback_rpc_returning_account_can_refresh_and_reconcile_older_intent() {
+        use crate::playback::model::{ApplySessionParams, SessionOperation, TrackSource};
+        use crate::providers::feedback::account_scope;
+        use mockito::{Matcher, Server};
+        let mut server = Server::new_async().await;
+        let user = "11111111-1111-4111-8111-111111111111";
+        let _info = server
+            .mock("GET", "/System/Info/Public")
+            .with_body(r#"{"Version":"12.1.0"}"#)
+            .create_async()
+            .await;
+        let _me = server
+            .mock("GET", "/Users/Me")
+            .with_body(format!(r#"{{"Id":"{user}"}}"#))
+            .create_async()
+            .await;
+        let reads = server
+            .mock("GET", "/UserItems/track/UserData")
+            .match_query(Matcher::UrlEncoded("userId".into(), user.into()))
+            .with_body(r#"{"ItemId":"track","IsFavorite":false}"#)
+            .expect(3)
+            .create_async()
+            .await;
+        let state =
+            super::super::tests::make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let server_id = {
+            let mut manager = state.server_manager.write().await;
+            manager.set_test_provider(Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                crate::api::JellyfinClient::new(),
+                server.url(),
+                "secret",
+                user,
+            )));
+            manager.servers[0].server_id.clone().unwrap()
+        };
+        let initial = state.playback.snapshot().unwrap();
+        state
+            .playback
+            .apply(ApplySessionParams {
+                schema_version: 1,
+                session_id: initial.session_id,
+                instance_id: initial.instance_id,
+                expected_queue_revision: initial.queue_revision,
+                command_id: uuid::Uuid::new_v4().to_string(),
+                operation: SessionOperation::ReplaceQueue {
+                    sources: vec![TrackSource {
+                        server_id,
+                        track_id: "track".into(),
+                    }],
+                },
+            })
+            .unwrap();
+        let current = state.playback.snapshot().unwrap();
+        let query = FeedbackQuery {
+            schema_version: 1,
+            expected_session_id: current.session_id.clone(),
+            occurrence_id: current.current.as_ref().unwrap().occurrence_id.clone(),
+        };
+        let frozen = state.playback.feedback_target(query.clone()).unwrap();
+        let account_a = account_scope(user);
+        let account_b = account_scope("another-user");
+        for (id, account, status) in [
+            (
+                "a-confirmed",
+                &account_a,
+                FeedbackOperationStatus::Confirmed,
+            ),
+            (
+                "a-uncertain",
+                &account_a,
+                FeedbackOperationStatus::Ambiguous,
+            ),
+            ("b-newer", &account_b, FeedbackOperationStatus::Confirmed),
+        ] {
+            state
+                .db
+                .record_feedback(&frozen, account, Preference::Like, id)
+                .unwrap();
+            assert_eq!(state.db.claim_feedback().unwrap().unwrap().operation_id, id);
+            state.db.settle_feedback(id, status, None).unwrap();
+        }
+        for _ in 0..3 {
+            let result = read(&state, Some(serde_json::to_value(&query).unwrap()))
+                .await
+                .unwrap();
+            assert_eq!(result["data"]["readStatus"], "known");
+            assert_eq!(result["data"]["preference"], "neutral");
+            assert_eq!(result["data"]["operation"]["operationId"], "a-uncertain");
+            assert_eq!(result["data"]["operation"]["status"], "reconciled");
+        }
+        assert_eq!(
+            state
+                .db
+                .feedback_operation("b-newer")
+                .unwrap()
+                .unwrap()
+                .status,
+            FeedbackOperationStatus::Confirmed
+        );
+        assert!(state.db.claim_feedback().unwrap().is_none());
+        reads.assert_async().await;
+        state.playback.stop_and_join().unwrap();
     }
     #[tokio::test]
     async fn feedback_rpc_rejects_unsupported_negative_and_accepts_verified_offline_intent() {

@@ -306,7 +306,13 @@ impl MediaProvider for SubsonicProvider {
                 self.client.signed_url(endpoint, &[("id", track_id)])?,
                 Some(MAX_FEEDBACK_RESPONSE_BYTES),
             )
-            .await?;
+            .await
+            .map_err(|error| match error {
+                // This helper's size-limit error occurs after sending the mutation.
+                // It cannot establish rejection or revoke the verified capability.
+                ProviderError::UnsupportedCapability(_) => malformed(),
+                other => other,
+            })?;
         Ok(())
     }
     async fn related_artists(

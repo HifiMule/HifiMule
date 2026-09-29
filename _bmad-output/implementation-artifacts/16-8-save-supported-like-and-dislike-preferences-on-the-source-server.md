@@ -4,7 +4,7 @@ baseline_commit: aed88805e94bab705884836487094c78ae26a1d8
 
 # Story 16.8: Save supported Like and Dislike preferences on the source server
 
-Status: review
+Status: done
 
 ## Story
 
@@ -41,6 +41,17 @@ so that the preference is available outside HifiMule rather than becoming a sepa
 - [x] Add accessible feedback controls and verification (AC: 1–9).
   - [x] Reuse the floating playback controls' current-occurrence source badge, report-status pattern, request fencing, and localized status surface. Show capability-specific controls for the current main/preview occurrence; unknown, loading, pending, confirmed, failed and ambiguous states need distinct labels and live announcements without stealing focus.
   - [x] Test two servers sharing a track ID, duplicate recordings, track/preview switches during requests, opposite rapid actions, server-side changes after reconnect, journal failures, and no transport/reporting side effects. Update API/data-model docs and all four locale strings. Run focused daemon/UI/i18n checks plus the affected cross-platform matrix and record configured-server version/effect evidence.
+
+### Review Findings
+
+Review date: 2026-09-29. Reviewed `aed88805e94bab705884836487094c78ae26a1d8..260303f` with Blind Hunter, Edge Case Hunter, and Acceptance Auditor. All four patch findings were fixed after merging duplicates and dismissing one candidate; no decision-needed, deferred, or unresolved findings remain.
+
+- [x] [Review][Patch] [P2] Scope both read watermarks to the authenticated account [hifimule-daemon/src/playback/feedback.rs:241] — Fixed by capturing the latest operation for every account in one bounded pre-read snapshot, then selecting the authenticated account for reconciliation and concurrent-write fencing. Regression coverage verifies three successful refreshes for returning account A despite B's newer operation, reconciliation of A's uncertain intent, and rejection of reads overtaken by new A intents (AC1, AC8).
+- [x] [Review][Patch] [P2] Recover failed settlement after provider lookup [hifimule-daemon/src/playback/feedback.rs:555] — Fixed by retrying the local failed settlement with a capped delay before claiming more work. A trigger-injected write failure now recovers and allows another source's queued operation to proceed. A known unsent outcome still gets an initial settlement attempt if shutdown interrupts provider lookup (AC4, AC8).
+- [x] [Review][Patch] [P2] Retry transient startup journal recovery failures [hifimule-daemon/src/playback/feedback.rs:527] — Fixed by retrying startup recovery with backoff from 100 ms to a 500 ms cap before claiming work. Regressions prove interrupted sends become ambiguous, their opposing intents remain blocked, other unsent work resumes after storage recovery, and shutdown terminates a persistent recovery failure (AC4, AC8).
+- [x] [Review][Patch] [P2] Preserve ambiguity for oversized Navidrome mutation responses [hifimule-daemon/src/providers/subsonic.rs:303] — Fixed by mapping post-send response-limit failures to an unreadable response rather than unsupported capability. Production delivery tests cover both star and unstar with Content-Length and streamed-body limits: the sent operation remains ambiguous, the opposing operation becomes conflict, and no opposite request is sent (AC4, AC5).
+
+Review validation: final focused daemon feedback suite passed (28 passed, one live-server test ignored), including six new regressions and expanded account-watermark coverage; log: `/private/tmp/hifimule-16-8-patches-feedback-final.log`. Daemon Clippy across all targets passed with existing warnings and no warnings in changed code; log: `/private/tmp/hifimule-16-8-patches-clippy.log`. Rust formatting and Git whitespace checks passed. All 65 playback UI tests passed during the review; no frontend code changed in the patches. Live source-server probes and installed-platform checks were not rerun, and their existing verification gaps remain recorded. All four patches were applied with user authorization; story and sprint status are `done`.
 
 ## Dev Notes
 
@@ -107,7 +118,7 @@ GPT-6 (Codex)
 - Explicit Dislike persists a session rejection before remote journal insertion. Like clears only that exact occurrence, including Preview; neutral and other occurrences do not clear it. Journal failure preserves rejection. Radio logical-session replacement expires old dispositions, paused restore retains them, and feedback does not change transport, queue, listening reports or Radio skip exclusions. Story 16.9 has a bounded occurrence-ID read path.
 - Playback controls show verified actions, current source preference, loading/unknown and operational status with stable keyboard controls, visible refresh for recoverable failures, authoritative pressed state and polite announcements in English, French, Spanish and German. Reconnect, source/Preview replacement, opposite clicks, delayed results and journal failure have deterministic tests.
 - API/data-model documentation and the Windows x64, Linux x64, macOS x64/arm64 CI matrix include feedback. Local macOS arm64 workspace compilation, automated interactions and live source effects passed. Installed Story 16.8 UI interactions were not run on any platform; Windows/Linux/macOS x64 native compilation and interaction runners were unavailable. The contract records these gaps explicitly; they are not passing installed-platform evidence.
-- Definition of Done: implementation, acceptance-criteria coverage, regression checks, permitted story edits and complete file inventory verified. All story tasks are checked; story and sprint status are `review`. No dependencies were added and no commit or push was made.
+- Definition of Done: implementation, acceptance-criteria coverage, regression checks, permitted story edits and complete file inventory verified. All story tasks and review patches are checked; story and sprint status are `done`. No dependencies were added and no commit or push was made.
 
 ### File List
 
@@ -139,4 +150,5 @@ GPT-6 (Codex)
 
 ## Change Log
 
+- 2026-09-29: Applied all four code-review patches: account-scoped read watermarks, retryable worker startup recovery and provider-lookup settlement, and ambiguity preservation for oversized Navidrome mutation responses. Added six regressions, expanded stale-read coverage, updated feedback documentation, and marked story/sprint done after focused tests, Clippy, formatting, and whitespace checks.
 - 2026-09-29: Implemented verified source-server Like/Dislike/clear feedback, durable ordered intent and ambiguity reconciliation, recoverable per-occurrence rejection, accessible localized player controls, provider/RPC/owner/UI regressions, live configured-server effect evidence, and cross-platform CI coverage. Marked ready for review with installed-platform gaps recorded.

@@ -236,9 +236,19 @@ impl Database {
             .query_map(params![session, MAX_SESSION_REJECTIONS], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn feedback_before_read(&self, source: &TrackSource) -> Result<Option<FeedbackOperation>> {
+    /// Snapshot each account before the remote read identifies the authenticated user.
+    /// The journal bounds this result, and one SQLite statement captures a consistent watermark.
+    pub fn feedback_before_read(&self, source: &TrackSource) -> Result<Vec<FeedbackOperation>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(conn.query_row(&format!("SELECT {COLUMNS} FROM playback_feedback WHERE server_id=?1 AND track_id=?2 ORDER BY sequence DESC LIMIT 1"),params![source.server_id,source.track_id],operation_row).optional()?)
+        let mut statement = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM playback_feedback WHERE sequence IN (
+                SELECT MAX(sequence) FROM playback_feedback
+                WHERE server_id=?1 AND track_id=?2 GROUP BY account_scope
+            ) ORDER BY sequence DESC"
+        ))?;
+        Ok(statement
+            .query_map(params![source.server_id, source.track_id], operation_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn record_feedback(
         &self,
@@ -482,13 +492,39 @@ pub async fn deliver_feedback(
     Ok(())
 }
 
+/// Only retries local persistence. A failed settlement must never replay its remote request.
+async fn retry_feedback_journal(
+    shutdown: &AtomicBool,
+    mut step: impl FnMut() -> Result<()>,
+) -> bool {
+    let mut delay = Duration::from_millis(100);
+    let mut reported = false;
+    loop {
+        // Preserve a known terminal outcome even when shutdown began during provider lookup.
+        if step().is_ok() {
+            return true;
+        }
+        if shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        if !reported {
+            eprintln!("[Feedback] journal unavailable; retrying local persistence");
+            reported = true;
+        }
+        tokio::time::sleep(delay).await;
+        if shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
+}
+
 pub async fn run_feedback(
     db: Arc<Database>,
     manager: Arc<tokio::sync::RwLock<crate::server_manager::ServerManager>>,
     shutdown: Arc<AtomicBool>,
 ) {
-    if db.recover_feedback().is_err() {
-        eprintln!("[Feedback] recovery unavailable");
+    if !retry_feedback_journal(&shutdown, || db.recover_feedback()).await {
         return;
     }
     while !shutdown.load(Ordering::Acquire) {
@@ -512,19 +548,19 @@ pub async fn run_feedback(
                             eprintln!("[Feedback] settlement unavailable");
                             // The delivery future has ended. Recover its unsettled row as uncertain;
                             // retry only this local persistence step, never the remote request.
-                            while !shutdown.load(Ordering::Acquire)
-                                && db.recover_feedback().is_err()
-                            {
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                            }
+                            retry_feedback_journal(&shutdown, || db.recover_feedback()).await;
                         }
                     }
                     _ => {
-                        let _ = db.settle_feedback(
-                            &row.operation_id,
-                            FeedbackOperationStatus::Failed,
-                            Some(FeedbackDiagnostic::SourceUnavailable),
-                        );
+                        retry_feedback_journal(&shutdown, || {
+                            db.settle_feedback(
+                                &row.operation_id,
+                                FeedbackOperationStatus::Failed,
+                                Some(FeedbackDiagnostic::SourceUnavailable),
+                            )
+                            .map(|_| ())
+                        })
+                        .await;
                     }
                 }
             }
@@ -549,6 +585,233 @@ mod tests {
             },
         }
     }
+
+    #[tokio::test]
+    async fn feedback_worker_recovers_provider_lookup_settlement_without_stalling_other_sources() {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        for (source, operation) in [("removed-source", "first"), ("other-source", "second")] {
+            db.record_feedback(
+                &target(source, operation),
+                "account",
+                Preference::Like,
+                operation,
+            )
+            .unwrap();
+        }
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_feedback_settlement BEFORE UPDATE OF status ON playback_feedback
+             WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT, 'storage unavailable'); END;"
+        ).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut worker = Box::pin(run_feedback(
+            db.clone(),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
+            shutdown.clone(),
+        ));
+        // Poll through the failed lookup and failed local settlement, up to the retry wait.
+        assert!(futures::poll!(&mut worker).is_pending());
+        assert_eq!(
+            db.feedback_operation("first").unwrap().unwrap().status,
+            FeedbackOperationStatus::Sending
+        );
+        assert_eq!(
+            db.feedback_operation("second").unwrap().unwrap().status,
+            FeedbackOperationStatus::Pending
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_feedback_settlement")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                tokio::select! {
+                    _ = &mut worker => panic!("feedback worker stopped before settlement"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+                if db.feedback_operation("second").unwrap().unwrap().status
+                    == FeedbackOperationStatus::Failed
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let first = db.feedback_operation("first").unwrap().unwrap();
+        assert_eq!(first.status, FeedbackOperationStatus::Failed);
+        assert_eq!(
+            first.diagnostic,
+            Some(FeedbackDiagnostic::SourceUnavailable)
+        );
+        shutdown.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn feedback_worker_retries_startup_recovery_before_claiming_unsent_work() {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        let source = target("interrupted-source", "occurrence");
+        db.record_feedback(&source, "account", Preference::Dislike, "interrupted")
+            .unwrap();
+        db.claim_feedback().unwrap();
+        db.record_feedback(&source, "account", Preference::Like, "opposed")
+            .unwrap();
+        db.record_feedback(
+            &target("other-source", "other"),
+            "account",
+            Preference::Like,
+            "unsent",
+        )
+        .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_feedback_recovery BEFORE UPDATE OF status ON playback_feedback
+             WHEN NEW.status='ambiguous' BEGIN SELECT RAISE(ABORT, 'storage unavailable'); END;",
+            )
+            .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut worker = Box::pin(run_feedback(
+            db.clone(),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
+            shutdown.clone(),
+        ));
+        assert!(futures::poll!(&mut worker).is_pending());
+        assert_eq!(
+            db.feedback_operation("interrupted")
+                .unwrap()
+                .unwrap()
+                .status,
+            FeedbackOperationStatus::Sending
+        );
+        assert_eq!(
+            db.feedback_operation("opposed").unwrap().unwrap().status,
+            FeedbackOperationStatus::Pending
+        );
+        assert_eq!(
+            db.feedback_operation("unsent").unwrap().unwrap().status,
+            FeedbackOperationStatus::Pending
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_feedback_recovery")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                tokio::select! {
+                    _ = &mut worker => panic!("feedback worker stopped after transient recovery failure"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+                if db.feedback_operation("unsent").unwrap().unwrap().status == FeedbackOperationStatus::Failed {
+                    break;
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(
+            db.feedback_operation("interrupted")
+                .unwrap()
+                .unwrap()
+                .status,
+            FeedbackOperationStatus::Ambiguous
+        );
+        assert_eq!(
+            db.feedback_operation("opposed").unwrap().unwrap().status,
+            FeedbackOperationStatus::Conflict
+        );
+        shutdown.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn feedback_worker_can_shutdown_during_persistent_recovery_failure() {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        db.record_feedback(
+            &target("source", "occurrence"),
+            "account",
+            Preference::Like,
+            "interrupted",
+        )
+        .unwrap();
+        db.claim_feedback().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_feedback_recovery BEFORE UPDATE OF status ON playback_feedback
+             BEGIN SELECT RAISE(ABORT, 'storage unavailable'); END;",
+            )
+            .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut worker = Box::pin(run_feedback(
+            db.clone(),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
+            shutdown.clone(),
+        ));
+        assert!(futures::poll!(&mut worker).is_pending());
+        shutdown.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.feedback_operation("interrupted")
+                .unwrap()
+                .unwrap()
+                .status,
+            FeedbackOperationStatus::Sending
+        );
+    }
+
+    #[tokio::test]
+    async fn feedback_worker_settles_unsent_claim_when_shutdown_interrupts_provider_lookup() {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        db.record_feedback(
+            &target("source", "occurrence"),
+            "account",
+            Preference::Like,
+            "unsent",
+        )
+        .unwrap();
+        let manager = Arc::new(tokio::sync::RwLock::new(
+            crate::server_manager::ServerManager::new(),
+        ));
+        let lookup_gate = manager.write().await;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut worker = Box::pin(run_feedback(db.clone(), manager.clone(), shutdown.clone()));
+        assert!(futures::poll!(&mut worker).is_pending());
+        assert_eq!(
+            db.feedback_operation("unsent").unwrap().unwrap().status,
+            FeedbackOperationStatus::Sending
+        );
+        shutdown.store(true, Ordering::Release);
+        drop(lookup_gate);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap();
+        let settled = db.feedback_operation("unsent").unwrap().unwrap();
+        assert_eq!(settled.status, FeedbackOperationStatus::Failed);
+        assert_eq!(
+            settled.diagnostic,
+            Some(FeedbackDiagnostic::SourceUnavailable)
+        );
+    }
+
     #[test]
     fn feedback_requests_are_versioned_and_bound_to_exact_occurrences() {
         let p: FeedbackQuery=serde_json::from_value(serde_json::json!({"schemaVersion":1,"expectedSessionId":uuid::Uuid::new_v4().to_string(),"occurrenceId":uuid::Uuid::new_v4().to_string()})).unwrap();

@@ -1340,7 +1340,7 @@ Read returns `{ "data": FeedbackView }`:
 
 - `schemaVersion: 1`; `target: { sessionId, logicalSessionId, occurrenceId, source: { serverId, trackId } }`.
 - `capabilities: { like, dislike, clear }`, each a boolean. Unverified providers expose all false.
-- `readStatus: known|unknown|unsupported`; `preference: neutral|like|dislike|null`. Only a successful authoritative read produces a non-null preference. A concurrent journal change invalidates a potentially stale read.
+- `readStatus: known|unknown|unsupported`; `preference: neutral|like|dislike|null`. Only a successful authoritative read produces a non-null preference. A concurrent journal change for the authenticated account invalidates a potentially stale read; a newer operation belonging to another account does not.
 - `operation: FeedbackOperation|null`: latest operation for this source track and authenticated account, independently of occurrence; `rejected: boolean`: disposition of this exact current occurrence.
 - `diagnostic: null|sourceUnavailable|providerUnsupported` (other allowlisted operational diagnostics may appear on an operation).
 
