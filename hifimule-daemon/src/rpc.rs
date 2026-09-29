@@ -986,15 +986,27 @@ async fn handle_playback_list_live_reports(
         });
     }
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.list_live_reports(&p.session_id, 50))
-        .await
-        .map_err(playback_task_error)?
-        .map(|reports| serde_json::json!({"data":{"reports": reports}}))
-        .map_err(|_| JsonRpcError {
-            code: -32603,
-            message: "Live reports unavailable".into(),
-            data: Some(serde_json::json!({"code":"REPORT_QUERY_FAILED"})),
-        })
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut failures = playback.live_report_failures(&p.session_id);
+        match db.list_live_reports(&p.session_id, 50) {
+            Ok(mut reports) => {
+                failures.append(&mut reports);
+                failures.truncate(50);
+                Ok::<_, anyhow::Error>(failures)
+            }
+            Err(_) if !failures.is_empty() => Ok(failures),
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .map_err(playback_task_error)?
+    .map(|reports| serde_json::json!({"data":{"reports": reports}}))
+    .map_err(|_| JsonRpcError {
+        code: -32603,
+        message: "Live reports unavailable".into(),
+        data: Some(serde_json::json!({"code":"REPORT_QUERY_FAILED"})),
+    })
 }
 
 async fn handle_playback_list_occurrences(

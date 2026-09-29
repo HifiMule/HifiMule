@@ -1,5 +1,5 @@
 use super::model::*;
-use super::reporting::{HeardEvidence, LiveStatusSample, TerminalReason};
+use super::reporting::{HeardEvidence, LiveReportRow, LiveStatusSample, TerminalReason};
 mod album_admission;
 pub(crate) use album_admission::{AlbumAdmission, AlbumReservation};
 mod output_selection;
@@ -180,6 +180,7 @@ struct Inner {
     preview: Option<ActivePreview>,
     reporting_main: Option<HeardEvidence>,
     reporting_preview: Option<HeardEvidence>,
+    reporting_failures: Vec<LiveReportRow>,
     reporting_status_tx: Option<tokio::sync::mpsc::Sender<Option<LiveStatusSample>>>,
     preview_return_pending: bool,
     generation_id: String,
@@ -298,6 +299,16 @@ impl PlaybackSession {
     pub fn live_status_sample(&self) -> Option<LiveStatusSample> {
         let i = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         live_status_sample_inner(&i)
+    }
+
+    pub fn live_report_failures(&self, session_id: &str) -> Vec<LiveReportRow> {
+        let i = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        i.reporting_failures
+            .iter()
+            .rev()
+            .filter(|row| row.session_id == session_id)
+            .cloned()
+            .collect()
     }
 }
 
@@ -653,6 +664,7 @@ impl PlaybackSession {
             preview: None,
             reporting_main: None,
             reporting_preview: None,
+            reporting_failures: Vec::new(),
             reporting_status_tx: None,
             preview_return_pending: false,
             generation_id: Uuid::new_v4().to_string(),
@@ -1406,6 +1418,18 @@ fn owner_loop(
                         if i.playback.status == PlaybackStatus::Error {
                             continue;
                         }
+                        let _ = sample_progress(&mut i, &ingress);
+                        if let Some(mut evidence) = i.reporting_preview.take() {
+                            evidence.freeze(
+                                i.playback.duration_ms,
+                                if code == "OUTPUT_LOST" {
+                                    TerminalReason::OutputLoss
+                                } else {
+                                    TerminalReason::TechnicalFailure
+                                },
+                            );
+                            record_or_note_live_report(&mut i, &evidence);
+                        }
                         if code == "OUTPUT_LOST"
                             && let Some(preview) = i.preview.as_mut()
                         {
@@ -1578,9 +1602,11 @@ fn owner_loop(
                         // explicit resume starts fresh evidence at its cursor.
                         if let Some(mut evidence) = i.reporting_main.take() {
                             evidence.freeze(i.playback.duration_ms, TerminalReason::OutputLoss);
+                            record_or_note_live_report(&mut i, &evidence);
                         }
                         if let Some(mut evidence) = i.reporting_preview.take() {
                             evidence.freeze(i.playback.duration_ms, TerminalReason::OutputLoss);
+                            record_or_note_live_report(&mut i, &evidence);
                         }
                         if let Some(position) =
                             super::audio::global().captured_position(&generation_id)
@@ -2103,11 +2129,26 @@ fn ensure_reporting_evidence(i: &mut Inner) {
 }
 
 fn freeze_live_shutdown(i: &mut Inner) {
-    if let Some(evidence) = i.reporting_main.as_mut() {
+    if let Some(mut evidence) = i.reporting_main.take() {
         evidence.freeze(i.playback.duration_ms, TerminalReason::Shutdown);
+        record_or_note_live_report(i, &evidence);
     }
-    if let Some(evidence) = i.reporting_preview.as_mut() {
+    if let Some(mut evidence) = i.reporting_preview.take() {
         evidence.freeze(i.playback.duration_ms, TerminalReason::Shutdown);
+        record_or_note_live_report(i, &evidence);
+    }
+}
+
+fn record_or_note_live_report(i: &mut Inner, evidence: &HeardEvidence) {
+    if i.db.record_live_report(evidence).is_err() {
+        // Keep a bounded, source-scoped failure visible while this daemon runs.
+        // The operation was never committed and must not be sent or retried.
+        eprintln!("[LiveReport] journal unavailable; completion was not submitted");
+        if i.reporting_failures.len() == 32 {
+            i.reporting_failures.remove(0);
+        }
+        i.reporting_failures
+            .push(LiveReportRow::journal_failure(evidence));
     }
 }
 
@@ -2606,6 +2647,7 @@ fn retry_restore_inner(
         preview: None,
         reporting_main: None,
         reporting_preview: None,
+        reporting_failures: inner.reporting_failures.clone(),
         reporting_status_tx: inner.reporting_status_tx.clone(),
         preview_return_pending: false,
         generation_id: Uuid::new_v4().to_string(),
@@ -3599,7 +3641,7 @@ fn finish_preview(
             live_terminal_reason(terminal_disposition),
         );
         // Reporting storage failure cannot interrupt the audio return path.
-        let _ = i.db.record_live_report(&evidence);
+        record_or_note_live_report(i, &evidence);
     }
     i.preview = None;
     i.preview_return_pending = should_resume;
@@ -5567,7 +5609,7 @@ fn commit_terminal(
             );
             // The intent is committed before any worker can send it. A journal
             // failure is reported separately and never reverses audio state.
-            let _ = i.db.record_live_report(&evidence);
+            record_or_note_live_report(i, &evidence);
         } else {
             i.reporting_main = Some(evidence);
         }
@@ -6706,6 +6748,43 @@ mod tests {
         assert_eq!(
             db.list_live_reports(&applied.session_id, 10).unwrap().len(),
             1
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn journal_failure_is_inspectable_without_sending() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE playback_live_reports", [])
+            .unwrap();
+        let mut evidence = HeardEvidence::new(
+            "session",
+            "occurrence",
+            "attempt",
+            "source",
+            "track",
+            "g1",
+            0,
+        );
+        evidence.sample("g1", 30_000, true);
+        evidence.freeze(Some(40_000), TerminalReason::NaturalEnd);
+        {
+            let mut inner = playback.inner.lock().unwrap();
+            record_or_note_live_report(&mut inner, &evidence);
+        }
+        let failures = playback.live_report_failures("session");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].status,
+            super::super::reporting::LiveReportStatus::Failed
+        );
+        assert_eq!(
+            failures[0].diagnostic.as_deref(),
+            Some("journalUnavailable")
         );
         playback.stop_and_join().unwrap();
     }

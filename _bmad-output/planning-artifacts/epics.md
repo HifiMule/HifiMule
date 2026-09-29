@@ -4623,10 +4623,10 @@ So that its listening history reflects what I heard without HifiMule creating it
 **Then** backoff, persistence, retention and in-memory work are bounded under a documented policy,
 **And** bookkeeping is not performed in the audio callback and does not become a cross-session recommendation/taste model.
 
-**Given** supported providers and Windows, macOS and Linux builds,
+**Given** the verified Jellyfin 12.1.0 and Navidrome 0.64.2 provider contracts,
 **When** tests cover completion, early skip, seeking, preview completion, main-session return, duplicate events, repeated occurrences, restart and ambiguous responses,
-**Then** provider request fixtures verify routing and eligibility, and configured-server integration checks verify actual play-count/status effects,
-**And** unsupported semantics remain disabled or explicitly limited rather than inferred from another provider's behavior.
+**Then** provider request fixtures and deterministic local tests verify routing and eligibility, and configured-server API probes on macOS arm64 verify the observed play-count and now-playing effects,
+**And** unsupported semantics remain disabled or explicitly limited rather than inferred from another provider's behavior. Installed HifiMule playback and server-effect checks on Windows, macOS and Linux are tracked separately and are not claimed as Story 16.7 evidence.
 
 **Implementation gate:** Before coding, verify each provider's now-playing, completion, automatic play-count, seek/resume and idempotency semantics; define eligibility thresholds and durable operation identity/reconciliation/retention. No universal counting threshold is assumed. Enable only verified reporting behavior; if provider integrations exceed one implementation session, split them into ordered provider-specific stories before execution.
 

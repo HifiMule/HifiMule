@@ -79,6 +79,6 @@
     "Jellyfin session progress, pause, seek and failed stop side effects",
     "Navidrome reportPlayback counting when ignoreScrobble=false",
     "Non-Navidrome Subsonic/OpenSubsonic implementations and versions",
-    "Windows and Linux installed-app behavior"
+    "Windows, macOS, and Linux installed-app playback and server-effect behavior"
   ]
 }

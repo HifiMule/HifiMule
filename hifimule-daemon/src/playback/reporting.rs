@@ -14,6 +14,9 @@ use uuid::Uuid;
 const MAX_PENDING_REPORTS: i64 = 256;
 const MAX_REPORT_ROWS: i64 = 2048;
 const REPORT_RETENTION_SECONDS: i64 = 90 * 24 * 60 * 60;
+const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const COMPLETION_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
+const COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +73,26 @@ pub struct LiveReportRow {
     pub diagnostic: Option<String>,
 }
 
+impl LiveReportRow {
+    /// Volatile fallback when SQLite cannot accept the operation. This is not
+    /// delivery evidence and never enters the sender queue.
+    pub fn journal_failure(evidence: &HeardEvidence) -> Self {
+        Self {
+            operation_id: Uuid::new_v4().to_string(),
+            session_id: evidence.session_id.clone(),
+            occurrence_id: evidence.occurrence_id.clone(),
+            attempt_id: evidence.attempt_id.clone(),
+            server_id: evidence.server_id.clone(),
+            track_id: evidence.track_id.clone(),
+            heard_ms: evidence.heard_ms(),
+            duration_ms: evidence.terminal().and_then(|(_, duration, _)| duration),
+            status: LiveReportStatus::Failed,
+            attempt_count: 0,
+            diagnostic: Some("journalUnavailable".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveStatusSample {
     pub session_id: String,
@@ -108,14 +131,21 @@ impl Database {
             "DELETE FROM playback_live_reports WHERE status IN ('ineligible','confirmed','failed','unsupported','ambiguous') AND updated_at<unixepoch()-?1",
             [REPORT_RETENTION_SECONDS],
         )?;
-        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_live_reports WHERE session_id=?1 AND occurrence_id=?2 AND kind='completed')", params![evidence.session_id, evidence.occurrence_id], |r| r.get(0))?;
-        if existing {
+        let existing: Option<String> = tx.query_row(
+            "SELECT status FROM playback_live_reports WHERE session_id=?1 AND occurrence_id=?2 AND kind='completed'",
+            params![evidence.session_id, evidence.occurrence_id],
+            |row| row.get(0),
+        ).optional()?;
+        // Output loss can end one audible segment without ending the logical
+        // occurrence. A later explicit resume may become eligible; only an
+        // unsent ineligible row can be promoted in that case.
+        if existing.is_some() && (existing.as_deref() != Some("ineligible") || !qualified) {
             return Ok(());
         }
         let total: i64 = tx.query_row("SELECT COUNT(*) FROM playback_live_reports", [], |r| {
             r.get(0)
         })?;
-        if total >= MAX_REPORT_ROWS {
+        if total >= MAX_REPORT_ROWS && existing.is_none() {
             tx.execute(
                 "DELETE FROM playback_live_reports WHERE operation_id IN (SELECT operation_id FROM playback_live_reports WHERE status IN ('ineligible','confirmed','failed','unsupported','ambiguous') ORDER BY updated_at LIMIT ?1)",
                 [total - MAX_REPORT_ROWS + 1],
@@ -124,7 +154,7 @@ impl Database {
         let total: i64 = tx.query_row("SELECT COUNT(*) FROM playback_live_reports", [], |r| {
             r.get(0)
         })?;
-        if total >= MAX_REPORT_ROWS {
+        if total >= MAX_REPORT_ROWS && existing.is_none() {
             return Err(anyhow!("REPORT_JOURNAL_FULL"));
         }
         let pending: i64 = tx.query_row(
@@ -132,17 +162,44 @@ impl Database {
             [],
             |r| r.get(0),
         )?;
-        let status = if !qualified {
+        let server_type: Option<String> = tx
+            .query_row(
+                "SELECT server_type FROM server_config WHERE server_id=?1 OR id=?1 LIMIT 1",
+                [&evidence.server_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let unsupported = matches!(server_type.as_deref(), Some("jellyfin" | "audiobookshelf"));
+        let status = if unsupported {
+            LiveReportStatus::Unsupported
+        } else if !qualified {
             LiveReportStatus::Ineligible
         } else if pending >= MAX_PENDING_REPORTS {
             LiveReportStatus::Failed
         } else {
             LiveReportStatus::Pending
         };
-        tx.execute(
-            "INSERT OR IGNORE INTO playback_live_reports(operation_id,schema_version,session_id,occurrence_id,attempt_id,server_id,track_id,kind,heard_ms,duration_ms,terminal_reason,status,diagnostic) VALUES(?1,1,?2,?3,?4,?5,?6,'completed',?7,?8,?9,?10,?11)",
-            params![Uuid::new_v4().to_string(), evidence.session_id, evidence.occurrence_id, evidence.attempt_id, evidence.server_id, evidence.track_id, i64::try_from(evidence.heard_ms())?, duration_ms.filter(|value| *value > 0 && *value <= i64::MAX as u64).map(|value| value as i64), reason.as_str(), status.as_str(), if status == LiveReportStatus::Failed { Some("queueFull") } else { None }],
-        )?;
+        let operation_id = Uuid::new_v4().to_string();
+        let heard_ms = i64::try_from(evidence.heard_ms())?;
+        let duration_ms = duration_ms
+            .filter(|value| *value > 0 && *value <= i64::MAX as u64)
+            .map(|value| value as i64);
+        let diagnostic = if status == LiveReportStatus::Failed {
+            Some("queueFull")
+        } else {
+            None
+        };
+        if existing.is_some() {
+            tx.execute(
+                "UPDATE playback_live_reports SET operation_id=?1,attempt_id=?4,server_id=?5,track_id=?6,heard_ms=?7,duration_ms=?8,terminal_reason=?9,status=?10,diagnostic=?11,next_attempt_at=0,updated_at=unixepoch() WHERE session_id=?2 AND occurrence_id=?3 AND kind='completed' AND status='ineligible'",
+                params![operation_id, evidence.session_id, evidence.occurrence_id, evidence.attempt_id, evidence.server_id, evidence.track_id, heard_ms, duration_ms, reason.as_str(), status.as_str(), diagnostic],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO playback_live_reports(operation_id,schema_version,session_id,occurrence_id,attempt_id,server_id,track_id,kind,heard_ms,duration_ms,terminal_reason,status,diagnostic) VALUES(?1,1,?2,?3,?4,?5,?6,'completed',?7,?8,?9,?10,?11)",
+                params![operation_id, evidence.session_id, evidence.occurrence_id, evidence.attempt_id, evidence.server_id, evidence.track_id, heard_ms, duration_ms, reason.as_str(), status.as_str(), diagnostic],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -253,7 +310,77 @@ pub async fn run_reporter(
     let mut previous_status: Option<LiveStatusSample> = None;
     let mut last_status_sent = std::time::Instant::now() - Duration::from_secs(30);
     while !shutdown.load(Ordering::Acquire) {
-        while let Ok(event) = status_events.try_recv() {
+        // A status burst must never starve durable completion delivery.
+        let mut claimed = false;
+        match db.claim_live_report() {
+            Ok(Some(row)) => {
+                claimed = true;
+                let provider = tokio::time::timeout(
+                    COMPLETION_PREFLIGHT_TIMEOUT,
+                    crate::server_manager::get_provider_by_server_id(&manager, &db, &row.server_id),
+                )
+                .await;
+                match provider {
+                    Ok(Ok(provider)) => {
+                        match tokio::time::timeout(
+                            COMPLETION_PREFLIGHT_TIMEOUT,
+                            provider.verify_live_completion(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {
+                                let result = tokio::time::timeout(
+                                    COMPLETION_REQUEST_TIMEOUT,
+                                    provider.report_live_completed(&row.track_id),
+                                )
+                                .await;
+                                let (status, diagnostic) = match result {
+                                    Ok(result) => classify_completion(result),
+                                    Err(_) => {
+                                        (LiveReportStatus::Ambiguous, Some("transportAmbiguous"))
+                                    }
+                                };
+                                if let Err(error) =
+                                    db.settle_live_report(&row.operation_id, status, diagnostic)
+                                {
+                                    eprintln!("[LiveReport] settlement failed: {error:#}");
+                                }
+                            }
+                            Ok(Err(error)) if preflight_is_definite(&error) => {
+                                let (status, diagnostic) = classify_completion(Err(error));
+                                if let Err(error) =
+                                    db.settle_live_report(&row.operation_id, status, diagnostic)
+                                {
+                                    eprintln!("[LiveReport] settlement failed: {error:#}");
+                                }
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                if let Err(error) =
+                                    db.defer_live_report(&row.operation_id, row.attempt_count)
+                                {
+                                    eprintln!("[LiveReport] deferral failed: {error:#}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        if let Err(error) =
+                            db.defer_live_report(&row.operation_id, row.attempt_count)
+                        {
+                            eprintln!("[LiveReport] deferral failed: {error:#}");
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("[LiveReport] claim failed: {error:#}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+        // Process at most one queued transition per turn, then sample the owner.
+        // Each status call is deadline-bound independently from completion.
+        if let Ok(event) = status_events.try_recv() {
             apply_live_status(
                 &db,
                 &manager,
@@ -271,35 +398,8 @@ pub async fn run_reporter(
             playback.live_status_sample(),
         )
         .await;
-        match db.claim_live_report() {
-            Ok(Some(row)) => {
-                let provider =
-                    crate::server_manager::get_provider_by_server_id(&manager, &db, &row.server_id)
-                        .await;
-                match provider {
-                    Ok(provider) => {
-                        let result = provider.report_live_completed(&row.track_id).await;
-                        let (status, diagnostic) = classify_completion(result);
-                        if let Err(error) =
-                            db.settle_live_report(&row.operation_id, status, diagnostic)
-                        {
-                            eprintln!("[LiveReport] settlement failed: {error:#}");
-                        }
-                    }
-                    Err(_) => {
-                        if let Err(error) =
-                            db.defer_live_report(&row.operation_id, row.attempt_count)
-                        {
-                            eprintln!("[LiveReport] deferral failed: {error:#}");
-                        }
-                    }
-                }
-            }
-            Ok(None) => tokio::time::sleep(Duration::from_millis(500)).await,
-            Err(error) => {
-                eprintln!("[LiveReport] claim failed: {error:#}");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
+        if !claimed {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 }
@@ -345,17 +445,36 @@ async fn send_live_status(
     sample: &LiveStatusSample,
     state: crate::providers::LivePlaybackState,
 ) {
-    if let Ok(provider) =
-        crate::server_manager::get_provider_by_server_id(manager, db, &sample.server_id).await
-    {
-        let _ = provider
-            .report_live_status(crate::providers::LiveStatusRequest {
-                song_id: sample.track_id.clone(),
-                position_ms: sample.position_ms,
-                state,
-            })
-            .await;
-    }
+    let _ = tokio::time::timeout(STATUS_REQUEST_TIMEOUT, async {
+        if let Ok(provider) =
+            crate::server_manager::get_provider_by_server_id(manager, db, &sample.server_id).await
+        {
+            let _ = provider
+                .report_live_status(crate::providers::LiveStatusRequest {
+                    song_id: sample.track_id.clone(),
+                    position_ms: sample.position_ms,
+                    state,
+                })
+                .await;
+        }
+    })
+    .await;
+}
+
+fn preflight_is_definite(error: &crate::providers::ProviderError) -> bool {
+    use crate::providers::ProviderError;
+    matches!(
+        error,
+        ProviderError::UnsupportedCapability(_)
+            | ProviderError::Auth(_)
+            | ProviderError::Forbidden
+            | ProviderError::NotFound { .. }
+            | ProviderError::StaleConfiguration(_)
+            | ProviderError::Http {
+                status: Some(400..=499),
+                ..
+            }
+    )
 }
 
 fn classify_completion(
@@ -594,6 +713,69 @@ mod tests {
             db.list_live_reports("session", 10).unwrap()[0].status,
             LiveReportStatus::Ineligible
         );
+    }
+
+    #[test]
+    fn resumed_occurrence_can_promote_an_unsent_output_loss() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let mut lost = evidence();
+        lost.sample("g1", 8_000, true);
+        lost.freeze(Some(40_000), TerminalReason::OutputLoss);
+        db.record_live_report(&lost).unwrap();
+        let mut resumed = evidence();
+        resumed.discontinuity("g2", 8_000);
+        resumed.sample("g2", 30_000, true);
+        resumed.freeze(Some(40_000), TerminalReason::NaturalEnd);
+        db.record_live_report(&resumed).unwrap();
+        let rows = db.list_live_reports("session", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, LiveReportStatus::Pending);
+        assert_eq!(rows[0].heard_ms, 22_000);
+    }
+
+    #[test]
+    fn unsupported_source_is_not_labeled_ineligible_by_navidrome_policy() {
+        let db = Database::memory().unwrap();
+        db.init_playback().unwrap();
+        let server_id = db
+            .upsert_server(
+                "http://jellyfin.example",
+                "jellyfin",
+                "test",
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut e = HeardEvidence::new(
+            "session",
+            "occurrence",
+            "attempt",
+            &server_id,
+            "track",
+            "g1",
+            0,
+        );
+        e.sample("g1", 1_000, true);
+        e.freeze(Some(40_000), TerminalReason::Skip);
+        db.record_live_report(&e).unwrap();
+        let row = &db.list_live_reports("session", 10).unwrap()[0];
+        assert_eq!(row.status, LiveReportStatus::Unsupported);
+        assert!(db.claim_live_report().unwrap().is_none());
+    }
+
+    #[test]
+    fn preflight_transport_failure_is_retryable_without_a_send() {
+        use crate::providers::ProviderError;
+        assert!(!preflight_is_definite(&ProviderError::Http {
+            status: None,
+            message: "offline".into(),
+        }));
+        assert!(preflight_is_definite(
+            &ProviderError::UnsupportedCapability("unverified".into(),)
+        ));
     }
 
     #[test]

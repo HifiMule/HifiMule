@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Follow-up from: Story 16.7 verification scope decision (2026-09-29)
+
+- **Verify installed live listening reports on Windows, macOS, and Linux** — Run installed HifiMule with configured Jellyfin 12.1.0 and Navidrome 0.64.2 test accounts on each platform. Record app build, OS and architecture, server version, source-scoped now-playing and play-count changes for completion, early skip, seek, audition/return, repeat, restart, and ambiguous network outcomes. Keep unverified provider/version semantics disabled; do not infer installed behavior from the macOS arm64 direct API probes in `docs/playback-evidence/reporting-contract-2026-09-29.json`.
+
 ## Deferred from: Audiobookshelf connection fix review (2026-09-22)
 
 - **Canonical URL normalization lowercases reverse-proxy paths** (`hifimule-daemon/src/db.rs:68`) — the pre-existing `normalized_server_url` helper lowercases the entire URL instead of only the scheme/host. Audiobookshelf now inherits this behavior when persisting a prefixed endpoint, so an uncommon case-sensitive proxy path could work during discovery but fail after restart. Correcting it safely requires a cross-provider identity/migration decision because portable IDs and existing row matching already depend on the legacy normalization.

@@ -287,7 +287,10 @@ export class PlaybackControls {
             }
     }
     private render(snapshot: PlaybackSessionSnapshot): void {
-        this.reportStatus.replaceChildren(...this.reports.slice(0, 3).map(report => {
+        const currentReports = this.reports.filter(report => snapshot.current
+            && report.occurrenceId === snapshot.current.occurrenceId
+            && report.serverId === snapshot.current.source.serverId);
+        this.reportStatus.replaceChildren(...currentReports.slice(0, 3).map(report => {
             const line = document.createElement('div');
             const source = this.serverIdentities.get(report.serverId)?.label ?? t('playback.reporting.source');
             line.textContent = `${source} (${report.occurrenceId.slice(0, 8)}): ${t(`playback.reporting.${report.status}`)}`;

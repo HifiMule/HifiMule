@@ -595,8 +595,16 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
-    /// One non-idempotent completed-listen submission. The caller journals intent
-    /// and must never blindly retry an ambiguous result.
+    /// Pre-send verification for live completion. Failure here proves that no
+    /// non-idempotent submission was attempted and may be deferred safely.
+    async fn verify_live_completion(&self) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "live reporting is not verified for this provider".into(),
+        ))
+    }
+
+    /// One non-idempotent completed-listen submission after verification. The
+    /// caller journals intent and must never retry an ambiguous result.
     async fn report_live_completed(&self, _song_id: &str) -> Result<(), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "live reporting is not verified for this provider".into(),

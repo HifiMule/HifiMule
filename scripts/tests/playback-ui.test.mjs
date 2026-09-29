@@ -293,6 +293,20 @@ test('live listening outcomes have distinct explanations in every locale', () =>
   }
 });
 
+test('live report label is scoped to the displayed source occurrence', async () => {
+  const current = snapshot('playing');
+  const h = harness(current); await h.tick();
+  h.component.reports = [
+    { occurrenceId: 'earlier', serverId: 'server', status: 'confirmed' },
+    { occurrenceId: 'occurrence', serverId: 'other', status: 'failed' },
+    { occurrenceId: 'occurrence', serverId: 'server', status: 'pending' },
+  ];
+  h.component.render(current);
+  assert.match(text(h.component.reportStatus), /reporting.pending/);
+  assert.doesNotMatch(text(h.component.reportStatus), /reporting.confirmed|reporting.failed/);
+  h.component.destroy();
+});
+
 test('initial read failure offers local browsing and refresh without pretending playback paused', async () => {
   let failing = true; let browsed = 0;
   const current = snapshot('playing');

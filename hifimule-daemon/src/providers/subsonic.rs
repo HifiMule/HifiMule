@@ -747,8 +747,11 @@ impl MediaProvider for SubsonicProvider {
         Ok(())
     }
 
+    async fn verify_live_completion(&self) -> Result<(), ProviderError> {
+        self.client.verify_live_navidrome().await
+    }
+
     async fn report_live_completed(&self, song_id: &str) -> Result<(), ProviderError> {
-        self.client.verify_live_navidrome().await?;
         self.client.scrobble(song_id, true).await
     }
 
@@ -3925,11 +3928,9 @@ mod tests {
             .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
             .create_async()
             .await;
-        provider(&server)
-            .await
-            .report_live_completed("song1")
-            .await
-            .unwrap();
+        let provider = provider(&server).await;
+        provider.verify_live_completion().await.unwrap();
+        provider.report_live_completed("song1").await.unwrap();
     }
 
     #[tokio::test]
@@ -3939,7 +3940,7 @@ mod tests {
             .match_query(Matcher::AllOf(auth_matchers()))
             .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.3","openSubsonic":true}}"#)
             .create_async().await;
-        let result = provider(&server).await.report_live_completed("song1").await;
+        let result = provider(&server).await.verify_live_completion().await;
         assert!(matches!(
             result,
             Err(ProviderError::UnsupportedCapability(_))

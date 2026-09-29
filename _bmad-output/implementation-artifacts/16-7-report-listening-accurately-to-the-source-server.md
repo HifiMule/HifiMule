@@ -3,7 +3,7 @@ baseline_commit: cd93a0c76ff96a44da2678ba7aac86dfa16a86e5
 ---
 # Story 16.7: Report listening accurately to the source server
 
-Status: review
+Status: done
 
 ## Story
 
@@ -22,7 +22,7 @@ so that its listening history reflects what I heard without HifiMule creating it
 7. Persist pending, confirmed, failed, and ambiguous outcomes as needed. Retry only after verified provider idempotency or reliable reconciliation; never blindly repeat an ambiguous non-idempotent write or claim guaranteed exactly-once delivery.
 8. Unsupported or unreconcilable reporting is inspectable and never interrupts audio. Neither persisted evidence nor logs expose credentials or authenticated stream URLs.
 9. Bound the outage queue, retry/backoff, retention, and memory work under a documented policy. Keep reporting and persistence off the audio callback. Do not create a cross-session recommendation or taste model.
-10. Provider request fixtures cover completion, early skip, seeking, audition, return, duplicate events, repeated occurrences, restart, and ambiguous responses. Configured-server checks verify real now-playing and play-count effects on Windows, macOS, and Linux; unverified or unsupported semantics remain disabled or explicitly limited.
+10. Provider request fixtures and deterministic local tests cover completion, early skip, seeking, audition, return, duplicate events, repeated occurrences, restart, and ambiguous responses. Configured-server API probes on macOS arm64 verify the observed now-playing and play-count effects for Jellyfin 12.1.0 and Navidrome 0.64.2. Unverified or unsupported semantics remain disabled or explicitly limited. Installed HifiMule playback and server-effect checks on Windows, macOS, and Linux are tracked separately and are not claimed as evidence for this story.
 
 ## Tasks / Subtasks
 
@@ -38,9 +38,19 @@ so that its listening history reflects what I heard without HifiMule creating it
   - [x] Extend the existing `MediaProvider` boundary and adapters with separate capability-gated status and completed-listen operations. Keep credentials and server-specific endpoints inside the daemon/providers; do not dispatch by the currently browsed server or route provider API calls from the UI.
   - [x] Add versioned SQLite state and migration for operation identity, frozen source/track, kind, eligibility evidence, status, attempt count, timestamps, and safe diagnostic category. Commit intent before a non-idempotent send; classify definite rejection versus ambiguous transport/timeout/crash. Reconcile where reliable, otherwise surface unresolved state without blind retry.
   - [x] Use bounded worker concurrency, backoff, retention, and shutdown behavior. Keep audio nonblocking and preserve the Rockbox/device-scrobble history and Audiobookshelf progress paths.
-- [ ] Expose truthful reporting status and verification (AC: 8–10).
+- [x] Expose truthful reporting status and verification (AC: 8–10).
   - [x] Add a read-only daemon RPC/status surface and accessible, localized UI explanation for pending, confirmed, failed, ambiguous, and unsupported outcomes; avoid claiming server confirmation from local eligibility alone. Keep status scoped to source/occurrence and avoid exposing secrets.
-  - [x] Add deterministic owner/persistence/provider tests, including crash boundaries, duplicate messages, two servers sharing a track ID, manual/album/Radio/Preview, output loss, seek gaps, and resumed paused state. Run focused Rust/UI/i18n checks and affected integration/installed checks; record server version, platform architecture, observed server effects, and gaps separately.
+  - [x] Add deterministic owner/persistence/provider tests, including crash boundaries, duplicate messages, two servers sharing a track ID, manual/album/Radio/Preview, output loss, seek gaps, and resumed paused state. Run focused Rust/UI/i18n checks and configured-server API probes; record server version, platform architecture, observed server effects, and installed-app gaps separately.
+
+### Review Findings
+
+- [x] [Review][Patch] Narrow AC10 to verified provider probes — User chose the limited verified scope. AC10 now names the macOS arm64 configured-server probes and explicitly excludes unrun installed-app checks; the Windows, macOS, and Linux matrix is tracked in `deferred-work.md`.
+- [x] [Review][Patch] Bound provider requests and prioritize completion delivery [hifimule-daemon/src/playback/reporting.rs:255] — Completion claims now precede status work; provider resolution, preflight, status, and send have deadlines.
+- [x] [Review][Patch] Defer failures before the completion send [hifimule-daemon/src/providers/subsonic.rs:750] — Navidrome verification is a separate pre-send operation, so transient failure safely defers and a timed-out submission remains ambiguous.
+- [x] [Review][Patch] Surface live-report journal write failures [hifimule-daemon/src/playback/session.rs:5570] — A bounded volatile `failed` result with `journalUnavailable` is inspectable through the read-only RPC without sending.
+- [x] [Review][Patch] Persist output-loss and shutdown outcomes [hifimule-daemon/src/playback/session.rs:1579] — Owner terminal paths now journal ineligible evidence; a later eligible resume can promote the same unsent occurrence.
+- [x] [Review][Patch] Scope UI report status to the displayed occurrence [hifimule-ui/src/components/PlaybackControls.ts:290] — The controls filter report rows by current occurrence and frozen server.
+- [x] [Review][Patch] Classify unsupported providers before applying Navidrome eligibility [hifimule-daemon/src/playback/reporting.rs:135] — Jellyfin and Audiobookshelf journal rows report `unsupported` even when below Navidrome's threshold.
 
 ## Dev Notes
 
@@ -117,13 +127,14 @@ Request and effect fixture: `docs/playback-evidence/reporting-contract-2026-09-2
 - 2026-09-29: Full daemon regression suite passed under the supported `npm run build:daemon` wrapper with loopback sockets enabled. The restricted sandbox's first run failed because mock HTTP servers could not bind; the elevated rerun passed.
 - 2026-09-29: Added generation-fenced heard-time evidence, durable operation journal, one-at-a-time delivery worker, Navidrome 0.64.2 provider gating, bounded live-status owner events, read-only RPC, and four-locale UI explanations. Local daemon regression, provider fixtures, UI build/tests, i18n tests, formatting, and Clippy ran successfully during implementation; final rerun follows remaining edits.
 - 2026-09-29: Installed configured-server checks remain unavailable on macOS, Windows, and Linux. The supplied LAN servers were probed directly from macOS arm64; those provider observations do not constitute installed HifiMule playback evidence on any platform.
-- 2026-09-29: Final local rerun passed: full daemon test suite (loopback-enabled), focused playback UI suite, UI production build, i18n Rust tests, `cargo fmt --check`, Clippy, and `git diff --check`. Clippy completed with repository warnings. Story remains in-progress because AC10's installed, configured macOS/Windows/Linux server-effect matrix has no accessible test workflow or results.
+- 2026-09-29: Review fixes passed the final loopback-enabled daemon suite (1282 unit tests passed, 6 ignored, 5 integration tests passed), playback UI suite (56 passed), frontend production build, formatting, Clippy, and `git diff --check`. Clippy completed with repository warnings. The user narrowed AC10 to verified configured-server API probes; installed Windows/macOS/Linux checks remain separately tracked without a completion claim.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Provider gate complete for the tested versions. Jellyfin 12.1.0 and non-Navidrome Subsonic variants remain disabled for live reporting. Navidrome 0.64.2 status-only and explicit completion contracts are backed by anonymized configured-server request/effect fixtures. Full daemon regression passed.
 - Live completion is based on frozen source identity and consumed audio; a known-duration occurrence must reach `min(ceil(duration/2), 240000 ms)`. An early skip, unknown duration, technical failure, output loss, or shutdown does not submit. Journal recovery leaves uncertain writes ambiguous and never blindly retries them. Source lookup failures before a send receive bounded backoff. The UI labels local eligibility separately from server acceptance.
+- Code review applied six fixes: deadline-bound completion-first reporting, safe pre-send verification deferral, inspectable journal failures, output-loss/shutdown terminal evidence with resume promotion, occurrence-scoped UI status, and unsupported-provider classification. All findings are closed under the revised AC10 scope.
 
 ### File List
 
@@ -148,3 +159,5 @@ Request and effect fixture: `docs/playback-evidence/reporting-contract-2026-09-2
 
 - 2026-09-29: Established versioned reporting contracts and captured configured-server request/effect evidence; disabled unverified or unsafe provider behavior.
 - 2026-09-29: Implemented owner evidence, durable source-routed Navidrome reporting, inspectable RPC/UI outcomes, and bounded non-retrying recovery; local verification complete, cross-platform configured checks outstanding.
+- 2026-09-29: Review decision narrowed AC10 to configured-server API probes on macOS arm64. Installed Windows/macOS/Linux playback and server-effect verification remains a separate follow-up.
+- 2026-09-29: Code review fixes applied and verified; Story 16.7 marked done under the revised scope.
