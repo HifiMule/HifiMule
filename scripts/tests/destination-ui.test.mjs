@@ -959,6 +959,7 @@ function destinationSelectionHarness(hooks = {}) {
     },
     '../state/basket': { basketStore: {
       flushPendingSave: async () => { calls.push('flush'); await hooks.flush?.(); },
+      setDaemonContext: () => {},
       hydrateFromDaemon: items => hydrated.push(items),
     } },
     '../i18n': { t: key => key },

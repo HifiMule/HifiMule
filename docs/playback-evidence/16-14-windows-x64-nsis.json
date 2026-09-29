@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": 1,
+  "target": "windows-x64",
+  "packageFormat": "nsis",
+  "artifact": {
+    "sha256": "2827237927621AC2D729F57E7CA3AF6B63E971AB8E5CF4073B4CA38BAFC58565",
+    "sourceRevision": "ad02f327bf600f182dfbf35e17233c66c4ce2283",
+    "immutableUri": ""
+  },
+  "environment": {
+    "physicalOrVm": "unverified",
+    "osVersion": "Windows 10.0.22631.0",
+    "architecture": "x64"
+  },
+  "runtime": {
+    "application": "0.16.1",
+    "daemon": "0.16.1; installed executable SHA-256 D5B70D0B0BFFE2317746B7EECBEB558843E7608287054FDFD47C4B592415DBA6",
+    "rust": "1.98.1 local toolchain; build provenance unverified",
+    "ffmpegBindings": "9.0.0",
+    "loadedFfmpeg": {
+      "avcodec": "63.1.102",
+      "avformat": "63.1.102",
+      "avutil": "61.1.102",
+      "swresample": "7.1.102",
+      "privatePackageDirectory": true
+    },
+    "manifestMatch": "PASS"
+  },
+  "profiles": {
+    "album": {
+      "outcome": "NOT RUN",
+      "rawEvidenceUri": "",
+      "samples": []
+    },
+    "combined": {
+      "outcome": "NOT RUN",
+      "rawEvidenceUri": "",
+      "samples": []
+    },
+    "idle": {
+      "outcome": "NOT RUN",
+      "rawEvidenceUri": "",
+      "samples": []
+    },
+    "playback-only": {
+      "outcome": "NOT RUN",
+      "rawEvidenceUri": "",
+      "samples": []
+    },
+    "radio": {
+      "outcome": "NOT RUN",
+      "rawEvidenceUri": "",
+      "samples": []
+    },
+    "sync-only": {
+      "outcome": "NOT RUN",
+      "rawEvidenceUri": "",
+      "samples": []
+    }
+  },
+  "faults": {
+    "source-stall": "NOT RUN",
+    "source-outage": "NOT RUN",
+    "ambiguous-write": "NOT RUN",
+    "seek": "NOT RUN",
+    "preview-return": "NOT RUN",
+    "session-replacement": "NOT RUN",
+    "output-loss-switch": "NOT RUN",
+    "sleep-wake": "NOT RUN",
+    "orderly-quit": "NOT RUN",
+    "abrupt-exit": "NOT RUN",
+    "killed-mid-checkpoint": "NOT RUN"
+  },
+  "epic16Matrix": {
+    "16.1": "NOT RUN",
+    "16.2": "NOT RUN",
+    "16.3": "NOT RUN",
+    "16.4": "NOT RUN",
+    "16.5": "NOT RUN",
+    "16.6": "NOT RUN",
+    "16.7": "NOT RUN",
+    "16.8": "NOT RUN",
+    "16.9": "NOT RUN",
+    "16.10": "NOT RUN",
+    "16.11": "NOT RUN",
+    "16.12": "NOT RUN",
+    "16.13": "NOT RUN"
+  },
+  "limitations": [
+    "Artifact has no immutable evidence URI; local package hash and installed daemon binary were verified.",
+    "Two-minute Radio preflight is diagnostic only; intentional pause and no frozen warm-up, duration, repetitions or fault schedule.",
+    "User observed no audible problem during sync; matched physical throughput and protection traces remain unmeasured.",
+    "Eight-hour Radio resource sampling started at 2026-09-29T21:06:10Z and remains in progress; its outcome is not yet validated.",
+    "Clean install or upgrade path, sustained profiles, Windows sleep/wake, and Epic 16 installed matrix remain unverified.",
+    "An isolated installed-UI hydration attempt timed out and needs diagnosis."
+  ],
+  "preflight": {
+    "outcome": "BLOCKED",
+    "kind": "diagnostic-only",
+    "rawEvidencePath": "docs/playback-evidence/16-14-windows-nsis-radio-preflight.jsonl",
+    "rawEvidenceSha256": "BC35CFFCFA619D93565F770BED9CACD7D6B819CDB06D34AC5570C13E8BE1B0BC",
+    "samples": 24,
+    "durationSeconds": 115.73,
+    "intentionalPause": true,
+    "userObservedAudibleProblemDuringSync": false
+  },
+  "decision": "BLOCKED"
+}

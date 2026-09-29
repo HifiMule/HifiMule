@@ -4,7 +4,7 @@ baseline_commit: 989103c
 
 # Story 16.14: Keep long listening sessions bounded and recoverable
 
-Status: ready-for-dev
+Status: in-progress
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created -->
 
@@ -258,6 +258,9 @@ GPT-5 Codex
 - 2026-09-29: Controlled evidence runner passed all 14 command groups on macOS ARM64 after granting local RPC socket access; the initial sandboxed run correctly failed two socket-based RPC tests with `Operation not permitted`.
 - 2026-09-29: Installed/physical acceptance stopped at Task 5 because the required Windows/Linux/macOS package rows, configured providers, physical audio outputs and physical sync device are unavailable in this checkout.
 - 2026-09-29: macOS 27 ARM64 isolated DMG check passed signature, architecture, clean launch, private FFmpeg load/ABI, orderly Quit, 39 packaging/runtime tests, 47 evidence tests, and the full daemon suite (1,355 passed, 8 ignored; 5 contract tests passed). No audio/USB device or provider fixture was available, so installed physical scenarios remain blocked.
+- 2026-09-29: Windows local continuation: 47 evidence tests, 284 Node tests (6 skipped), 1,350 daemon tests (7 ignored) plus 5 contract tests, 7 i18n tests and TypeScript type checking passed. The Node suite initially exposed a stale destination-selection test mock; it passed after adding the current basket context method. All-target Clippy could not complete after the local FFmpeg cache disappeared and network fetch was unavailable. The only local MSI is version 0.16.0, older than the current 0.16.1 source, so it cannot be used for Story 16.14 installed certification.
+- 2026-09-29: User rebuilt and installed the Windows x64 NSIS 0.16.1 package. The running daemon binary matches the current release build; authenticated health and private FFmpeg library/ABI checks passed. All-target Clippy subsequently completed with pre-existing warnings. A two-minute, 24-sample Radio resource preflight had no collection errors and remained below compressed limits; its 15 paused samples were an intentional user pause. The user reported no audible problem during sync. This short local record is not a frozen sustained/coexistence acceptance run. An isolated UI hydration smoke attempt timed out and needs diagnosis.
+- 2026-09-29: Started an eight-hour Windows NSIS Radio resource sampler at 23:06:10 Europe/Paris with five-second sampling and a five-minute warm-up; it is expected to stop at 07:11 on 2026-09-30. The first 19 samples had no collection error. The sampler does not inject the frozen fault schedule or establish audible continuity; this is a resource diagnostic until the full run and companion evidence are reviewed.
 
 ### Implementation Plan
 
@@ -274,6 +277,9 @@ GPT-5 Codex
 - No runtime defect was reproduced by the controlled suite, so no playback runtime code was changed.
 - Story remains in progress: installed sleep/wake, sustained soak, physical coexistence and full Epic 16 package matrix are blocked on external platforms/equipment.
 - Recorded the macOS ARM64 controlled package result without promoting it to installed or physical certification.
+- Repaired the destination-selection regression harness to provide the basket context method used by the current UI; all 284 local Node tests now pass.
+- Confirmed the rebuilt NSIS installation matches the current daemon binary and loads the four private FFmpeg libraries with the expected ABI. Preserved the sanitized Windows Radio preflight trace and direct user audio observation; clean-install/upgrade, sustained profiles, matched throughput and the full Windows workflow matrix remain open.
+- Added a validated blocked NSIS evidence record and started long Radio resource sampling; no Task 5–8 completion checkbox was changed because the installed acceptance gates remain open.
 
 ### File List
 
@@ -286,8 +292,14 @@ GPT-5 Codex
 - `scripts/playback-session-evidence.py`
 - `scripts/tests/test_playback_long_session_evidence.py`
 - `scripts/tests/test_playback_session_evidence.py`
+- `scripts/tests/destination-ui.test.mjs`
+- `docs/playback-evidence/16-14-windows-nsis-radio-preflight.jsonl`
+- `docs/playback-evidence/16-14-windows-x64-nsis.json`
 
 ## Change Log
 
 - 2026-09-29: Created comprehensive Story 16.14 implementation and certification guide; status set to ready-for-dev.
 - 2026-09-29: Froze Story 16.14 contract, added fail-closed evidence validation, expanded controlled proofs, and retained unavailable installed/physical rows as blockers.
+- 2026-09-29: Continued Windows local regression verification; repaired a stale UI test mock and retained installed/physical gates as blockers.
+- 2026-09-29: Verified the rebuilt Windows NSIS installation and captured a short Radio resource preflight; retained the frozen sustained and cross-platform gates as incomplete.
+- 2026-09-29: Started the Windows NSIS Radio resource run and added a fail-closed, validated blocked artifact record.
