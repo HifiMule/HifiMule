@@ -1,6 +1,6 @@
 //! Pure playback-protection admission policy. Device work is never owned here.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 pub(crate) const POLICY_VERSION: u8 = 1;
 pub(crate) const ATTRIBUTABLE_DELAY_MS: u64 = 500;
@@ -27,6 +27,29 @@ pub(crate) enum Reason {
     UnattributableOutputRisk,
     RecoveryPending,
     IneffectiveProtection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvidenceReason {
+    InsufficientEvidence,
+    CompressedDepletion,
+    PcmDepletion,
+    BufferDepletion,
+    UnsustainableDelivery,
+    RecoveryPending,
+}
+
+impl EvidenceReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::InsufficientEvidence => "insufficientEvidence",
+            Self::CompressedDepletion => "compressedDepletion",
+            Self::PcmDepletion => "pcmDepletion",
+            Self::BufferDepletion => "bufferDepletion",
+            Self::UnsustainableDelivery => "unsustainableDelivery",
+            Self::RecoveryPending => "recoveryPending",
+        }
+    }
 }
 
 impl Reason {
@@ -56,19 +79,57 @@ pub(crate) struct Snapshot {
     pub observed_ms: u64,
     pub expires_ms: u64,
     pub risk_started_ms: Option<u64>,
+    pub recovery_started_ms: Option<u64>,
     pub eligible_samples: usize,
     pub health: Health,
+    pub evidence_reason: EvidenceReason,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct Observer(Arc<Mutex<Option<Snapshot>>>);
+#[derive(Clone)]
+pub(crate) struct Publisher {
+    state: Arc<Mutex<Option<Snapshot>>>,
+    lifetime: Arc<()>,
+}
+
+impl Default for Publisher {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(None)),
+            lifetime: Arc::new(()),
+        }
+    }
+}
+
+impl Publisher {
+    pub(crate) fn publish(&self, snapshot: Option<Snapshot>) {
+        *self.state.lock().unwrap_or_else(|error| error.into_inner()) = snapshot;
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<Snapshot> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn observer(&self) -> Observer {
+        Observer {
+            state: Arc::clone(&self.state),
+            lifetime: Arc::downgrade(&self.lifetime),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Observer {
+    state: Arc<Mutex<Option<Snapshot>>>,
+    lifetime: Weak<()>,
+}
 
 impl Observer {
-    pub(crate) fn publish(&self, snapshot: Option<Snapshot>) {
-        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = snapshot;
-    }
     pub(crate) fn snapshot(&self) -> Option<Snapshot> {
-        self.0
+        self.lifetime.upgrade()?;
+        self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
@@ -147,8 +208,10 @@ mod tests {
             observed_ms: at,
             expires_ms: at + 60_000,
             risk_started_ms: (health == Health::Risk).then_some(at),
+            recovery_started_ms: None,
             eligible_samples: 3,
             health,
+            evidence_reason: EvidenceReason::CompressedDepletion,
         }
     }
     #[test]
@@ -212,14 +275,15 @@ mod tests {
 
     #[test]
     fn publisher_replacement_and_close_cannot_revive_old_generation() {
-        let observer = Observer::default();
+        let publisher = Publisher::default();
+        let observer = publisher.observer();
         let old = snapshot_at(1_000, Some("shared"), Health::Risk);
-        observer.publish(Some(old));
+        publisher.publish(Some(old));
         let mut replacement = snapshot_at(2_000, Some("shared"), Health::Healthy);
         replacement.generation_id = "new-generation".into();
-        observer.publish(Some(replacement.clone()));
+        publisher.publish(Some(replacement.clone()));
         assert_eq!(observer.snapshot(), Some(replacement));
-        observer.publish(None);
+        publisher.publish(None);
         assert_eq!(observer.snapshot(), None);
         assert_eq!(
             decide(observer.snapshot().as_ref(), Some("shared"), 2_000).delay_ms,
@@ -229,17 +293,20 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_preempts_an_active_protection_wait() {
-        let observer = Observer::default();
+        let publisher = Publisher::default();
+        let observer = publisher.observer();
         let now = crate::playback::adaptation::monotonic_ms();
-        observer.publish(Some(snapshot_at(now, Some("shared"), Health::Risk)));
+        publisher.publish(Some(snapshot_at(now, Some("shared"), Health::Risk)));
         let manager = std::sync::Arc::new(super::super::SyncOperationManager::new());
         manager.create_operation("protected-wait".into(), 1).await;
         let wait_observer = observer.clone();
         let wait_manager = manager.clone();
         let waiter = tokio::spawn(async move {
+            let sync_sources = std::collections::HashSet::from(["shared".to_owned()]);
             super::super::wait_for_protection_admission(
                 Some(&wait_observer),
                 Some("shared"),
+                &sync_sources,
                 &wait_manager,
                 "protected-wait",
             )
@@ -252,6 +319,46 @@ mod tests {
                 .await
                 .expect("cancellation must preempt the 500 ms delay")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn dropping_the_last_publisher_closes_the_observer_immediately() {
+        let publisher = Publisher::default();
+        let observer = publisher.observer();
+        publisher.publish(Some(snapshot_at(1_000, Some("shared"), Health::Risk)));
+        assert!(observer.snapshot().is_some());
+        drop(publisher);
+        assert!(observer.snapshot().is_none());
+    }
+
+    #[test]
+    fn depleted_playback_without_a_shared_source_uses_the_global_minimum_delay() {
+        let publisher = Publisher::default();
+        let observer = publisher.observer();
+        let snapshot = snapshot_at(1_000, Some("playback-only"), Health::Risk);
+        publisher.publish(Some(snapshot));
+        let sync_sources = std::collections::HashSet::from(["sync-only".to_owned()]);
+        assert_eq!(
+            super::super::protection_decision(Some(&observer), Some("sync-only"), &sync_sources,),
+            Decision {
+                delay_ms: UNATTRIBUTABLE_DELAY_MS,
+                reason: Reason::UnattributableOutputRisk,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_risk_without_a_shared_source_does_not_throttle_unrelated_sync() {
+        let publisher = Publisher::default();
+        let observer = publisher.observer();
+        let mut snapshot = snapshot_at(1_000, Some("playback-only"), Health::Risk);
+        snapshot.evidence_reason = EvidenceReason::UnsustainableDelivery;
+        publisher.publish(Some(snapshot));
+        let sync_sources = std::collections::HashSet::from(["sync-only".to_owned()]);
+        assert_eq!(
+            super::super::protection_decision(Some(&observer), Some("sync-only"), &sync_sources,),
+            Decision::normal(Reason::SourceNotInSyncSet)
         );
     }
 }

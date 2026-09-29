@@ -96,12 +96,13 @@ pub struct CapacityEvidence {
     pub oldest_ms: u64,
     pub newest_ms: u64,
     pub depleted: bool,
+    pub compressed_low_observed: bool,
+    pub pcm_low_observed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncEvidenceClass {
     Unknown,
-    Healthy,
     Risk,
     Recovering,
 }
@@ -110,7 +111,20 @@ pub(crate) enum SyncEvidenceClass {
 pub(crate) struct SyncEvidence {
     pub class: SyncEvidenceClass,
     pub eligible_samples: usize,
+    pub oldest_ms: u64,
     pub newest_ms: u64,
+    pub reason: SyncEvidenceReason,
+    pub recovery_qualified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncEvidenceReason {
+    InsufficientEvidence,
+    CompressedDepletion,
+    PcmDepletion,
+    BufferDepletion,
+    UnsustainableDelivery,
+    RecoveryPending,
 }
 
 #[derive(Debug, Default)]
@@ -165,7 +179,10 @@ pub(crate) fn sync_evidence(
         return SyncEvidence {
             class: SyncEvidenceClass::Unknown,
             eligible_samples: 0,
+            oldest_ms: now_ms,
             newest_ms: now_ms,
+            reason: SyncEvidenceReason::InsufficientEvidence,
+            recovery_qualified: false,
         };
     };
     let unsustainable =
@@ -174,25 +191,31 @@ pub(crate) fn sync_evidence(
         return SyncEvidence {
             class: SyncEvidenceClass::Risk,
             eligible_samples: risk.eligible_samples,
+            oldest_ms: risk.oldest_ms,
             newest_ms: risk.newest_ms,
+            reason: if unsustainable {
+                SyncEvidenceReason::UnsustainableDelivery
+            } else if risk.compressed_low_observed && risk.pcm_low_observed {
+                SyncEvidenceReason::BufferDepletion
+            } else if risk.compressed_low_observed {
+                SyncEvidenceReason::CompressedDepletion
+            } else {
+                SyncEvidenceReason::PcmDepletion
+            },
+            recovery_qualified: false,
         };
     }
-    let recovered = runtime
-        .history
-        .evidence(scope, now_ms, RECOVERY_WINDOW_MS)
-        .is_some_and(|evidence| {
-            !evidence.depleted
-                && required_bytes_per_second
-                    .is_some_and(|required| sustainable(required, evidence, true))
-        });
+    let recovery_qualified = required_bytes_per_second.is_some_and(|required| {
+        risk.bytes_per_second.saturating_mul(100)
+            >= required.saturating_mul(RECOVERY_HEADROOM_PERCENT)
+    });
     SyncEvidence {
-        class: if recovered {
-            SyncEvidenceClass::Healthy
-        } else {
-            SyncEvidenceClass::Recovering
-        },
+        class: SyncEvidenceClass::Recovering,
         eligible_samples: risk.eligible_samples,
+        oldest_ms: risk.oldest_ms,
         newest_ms: risk.newest_ms,
+        reason: SyncEvidenceReason::RecoveryPending,
+        recovery_qualified,
     }
 }
 
@@ -355,16 +378,23 @@ impl AdaptationHistory {
             .iter()
             .filter_map(|sample| sample.bytes_per_second())
             .min()?;
+        let compressed_low_observed = eligible
+            .iter()
+            .any(|sample| sample.compressed_buffer_ms < 100);
+        let pcm_low_observed = eligible.iter().any(|sample| sample.pcm_buffer_ms < 100);
+        let depleted = eligible
+            .iter()
+            .filter(|sample| sample.compressed_buffer_ms < 100 || sample.pcm_buffer_ms < 100)
+            .count()
+            >= 2;
         Some(CapacityEvidence {
             bytes_per_second,
             eligible_samples: eligible.len(),
             oldest_ms: eligible.first()?.monotonic_ms,
             newest_ms: eligible.last()?.monotonic_ms,
-            depleted: eligible
-                .iter()
-                .filter(|sample| sample.compressed_buffer_ms < 100 || sample.pcm_buffer_ms < 100)
-                .count()
-                >= 2,
+            depleted,
+            compressed_low_observed,
+            pcm_low_observed,
         })
     }
 }
@@ -466,6 +496,8 @@ mod tests {
             oldest_ms: 0,
             newest_ms: 5_000,
             depleted: true,
+            compressed_low_observed: true,
+            pcm_low_observed: true,
         };
         assert!(!sustainable(32_000, slow, false));
         let burst = CapacityEvidence {
@@ -474,6 +506,8 @@ mod tests {
             oldest_ms: 0,
             newest_ms: 5_000,
             depleted: false,
+            compressed_low_observed: false,
+            pcm_low_observed: false,
         };
         assert!(!sustainable(32_000, burst, true));
         let recovered = CapacityEvidence {
@@ -481,6 +515,33 @@ mod tests {
             ..burst
         };
         assert!(sustainable(32_000, recovered, true));
+    }
+
+    #[test]
+    fn mixed_compressed_and_pcm_low_water_samples_preserve_v1_depletion_semantics() {
+        let mut history = AdaptationHistory::default();
+        let scope = ObservationScope {
+            server_id: "mixed".into(),
+            representation_id: "original".into(),
+        };
+        history.observe(
+            scope.clone(),
+            sample(1_000, 100_000, 50, 500, SampleEligibility::Eligible),
+        );
+        history.observe(
+            scope.clone(),
+            sample(2_000, 100_000, 500, 50, SampleEligibility::Eligible),
+        );
+        history.observe(
+            scope.clone(),
+            sample(3_000, 100_000, 500, 500, SampleEligibility::Eligible),
+        );
+        let evidence = history
+            .evidence(&scope, 3_000, OBSERVATION_WINDOW_MS)
+            .unwrap();
+        assert!(evidence.depleted);
+        assert!(evidence.compressed_low_observed);
+        assert!(evidence.pcm_low_observed);
     }
 
     fn representation(
@@ -641,6 +702,8 @@ mod tests {
             oldest_ms: 60_000,
             newest_ms: 119_999,
             depleted: false,
+            compressed_low_observed: false,
+            pcm_low_observed: false,
         };
         assert!(!sustainable(40_000, burst, true));
         assert!(sustainable(

@@ -4,7 +4,7 @@ baseline_commit: f60a93c
 
 # Story 16.13: Protect playback during sync without unnecessary throttling
 
-Status: review
+Status: done
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created -->
 
@@ -150,6 +150,16 @@ These values are the implementation baseline and acceptance oracle. A measured c
   - [x] Update `docs/playback-installed-test-checklist.md` with 16.13 controlled coexistence cases and the explicit 16.14 installed-soak handoff.
   - [x] Document diagnostic fields/reasons and confirm no secret-bearing data crosses RPC/log boundaries. Add API/data-model docs only if a public contract actually changes.
   - [x] Run targeted protection/adaptation/sync/lifecycle suites, the full daemon/workspace tests, normal all-target Clippy, and any affected UI/i18n checks. Report pre-existing strict-Clippy debt or environment restrictions separately from story failures.
+
+### Review Findings
+
+- [x] [Review][Patch] Run and record the AC8 playback-only, sync-only, and combined coexistence profiles; controlled policy/provider/device results are recorded, but the live-provider + audible-output + physical-device 5% median gate remains unavailable in this checkout [docs/playback-evidence/16-13-coexistence-template.md:1]
+- [x] [Review][Patch] Gate every provider HTTP retry through playback-protection admission [hifimule-daemon/src/sync.rs:2760]
+- [x] [Review][Patch] Re-check the current protection decision after each bounded admission delay [hifimule-daemon/src/sync.rs:3731]
+- [x] [Review][Patch] Preserve risk until valid 120-second recovery evidence exists and make the recovery window attainable without an exact timestamp-boundary coincidence [hifimule-daemon/src/playback/adaptation.rs:151]
+- [x] [Review][Patch] Publish genuinely unattributable PCM/output depletion so the normative 100 ms global admission path is reachable [hifimule-daemon/src/playback/session.rs:2347]
+- [x] [Review][Patch] Invalidate the last snapshot when the playback publisher closes instead of retaining risk until expiry [hifimule-daemon/src/sync/protection.rs:50]
+- [x] [Review][Patch] Carry the sanitized playback evidence reason in the scheduler-facing snapshot and diagnostics [hifimule-daemon/src/sync/protection.rs:34]
 
 ## Dev Notes
 
@@ -301,6 +311,8 @@ GPT-5 Codex
 - Integrated cancellable checks before future provider resolution/request work and retries without holding staging permits or modifying writer/device/manifest semantics; manual single/multi-server and daemon auto-sync share one observer.
 - Added seven deterministic policy/lifecycle/cancellation tests. Full daemon validation passed: 1,350 unit tests, 5 contract tests, 8 intentional ignores. All-target Clippy completed with pre-existing warnings only.
 - Added policy, architecture, playback, installed-checklist, and coexistence evidence documentation. Installed Windows/Linux/macOS coexistence runs are explicitly unverified and handed to Story 16.14; no release certification is inferred.
+- Code review patches gate every provider retry, re-check after bounded waits, retain risk across insufficient recovery evidence, make rolling 120-second recovery attainable, distinguish mixed compressed/PCM depletion, publish unattributable output risk, close observers with their publisher, and carry sanitized evidence reasons.
+- Controlled coexistence evidence now records the deterministic policy matrix, 15 provider-sync integration profiles, retry timing, blocked-writer behavior, cancellation cleanup, and full daemon results. The required live healthy combined-vs-sync-only median remains open because this checkout has no configured live provider, audible output observation, or physical target device.
 
 ### File List
 
@@ -321,3 +333,4 @@ GPT-5 Codex
 ## Change Log
 
 - 2026-09-29: Implemented Story 16.13 playback/sync protection policy v1, owner-fenced health snapshot, targeted cancellable sync admissions, deterministic tests, and controlled coexistence documentation; moved story to review.
+- 2026-09-29: Applied six code-review fixes and recorded all locally executable coexistence evidence; returned story to in-progress because the live AC8 5% throughput gate remains unavailable.

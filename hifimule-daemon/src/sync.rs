@@ -2527,6 +2527,12 @@ pub(crate) async fn execute_provider_sync_with_protection(
             .or_default()
             .push(add);
     }
+    let protection_sync_sources = Arc::new(
+        producer_groups
+            .keys()
+            .filter_map(Clone::clone)
+            .collect::<std::collections::HashSet<_>>(),
+    );
     let priority_barrier = Arc::new(tokio::sync::Barrier::new(producer_groups.len().max(1)));
 
     macro_rules! spawn_provider {
@@ -2552,6 +2558,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
         let producer_reader_started = Arc::clone(&reader_started);
         let producer_reader_bytes = Arc::clone(&reader_bytes);
         let producer_protection_observer = protection_observer.clone();
+        let producer_protection_sync_sources = Arc::clone(&protection_sync_sources);
         let staged_tx = staged_tx.clone();
         tokio::spawn(async move {
         let mut errors = Vec::new();
@@ -2587,6 +2594,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
             if !wait_for_protection_admission(
                 producer_protection_observer.as_ref(),
                 add_item.server_id.as_deref().or(server_id.as_deref()),
+                &producer_protection_sync_sources,
                 &producer_operation_manager,
                 &producer_operation_id,
             ).await {
@@ -2695,6 +2703,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
                             if !wait_for_protection_admission(
                                 producer_protection_observer.as_ref(),
                                 add_item.server_id.as_deref().or(server_id.as_deref()),
+                                &producer_protection_sync_sources,
                                 &producer_operation_manager,
                                 &producer_operation_id,
                             ).await {
@@ -2761,6 +2770,15 @@ pub(crate) async fn execute_provider_sync_with_protection(
                         Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                             if let Some(refresh) = direct_media.as_ref().and_then(|media| media.request.refresh.as_ref()) {
                                 if let Some(headers) = refresh().await {
+                                    if !wait_for_protection_admission(
+                                        producer_protection_observer.as_ref(),
+                                        add_item.server_id.as_deref().or(server_id.as_deref()),
+                                        &producer_protection_sync_sources,
+                                        &producer_operation_manager,
+                                        &producer_operation_id,
+                                    ).await {
+                                        return Ok(response);
+                                    }
                                     client.get(&url).headers(headers).send().await
                                 } else { Ok(response) }
                             } else { Ok(response) }
@@ -2774,10 +2792,28 @@ pub(crate) async fn execute_provider_sync_with_protection(
                                 add_item.name,
                                 response.status()
                             );
+                            if !wait_for_protection_admission(
+                                producer_protection_observer.as_ref(),
+                                add_item.server_id.as_deref().or(server_id.as_deref()),
+                                &producer_protection_sync_sources,
+                                &producer_operation_manager,
+                                &producer_operation_id,
+                            ).await {
+                                return Ok(response);
+                            }
                             client.get(&url).headers(sync_headers.clone()).send().await
                         }
                         Err(first_error) => {
                             crate::daemon_log!("[Sync] Retrying HTTP source for '{}': {}", add_item.name, first_error);
+                            if !wait_for_protection_admission(
+                                producer_protection_observer.as_ref(),
+                                add_item.server_id.as_deref().or(server_id.as_deref()),
+                                &producer_protection_sync_sources,
+                                &producer_operation_manager,
+                                &producer_operation_id,
+                            ).await {
+                                return Err(first_error);
+                            }
                             client.get(&url).headers(sync_headers.clone()).send().await
                         }
                     }
@@ -3731,29 +3767,68 @@ pub(crate) async fn execute_provider_sync_with_protection(
 async fn wait_for_protection_admission(
     observer: Option<&protection::Observer>,
     producer_server_id: Option<&str>,
+    sync_server_ids: &std::collections::HashSet<String>,
     operation_manager: &SyncOperationManager,
     operation_id: &str,
 ) -> bool {
-    let snapshot = observer.and_then(protection::Observer::snapshot);
-    let decision = protection::decide(
-        snapshot.as_ref(),
-        producer_server_id,
-        crate::playback::adaptation::monotonic_ms(),
-    );
+    let decision = protection_decision(observer, producer_server_id, sync_server_ids);
     if decision.delay_ms == 0 {
         return true;
     }
     crate::daemon_log!(
-        "[Sync] Playback protection v{}: reason={} delay_ms={} server={}",
+        "[Sync] Playback protection v{}: reason={} evidence={} delay_ms={} server={}",
         protection::POLICY_VERSION,
         decision.reason.code(),
+        observer
+            .and_then(protection::Observer::snapshot)
+            .map_or("noActivePlayback", |snapshot| snapshot
+                .evidence_reason
+                .code()),
         decision.delay_ms,
         producer_server_id.unwrap_or("unattributed")
     );
-    tokio::select! {
+    let completed = tokio::select! {
         _ = tokio::time::sleep(Duration::from_millis(decision.delay_ms)) => true,
         _ = wait_for_operation_cancellation(operation_manager, operation_id) => false,
+    };
+    if completed {
+        let post_delay = protection_decision(observer, producer_server_id, sync_server_ids);
+        crate::daemon_log!(
+            "[Sync] Playback protection v{} post-delay recheck: reason={} next_delay_ms={} server={}",
+            protection::POLICY_VERSION,
+            post_delay.reason.code(),
+            post_delay.delay_ms,
+            producer_server_id.unwrap_or("unattributed")
+        );
     }
+    completed
+}
+
+fn protection_decision(
+    observer: Option<&protection::Observer>,
+    producer_server_id: Option<&str>,
+    sync_server_ids: &std::collections::HashSet<String>,
+) -> protection::Decision {
+    let mut snapshot = observer.and_then(protection::Observer::snapshot);
+    if let Some(snapshot) = snapshot.as_mut()
+        && snapshot
+            .server_id
+            .as_ref()
+            .is_some_and(|source| !sync_server_ids.contains(source))
+        && matches!(
+            snapshot.evidence_reason,
+            protection::EvidenceReason::CompressedDepletion
+                | protection::EvidenceReason::PcmDepletion
+                | protection::EvidenceReason::BufferDepletion
+        )
+    {
+        snapshot.server_id = None;
+    }
+    protection::decide(
+        snapshot.as_ref(),
+        producer_server_id,
+        crate::playback::adaptation::monotonic_ms(),
+    )
 }
 
 fn provider_sync_staging_prefix(operation_id: &str) -> String {
@@ -4474,6 +4549,34 @@ mod tests {
             io,
         };
         execute_provider_sync(delta, &target, source, operations, operation_id, devices).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_test_provider_sync_with_protection(
+        delta: &SyncDelta,
+        path: &Path,
+        source: ProviderSyncSource,
+        operations: Arc<SyncOperationManager>,
+        operation_id: String,
+        devices: Arc<crate::device::DeviceManager>,
+        io: Arc<dyn crate::device_io::DeviceIO>,
+        observer: protection::Observer,
+    ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+        let target = SyncTarget {
+            path: path.to_path_buf(),
+            manifest: devices.get_current_device().await.unwrap(),
+            io,
+        };
+        execute_provider_sync_with_protection(
+            delta,
+            &target,
+            source,
+            operations,
+            operation_id,
+            devices,
+            Some(observer),
+        )
+        .await
     }
 
     use super::*;
@@ -6376,7 +6479,27 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_test_provider_sync(
+        let protection_publisher = protection::Publisher::default();
+        let protection_observer = protection_publisher.observer();
+        let now_ms = crate::playback::adaptation::monotonic_ms();
+        protection_publisher.publish(Some(protection::Snapshot {
+            policy_version: protection::POLICY_VERSION,
+            session_id: "retry-session".into(),
+            generation_id: "retry-generation".into(),
+            preview: false,
+            server_id: None,
+            representation_id: "retry-representation".into(),
+            observed_ms: now_ms,
+            expires_ms: now_ms.saturating_add(60_000),
+            risk_started_ms: Some(now_ms),
+            recovery_started_ms: None,
+            eligible_samples: 3,
+            health: protection::Health::Risk,
+            evidence_reason: protection::EvidenceReason::PcmDepletion,
+        }));
+        let started = std::time::Instant::now();
+
+        let (synced, errors) = execute_test_provider_sync_with_protection(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -6388,6 +6511,7 @@ mod tests {
             operation_id,
             manager,
             device_io,
+            protection_observer,
         )
         .await
         .unwrap();
@@ -6396,6 +6520,10 @@ mod tests {
         assert!(synced.is_empty());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].error_message.contains("500"));
+        assert!(
+            started.elapsed() >= Duration::from_millis(190),
+            "initial admission and retry must each receive the 100 ms global delay"
+        );
     }
 
     #[tokio::test]

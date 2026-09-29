@@ -82,7 +82,7 @@ pub struct PlaybackSession {
     fenced: Arc<AtomicBool>,
     ingress: Arc<Mutex<ProgressIngress>>,
     health: Arc<Mutex<PlaybackHealth>>,
-    sync_protection: crate::sync::protection::Observer,
+    sync_protection: crate::sync::protection::Publisher,
     worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
@@ -221,7 +221,7 @@ struct Inner {
     dirty: bool,
     checkpointed_position_ms: u64,
     playback: PlaybackState,
-    sync_protection: crate::sync::protection::Observer,
+    sync_protection: crate::sync::protection::Publisher,
     radio_inflight: Option<String>,
     radio_wake: Option<tokio::sync::mpsc::Sender<()>>,
     radio_resume_after_refill: bool,
@@ -672,7 +672,7 @@ impl PlaybackSession {
         };
         let output_gate = Arc::new(AtomicBool::new(false));
         let control_epoch = Arc::new(AtomicU64::new(0));
-        let sync_protection = crate::sync::protection::Observer::default();
+        let sync_protection = crate::sync::protection::Publisher::default();
         let inner = Arc::new(Mutex::new(Inner {
             album: Default::default(),
             pending_terminal: None,
@@ -809,7 +809,7 @@ impl PlaybackSession {
     }
 
     pub(crate) fn sync_protection_observer(&self) -> crate::sync::protection::Observer {
-        self.sync_protection.clone()
+        self.sync_protection.observer()
     }
 
     pub fn instance_id(&self) -> String {
@@ -2284,7 +2284,7 @@ fn publish_health(i: &Inner, health: &Mutex<PlaybackHealth>) {
 }
 
 fn publish_sync_protection(i: &Inner) {
-    use crate::sync::protection::{Health, POLICY_VERSION, Snapshot};
+    use crate::sync::protection::{EvidenceReason, Health, POLICY_VERSION, Snapshot};
     let now_ms = super::adaptation::monotonic_ms();
     let active = matches!(
         active_state(i),
@@ -2325,20 +2325,77 @@ fn publish_sync_protection(i: &Inner) {
         .map(|kbps| u64::from(kbps).saturating_mul(1_000) / 8);
     let evidence = super::adaptation::sync_evidence(&scope, required, now_ms);
     let previous = i.sync_protection.snapshot();
-    let health = match evidence.class {
-        super::adaptation::SyncEvidenceClass::Unknown => Health::Unknown,
-        super::adaptation::SyncEvidenceClass::Healthy => Health::Healthy,
-        super::adaptation::SyncEvidenceClass::Risk => Health::Risk,
-        super::adaptation::SyncEvidenceClass::Recovering => Health::Recovering,
+    let previous_current = previous.as_ref().filter(|snapshot| {
+        snapshot.session_id == i.session.session_id
+            && snapshot.generation_id == i.generation_id
+            && now_ms <= snapshot.expires_ms
+    });
+    let previous_protected = previous_current
+        .filter(|snapshot| matches!(snapshot.health, Health::Risk | Health::Recovering));
+    let (health, observed_ms, expires_ms, recovery_started_ms) = match evidence.class {
+        super::adaptation::SyncEvidenceClass::Risk => (
+            Health::Risk,
+            evidence.newest_ms,
+            evidence
+                .newest_ms
+                .saturating_add(super::adaptation::OBSERVATION_WINDOW_MS),
+            None,
+        ),
+        super::adaptation::SyncEvidenceClass::Recovering
+            if previous_protected.is_some() && evidence.recovery_qualified =>
+        {
+            let recovery_started = previous_protected
+                .and_then(|snapshot| snapshot.recovery_started_ms)
+                .unwrap_or_else(|| {
+                    evidence.oldest_ms.max(
+                        previous_protected
+                            .and_then(|snapshot| snapshot.risk_started_ms)
+                            .unwrap_or(evidence.oldest_ms),
+                    )
+                });
+            let recovered = evidence.newest_ms.saturating_sub(recovery_started)
+                >= super::adaptation::RECOVERY_WINDOW_MS;
+            (
+                if recovered {
+                    Health::Healthy
+                } else {
+                    Health::Recovering
+                },
+                evidence.newest_ms,
+                evidence
+                    .newest_ms
+                    .saturating_add(super::adaptation::OBSERVATION_WINDOW_MS),
+                (!recovered).then_some(recovery_started),
+            )
+        }
+        super::adaptation::SyncEvidenceClass::Unknown if previous_protected.is_some() => {
+            let previous = previous_protected.expect("checked above");
+            (
+                Health::Recovering,
+                previous.observed_ms,
+                previous.expires_ms,
+                None,
+            )
+        }
+        super::adaptation::SyncEvidenceClass::Unknown => (
+            Health::Unknown,
+            evidence.newest_ms,
+            evidence
+                .newest_ms
+                .saturating_add(super::adaptation::OBSERVATION_WINDOW_MS),
+            None,
+        ),
+        super::adaptation::SyncEvidenceClass::Recovering => (
+            Health::Healthy,
+            evidence.newest_ms,
+            evidence
+                .newest_ms
+                .saturating_add(super::adaptation::OBSERVATION_WINDOW_MS),
+            None,
+        ),
     };
     let risk_started_ms = if matches!(health, Health::Risk | Health::Recovering) {
-        previous
-            .as_ref()
-            .filter(|snapshot| {
-                snapshot.session_id == i.session.session_id
-                    && snapshot.generation_id == i.generation_id
-                    && matches!(snapshot.health, Health::Risk | Health::Recovering)
-            })
+        previous_protected
             .and_then(|snapshot| snapshot.risk_started_ms)
             .or(Some(now_ms))
     } else {
@@ -2351,13 +2408,30 @@ fn publish_sync_protection(i: &Inner) {
         preview: i.preview.is_some(),
         server_id: Some(metadata.source.server_id.clone()),
         representation_id: quality.representation_id.clone(),
-        observed_ms: evidence.newest_ms,
-        expires_ms: evidence
-            .newest_ms
-            .saturating_add(super::adaptation::OBSERVATION_WINDOW_MS),
+        observed_ms,
+        expires_ms,
         risk_started_ms,
+        recovery_started_ms,
         eligible_samples: evidence.eligible_samples,
         health,
+        evidence_reason: match evidence.reason {
+            super::adaptation::SyncEvidenceReason::InsufficientEvidence => {
+                EvidenceReason::InsufficientEvidence
+            }
+            super::adaptation::SyncEvidenceReason::CompressedDepletion => {
+                EvidenceReason::CompressedDepletion
+            }
+            super::adaptation::SyncEvidenceReason::PcmDepletion => EvidenceReason::PcmDepletion,
+            super::adaptation::SyncEvidenceReason::BufferDepletion => {
+                EvidenceReason::BufferDepletion
+            }
+            super::adaptation::SyncEvidenceReason::UnsustainableDelivery => {
+                EvidenceReason::UnsustainableDelivery
+            }
+            super::adaptation::SyncEvidenceReason::RecoveryPending => {
+                EvidenceReason::RecoveryPending
+            }
+        },
     }));
 }
 
