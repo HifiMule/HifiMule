@@ -779,6 +779,16 @@ impl MediaProvider for JellyfinProvider {
         );
         Ok(PlaybackDescription {
             representations: vec![PlaybackRepresentation {
+                id: crate::providers::RepresentationId(format!(
+                    "jellyfin-original-{}",
+                    song.suffix.as_deref().unwrap_or("unknown")
+                )),
+                quality: crate::providers::PlaybackQuality {
+                    tier: 100,
+                    required_bytes_per_second: song
+                        .bitrate_kbps
+                        .map(|value| u64::from(value) * 125),
+                },
                 codec: song.suffix.clone(),
                 container: song.suffix.clone(),
                 bitrate_kbps: song.bitrate_kbps,

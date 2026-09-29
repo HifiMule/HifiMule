@@ -5083,7 +5083,16 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
         } => {
             i.playback.metadata = Some(metadata);
             i.playback.duration_ms = duration_ms;
-            i.playback.representation = Some(representation);
+            i.playback.representation = Some(representation.clone());
+            i.playback.selected_quality = Some(super::model::SelectedPlaybackQuality {
+                representation_id: representation.clone(),
+                codec: None,
+                container: Some(representation.clone()),
+                bitrate_kbps: None,
+                reduced: false,
+                reason: None,
+                policy_version: super::adaptation::POLICY_VERSION,
+            });
             if seek.reason.as_deref() != Some("seek.validating")
                 && i.playback.pending_seek.is_none()
                 && i.playback.status == PlaybackStatus::Loading
@@ -5412,6 +5421,18 @@ fn adopt_presented_handoff(
     i.session = next;
     i.checkpointed_position_ms = i.session.position_ms;
     i.radio_wait_for_transition = false;
+    let selected_quality = super::adaptation::selected_status(&metadata.source.server_id).map(
+        |(representation_id, reason)| super::model::SelectedPlaybackQuality {
+            representation_id,
+            codec: None,
+            container: Some(representation.clone()),
+            bitrate_kbps: None,
+            reduced: reason == super::adaptation::AdaptationReason::ReducedBufferPressure,
+            reason: (reason == super::adaptation::AdaptationReason::ReducedBufferPressure)
+                .then(|| reason.wire_code().into()),
+            policy_version: super::adaptation::POLICY_VERSION,
+        },
+    );
     i.playback = PlaybackState {
         status: if i.output_gate.load(Ordering::Acquire) {
             PlaybackStatus::Active
@@ -5432,7 +5453,8 @@ fn adopt_presented_handoff(
         back_unavailable_reason: None,
         metadata: Some(metadata),
         duration_ms: Some(duration_ms),
-        representation: Some(representation),
+        representation: Some(representation.clone()),
+        selected_quality,
         seek,
         pending_seek: None,
         seek_outcome: None,

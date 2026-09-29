@@ -219,6 +219,18 @@ pub struct PlaybackFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SelectedPlaybackQuality {
+    pub representation_id: String,
+    pub codec: Option<String>,
+    pub container: Option<String>,
+    pub bitrate_kbps: Option<u32>,
+    pub reduced: bool,
+    pub reason: Option<String>,
+    pub policy_version: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlaybackTrackMetadata {
     pub source: TrackSource,
     pub title: String,
@@ -236,6 +248,7 @@ pub struct PlaybackState {
     pub metadata: Option<PlaybackTrackMetadata>,
     pub duration_ms: Option<u64>,
     pub representation: Option<String>,
+    pub selected_quality: Option<SelectedPlaybackQuality>,
     pub seek: SeekCapability,
     pub pending_seek: Option<PendingSeek>,
     pub seek_outcome: Option<SeekOutcome>,
@@ -254,6 +267,7 @@ impl Default for PlaybackState {
             metadata: None,
             duration_ms: None,
             representation: None,
+            selected_quality: None,
             seek: SeekCapability::unavailable("seek.unresolved"),
             pending_seek: None,
             seek_outcome: None,

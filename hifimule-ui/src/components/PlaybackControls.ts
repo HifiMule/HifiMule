@@ -355,7 +355,12 @@ export class PlaybackControls {
         const statusText = !snapshot.current ? t('playback.idle_guidance') : sourceUnavailable ? t('playback.queue.source_unavailable') : outputUnavailable && !snapshot.output?.error ? t('playback.output.choose') : snapshot.mode === 'preview'
             ? t('playback.status.preview', { status: transportStatus })
             : transportStatus;
-        this.setText(this.status, this.fresh() ? statusText : t(`playback.connection.${playbackStore.connection()}`));
+        const qualityText = snapshot.playback.selectedQuality?.reduced
+            ? t(`playback.quality.${snapshot.playback.selectedQuality.reason ?? 'reducedBufferPressure'}`)
+            : '';
+        this.setText(this.status, this.fresh()
+            ? [statusText, qualityText].filter(Boolean).join(' · ')
+            : t(`playback.connection.${playbackStore.connection()}`));
         const continuityNotice = snapshot.mode === 'main' && snapshot.current && snapshot.continuityStatus
             ? t(`playback.book_progress.${snapshot.continuityStatus}`) : '';
         this.setText(this.error, [this.commandError, continuityNotice].filter(Boolean).join(' '));

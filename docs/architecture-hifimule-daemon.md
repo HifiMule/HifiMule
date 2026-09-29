@@ -43,3 +43,10 @@ Capabilities decide the modes surfaced by the UI. The Audiobookshelf provider ke
 ## Build and verification
 
 The root audio-runtime wrapper is required before daemon compilation because FFmpeg native libraries must be prepared before Cargo dependency build scripts. Use `rtk npm run build:daemon -- check -p hifimule-daemon` and `rtk npm run build:daemon -- test -p hifimule-daemon`. Provider tests, `tests/audiobookshelf_contract.rs`, sync/device tests, and installed smoke scripts cover separate boundaries. See [Development Guide](./development-guide.md) for platform prerequisites and commands.
+# Playback adaptation ownership
+
+`playback/adaptation.rs` owns the pure bounded policy and scoped history. `http_source.rs` captures
+sanitized byte/time facts; `streaming.rs` retains compressed-buffer ownership; `audio.rs` invokes
+the decision only in the existing successor preparation path. The CPAL/Pulse callback performs no
+adaptation work, allocation, I/O, estimator locking, persistence, or provider access. Existing
+generation and `SuccessorFence` admission remains the final authority.

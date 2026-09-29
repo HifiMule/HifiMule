@@ -143,6 +143,11 @@ fn description(url: &str) -> PlaybackDescription {
         )
         .unwrap(),
         representations: vec![crate::providers::PlaybackRepresentation {
+            id: crate::providers::RepresentationId("test-wav".into()),
+            quality: crate::providers::PlaybackQuality {
+                tier: 0,
+                required_bytes_per_second: None,
+            },
             codec: Some("pcm_s16le".into()),
             container: Some("wav".into()),
             bitrate_kbps: None,

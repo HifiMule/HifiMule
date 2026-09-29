@@ -73,6 +73,12 @@ pub(crate) struct HttpSource {
     length: Option<u64>,
     validator: Option<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
     preparation: Preparation,
+    adaptation_scope: Option<super::adaptation::ObservationScope>,
+    delivery_elapsed: Duration,
+    delivered_bytes: u64,
+    cache_confirmed: bool,
+    seeked: bool,
+    complete: bool,
 }
 impl HttpSource {
     pub fn new(
@@ -93,6 +99,17 @@ impl HttpSource {
                     .cloned()
                     .map(|value| (reqwest::header::LAST_MODIFIED, value))
             });
+        let cache_confirmed = response
+            .headers()
+            .get(reqwest::header::AGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|age| age > 0)
+            || response
+                .headers()
+                .get("x-cache")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.eq_ignore_ascii_case("hit"));
         Self {
             runtime: tokio::runtime::Handle::current(),
             request,
@@ -103,7 +120,21 @@ impl HttpSource {
             pending_allocation: 0,
             position: 0,
             preparation,
+            adaptation_scope: None,
+            delivery_elapsed: Duration::ZERO,
+            delivered_bytes: 0,
+            cache_confirmed,
+            seeked: false,
+            complete: false,
         }
+    }
+
+    pub fn with_adaptation_scope(mut self, server_id: String, representation_id: String) -> Self {
+        self.adaptation_scope = Some(super::adaptation::ObservationScope {
+            server_id,
+            representation_id,
+        });
+        self
     }
 }
 impl Read for HttpSource {
@@ -117,12 +148,16 @@ impl Read for HttpSource {
             let Some(response) = self.response.as_mut() else {
                 return Ok(0);
             };
+            let delivery_started = Instant::now();
             let chunk = self.runtime.block_on(self.preparation.run(async {
                 response
                     .chunk()
                     .await
                     .map_err(|_| io::Error::other("source read failed"))
             }))?;
+            self.delivery_elapsed = self
+                .delivery_elapsed
+                .saturating_add(delivery_started.elapsed());
             let Some(chunk) = chunk else {
                 if self.length.is_some_and(|length| self.position < length) {
                     return Err(io::Error::new(
@@ -131,13 +166,53 @@ impl Read for HttpSource {
                     ));
                 }
                 self.response = None;
+                self.complete = true;
                 return Ok(0);
             };
+            if let Some(scope) = self.adaptation_scope.clone() {
+                let elapsed_ms =
+                    u64::try_from(delivery_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let eligibility = if self.cache_confirmed {
+                    super::adaptation::SampleEligibility::Cached
+                } else if self.seeked {
+                    super::adaptation::SampleEligibility::RangeOrSeek
+                } else if elapsed_ms < 250 {
+                    super::adaptation::SampleEligibility::TooShort
+                } else {
+                    super::adaptation::SampleEligibility::Eligible
+                };
+                super::adaptation::record(
+                    scope,
+                    super::adaptation::DeliveryObservation {
+                        monotonic_ms: super::adaptation::monotonic_ms(),
+                        bytes: chunk.len() as u64,
+                        elapsed_ms,
+                        compressed_buffer_ms: if eligibility
+                            == super::adaptation::SampleEligibility::Eligible
+                        {
+                            0
+                        } else {
+                            500
+                        },
+                        pcm_buffer_ms: if eligibility
+                            == super::adaptation::SampleEligibility::Eligible
+                        {
+                            0
+                        } else {
+                            500
+                        },
+                        eligibility,
+                    },
+                );
+            }
             // The retained network chunk has an explicit share of the byte
             // budget. Do not retain an arbitrarily large upstream allocation.
             validate_chunk_length(chunk.len())?;
             self.pending = chunk;
             self.pending_allocation = self.pending.len();
+            self.delivered_bytes = self
+                .delivered_bytes
+                .saturating_add(self.pending.len() as u64);
         }
         let count = target.len().min(self.pending.len());
         target[..count].copy_from_slice(&self.pending[..count]);
@@ -179,6 +254,7 @@ impl Seek for HttpSource {
         if target == self.position {
             return Ok(target);
         }
+        self.seeked = true;
         // Close the old response first: only one HTTP request owns this source.
         self.response = None;
         self.pending = Bytes::new();
@@ -279,6 +355,37 @@ impl Seek for HttpSource {
         self.response = Some(response);
         self.position = target;
         Ok(target)
+    }
+}
+
+impl Drop for HttpSource {
+    fn drop(&mut self) {
+        let Some(scope) = self.adaptation_scope.take() else {
+            return;
+        };
+        let elapsed_ms = u64::try_from(self.delivery_elapsed.as_millis()).unwrap_or(u64::MAX);
+        let eligibility = if self.cache_confirmed {
+            super::adaptation::SampleEligibility::Cached
+        } else if self.seeked {
+            super::adaptation::SampleEligibility::RangeOrSeek
+        } else if !self.complete {
+            super::adaptation::SampleEligibility::Partial
+        } else if elapsed_ms < 250 {
+            super::adaptation::SampleEligibility::TooShort
+        } else {
+            super::adaptation::SampleEligibility::Eligible
+        };
+        super::adaptation::record(
+            scope,
+            super::adaptation::DeliveryObservation {
+                monotonic_ms: super::adaptation::monotonic_ms(),
+                bytes: self.delivered_bytes,
+                elapsed_ms,
+                compressed_buffer_ms: if self.complete { 500 } else { 0 },
+                pcm_buffer_ms: if self.complete { 500 } else { 0 },
+                eligibility,
+            },
+        );
     }
 }
 impl super::streaming::CompressedSource for HttpSource {

@@ -545,3 +545,11 @@ Bounds are explicit: 480 UTF-8 bytes/120 characters per name, 10,000 occurrences
 `playback_basket_exports` stores the operation UUID, canonical request, frozen snapshot and durable device IDs, action, pre/post canonical basket hashes, terminal authoritative basket when confirmed, reason, and retention timestamps. States are `intentRecorded`, `commitConfirmed`, `conflict`, `failed`, and `commitUncertain`. Startup turns an unacknowledged intent into `commitUncertain`; recovery compares the exact connected target against both persisted hashes rather than replaying the mutation. Rows are retained for 30 days.
 
 Basket policy version 1 hashes stable JSON for `(policyVersion, ordered full basket vector)` and excludes unrelated manifest fields. Basket provider identity is `(serverId, id)`; provider `id` is never replaced with an occurrence key. Replace assigns the validated vector once. Add preserves the latest existing vector and appends only identities not already present.
+# Playback representation and adaptation evidence
+
+`RepresentationId` is stable within a provider capability contract and contains no request data.
+`PlaybackQuality` contains a provider-verified comparison tier and optional required bytes/second;
+bitrate is comparable only within an explicitly equivalent tier. `ObservationScope` is
+`(portable_server_id, representation_id)`. Each scope retains at most 16 delivery observations.
+Durations and ages use monotonic milliseconds; rates use bytes/second; compressed and PCM health
+use milliseconds. Device write throughput and decoded bit depth are never origin-capacity inputs.

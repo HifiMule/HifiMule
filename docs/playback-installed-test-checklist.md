@@ -899,3 +899,14 @@ A subsequent package rebuild after the menu status change succeeded with SHA-256
 The Story 16.6 review patch built an ARM64 DMG with SHA-256 `3db56d10fda1e029ffb96bdab6942bb639ac0a2a37db46d5194fcee3b978227d` on macOS 27.0 ARM64. The app passed strict code-signature verification, was copied from the mounted DMG into an isolated test location, and launched with a separate empty profile. The main webview rendered the media-server connection screen, so the earlier blank-window observation did not recur. The daemon answered `daemon.health` and `playback.startSelection` returned `PLAYBACK_SELECTION_SETUP`, as expected without saved sources. After closing the isolated UI, launchd still reported the daemon running and an authenticated health RPC succeeded. No configured first track, status-menu interaction, floating bar, replenishment, or physical output was verified. The copied local package is not immutable release evidence.
 
 A final rebuild after the activation route-ready guard produced SHA-256 `34694c545dadfefdfcdf77208cd6e5749ed84297b875e0c3b0e37b303db752b3` and passed strict code-signature verification. This final DMG has not been installed or smoke tested; the isolated observations above apply to the preceding package hash only.
+# Story 16.14 network-profile evidence handoff
+
+For each installed run, record: build/commit, OS and architecture, provider/server version,
+portable server ID hash, representation IDs and sanitized descriptors, profile phases in monotonic
+milliseconds, delivered bytes and eligible duration, compressed/PCM high-water bytes, buffering
+event count/duration, boundary switch count/reasons, actual recovery boundary, and final outcome.
+Use at least stable-fast, sustained-slowdown, jitter/burst, outage/recovery, and explicit-cache
+profiles. Verify 8 MiB compressed and 1 MiB PCM per slot (16 MiB/2 MiB aggregate), 64 KiB reader
+chunks, <=1 MiB network chunks, the 7,274,496-byte retained compressed window, 500 ms PCM target,
+100 ms startup/refill, and 60-second preparation deadline. Story 16.12 unit/provider evidence is
+not installed Windows/macOS/Linux certification.

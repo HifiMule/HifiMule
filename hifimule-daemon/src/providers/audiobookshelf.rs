@@ -1193,6 +1193,11 @@ impl AudiobookshelfProvider {
         Ok(PlaybackDescription {
             song: podcast_episode_song(&episode_public),
             representations: vec![PlaybackRepresentation {
+                id: crate::providers::RepresentationId(format!("audiobookshelf-direct-{codec}")),
+                quality: crate::providers::PlaybackQuality {
+                    tier: 100,
+                    required_bytes_per_second: None,
+                },
                 codec: Some(codec.into()),
                 container: Some(container.into()),
                 bitrate_kbps: None,
@@ -3590,6 +3595,11 @@ impl MediaProvider for AudiobookshelfProvider {
         Ok(PlaybackDescription {
             song,
             representations: vec![PlaybackRepresentation {
+                id: crate::providers::RepresentationId(format!("audiobookshelf-session-{codec}")),
+                quality: crate::providers::PlaybackQuality {
+                    tier: 100,
+                    required_bytes_per_second: None,
+                },
                 codec: Some(codec.into()),
                 container: Some(container.into()),
                 bitrate_kbps: None,

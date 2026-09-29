@@ -1,3 +1,4 @@
+pub mod adaptation;
 pub mod album;
 pub mod audio;
 pub mod basket_export;

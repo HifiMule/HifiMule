@@ -51,3 +51,23 @@ The UI refreshes the daemon snapshot after each change. This prevents a delayed 
 | Media provider | Supplies authenticated stream access and metadata; credentials stay inside the daemon. |
 
 For exact RPC schemas and recovery guarantees, see [API Contracts — Daemon](./api-contracts-hifimule-daemon.md). For the broader process design, see [Daemon Architecture](./architecture-hifimule-daemon.md), [UI Architecture](./architecture-hifimule-ui.md), and [Integration Architecture](./integration-architecture.md).
+# Track-boundary quality adaptation (policy v1)
+
+Playback alternatives are daemon-private, provider-verified representations. Navidrome is the
+first multi-representation path: a qualified original plus the existing OpenSubsonic `stream`
+route at MP3 192 kb/s when the source exceeds that bitrate. Jellyfin and Audiobookshelf remain
+single-representation until their server/version transcode contracts receive equivalent evidence.
+Portable-device transcoding profiles never participate.
+
+Policy v1 uses monotonic delivery time, a 60,000 ms observation window, at least three eligible
+samples, 125% downgrade headroom, 175% recovery headroom, and a 60,000 ms recovery span. History
+is scoped by portable server identity plus stable representation identity and is bounded to 16
+samples per scope (120,000 ms maximum age). Explicit cache hits, startup/short samples (<250 ms),
+range/seek reads, partial bodies, and failures do not establish capacity. Unknown capacity keeps
+the current/highest verified representation and the existing 100 ms bounded startup fill.
+
+Selection changes only while preparing a later queue occurrence. `SuccessorFence`, the one-slot
+prepared-successor contract, the 60-second preparation deadline, and generation/control/queue
+fences remain authoritative. A claimed successor is retained. Non-unity album gain deliberately
+constrains the occurrence to its qualified original representation. No mid-track replacement,
+automatic skip, output reroute, or synthetic reporting transition is permitted.

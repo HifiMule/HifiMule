@@ -1,5 +1,6 @@
 {
   "en": {
+    "playback.quality.reducedBufferPressure": "Quality reduced for connection stability",
     "playback.snapshots.save": "Save listening snapshot",
     "playback.snapshots.browse": "Saved snapshots",
     "playback.snapshots.name": "Snapshot name",
@@ -788,6 +789,7 @@
     "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
+    "playback.quality.reducedBufferPressure": "Qualité réduite pour stabiliser la connexion",
     "playback.snapshots.save": "Enregistrer un instantané d’écoute",
     "playback.snapshots.browse": "Instantanés enregistrés",
     "playback.snapshots.name": "Nom de l’instantané",
@@ -1552,6 +1554,7 @@
     "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
+    "playback.quality.reducedBufferPressure": "Calidad reducida para estabilizar la conexión",
     "playback.snapshots.save": "Guardar instantánea de escucha",
     "playback.snapshots.browse": "Instantáneas guardadas",
     "playback.snapshots.name": "Nombre de la instantánea",
@@ -2316,6 +2319,7 @@
     "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
+    "playback.quality.reducedBufferPressure": "Qualität für eine stabile Verbindung reduziert",
     "playback.snapshots.save": "Hörsitzung als Momentaufnahme speichern",
     "playback.snapshots.browse": "Gespeicherte Momentaufnahmen",
     "playback.snapshots.name": "Name der Momentaufnahme",

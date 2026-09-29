@@ -828,9 +828,21 @@ impl AudioEngine {
             artist: description.song.artist_name.clone(),
             album: description.song.album_title.clone(),
         };
-        let representation = select_playback_representation(description.representations)
-            .map_err(PlaybackPipelineError::from_provider_error)?;
         let gain = f32::from_bits(candidate.gain_bits);
+        let (representation, _adaptation_reason) = if gain.to_bits() == 1.0f32.to_bits() {
+            super::adaptation::select_for_boundary(
+                &candidate.successor.source.server_id,
+                description.representations,
+            )
+        } else {
+            select_playback_representation(description.representations).map(|representation| {
+                (
+                    representation,
+                    super::adaptation::AdaptationReason::AlbumGainConstraint,
+                )
+            })
+        }
+        .map_err(PlaybackPipelineError::from_provider_error)?;
         let qualified_suffix = qualified_gain_suffix(
             gain,
             description.song.suffix.as_deref(),
@@ -854,10 +866,15 @@ impl AudioEngine {
             )));
         }
         let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
+        let representation_id = representation.id.0.clone();
         let source = super::http_source::HttpSource::new(
             representation.request,
             response,
             preparation.clone(),
+        )
+        .with_adaptation_scope(
+            candidate.successor.source.server_id.clone(),
+            representation_id,
         );
         let reader = BoundedHttpReader::from_source(source, cancel.clone(), high_water);
         let token = super::continuity::HandoffToken {
@@ -3219,6 +3236,11 @@ mod tests {
         url: &str,
     ) -> PlaybackRepresentation {
         PlaybackRepresentation {
+            id: crate::providers::RepresentationId(format!("test-{}", codec.unwrap_or("unknown"))),
+            quality: crate::providers::PlaybackQuality {
+                tier: 0,
+                required_bytes_per_second: None,
+            },
             codec: codec.map(str::to_owned),
             container: container.map(str::to_owned),
             bitrate_kbps: None,

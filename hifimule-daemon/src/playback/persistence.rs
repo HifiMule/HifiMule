@@ -4063,7 +4063,7 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('playback_listening_snapshots','playback_listening_snapshot_entries')", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 2);
-        assert_eq!(PERSISTENCE_VERSION, 15);
+        assert_eq!(PERSISTENCE_VERSION, 16);
     }
 
     #[test]
@@ -4095,7 +4095,7 @@ mod tests {
                 .query_row("SELECT version FROM playback_schema", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
-            15
+            PERSISTENCE_VERSION
         );
     }
 

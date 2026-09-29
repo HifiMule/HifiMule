@@ -722,24 +722,74 @@ impl MediaProvider for SubsonicProvider {
         .map_err(|_| {
             ProviderError::UnsupportedCapability("invalid Subsonic playback route".into())
         })?;
-        Ok(PlaybackDescription {
-            representations: vec![PlaybackRepresentation {
-                codec: song.suffix.clone(),
-                container: song.suffix.clone(),
-                bitrate_kbps: song.bitrate_kbps,
+        let mut representations = vec![PlaybackRepresentation {
+            id: crate::providers::RepresentationId(format!(
+                "subsonic-original-{}",
+                song.suffix.as_deref().unwrap_or("unknown")
+            )),
+            quality: crate::providers::PlaybackQuality {
+                tier: 100,
+                required_bytes_per_second: song.bitrate_kbps.map(|value| u64::from(value) * 125),
+            },
+            codec: song.suffix.clone(),
+            container: song.suffix.clone(),
+            bitrate_kbps: song.bitrate_kbps,
+            sample_rate: None,
+            bit_depth: None,
+            provenance: PlaybackProvenance::Original,
+            seek_mechanism,
+            request: PlaybackRequest {
+                url,
+                headers: reqwest::header::HeaderMap::new(),
+                range_supported: navidrome,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
+            },
+        }];
+        // Navidrome's OpenSubsonic stream endpoint is the shipped, verified
+        // playback-alternative path. Generic Subsonic servers remain explicit
+        // single-representation providers because their transcode behavior is
+        // not assumed from protocol compatibility alone.
+        if navidrome && song.bitrate_kbps.is_some_and(|bitrate| bitrate > 192) {
+            let transcode_url = reqwest::Url::parse(&self.client.stream_url(
+                song_id,
+                &TranscodeProfile {
+                    container: Some("mp3".into()),
+                    audio_codec: Some("mp3".into()),
+                    max_bitrate_kbps: Some(192),
+                },
+            )?)
+            .map_err(|_| {
+                ProviderError::UnsupportedCapability(
+                    "invalid Navidrome playback transcode route".into(),
+                )
+            })?;
+            representations.push(PlaybackRepresentation {
+                id: crate::providers::RepresentationId("navidrome-mp3-192".into()),
+                quality: crate::providers::PlaybackQuality {
+                    tier: 50,
+                    required_bytes_per_second: Some(24_000),
+                },
+                codec: Some("mp3".into()),
+                container: Some("mp3".into()),
+                bitrate_kbps: Some(192),
                 sample_rate: None,
                 bit_depth: None,
-                provenance: PlaybackProvenance::Original,
-                seek_mechanism,
+                provenance: PlaybackProvenance::Alternative,
+                seek_mechanism: None,
                 request: PlaybackRequest {
-                    url,
+                    url: transcode_url,
                     headers: reqwest::header::HeaderMap::new(),
-                    range_supported: navidrome,
+                    range_supported: false,
                     cleanup: None,
                     refresh: None,
-                    expected_content_type: None,
+                    expected_content_type: Some("audio/mpeg".into()),
                 },
-            }],
+            });
+        }
+        Ok(PlaybackDescription {
+            representations,
             song,
         })
     }

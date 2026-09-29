@@ -148,8 +148,22 @@ pub enum PlaybackSeekMechanism {
     AudiobookshelfDirectM4a,
 }
 
+/// Stable, daemon-private identity for capacity evidence. It contains no URL,
+/// credential, or request-specific value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RepresentationId(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackQuality {
+    /// Provider-verified ordering tier. Bitrate is compared only inside a tier.
+    pub tier: u8,
+    pub required_bytes_per_second: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackRepresentation {
+    pub id: RepresentationId,
+    pub quality: PlaybackQuality,
     pub codec: Option<String>,
     pub container: Option<String>,
     pub bitrate_kbps: Option<u32>,
@@ -240,8 +254,19 @@ pub struct BookTiming {
 }
 
 pub(crate) fn select_playback_representation(
-    mut representations: Vec<PlaybackRepresentation>,
+    representations: Vec<PlaybackRepresentation>,
 ) -> Result<PlaybackRepresentation, ProviderError> {
+    select_ordered_playback_representations(representations)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ProviderError::UnsupportedCapability("no supported playback representation".into())
+        })
+}
+
+pub(crate) fn select_ordered_playback_representations(
+    mut representations: Vec<PlaybackRepresentation>,
+) -> Result<Vec<PlaybackRepresentation>, ProviderError> {
     if representations.len() > MAX_PLAYBACK_REPRESENTATIONS {
         return Err(ProviderError::UnsupportedCapability(
             "provider advertised more than eight playback representations".into(),
@@ -251,18 +276,25 @@ pub(crate) fn select_playback_representation(
     representations.sort_by(|left, right| {
         let left_group = representation_group(left);
         let right_group = representation_group(right);
-        left_group.cmp(&right_group).then_with(|| match left_group {
-            1 => right
-                .sample_rate
-                .cmp(&left.sample_rate)
-                .then_with(|| right.bit_depth.cmp(&left.bit_depth)),
-            2 if left.codec == right.codec => right.bitrate_kbps.cmp(&left.bitrate_kbps),
-            _ => std::cmp::Ordering::Equal,
-        })
+        left_group
+            .cmp(&right_group)
+            .then_with(|| right.quality.tier.cmp(&left.quality.tier))
+            .then_with(|| match left_group {
+                1 => right
+                    .sample_rate
+                    .cmp(&left.sample_rate)
+                    .then_with(|| right.bit_depth.cmp(&left.bit_depth)),
+                2 if left.codec == right.codec => right.bitrate_kbps.cmp(&left.bitrate_kbps),
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| left.id.0.cmp(&right.id.0))
     });
-    representations.into_iter().next().ok_or_else(|| {
-        ProviderError::UnsupportedCapability("no supported playback representation".into())
-    })
+    if representations.is_empty() {
+        return Err(ProviderError::UnsupportedCapability(
+            "no supported playback representation".into(),
+        ));
+    }
+    Ok(representations)
 }
 
 fn representation_group(representation: &PlaybackRepresentation) -> u8 {
@@ -2107,6 +2139,11 @@ mod tests {
         bit_depth: Option<u8>,
     ) -> PlaybackRepresentation {
         PlaybackRepresentation {
+            id: RepresentationId(format!("test-{codec}")),
+            quality: PlaybackQuality {
+                tier: 0,
+                required_bytes_per_second: bitrate_kbps.map(|value| u64::from(value) * 125),
+            },
             codec: Some(codec.into()),
             container: None,
             bitrate_kbps,

@@ -1502,3 +1502,10 @@ Automated fixtures cover request ordering and duplicate parameter preservation. 
 Planning applies a 10-second bound to each provider resolution and a 60-second overall bound. Add also rejects raw-ID collisions with existing cross-source basket entries that the current basket UI cannot represent faithfully.
 
 All params use camelCase, reject unknown fields, and require `schemaVersion: 1`. Replace requires the planned hash exactly. Add re-resolves the durable device under its manifest commit lock and merges against the latest basket using `(portable serverId, provider trackId)` identity, preserving the existing vector and metadata. The current basket/UI/sync representation cannot safely expose repeated occurrences or identical raw IDs across sources, so preflight blocks and discloses those cases. Provider-unavailable, missing/changed tracks, missing authoritative sizes, metadata overflow, and unsafe mixed-source auto-sync are likewise explicit limitations. Export never starts sync or deletes device media.
+# Playback quality state (schema v1 addition)
+
+`playback.getSession` includes `playback.representation` and optional `playback.selectedQuality`:
+`{ representationId, codec, container, bitrateKbps, reduced, reason, policyVersion }`. Values are
+sanitized descriptors; authenticated URLs, headers, provider session identifiers, and throughput
+samples never cross RPC. `reason` is a localized-code input such as `reducedBufferPressure`.
+Only current-generation resolved or presented-handoff state may replace this field.
