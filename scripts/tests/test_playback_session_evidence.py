@@ -44,21 +44,21 @@ class PlaybackEvidenceTests(unittest.TestCase):
     def test_every_fixture_uses_runtime_verifying_wrapper(self):
         code, record, calls = self.run_evidence()
         self.assertEqual(code, 0)
-        self.assertEqual(len(calls), 9)
+        self.assertEqual(len(calls), 14)
         for command in calls:
             self.assertEqual(command[:5], ["node", "scripts/build-daemon.mjs", "test", "-p", "hifimule-daemon"])
             self.assertEqual(command[-2:], ["--", "--nocapture"])
         self.assertEqual(record["commands"], [" ".join(command) for command in calls])
         self.assertEqual(record["outcome"], "passed")
-        self.assertEqual(record["commandExitCodes"], [0] * 9)
+        self.assertEqual(record["commandExitCodes"], [0] * 14)
 
     def test_failure_is_preserved_and_remaining_fixtures_run(self):
         code, record, calls = self.run_evidence(failed_index=2)
         self.assertEqual(code, 101)
-        self.assertEqual(len(calls), 9)
+        self.assertEqual(len(calls), 14)
         self.assertEqual(record["outcome"], "failed")
         self.assertEqual(record["exitCode"], 101)
-        self.assertEqual(record["commandExitCodes"], [0, 0, 101, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(record["commandExitCodes"], [0, 0, 101] + [0] * 11)
 
 
 if __name__ == "__main__":

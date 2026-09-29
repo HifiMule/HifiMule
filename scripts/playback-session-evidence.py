@@ -27,6 +27,11 @@ FIXTURES = [
     "shutdown control under saturation and dropped-caller admission",
     "transactional migration rollback and checkpoint retry",
     "abrupt child-process termination during SQLite transaction",
+    "long-session Radio bounds and exclusion continuity",
+    "adaptation sample/scope bounds and fake-time recovery",
+    "late output open and retired generation rejection",
+    "bounded reporting retries and ambiguous-operation durability",
+    "immutable export paging and dropped-caller fencing",
     "authenticated playback router and exact JSON/error contract",
     "shutdown checkpoint failure visibility and authorized retry",
     "committed shutdown cancellation during stalled session storage",
@@ -74,6 +79,16 @@ def main() -> int:
             "--", "--nocapture",
         ],
     ]
+    for module in [
+        "playback::radio::tests",
+        "playback::adaptation::tests",
+        "playback::session::output_selection::tests",
+        "playback::reporting::tests",
+        "playback::session::export::tests",
+    ]:
+        commands.append([
+            "cargo", "test", "-p", "hifimule-daemon", module, "--", "--nocapture",
+        ])
     for fixture in [
         "stalled_playback_checkpoint_does_not_delay_sync_cancellation_or_health",
         "playback_retry_checkpoint_router_is_authenticated_owner_bound_and_shutdown_scoped",

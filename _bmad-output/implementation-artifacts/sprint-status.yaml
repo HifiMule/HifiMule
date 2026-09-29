@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-29  # Story 16.14 created and ready for development
+last_updated: 2026-09-29  # Story 16.14 development started
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -218,7 +218,7 @@ development_status:
   16-11-add-a-listening-snapshot-to-a-connected-device-basket-or-replace-it: done  # code review: 11 patches applied
   16-12-adapt-playback-quality-at-track-boundaries-using-buffer-health: done  # code review: 11 patches applied
   16-13-protect-playback-during-sync-without-unnecessary-throttling: done
-  16-14-keep-long-listening-sessions-bounded-and-recoverable: ready-for-dev
+  16-14-keep-long-listening-sessions-bounded-and-recoverable: in-progress
   epic-16-retrospective: optional
 
   # Epic 17 — Audiobookshelf Integration (sprint-change-proposal-2026-09-20-audiobookshelf)

@@ -1,5 +1,14 @@
 # Installed playback checklist — Epic 15 manual release and Epic 16 extension
 
+## Story 16.14 sustained-session contract
+
+Story 16.14 acceptance runs use the frozen version-1 contract in
+[`playback-evidence/16-14-soak-contract.md`](playback-evidence/16-14-soak-contract.md).
+Create one fail-closed record per package row with `scripts/playback-long-session-evidence.py`;
+the current matrix and explicit blockers are indexed in
+[`playback-evidence/16-14-evidence-index.md`](playback-evidence/16-14-evidence-index.md).
+Earlier deterministic or installed observations are context only and cannot be copied into these rows.
+
 ## Current release ownership — 2026-09-19
 
 Story 15.17 owns installed verification of the manual playback release, including Back (15.15) and compact browse navigation (15.16). Story 16.14 later extends the installed matrix to Radio, reporting/preferences, snapshots/exports, adaptive quality and conditional sync protection. Radio features are not prerequisites for 15.17.
