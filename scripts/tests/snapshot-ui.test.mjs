@@ -112,6 +112,7 @@ const doc={createElement:tag=>new Element(tag),activeElement:null};
 function all(node){return [node,...node.children.flatMap(all)];}
 function text(node){return node.textContent+' '+node.children.map(text).join(' ');}
 function component(rpc={}) {
+  rpc={playbackListSnapshotPlaylistExports:async()=>[],playbackPlanSnapshotPlaylistExport:async()=>({parts:[]}),playbackStartSnapshotPlaylistExport:async()=>({parts:[]}),playbackRetrySnapshotPlaylistExport:async()=>({parts:[]}),playbackReconcileSnapshotPlaylistExport:async()=>({parts:[]}),...rpc};
   let subscriber,connectionSubscriber,saveSubscriber;let connection='fresh';const changes=[];const s=observed();
   const store={subscribe:fn=>{subscriber=fn;fn(s);return()=>{};},subscribeConnection:fn=>{connectionSubscriber=fn;fn(connection);return()=>{};},connection:()=>connection,refresh:async()=>{}};
   const saves={state:{kind:'idle'},pending:null,canSave:()=>true,subscribe:fn=>{saveSubscriber=fn;fn(saves.state);return()=>{};},save:async()=>{},recover:async()=>{}};

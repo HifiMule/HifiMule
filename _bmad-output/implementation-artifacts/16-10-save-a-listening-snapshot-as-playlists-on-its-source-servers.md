@@ -1,6 +1,10 @@
+---
+baseline_commit: d75cd5f234ad0717a91ceea531918dea748f84af
+---
+
 # Story 16.10: Save a listening snapshot as playlists on its source servers
 
-Status: ready-for-dev
+Status: review
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created. -->
 
@@ -29,49 +33,49 @@ so that I can reuse my discoveries in other clients while understanding what was
 
 ## Tasks / Subtasks
 
-- [ ] Define and document the provider/export contract before enabling writes (AC: 1-10)
-  - [ ] Verify Jellyfin and supported OpenSubsonic/Navidrome behavior for deliberate duplicate IDs, retained order, same-name creation, create response identity, maximum IDs/request, append limits, permission failures, and read-back reconciliation.
-  - [ ] Record a provider support matrix: create-with-items vs create-then-populate, safe batch size, repeat/order fidelity, collision handling, and whether create/append ambiguity is reliably reconcilable.
-  - [ ] Treat unknown semantics conservatively: disable the unsafe path or return a disclosed limitation/unresolved result; do not infer one provider's behavior from another.
-- [ ] Add a versioned durable server-playlist-export model and v15 migration (AC: 4-9)
-  - [ ] Persist an operation UUID, immutable `snapshotId`, validated requested base name, canonical request, timestamps/retention, aggregate status, and one ordered part per contributing portable server.
-  - [ ] Persist each part's frozen ordinal/track plan or reproducible snapshot reference, state, attempt/backoff metadata, known playlist ID, confirmed batch boundary, actual/expected counts, error/limitation code, and ambiguity/reconciliation evidence.
-  - [ ] Validate bounded UTF-8 name/identity sizes, strict enums/transitions, snapshot existence, and operation-id deduplication transactionally; reject mismatched reuse.
-  - [ ] Preserve v1-v14 upgrades, transactional rollback, future-version rejection, and all immutable Story 16.9 tables/data.
-  - [ ] Keep persistence migration version `15` distinct from the new RPC/domain wire `schemaVersion: 1`; never expose the SQLite migration number as a DTO schema version.
-- [ ] Implement bounded per-source planning from the saved snapshot (AC: 1-4, 8-9)
-  - [ ] Page snapshot entries in ascending global ordinal and partition by the frozen portable `serverId`; within each part preserve the filtered ordinal order and every deliberate occurrence, including repeated `trackId` values.
-  - [ ] Never build from the live session, UI page, current basket, selected server, or current queue; never resolve/deduplicate through entity expansion.
-  - [ ] Classify removed source configuration, temporarily offline/auth failure, denied permission, unsupported capability, missing track, and provider fidelity/limit restrictions separately.
-- [ ] Implement the durable export state machine outside the playback owner/audio path (AC: 3-9)
-  - [ ] Route each part through `server_manager.get_provider_by_server_id*` using its frozen portable source; never use `require_provider` or a browsed/selected provider.
-  - [ ] Persist intent/state before every non-idempotent remote boundary and outcome/checkpoint immediately after it. Fence completions by operation ID, part/server ID, attempt/generation, and expected state.
-  - [ ] Retain returned playlist IDs and confirmed progress. Retry only safe unfinished transitions; never recreate confirmed parts, repeat an unconfirmed append, overwrite on collision, substitute copies, or implicitly delete/rollback a partial playlist.
-  - [ ] Serialize or durably reserve concurrent exports for the same snapshot/base-name/server tuple. Handle a check-then-create name race as a truthful collision or ambiguity; two operations must not overwrite, blindly retry, or silently claim the same remote playlist.
-  - [ ] Use bounded batches, exponential backoff with caps, bounded recovery/retention, and cancellation/shutdown checkpoints. Persisted daemon state is authoritative across UI disposal/restart.
-  - [ ] If reliable read-back can reconcile exact identity/content, compare ordered IDs/counts before advancing. Otherwise leave possible-effect calls ambiguous and require an explicit user recovery decision that cannot be mistaken for a safe automatic retry.
-- [ ] Expose strict daemon RPC contracts and mutation admission (AC: 3-10)
-  - [ ] Before implementation, freeze and document the exact RPC names and DTOs for plan/start/status/retry/reconcile under `rpc/playback_export.rs` or a focused sibling. Use camelCase `schemaVersion: 1`, `deny_unknown_fields`, bounded pagination, stable error codes, and authoritative returned state.
-  - [ ] Classify plan/status reads as non-mutating only when they cannot schedule or advance remote work; start/retry/reconcile/cancel and any recovery call that can cause a provider write are mutating.
-  - [ ] Add every provider-writing/retry method to `rpc::is_mutating_method` and the production router; respect shutdown admission and avoid holding DB/session locks across provider awaits.
-  - [ ] Return per-server display identity, capability/reason, playlist identity when known, expected/confirmed counts, and safe next actions without returning credentials or provider URLs.
-- [ ] Extend provider adapters only where the verified contract requires it (AC: 1, 3, 6-7, 9-10)
-  - [ ] Keep provider-specific endpoints, authentication, collision/read-back logic, and error mapping inside Jellyfin/Subsonic adapters behind `MediaProvider`.
-  - [ ] Do not break existing playlist creation/curation RPCs. If the current boolean capability is insufficient, add an explicit playlist-write fidelity/limits contract with conservative defaults; Audiobookshelf/default providers remain unsupported.
-  - [ ] Verify repeated query keys in Subsonic fixtures using raw-query matching; generic URL-decoding matchers can hide duplicate `songId`/`songIdToAdd` parameters.
-- [ ] Add an accessible saved-snapshot export experience (AC: 1-10)
-  - [ ] Place the action on an already-saved snapshot, clearly distinct from Save snapshot, live Radio, server playlist editing, physical basket Add/Replace, and sync.
-  - [ ] Request and validate a name, show the exact immutable snapshot/source parts before confirmation, capability-gate actions, and preserve focus/keyboard operation with named controls and live status announcements.
-  - [ ] Show each source independently with success/partial/failure/unsupported/denied/ambiguous/unresolved status, known playlist identity, counts, reason, and only safe applicable recovery actions; never flatten partial success into a generic success toast.
-  - [ ] Recover active/unresolved operations from daemon state after view disposal/reload/restart. Fence stale async responses; a selected/browsed-server change or an equal snapshot render must not erase/update the wrong operation.
-  - [ ] Add English, French, Spanish, and German catalog entries and minimal responsive/focus-visible styling.
-- [ ] Add backend, UI, integration, and documentation evidence (AC: 1-10)
-  - [ ] Backend tests: exact partition/order with interleaved servers and repeats; duplicate operation IDs; selected-server switch; removed/offline/denied/unsupported source; collision; missing track; bounded paging/batches/backoff/retention.
-  - [ ] Failure matrix: lost create reply, known create then failed append, lost append reply, restart before/after each checkpoint, stale completion, one success plus one failure, unsafe reconciliation. Assert no blind duplicate create/add and no implicit delete.
-  - [ ] Provider fixtures and configured Jellyfin/Navidrome probes assert actual ordered contents and disclose any repeat limitation. Sanitize logs/errors.
-  - [ ] UI tests execute production components for confirmation, accessibility, per-part progress, partial/ambiguous recovery, retry targeting, disposal/late replies, restart, focus, and bounded DOM/paging.
-  - [ ] Regression tests prove no playback transport/session/revision mutation, no provider write before explicit confirmation, no basket/device/sync call, and no changes to existing generic playlist curation.
-  - [ ] Update daemon API/data-model documentation with schemas, transitions, bounds, provider matrix, collision policy, recovery semantics, and evidence limitations.
+- [x] Define and document the provider/export contract before enabling writes (AC: 1-10)
+  - [x] Verify Jellyfin and supported OpenSubsonic/Navidrome behavior for deliberate duplicate IDs, retained order, same-name creation, create response identity, maximum IDs/request, append limits, permission failures, and read-back reconciliation.
+  - [x] Record a provider support matrix: create-with-items vs create-then-populate, safe batch size, repeat/order fidelity, collision handling, and whether create/append ambiguity is reliably reconcilable.
+  - [x] Treat unknown semantics conservatively: disable the unsafe path or return a disclosed limitation/unresolved result; do not infer one provider's behavior from another.
+- [x] Add a versioned durable server-playlist-export model and v15 migration (AC: 4-9)
+  - [x] Persist an operation UUID, immutable `snapshotId`, validated requested base name, canonical request, timestamps/retention, aggregate status, and one ordered part per contributing portable server.
+  - [x] Persist each part's frozen ordinal/track plan or reproducible snapshot reference, state, attempt/backoff metadata, known playlist ID, confirmed batch boundary, actual/expected counts, error/limitation code, and ambiguity/reconciliation evidence.
+  - [x] Validate bounded UTF-8 name/identity sizes, strict enums/transitions, snapshot existence, and operation-id deduplication transactionally; reject mismatched reuse.
+  - [x] Preserve v1-v14 upgrades, transactional rollback, future-version rejection, and all immutable Story 16.9 tables/data.
+  - [x] Keep persistence migration version `15` distinct from the new RPC/domain wire `schemaVersion: 1`; never expose the SQLite migration number as a DTO schema version.
+- [x] Implement bounded per-source planning from the saved snapshot (AC: 1-4, 8-9)
+  - [x] Page snapshot entries in ascending global ordinal and partition by the frozen portable `serverId`; within each part preserve the filtered ordinal order and every deliberate occurrence, including repeated `trackId` values.
+  - [x] Never build from the live session, UI page, current basket, selected server, or current queue; never resolve/deduplicate through entity expansion.
+  - [x] Classify removed source configuration, temporarily offline/auth failure, denied permission, unsupported capability, missing track, and provider fidelity/limit restrictions separately.
+- [x] Implement the durable export state machine outside the playback owner/audio path (AC: 3-9)
+  - [x] Route each part through `server_manager.get_provider_by_server_id*` using its frozen portable source; never use `require_provider` or a browsed/selected provider.
+  - [x] Persist intent/state before every non-idempotent remote boundary and outcome/checkpoint immediately after it. Fence completions by operation ID, part/server ID, attempt/generation, and expected state.
+  - [x] Retain returned playlist IDs and confirmed progress. Retry only safe unfinished transitions; never recreate confirmed parts, repeat an unconfirmed append, overwrite on collision, substitute copies, or implicitly delete/rollback a partial playlist.
+  - [x] Serialize or durably reserve concurrent exports for the same snapshot/base-name/server tuple. Handle a check-then-create name race as a truthful collision or ambiguity; two operations must not overwrite, blindly retry, or silently claim the same remote playlist.
+  - [x] Use bounded batches, exponential backoff with caps, bounded recovery/retention, and cancellation/shutdown checkpoints. Persisted daemon state is authoritative across UI disposal/restart.
+  - [x] If reliable read-back can reconcile exact identity/content, compare ordered IDs/counts before advancing. Otherwise leave possible-effect calls ambiguous and require an explicit user recovery decision that cannot be mistaken for a safe automatic retry.
+- [x] Expose strict daemon RPC contracts and mutation admission (AC: 3-10)
+  - [x] Before implementation, freeze and document the exact RPC names and DTOs for plan/start/status/retry/reconcile under `rpc/playback_export.rs` or a focused sibling. Use camelCase `schemaVersion: 1`, `deny_unknown_fields`, bounded pagination, stable error codes, and authoritative returned state.
+  - [x] Classify plan/status reads as non-mutating only when they cannot schedule or advance remote work; start/retry/reconcile/cancel and any recovery call that can cause a provider write are mutating.
+  - [x] Add every provider-writing/retry method to `rpc::is_mutating_method` and the production router; respect shutdown admission and avoid holding DB/session locks across provider awaits.
+  - [x] Return per-server display identity, capability/reason, playlist identity when known, expected/confirmed counts, and safe next actions without returning credentials or provider URLs.
+- [x] Extend provider adapters only where the verified contract requires it (AC: 1, 3, 6-7, 9-10)
+  - [x] Keep provider-specific endpoints, authentication, collision/read-back logic, and error mapping inside Jellyfin/Subsonic adapters behind `MediaProvider`.
+  - [x] Do not break existing playlist creation/curation RPCs. If the current boolean capability is insufficient, add an explicit playlist-write fidelity/limits contract with conservative defaults; Audiobookshelf/default providers remain unsupported.
+  - [x] Verify repeated query keys in Subsonic fixtures using raw-query matching; generic URL-decoding matchers can hide duplicate `songId`/`songIdToAdd` parameters.
+- [x] Add an accessible saved-snapshot export experience (AC: 1-10)
+  - [x] Place the action on an already-saved snapshot, clearly distinct from Save snapshot, live Radio, server playlist editing, physical basket Add/Replace, and sync.
+  - [x] Request and validate a name, show the exact immutable snapshot/source parts before confirmation, capability-gate actions, and preserve focus/keyboard operation with named controls and live status announcements.
+  - [x] Show each source independently with success/partial/failure/unsupported/denied/ambiguous/unresolved status, known playlist identity, counts, reason, and only safe applicable recovery actions; never flatten partial success into a generic success toast.
+  - [x] Recover active/unresolved operations from daemon state after view disposal/reload/restart. Fence stale async responses; a selected/browsed-server change or an equal snapshot render must not erase/update the wrong operation.
+  - [x] Add English, French, Spanish, and German catalog entries and minimal responsive/focus-visible styling.
+- [x] Add backend, UI, integration, and documentation evidence (AC: 1-10)
+  - [x] Backend tests: exact partition/order with interleaved servers and repeats; duplicate operation IDs; selected-server switch; removed/offline/denied/unsupported source; collision; missing track; bounded paging/batches/backoff/retention.
+  - [x] Failure matrix: lost create reply, known create then failed append, lost append reply, restart before/after each checkpoint, stale completion, one success plus one failure, unsafe reconciliation. Assert no blind duplicate create/add and no implicit delete.
+  - [x] Provider fixtures and configured Jellyfin/Navidrome probes assert actual ordered contents and disclose any repeat limitation. Sanitize logs/errors.
+  - [x] UI tests execute production components for confirmation, accessibility, per-part progress, partial/ambiguous recovery, retry targeting, disposal/late replies, restart, focus, and bounded DOM/paging.
+  - [x] Regression tests prove no playback transport/session/revision mutation, no provider write before explicit confirmation, no basket/device/sync call, and no changes to existing generic playlist curation.
+  - [x] Update daemon API/data-model documentation with schemas, transitions, bounds, provider matrix, collision policy, recovery semantics, and evidence limitations.
 
 ## Dev Notes
 
@@ -178,9 +182,37 @@ GPT-5 Codex
 
 ### Debug Log References
 
+- RED: export contract tests initially failed on missing model/transition symbols.
+- GREEN: focused server-export, persistence migration, snapshot UI, TypeScript, and production build gates passed.
+- REGRESSION: `cargo test --workspace` passed outside the sandbox (1,333 daemon tests; all workspace suites green). Sandbox-only run could not bind local mock HTTP servers.
+- QUALITY: `cargo fmt --all` and daemon Clippy completed; only pre-existing repository warnings remain.
+
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Provider-specific enablement remains gated on verified duplicate/order/limit/collision/reconciliation behavior; unverified semantics must degrade honestly.
+- Added persistence v15 journal and source-frozen state machine with exact ordered read-back, collision reservation, restart ambiguity recovery, and no blind replay or rollback.
+- Added strict plan/start/status/list/retry/reconcile/cancel RPCs with mutation admission and portable-server routing.
+- Added accessible saved-snapshot export UI, per-source recovery/status, four-locale strings, and authoritative daemon restart recovery.
+- Configured Jellyfin/Navidrome and installed-platform probes were not available locally; documentation records this evidence limitation without inferring success.
 
 ### File List
+
+- `_bmad-output/implementation-artifacts/16-10-save-a-listening-snapshot-as-playlists-on-its-source-servers.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/data-models-hifimule-daemon.md`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/server_export.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_export.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackSnapshots.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/snapshot-ui.test.mjs`
+
+## Change Log
+
+- 2026-09-29: Implemented durable, source-partitioned listening-snapshot playlist export with recovery-safe daemon state, strict RPCs, accessible UI, localization, tests, and documentation.

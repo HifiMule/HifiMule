@@ -532,3 +532,10 @@ single-connection contention limits are documented in the API contract's Story
 16.9 section. The previous `rejected_playback_occurrences` vector helper remains
 for other consumers; snapshot capture uses a transaction-local SQL anti-join and
 does not use that helper as a separate acceptance read.
+# Snapshot server-playlist export journal (persistence v15)
+
+`playback_server_exports` stores the operation UUID, immutable snapshot UUID, validated base name, canonical request, and bounded retention timestamps. `(snapshot_id, name)` is reserved to prevent concurrent duplicate creates.
+
+`playback_server_export_parts` stores one ordered row per frozen portable source with its ordered occurrence-preserving track-ID plan, state, attempt/generation fence, expected and confirmed counts, known remote playlist identity, diagnostic code, and retry boundary. Valid part states are `planned`, `unsupported`, `denied`, `pending`, `creating`, `populating`, `partial`, `succeeded`, `failed`, `ambiguous`, `unresolved`, and `canceled`. Aggregate state is derived from parts.
+
+Bounds are explicit: 480 UTF-8 bytes/120 characters per name, 10,000 occurrences, 32 sources, 1,000 IDs per provider request, and 30-day terminal-operation retention. Snapshot rows remain immutable. Migration v15 is transactional, retains all v1-v14 data, and remains distinct from RPC schema version 1.

@@ -1,4 +1,4 @@
-import { playbackListSnapshots, playbackListSnapshotEntries, type ListeningSnapshotSummary, type PlaybackSessionSnapshot } from '../rpc';
+import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
 import { withDeadline } from '../lifecycleDeadline';
 import { playbackStore } from '../state/playback';
@@ -41,6 +41,9 @@ export class PlaybackSnapshots {
     private readonly pageStatus = document.createElement('p');
     private readonly back = button('playback.snapshots.live', () => this.showLive());
     private readonly savedList = button('playback.snapshots.browse', () => this.showList());
+    private readonly exportName = document.createElement('input');
+    private readonly exportButton = button('playback.snapshots.export.action', () => void this.confirmExport());
+    private readonly exportStatus = document.createElement('div');
     private readonly retry = button('playback.retry', () => void this.loadPage());
     private readonly first = button('playback.snapshots.first', () => { this.cursor = null; this.previous = []; void this.loadPage(); });
     private readonly prev = button('playback.queue.previous', () => { this.cursor = this.previous.pop() ?? null; void this.loadPage(); });
@@ -74,7 +77,9 @@ export class PlaybackSnapshots {
         this.list.className = 'playback-destination__queue playback-snapshots__list';
         const paging = document.createElement('div'); paging.className = 'playback-destination__paging';
         paging.append(this.first, this.prev, this.next);
-        this.panel.append(this.back, this.savedList, this.heading, this.details, this.pageStatus, this.retry, this.list, paging);
+        const exportLabel=document.createElement('label');exportLabel.textContent=t('playback.snapshots.export.name');this.exportName.maxLength=120;this.exportName.setAttribute('aria-label',t('playback.snapshots.export.name'));exportLabel.append(this.exportName);
+        this.exportStatus.setAttribute('role','status');this.exportStatus.setAttribute('aria-live','polite');this.exportStatus.className='playback-snapshots__export-status';
+        this.panel.append(this.back, this.savedList, this.heading, this.details, exportLabel, this.exportButton, this.exportStatus, this.pageStatus, this.retry, this.list, paging);
         this.element.append(toolbar, this.explanation, this.saveStatus, this.recover, this.refresh, this.openResult, this.panel);
         this.element.addEventListener('keydown', event => { if (event.key === 'Escape' && !this.panel.hidden) { event.preventDefault(); this.showLive(); } });
         this.unsubscribers.push(playbackStore.subscribe(s => { this.observed = s; this.renderSave(); }));
@@ -124,7 +129,16 @@ export class PlaybackSnapshots {
         this.selection = snapshot; this.reset(); this.panel.hidden = false; this.savedList.hidden = false;
         this.heading.textContent = snapshot.name;
         this.details.textContent = `${new Date(snapshot.createdAt).toLocaleString()} · ${t('playback.snapshots.count', { count: snapshot.entryCount })}`;
-        this.onSavedView(true); this.heading.focus(); void this.loadPage();
+        this.exportName.value=snapshot.name;this.exportStatus.replaceChildren();
+        this.onSavedView(true); this.heading.focus(); void this.loadPage(); void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(v=>{if(v[0])this.renderExport(v[0]);}).catch(()=>{});
+    }
+    private async confirmExport():Promise<void>{
+        const snapshot=this.selection;if(!snapshot||this.disposed)return;const request=++this.request;this.exportButton.disabled=true;this.exportStatus.textContent=t('playback.snapshots.export.planning');
+        try{const plan=await playbackPlanSnapshotPlaylistExport(snapshot.snapshotId,this.exportName.value);if(this.disposed||request!==this.request||this.selection?.snapshotId!==snapshot.snapshotId)return;const parts=plan.parts.map(p=>`${p.sourceLabel}: ${p.expectedCount}`).join('\n');if(!window.confirm(t('playback.snapshots.export.confirm',{name:plan.name,parts})))return;this.renderExport(await playbackStartSnapshotPlaylistExport(snapshot.snapshotId,plan.name));}
+        catch(error){this.exportStatus.textContent=message(snapshotErrorCode(error));}finally{if(!this.disposed&&request===this.request)this.exportButton.disabled=false;}
+    }
+    private renderExport(operation:SnapshotPlaylistExport):void{
+        if(this.disposed||operation.snapshotId!==this.selection?.snapshotId)return;const list=document.createElement('ul');for(const part of operation.parts){const row=document.createElement('li');row.append(`${part.sourceLabel}: ${t(`playback.snapshots.export.state.${part.state}`)} · ${part.confirmedCount}/${part.expectedCount}${part.playlistId?` · ${part.playlistId}`:''}`);if(part.safeToRetry&&operation.operationId)row.append(button('playback.retry',()=>void playbackRetrySnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));if(part.state==='ambiguous'&&operation.operationId)row.append(button('playback.snapshots.export.reconcile',()=>void playbackReconcileSnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));list.append(row);}this.exportStatus.replaceChildren(document.createTextNode(t(`playback.snapshots.export.aggregate.${operation.status}`)),list);
     }
     private paging(): void {
         this.first.disabled = this.loading || this.cursor === null;

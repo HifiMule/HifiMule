@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 14;
+pub const PERSISTENCE_VERSION: i64 = 15;
 type RadioRow = (
     String,
     Option<String>,
@@ -299,6 +299,7 @@ impl Database {
         CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_replace AFTER UPDATE OF logical_id ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=NEW.session_id AND logical_session_id<>NEW.logical_id; END;
         CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_delete AFTER DELETE ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=OLD.session_id AND logical_session_id=OLD.logical_id; END;")?;
         super::export::migrate(&tx)?;
+        super::server_export::migrate(&tx)?;
         let key_pattern = format!("mbrec:{}:%", super::recording::RESOLVER_VERSION);
         let unknown: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording WHERE resolver_version<>?1 OR recording_key NOT LIKE ?2 UNION SELECT 1 FROM playback_radio_recording_membership WHERE recording_key NOT LIKE ?2)", params![super::recording::RESOLVER_VERSION,key_pattern], |row|row.get(0))?;
         if unknown {
@@ -3171,7 +3172,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 14);
+        assert_eq!(PERSISTENCE_VERSION, 15);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);
@@ -4061,7 +4062,7 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('playback_listening_snapshots','playback_listening_snapshot_entries')", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 2);
-        assert_eq!(PERSISTENCE_VERSION, 14);
+        assert_eq!(PERSISTENCE_VERSION, 15);
     }
 
     #[test]
@@ -4093,7 +4094,7 @@ mod tests {
                 .query_row("SELECT version FROM playback_schema", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
-            14
+            15
         );
     }
 

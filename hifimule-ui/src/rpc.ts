@@ -449,6 +449,14 @@ export async function playbackGetSnapshot(locator: { snapshotId: string } | { op
 export async function playbackListSnapshotEntries(snapshotId: string, cursor: string | null = null, limit = 50): Promise<ListeningSnapshotPage> {
     return (await rpcCall('playback.listSnapshotEntries', { schemaVersion: 1, snapshotId, cursor, limit })).data;
 }
+export type SnapshotPlaylistPartState = 'planned'|'unsupported'|'denied'|'pending'|'creating'|'populating'|'partial'|'succeeded'|'failed'|'ambiguous'|'unresolved'|'canceled';
+export interface SnapshotPlaylistExportPart { serverId:string;sourceLabel:string;state:SnapshotPlaylistPartState;expectedCount:string;confirmedCount:string;playlistId:string|null;reason:string|null;attempt:number;safeToRetry:boolean; }
+export interface SnapshotPlaylistExport { schemaVersion:1;operationId:string|null;snapshotId:string;name:string;status:'planned'|'running'|'partial'|'succeeded'|'failed'|'unresolved'|'canceled';createdAt:string|null;parts:SnapshotPlaylistExportPart[]; }
+export async function playbackPlanSnapshotPlaylistExport(snapshotId:string,name:string):Promise<SnapshotPlaylistExport>{return(await rpcCall('playback.planSnapshotPlaylistExport',{schemaVersion:1,snapshotId,name})).data;}
+export async function playbackStartSnapshotPlaylistExport(snapshotId:string,name:string,operationId=crypto.randomUUID()):Promise<SnapshotPlaylistExport>{return(await rpcCall('playback.startSnapshotPlaylistExport',{schemaVersion:1,operationId,snapshotId,name})).data;}
+export async function playbackRetrySnapshotPlaylistExport(operationId:string,serverId:string):Promise<SnapshotPlaylistExport>{return(await rpcCall('playback.retrySnapshotPlaylistExport',{schemaVersion:1,operationId,serverId})).data;}
+export async function playbackReconcileSnapshotPlaylistExport(operationId:string,serverId:string):Promise<SnapshotPlaylistExport>{return(await rpcCall('playback.reconcileSnapshotPlaylistExport',{schemaVersion:1,operationId,serverId})).data;}
+export async function playbackListSnapshotPlaylistExports(snapshotId:string):Promise<SnapshotPlaylistExport[]>{return(await rpcCall('playback.listSnapshotPlaylistExports',{schemaVersion:1,snapshotId,cursor:null,limit:20})).data;}
 
 export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
     const result = await rpcCall('playback.getSession', { schemaVersion: 1 });

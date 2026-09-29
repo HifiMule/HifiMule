@@ -683,6 +683,23 @@ async fn handler(
         "playback.listSnapshots" | "playback.getSnapshot" | "playback.listSnapshotEntries" => {
             playback_export::read(&state, &payload.method, payload.params).await
         }
+        "playback.planSnapshotPlaylistExport"
+        | "playback.getSnapshotPlaylistExport"
+        | "playback.listSnapshotPlaylistExports" => {
+            playback_export::export_read(&state, &payload.method, payload.params).await
+        }
+        "playback.startSnapshotPlaylistExport"
+        | "playback.retrySnapshotPlaylistExport"
+        | "playback.reconcileSnapshotPlaylistExport"
+        | "playback.cancelSnapshotPlaylistExport" => {
+            playback_export::export_write(
+                &state,
+                &payload.method,
+                payload.params,
+                mutation_guard.take(),
+            )
+            .await
+        }
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
         "playback.listLiveReports" => {
             handle_playback_list_live_reports(&state, payload.params).await
@@ -850,6 +867,10 @@ fn is_mutating_method(method: &str) -> bool {
             | "playback.applySession"
             | "playback.setFeedback"
             | "playback.saveSnapshot"
+            | "playback.startSnapshotPlaylistExport"
+            | "playback.retrySnapshotPlaylistExport"
+            | "playback.reconcileSnapshotPlaylistExport"
+            | "playback.cancelSnapshotPlaylistExport"
             | "playback.saveSelectionConfig"
             | "playback.startSelection"
             | "playback.cancelSelectionStart"
@@ -10796,6 +10817,13 @@ mod tests {
         assert!(!is_mutating_method("playback.listSnapshots"));
         assert!(!is_mutating_method("playback.getSnapshot"));
         assert!(!is_mutating_method("playback.listSnapshotEntries"));
+        assert!(!is_mutating_method("playback.planSnapshotPlaylistExport"));
+        assert!(!is_mutating_method("playback.listSnapshotPlaylistExports"));
+        assert!(is_mutating_method("playback.startSnapshotPlaylistExport"));
+        assert!(is_mutating_method("playback.retrySnapshotPlaylistExport"));
+        assert!(is_mutating_method(
+            "playback.reconcileSnapshotPlaylistExport"
+        ));
         assert!(is_mutating_method("playback.applySession"));
         assert!(is_mutating_method("playback.playEpisode"));
         assert!(is_mutating_method("playback.seek"));

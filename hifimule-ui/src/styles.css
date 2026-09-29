@@ -2543,6 +2543,9 @@ h2 {
 .playback-snapshots__list { list-style: none; }
 .playback-snapshots__list > li > button { width: 100%; text-align: start; }
 .playback-snapshots__panel { margin-block-start: 1rem; }
+.playback-snapshots__export-status ul { margin: .5rem 0; padding-inline-start: 1.25rem; }
+.playback-snapshots__export-status li { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.playback-snapshots button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .playback-snapshots [hidden] { display: none !important; }
 .playback-snapshots .playback-destination__source { display: flex; align-items: center; gap: .3rem; font-size: .85rem; }
 @media (max-width: 599px) {

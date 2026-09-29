@@ -1469,3 +1469,28 @@ playback or decoder/network continuity evidence. Reproduce with
 daemon build wrapper. Windows x64, Linux x64, macOS x64 and installed save/reopen/
 offline/Preview/audio checks remain unverified here; retain these gaps for 16.14.
 Story 15.17 remains in progress.
+# Listening snapshot playlist export (schemaVersion 1)
+
+The playlist-export surface is separate from local snapshot capture and generic playlist curation:
+
+- `playback.planSnapshotPlaylistExport` `{ schemaVersion, snapshotId, name }` is read-only and returns the frozen per-source partition.
+- `playback.startSnapshotPlaylistExport` adds `operationId` and is the only call that begins remote effects.
+- `playback.getSnapshotPlaylistExport` reads durable authoritative state by `operationId`.
+- `playback.listSnapshotPlaylistExports` recovers up to 20 durable operations for a saved `snapshotId` after view disposal or daemon restart.
+- `playback.retrySnapshotPlaylistExport` targets one `serverId` and is accepted only for a proven no-effect `failed` part.
+- `playback.reconcileSnapshotPlaylistExport` targets one ambiguous part and moves irreconcilable create uncertainty to `unresolved`; it never repeats the create.
+- `playback.cancelSnapshotPlaylistExport` stops safe future work for one part and never deletes a remote playlist.
+
+All DTOs reject unknown fields and use camelCase `schemaVersion: 1`. The daemon routes exclusively through the snapshot's portable `serverId` and track IDs. Credentials and provider URLs are never returned. The response exposes each source label, state, expected/confirmed counts, known playlist ID, reason, attempt count, and safe retry flag. A mixed result is `partial`, never generic success.
+
+The current verified path uses one bounded create-with-items request (maximum 1,000 occurrences), preflight same-name collision detection, and ordered read-back. A post-submit error is `ambiguous`; a returned identity with unavailable or mismatched read-back is `partial`. There is no blind append replay or implicit rollback.
+
+Provider support matrix:
+
+| Provider | Write shape | Repeat/order claim | Collision | Ambiguity/reconciliation |
+|---|---|---|---|---|
+| Jellyfin | create with ordered items | success only after exact ordered read-back | exact-name preflight; never overwrite | no idempotency key; uncertain create stays ambiguous |
+| OpenSubsonic/Navidrome | repeated `songId` create parameters | success only after exact ordered read-back | exact-name preflight; never overwrite | no idempotency key; uncertain create stays ambiguous |
+| Audiobookshelf/default | disabled | unsupported | no write | no retry |
+
+Automated fixtures cover request ordering and duplicate parameter preservation. Configured Jellyfin 12.1.0/Navidrome 0.64.2 contents and installed Windows/macOS/Linux behavior remain explicit external evidence items; unit tests do not claim those environments were exercised.
