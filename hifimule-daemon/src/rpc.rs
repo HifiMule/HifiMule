@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
+mod playback_feedback;
 pub(crate) mod playback_selection;
 
 // JSON-RPC 2.0 Error Codes
@@ -367,6 +368,11 @@ pub async fn run_server(
         config.shutdown.clone(),
     ));
     let (live_status_tx, live_status_rx) = tokio::sync::mpsc::channel(256);
+    tokio::spawn(crate::playback::feedback::run_feedback(
+        state.db.clone(),
+        state.server_manager.clone(),
+        config.shutdown.clone(),
+    ));
     state.playback.register_live_status_sender(live_status_tx);
     let _live_reporter = tokio::spawn(crate::playback::reporting::run_reporter(
         state.db.clone(),
@@ -674,6 +680,10 @@ async fn handler(
         "playback.listLiveReports" => {
             handle_playback_list_live_reports(&state, payload.params).await
         }
+        "playback.getFeedback" => playback_feedback::read(&state, payload.params).await,
+        "playback.setFeedback" => {
+            playback_feedback::write(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.getSelectionConfig" => playback_selection::get_config(payload.params).await,
         "playback.saveSelectionConfig" => {
             playback_selection::save_config(&state, payload.params).await
@@ -831,6 +841,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "destination.select"
             | "playlist.create"
             | "playback.applySession"
+            | "playback.setFeedback"
             | "playback.saveSelectionConfig"
             | "playback.startSelection"
             | "playback.cancelSelectionStart"
@@ -10779,6 +10790,8 @@ mod tests {
         assert!(is_mutating_method("playback.retryRestore"));
         assert!(!is_mutating_method("playback.getSession"));
         assert!(!is_mutating_method("playback.listLiveReports"));
+        assert!(!is_mutating_method("playback.getFeedback"));
+        assert!(is_mutating_method("playback.setFeedback"));
         assert!(!is_mutating_method("playback.listOccurrences"));
 
         let initial = handle_playback_get_session(&state, Some(json!({"schemaVersion": 1})))

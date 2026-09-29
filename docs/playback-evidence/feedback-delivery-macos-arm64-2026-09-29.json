@@ -1,0 +1,46 @@
+{
+  "architecture": "aarch64",
+  "installedApplication": false,
+  "observations": [
+    {
+      "capabilities": {
+        "clear": true,
+        "dislike": true,
+        "like": true
+      },
+      "confirmedSequence": [
+        "like",
+        "like",
+        "neutral",
+        "neutral",
+        "dislike",
+        "like"
+      ],
+      "initialPreference": "neutral",
+      "originalRestored": true,
+      "path": "production provider adapter + durable journal + delivery worker function + independent readback",
+      "provider": "jellyfin"
+    },
+    {
+      "capabilities": {
+        "clear": true,
+        "dislike": false,
+        "like": true
+      },
+      "confirmedSequence": [
+        "like",
+        "like",
+        "neutral",
+        "neutral"
+      ],
+      "initialPreference": "neutral",
+      "originalRestored": true,
+      "path": "production provider adapter + durable journal + delivery worker function + independent readback",
+      "provider": "navidrome"
+    }
+  ],
+  "os": "macos",
+  "outcome": "passed",
+  "recordedAt": "2026-09-29T11:45:26.528529+00:00",
+  "schemaVersion": 1
+}

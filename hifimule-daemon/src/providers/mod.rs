@@ -12,6 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 
 pub mod audiobookshelf;
+pub mod feedback;
 pub mod jellyfin;
 pub mod subsonic;
 
@@ -377,6 +378,22 @@ pub struct ArtistRelation {
 
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
+    /// A fresh authenticated read returns both capability and preference.
+    /// Missing browse fields never establish neutral or capability support.
+    async fn read_feedback(
+        &self,
+        _track_id: &str,
+    ) -> Result<feedback::ProviderFeedback, ProviderError> {
+        Err(feedback::unsupported())
+    }
+
+    async fn set_feedback(
+        &self,
+        _track_id: &str,
+        _value: feedback::Preference,
+    ) -> Result<(), ProviderError> {
+        Err(feedback::unsupported())
+    }
     /// Ordered, source-local artist IDs from an explicit provider relation.
     /// A default unsupported result never implies an empty relation set.
     async fn related_artists(

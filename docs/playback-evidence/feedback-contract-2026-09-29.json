@@ -1,0 +1,453 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-29",
+  "host": "macOS arm64",
+  "scope": "Previously supplied controlled test accounts; identifiers hashed; no credentials or server URLs",
+  "observations": [
+    {
+      "provider": "Jellyfin",
+      "serverVersion": "12.1.0",
+      "accountSha256Prefix": "eb723b8f7491",
+      "trackSha256Prefix": "6756ed2a2847",
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": true
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": true,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": true,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": true
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": true,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": true,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": false
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": false
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>"
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": "<absent>",
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": "<absent>",
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>"
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": "<absent>",
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": "<absent>",
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": false
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": true
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": true,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": true,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>",
+            "likes": false
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": false,
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/UserItems/<track>/Rating",
+          "params": {
+            "userId": "<user>"
+          },
+          "httpStatus": 200,
+          "response": {
+            "Likes": "<absent>",
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          },
+          "readback": {
+            "Likes": "<absent>",
+            "IsFavorite": false,
+            "PlayCount": 0,
+            "Played": false,
+            "PlaybackPositionTicks": 0
+          }
+        }
+      ],
+      "before": {
+        "Likes": "<absent>",
+        "IsFavorite": false,
+        "PlayCount": 0,
+        "Played": false,
+        "PlaybackPositionTicks": 0
+      },
+      "freshLoginRead": {
+        "Likes": false,
+        "IsFavorite": false,
+        "PlayCount": 0,
+        "Played": false,
+        "PlaybackPositionTicks": 0
+      },
+      "independentClientChangeVisible": true,
+      "restored": {
+        "Likes": "<absent>",
+        "IsFavorite": false,
+        "PlayCount": 0,
+        "Played": false,
+        "PlaybackPositionTicks": 0
+      },
+      "separateDeviceClientProbe": {
+        "differentDeviceIds": true,
+        "sameUser": true,
+        "writeClient": "B",
+        "readClient": "A",
+        "writtenLikes": true,
+        "readLikes": true,
+        "initialRestored": true
+      }
+    },
+    {
+      "provider": "Navidrome",
+      "serverVersion": "0.64.2 (10114574)",
+      "protocolVersion": "1.16.1",
+      "accountSha256Prefix": "9f86d081884c",
+      "trackSha256Prefix": "6dffc2eae3da",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/rest/star.view",
+          "params": {
+            "id": "<track>"
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "2026-09-29T13:00:48.719730698+02:00",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": true
+        },
+        {
+          "method": "GET",
+          "path": "/rest/star.view",
+          "params": {
+            "id": "<track>"
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "2026-09-29T13:00:48.794971847+02:00",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": true
+        },
+        {
+          "method": "GET",
+          "path": "/rest/unstar.view",
+          "params": {
+            "id": "<track>"
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": false
+        },
+        {
+          "method": "GET",
+          "path": "/rest/unstar.view",
+          "params": {
+            "id": "<track>"
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": false
+        },
+        {
+          "method": "GET",
+          "path": "/rest/star.view",
+          "params": {
+            "id": "<track>"
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "2026-09-29T13:00:48.961499191+02:00",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": true
+        },
+        {
+          "method": "GET",
+          "path": "/rest/unstar.view",
+          "params": {
+            "id": "<track>"
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": false
+        },
+        {
+          "method": "GET",
+          "path": "/rest/setRating.view",
+          "params": {
+            "id": "<track>",
+            "rating": 1
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": 1,
+            "averageRating": 1
+          },
+          "inGetStarred2": false
+        },
+        {
+          "method": "GET",
+          "path": "/rest/setRating.view",
+          "params": {
+            "id": "<track>",
+            "rating": 1
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": 1,
+            "averageRating": 1
+          },
+          "inGetStarred2": false
+        },
+        {
+          "method": "GET",
+          "path": "/rest/setRating.view",
+          "params": {
+            "id": "<track>",
+            "rating": 5
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": 5,
+            "averageRating": 5
+          },
+          "inGetStarred2": false
+        },
+        {
+          "method": "GET",
+          "path": "/rest/setRating.view",
+          "params": {
+            "id": "<track>",
+            "rating": 0
+          },
+          "httpStatus": 200,
+          "apiStatus": "ok",
+          "readback": {
+            "starred": "<absent>",
+            "userRating": "<absent>",
+            "averageRating": "<absent>"
+          },
+          "inGetStarred2": false
+        }
+      ],
+      "before": {
+        "starred": "<absent>",
+        "userRating": "<absent>",
+        "averageRating": "<absent>"
+      },
+      "independentClientChangeVisible": true,
+      "restored": {
+        "starred": "<absent>",
+        "userRating": "<absent>",
+        "averageRating": "<absent>"
+      }
+    }
+  ],
+  "probeResult": "passed",
+  "notes": [
+    "Preliminary same-device relogin invalidated the previous Jellyfin token (401); fresh authentication restored the original neutral preference. The separate-device probe retains independent valid clients.",
+    "Transport timeout or process death during send is not proof of server cancellation. Never automatically retry or order an opposite write after an uncertain send."
+  ]
+}

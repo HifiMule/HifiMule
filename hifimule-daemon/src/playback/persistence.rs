@@ -9,7 +9,7 @@ use crate::providers::BookTiming;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 12;
+pub const PERSISTENCE_VERSION: i64 = 13;
 type RadioRow = (
     String,
     Option<String>,
@@ -273,6 +273,31 @@ impl Database {
         );
         CREATE INDEX IF NOT EXISTS playback_live_reports_status ON playback_live_reports(status,created_at);
         CREATE INDEX IF NOT EXISTS playback_live_reports_session ON playback_live_reports(session_id,created_at);")?;
+        // Version 13: independent feedback intent journal; no credentials or transport outcomes.
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_feedback (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT NOT NULL UNIQUE,
+            schema_version INTEGER NOT NULL CHECK(schema_version=1),
+            session_id TEXT NOT NULL, logical_session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
+            server_id TEXT NOT NULL, track_id TEXT NOT NULL, account_scope TEXT NOT NULL,
+            requested_value TEXT NOT NULL CHECK(requested_value IN ('neutral','like','dislike')),
+            status TEXT NOT NULL CHECK(status IN ('pending','sending','confirmed','failed','ambiguous','conflict','reconciled')),
+            diagnostic TEXT, observed_value TEXT CHECK(observed_value IN ('neutral','like','dislike')),
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS playback_feedback_source ON playback_feedback(server_id,track_id,account_scope,sequence);
+        CREATE INDEX IF NOT EXISTS playback_feedback_status ON playback_feedback(status,sequence);")?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_feedback_dispositions (
+            schema_version INTEGER NOT NULL CHECK(schema_version=1),
+            session_id TEXT NOT NULL, logical_session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
+            rejected INTEGER NOT NULL CHECK(rejected=1), PRIMARY KEY(session_id,occurrence_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS playback_feedback_session_insert AFTER INSERT ON playback_sessions BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id<>NEW.session_id; END;
+        CREATE TRIGGER IF NOT EXISTS playback_feedback_session_replace AFTER UPDATE OF session_id ON playback_sessions BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id<>NEW.session_id; END;
+        CREATE TRIGGER IF NOT EXISTS playback_feedback_session_delete AFTER DELETE ON playback_sessions BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=OLD.session_id; END;
+        CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_insert AFTER INSERT ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=NEW.session_id AND logical_session_id<>NEW.logical_id; END;
+        CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_replace AFTER UPDATE OF logical_id ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=NEW.session_id AND logical_session_id<>NEW.logical_id; END;
+        CREATE TRIGGER IF NOT EXISTS playback_feedback_radio_delete AFTER DELETE ON playback_radio BEGIN DELETE FROM playback_feedback_dispositions WHERE session_id=OLD.session_id AND logical_session_id=OLD.logical_id; END;")?;
         let key_pattern = format!("mbrec:{}:%", super::recording::RESOLVER_VERSION);
         let unknown: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_radio_recording WHERE resolver_version<>?1 OR recording_key NOT LIKE ?2 UNION SELECT 1 FROM playback_radio_recording_membership WHERE recording_key NOT LIKE ?2)", params![super::recording::RESOLVER_VERSION,key_pattern], |row|row.get(0))?;
         if unknown {
@@ -3005,7 +3030,7 @@ mod tests {
             .unwrap()
             .query_row("SELECT version FROM playback_schema", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     #[test]
@@ -3145,7 +3170,7 @@ mod tests {
 
         db.init_playback().unwrap();
 
-        assert_eq!(PERSISTENCE_VERSION, 12);
+        assert_eq!(PERSISTENCE_VERSION, 13);
         let attempts = db.playback_attempts(&session_id, None, 20).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].occurrence_id, completed_id);

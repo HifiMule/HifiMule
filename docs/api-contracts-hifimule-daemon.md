@@ -1330,3 +1330,26 @@ The source/preparation checks run before replacing the main session or audition.
 The daemon-owned `tray-icon` menu is the intended UI-closed menu surface: Windows notification-area tray, Linux indicator/tray in supported desktop sessions, and macOS menu-bar status item. The macOS Dock is a different surface and is not claimed here. Installed placement and lifecycle remain subject to the platform evidence checklist.
 
 The menu's separate Open Playback settings and Choose audio output items write targeted UI activation requests. A running Tauri UI receives a native event and focuses the corresponding settings section or output chooser; a cold-started UI consumes the target after its main route reports ready. The activation acknowledgment prevents the target from replaying on a later launch. Ordinary Play something and failure notifications never post an activation request.
+
+
+## Playback source preferences (Story 16.8)
+
+`playback.getFeedback` is a read RPC with `{ "schemaVersion": 1, "expectedSessionId": "<UUID>", "occurrenceId": "<UUID>" }`. `playback.setFeedback` is mutating and adds `{ "operationId": "<UUID>", "value": "neutral|like|dislike" }`. UUID validation, schema validation and rejection of unknown fields happen before provider lookup. Both routes capture the displayed main or Preview occurrence through the playback owner; mismatched session or occurrence is rejected. The owner revalidates the complete frozen identity immediately before admission. Clients never supply a source server, track, credentials or provider request.
+
+Read returns `{ "data": FeedbackView }`:
+
+- `schemaVersion: 1`; `target: { sessionId, logicalSessionId, occurrenceId, source: { serverId, trackId } }`.
+- `capabilities: { like, dislike, clear }`, each a boolean. Unverified providers expose all false.
+- `readStatus: known|unknown|unsupported`; `preference: neutral|like|dislike|null`. Only a successful authoritative read produces a non-null preference. A concurrent journal change invalidates a potentially stale read.
+- `operation: FeedbackOperation|null`: latest operation for this source track and authenticated account, independently of occurrence; `rejected: boolean`: disposition of this exact current occurrence.
+- `diagnostic: null|sourceUnavailable|providerUnsupported` (other allowlisted operational diagnostics may appear on an operation).
+
+Write returns `{ "data": FeedbackOperation }` with `operationId`, decimal-string `sequence`, frozen `target`, `requestedValue`, `status`, nullable `diagnostic`, and nullable `observedValue`. Status is `pending|sending|confirmed|failed|ambiguous|conflict|reconciled`. Confirmation requires write success plus matching source readback; it describes the action at delivery, not a permanent guarantee against later edits by another client. `reconciled` means the server value was observed without attributing it to the uncertain request. Account scope hashes stay daemon-private.
+
+A successful source read provides one in-memory, exact-occurrence capability grant lasting at most 60 seconds. This grant permits immediate durable admission if connectivity drops between display and click; it is never used as displayed preference evidence. Without a grant, write performs fresh source verification first. The delivery worker always rechecks provider version, authenticated account and supported value. Failed or changed authentication cannot redirect an older account's intent.
+
+Explicit Dislike persists local rejection before inserting the remote operation. Like clears rejection only on the same occurrence; neutral leaves it alone. Journal admission failure returns a volatile `failed` operation with `sequence: "0"` and `journalUnavailable` or `queueFull`; its local disposition remains persisted, and no request is sent. Failure to persist the disposition itself rejects admission with `FEEDBACK_DISPOSITION_UNAVAILABLE`. Reusing an operation ID with a different target/account/value is rejected. Feedback never changes transport, the queue, Radio skip exclusions or listening reports.
+
+Four concurrent feedback RPCs are allowed, with busy rejection rather than an unbounded wait. Provider phases have a 25-second deadline; adapter response bodies are limited to 64 KiB (Jellyfin whole-response deadline: 8 seconds). The UI serializes at most 16 queued clicks, preserves their captured occurrence and drops unsent work on occurrence replacement/disconnection. It refreshes source state every five seconds when idle and after reconnect; responses from prior occurrences, instances or actions cannot repaint current controls. Keyboard buttons remain mounted, with explicit accessible names, pressed state from fresh server evidence, and polite status announcements in all four locales.
+
+The version gate, exact provider routes, measured effects and platform verification limits are documented in [the feedback contract](playback-feedback-contract.md).

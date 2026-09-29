@@ -1,6 +1,10 @@
+---
+baseline_commit: aed88805e94bab705884836487094c78ae26a1d8
+---
+
 # Story 16.8: Save supported Like and Dislike preferences on the source server
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -22,21 +26,21 @@ so that the preference is available outside HifiMule rather than becoming a sepa
 
 ## Tasks / Subtasks
 
-- [ ] Complete the provider contract gate before enabling a write (AC: 1–5, 8–9).
-  - [ ] For each proposed server/version, document a versioned table: read endpoint and absent-value semantics; Like/Dislike/clear endpoint and exact request; user scope; repeat-write and opposing-write behavior; response versus persisted effect; read-after-write consistency; ambiguity/reconciliation; enabled/disabled decision. Capture sanitized request/effect fixtures from configured test accounts.
-  - [ ] Verify Jellyfin 12.1.0 `POST /UserItems/{itemId}/Rating?likes=true|false`, DELETE on that route for neutral, and `UserItems/{itemId}/UserData` readback separately from favorite endpoints. The v12.1 controller writes nullable `Likes`; `false` is negative, not clear. Confirm actual track-level user state and behavior on the configured server before enabling either action.
-  - [ ] Investigate Navidrome 0.64.2 `star`/`unstar`, `getSong`/`getStarred2` state, and `setRating`. Enable Like only if starring genuinely expresses the user preference and can be read back. Keep Dislike disabled unless the tested server provides a genuine negative preference; `rating=1` is a numeric rating, not proof of Dislike.
-  - [ ] Treat other Subsonic/OpenSubsonic implementations and Audiobookshelf as unsupported until separately verified. Capability detection must be per configured server and user, independent of reporting capability.
-- [ ] Add source-scoped provider feedback and daemon RPC contracts (AC: 1–5, 8).
-  - [ ] Extend `MediaProvider` with explicit feedback capabilities, authoritative read, and set-value operations; default to unsupported. Keep provider URLs, credentials, request details and responses within adapters.
-  - [ ] Add schema-versioned read/write RPCs with exact occurrence and expected session identity, bounded input validation, typed capability/state/status/diagnostic responses, and mutation classification. Reject stale or mismatched occurrence and unsupported action before network send.
-  - [ ] Define a per-source-track intent sequence. Journal each accepted value and operation ID before send; serialize sends for one source track, fence stale completions, and reconcile ambiguous operations by an authoritative read where the provider contract permits. Never retry a toggle without proof. Bound request timeouts, queued work, retention, and shutdown recovery.
-- [ ] Record session rejection without changing transport (AC: 6–7).
-  - [ ] Persist a versioned, bounded per-session/per-occurrence disposition separate from terminal playback outcome, Radio membership, and server feedback journal. Record explicit Dislike immediately even if provider persistence later fails. Explicit Like on the same occurrence clears it; session replacement/expiry follows existing session-history lifecycle.
-  - [ ] Expose a read path for Story 16.9 so snapshot creation can omit rejected occurrences, including a disliked Preview, without inferring rejection from remote status or track identity. Confirm paused restore retains the current logical session's disposition.
-- [ ] Add accessible feedback controls and verification (AC: 1–9).
-  - [ ] Reuse the floating playback controls' current-occurrence source badge, report-status pattern, request fencing, and localized status surface. Show capability-specific controls for the current main/preview occurrence; unknown, loading, pending, confirmed, failed and ambiguous states need distinct labels and live announcements without stealing focus.
-  - [ ] Test two servers sharing a track ID, duplicate recordings, track/preview switches during requests, opposite rapid actions, server-side changes after reconnect, journal failures, and no transport/reporting side effects. Update API/data-model docs and all four locale strings. Run focused daemon/UI/i18n checks plus the affected cross-platform matrix and record configured-server version/effect evidence.
+- [x] Complete the provider contract gate before enabling a write (AC: 1–5, 8–9).
+  - [x] For each proposed server/version, document a versioned table: read endpoint and absent-value semantics; Like/Dislike/clear endpoint and exact request; user scope; repeat-write and opposing-write behavior; response versus persisted effect; read-after-write consistency; ambiguity/reconciliation; enabled/disabled decision. Capture sanitized request/effect fixtures from configured test accounts.
+  - [x] Verify Jellyfin 12.1.0 `POST /UserItems/{itemId}/Rating?likes=true|false`, DELETE on that route for neutral, and `UserItems/{itemId}/UserData` readback separately from favorite endpoints. The v12.1 controller writes nullable `Likes`; `false` is negative, not clear. Confirm actual track-level user state and behavior on the configured server before enabling either action.
+  - [x] Investigate Navidrome 0.64.2 `star`/`unstar`, `getSong`/`getStarred2` state, and `setRating`. Enable Like only if starring genuinely expresses the user preference and can be read back. Keep Dislike disabled unless the tested server provides a genuine negative preference; `rating=1` is a numeric rating, not proof of Dislike.
+  - [x] Treat other Subsonic/OpenSubsonic implementations and Audiobookshelf as unsupported until separately verified. Capability detection must be per configured server and user, independent of reporting capability.
+- [x] Add source-scoped provider feedback and daemon RPC contracts (AC: 1–5, 8).
+  - [x] Extend `MediaProvider` with explicit feedback capabilities, authoritative read, and set-value operations; default to unsupported. Keep provider URLs, credentials, request details and responses within adapters.
+  - [x] Add schema-versioned read/write RPCs with exact occurrence and expected session identity, bounded input validation, typed capability/state/status/diagnostic responses, and mutation classification. Reject stale or mismatched occurrence and unsupported action before network send.
+  - [x] Define a per-source-track intent sequence. Journal each accepted value and operation ID before send; serialize sends for one source track, fence stale completions, and reconcile ambiguous operations by an authoritative read where the provider contract permits. Never retry a toggle without proof. Bound request timeouts, queued work, retention, and shutdown recovery.
+- [x] Record session rejection without changing transport (AC: 6–7).
+  - [x] Persist a versioned, bounded per-session/per-occurrence disposition separate from terminal playback outcome, Radio membership, and server feedback journal. Record explicit Dislike immediately even if provider persistence later fails. Explicit Like on the same occurrence clears it; session replacement/expiry follows existing session-history lifecycle.
+  - [x] Expose a read path for Story 16.9 so snapshot creation can omit rejected occurrences, including a disliked Preview, without inferring rejection from remote status or track identity. Confirm paused restore retains the current logical session's disposition.
+- [x] Add accessible feedback controls and verification (AC: 1–9).
+  - [x] Reuse the floating playback controls' current-occurrence source badge, report-status pattern, request fencing, and localized status surface. Show capability-specific controls for the current main/preview occurrence; unknown, loading, pending, confirmed, failed and ambiguous states need distinct labels and live announcements without stealing focus.
+  - [x] Test two servers sharing a track ID, duplicate recordings, track/preview switches during requests, opposite rapid actions, server-side changes after reconnect, journal failures, and no transport/reporting side effects. Update API/data-model docs and all four locale strings. Run focused daemon/UI/i18n checks plus the affected cross-platform matrix and record configured-server version/effect evidence.
 
 ## Dev Notes
 
@@ -89,11 +93,50 @@ GPT-6 (Codex)
 
 ### Debug Log References
 
+- Provider contract gate: `docs/playback-feedback-contract.md`; sanitized independent probes in `docs/playback-evidence/feedback-contract-2026-09-29.json`. Controlled test-account authorization came from the earlier Story 16.7 chat. An initial same-device Jellyfin relogin invalidated the old token; reauthentication restored neutral, and separate-device changes were verified afterward.
+- Production integration: `docs/playback-evidence/feedback-delivery-macos-arm64-2026-09-29.json`. The first Rust check stopped before writing because Jellyfin's full system-info response exceeded 64 KiB. The compact public version endpoint fixed this; authenticated user and track verification remain mandatory. Both production adapter/journal sequences then passed and restored original preferences.
+- Final full Rust workspace regression: `/private/tmp/hifimule-16-8-workspace-verified.log` — 1,345 passed, 7 ignored; daemon 1,304 unit tests plus 5 integration tests. The new controlled-server test is opt-in and passed separately; the other six ignored daemon tests were not claimed as passing.
+- Node regression: `/private/tmp/hifimule-16-8-scripts-verified.log` — 275 passed, 1 skipped, including all 65 playback UI tests. Python script regression: `/private/tmp/hifimule-16-8-python.log` — 41 passed.
+- TypeScript/Vite build: `/private/tmp/hifimule-16-8-ui-build-verified.log`; workspace Clippy: `/private/tmp/hifimule-16-8-clippy-final.log`. Both completed successfully; repository Clippy and Vite bundling warnings remain. Rust formatting and Git whitespace checks passed.
+
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
+- Verified source preferences are enabled for Jellyfin 12.1.0 (Like, Dislike, explicit clear) and Navidrome 0.64.2 (Like/star and explicit clear/unstar). Numeric ratings are not mapped to Dislike. Other versions, implementations and Audiobookshelf retain unsupported defaults.
+- Schema-v1 RPCs capture and revalidate exact current main/Preview occurrence, logical session and portable source. A 60-second, exact-occurrence capability grant allows local admission during a subsequent outage; delivery rechecks source version, account and capability. Credentials and account hashes stay off the wire.
+- Persistence v13 separates a bounded source-track/account operation journal from occurrence rejection. Accepted writes commit before sending, opposing intents serialize, old completions and read watermarks are fenced, and restart preserves unsent work while making interrupted sends uncertain. Refresh reconciles observed values without replaying blocked opposites or claiming causation; users explicitly choose again when needed.
+- Explicit Dislike persists a session rejection before remote journal insertion. Like clears only that exact occurrence, including Preview; neutral and other occurrences do not clear it. Journal failure preserves rejection. Radio logical-session replacement expires old dispositions, paused restore retains them, and feedback does not change transport, queue, listening reports or Radio skip exclusions. Story 16.9 has a bounded occurrence-ID read path.
+- Playback controls show verified actions, current source preference, loading/unknown and operational status with stable keyboard controls, visible refresh for recoverable failures, authoritative pressed state and polite announcements in English, French, Spanish and German. Reconnect, source/Preview replacement, opposite clicks, delayed results and journal failure have deterministic tests.
+- API/data-model documentation and the Windows x64, Linux x64, macOS x64/arm64 CI matrix include feedback. Local macOS arm64 workspace compilation, automated interactions and live source effects passed. Installed Story 16.8 UI interactions were not run on any platform; Windows/Linux/macOS x64 native compilation and interaction runners were unavailable. The contract records these gaps explicitly; they are not passing installed-platform evidence.
+- Definition of Done: implementation, acceptance-criteria coverage, regression checks, permitted story edits and complete file inventory verified. All story tasks are checked; story and sprint status are `review`. No dependencies were added and no commit or push was made.
 
 ### File List
 
+- `.github/workflows/build.yml`
 - `_bmad-output/implementation-artifacts/16-8-save-supported-like-and-dislike-preferences-on-the-source-server.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/data-models-hifimule-daemon.md`
+- `docs/playback-feedback-contract.md`
+- `docs/playback-evidence/feedback-contract-2026-09-29.json`
+- `docs/playback-evidence/feedback-delivery-macos-arm64-2026-09-29.json`
+- `hifimule-daemon/src/playback/feedback.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/feedback.rs`
+- `hifimule-daemon/src/providers/feedback.rs`
+- `hifimule-daemon/src/providers/feedback/live_tests.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/rpc/playback_feedback.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/tests/playback-ui.test.mjs`
+
+## Change Log
+
+- 2026-09-29: Implemented verified source-server Like/Dislike/clear feedback, durable ordered intent and ambiguity reconciliation, recoverable per-occurrence rejection, accessible localized player controls, provider/RPC/owner/UI regressions, live configured-server effect evidence, and cross-platform CI coverage. Marked ready for review with installed-platform gaps recorded.

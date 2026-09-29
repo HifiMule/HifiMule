@@ -114,6 +114,9 @@ jobs:
       - name: Verify bounded Radio session and restoration
         run: npm run build:daemon -- test -p hifimule-daemon playback::radio::tests
 
+      - name: Verify source feedback, durable ordering, and session rejection
+        run: npm run build:daemon -- test -p hifimule-daemon feedback
+
       - name: Verify Radio track loudness source and sample fixtures
         run: |
           npm run build:daemon -- test -p hifimule-daemon track_replay_gain_

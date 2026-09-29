@@ -2,6 +2,7 @@ import { playbackControl, playbackDescribeOccurrences, playbackStartSelection, O
 import { t } from '../i18n';
 import { formatServerIdentity } from '../serverIdentity';
 import { playbackStore } from '../state/playback';
+import { playbackGetFeedback, playbackSetFeedback, type PlaybackFeedback, type PlaybackFeedbackOperation, type PlaybackPreference } from '../rpc';
 
 export class PlaybackControls {
     private disposed = false;
@@ -14,6 +15,21 @@ export class PlaybackControls {
     private reportRequest = 0;
     private reports: LiveReport[] = [];
     private readonly reportStatus = document.createElement('div');
+    private readonly feedbackLike = document.createElement('button');
+    private readonly feedbackDislike = document.createElement('button');
+    private readonly feedbackClear = document.createElement('button');
+    private readonly feedbackStatus = document.createElement('span');
+    private feedback?: PlaybackFeedback;
+    private feedbackEpoch = 0;
+    private feedbackRequest = 0;
+    private feedbackReading = false;
+    private feedbackLoading = false;
+    private feedbackQueued = 0;
+    private feedbackTotalQueued = 0;
+    private feedbackAction = 0;
+    private feedbackSerial: Promise<void> = Promise.resolve();
+    private feedbackIssue = '';
+    private feedbackLocalFailure?: PlaybackFeedbackOperation;
     private snapshot: PlaybackSessionSnapshot | undefined;
     private busy = false;
     private startBusy = false;
@@ -194,11 +210,25 @@ export class PlaybackControls {
         this.surfaceToggle.addEventListener('click', () => this.onSurfaceChange(this.surface === 'library' ? 'playback' : 'library'));
         const actions = document.createElement('div');
         actions.className = 'playback-controls__actions';
-        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry].map(button => this.hint(button)), this.playSomething, this.startRoute, this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
+        for (const [button, value, icon] of [
+            [this.feedbackLike, 'like', 'hand-thumbs-up'],
+            [this.feedbackDislike, 'dislike', 'hand-thumbs-down'],
+            [this.feedbackClear, 'neutral', 'x-circle'],
+        ] as const) {
+            button.type = 'button';
+            button.hidden = true;
+            button.dataset.playbackFeedback = value;
+            this.setIcon(button, icon, t(`playback.feedback.action_${value}`));
+            button.addEventListener('click', () => this.submitFeedback(value));
+        }
+        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry, this.feedbackLike, this.feedbackDislike, this.feedbackClear].map(button => this.hint(button)), this.playSomething, this.startRoute, this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
         this.messages.className = 'playback-controls__messages';
         this.reportStatus.setAttribute('role', 'status');
         this.reportStatus.setAttribute('aria-live', 'polite');
-        this.messages.append(this.status, this.startStatus, this.seekStatus, this.error, this.reportStatus);
+        this.feedbackStatus.setAttribute('role', 'status');
+        this.feedbackStatus.setAttribute('aria-live', 'polite');
+        this.feedbackStatus.setAttribute('aria-atomic', 'true');
+        this.messages.append(this.status, this.startStatus, this.seekStatus, this.error, this.reportStatus, this.feedbackStatus);
         container.replaceChildren(info, actions, timelineGroup, this.messages);
         this.back.hidden = this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
@@ -211,15 +241,20 @@ export class PlaybackControls {
             },
         );
         if (typeof globalThis.setInterval === 'function') {
-            this.reportTimer = globalThis.setInterval(() => void this.refreshLiveReports(), 5000);
+            this.reportTimer = globalThis.setInterval(() => {
+                void this.refreshLiveReports();
+                void this.refreshFeedback();
+            }, 5000);
         }
         this.unsubscribeConnection = playbackStore.subscribeConnection(state => {
             if (this.disposed) return;
             if (state !== 'fresh') {
                 this.invalidateInteractions();
+                this.resetFeedback(true);
             } else if (this.snapshot) {
                 this.anchorPositionMs = this.snapshot.positionMs;
                 this.anchorAt = this.now();
+                void this.refreshFeedback();
             }
             this.renderConnection();
         });
@@ -233,6 +268,7 @@ export class PlaybackControls {
     }
     destroy(): void {
         this.disposed = true;
+        this.resetFeedback();
         ++this.startRequest;
         this.resizeObserver?.disconnect();
         this.unsubscribeConnection?.();
@@ -269,6 +305,10 @@ export class PlaybackControls {
                     this.invalidateInteractions(true, this.startBusy && snapshot.queueKind === 'radio');
                 }
                 this.snapshot = snapshot;
+                if (this.feedbackIdentity(current) !== this.feedbackIdentity(snapshot)) {
+                    this.resetFeedback();
+                    void this.refreshFeedback();
+                }
                 this.anchorPositionMs = snapshot.positionMs;
                 this.anchorAt = this.now();
                 if (!this.scrubbing && !this.seekBusy && !snapshot.playback.pendingSeek
@@ -287,6 +327,7 @@ export class PlaybackControls {
             }
     }
     private render(snapshot: PlaybackSessionSnapshot): void {
+        this.renderFeedback();
         const currentReports = this.reports.filter(report => snapshot.current
             && report.occurrenceId === snapshot.current.occurrenceId
             && report.serverId === snapshot.current.source.serverId);
@@ -360,7 +401,7 @@ export class PlaybackControls {
         const active = snapshot.output?.active
             ? t('playback.output.active_name', { name: snapshot.output.active.displayName }) : '';
         if (!this.resetOutput) this.setText(this.outputStatus, `${outputText} ${active}`.trim());
-        this.refresh.hidden = this.fresh() && (!snapshot.current || Boolean(sourceLabel && (snapshot.playback.metadata || this.metadata?.status === 'available')));
+        this.renderRefresh();
         for (const [button, hint] of this.hints) hint.hidden = button.hidden;
         this.renderOptions();
         this.renderTimeline();
@@ -394,6 +435,129 @@ export class PlaybackControls {
     }
 
     private fresh(): boolean { return playbackStore.connection() === 'fresh'; }
+
+    private feedbackIdentity(snapshot = this.snapshot): string {
+        return JSON.stringify([snapshot?.instanceId, snapshot?.sessionId, snapshot?.radio?.logicalId,
+            snapshot?.current?.occurrenceId, snapshot?.current?.source.serverId, snapshot?.current?.source.trackId]);
+    }
+
+    private resetFeedback(preserveControls = false): void {
+        ++this.feedbackEpoch;
+        ++this.feedbackRequest;
+        this.feedback = preserveControls && this.feedback ? { ...this.feedback, preference: null, readStatus: 'unknown' } : undefined;
+        this.feedbackReading = this.feedbackLoading = false;
+        this.feedbackQueued = 0;
+        this.feedbackIssue = '';
+        this.feedbackLocalFailure = undefined;
+    }
+
+    private feedbackMatches(target: PlaybackFeedback['target'], observed: PlaybackSessionSnapshot): boolean {
+        return target.sessionId === observed.sessionId && target.logicalSessionId === (observed.radio?.logicalId ?? observed.sessionId)
+            && target.occurrenceId === observed.current?.occurrenceId && target.source.serverId === observed.current?.source.serverId
+            && target.source.trackId === observed.current?.source.trackId;
+    }
+
+    private async refreshFeedback(): Promise<void> {
+        if (this.disposed || !this.fresh() || !this.snapshot?.current || this.feedbackReading || this.feedbackQueued) return;
+        const observed = this.snapshot;
+        const identity = this.feedbackIdentity(observed);
+        const request = ++this.feedbackRequest;
+        this.feedbackReading = true;
+        this.feedbackLoading = !this.feedback;
+        this.renderFeedback();
+        try {
+            const result = await playbackGetFeedback(observed);
+            if (this.disposed || request !== this.feedbackRequest || identity !== this.feedbackIdentity() || !this.feedbackMatches(result.target, observed)) return;
+            this.feedback = result.readStatus === 'unknown' && this.feedback
+                ? { ...result, capabilities: this.feedback.capabilities } : result;
+            if (this.feedbackLocalFailure) this.feedback.operation = this.feedbackLocalFailure;
+            this.feedbackIssue = '';
+        } catch {
+            if (this.disposed || request !== this.feedbackRequest || identity !== this.feedbackIdentity()) return;
+            // A failed read cannot turn a cached value into current server evidence.
+            if (this.feedback) this.feedback = { ...this.feedback, preference: null, readStatus: 'unknown' };
+            this.feedbackIssue = 'unknown';
+        } finally {
+            if (!this.disposed && request === this.feedbackRequest) {
+                this.feedbackReading = this.feedbackLoading = false;
+                this.renderFeedback();
+            }
+        }
+    }
+
+    private submitFeedback(value: PlaybackPreference): void {
+        const capability = value === 'neutral' ? 'clear' : value;
+        if (this.disposed || !this.fresh() || !this.snapshot?.current || !this.feedback?.capabilities[capability] || this.feedbackTotalQueued >= 16) return;
+        const observed = this.snapshot;
+        const identity = this.feedbackIdentity(observed);
+        const epoch = this.feedbackEpoch;
+        const action = ++this.feedbackAction;
+        ++this.feedbackRequest;
+        this.feedbackReading = this.feedbackLoading = false;
+        this.feedbackLocalFailure = undefined;
+        this.feedbackIssue = '';
+        ++this.feedbackQueued;
+        ++this.feedbackTotalQueued;
+        this.renderFeedback();
+        // Admission is ordered too: a slower first preflight must not reverse two clicks.
+        this.feedbackSerial = this.feedbackSerial.then(async () => {
+            if (this.disposed || epoch !== this.feedbackEpoch || identity !== this.feedbackIdentity() || !this.fresh()) return;
+            try {
+                const operation = await playbackSetFeedback(observed, value);
+                if (this.disposed || epoch !== this.feedbackEpoch || action !== this.feedbackAction || !this.feedbackMatches(operation.target, observed)) return;
+                if (this.feedback) {
+                    this.feedback.operation = operation;
+                    if (value !== 'neutral') this.feedback.rejected = value === 'dislike';
+                }
+                if (operation.sequence === '0') this.feedbackLocalFailure = operation;
+            } catch (error) {
+                if (this.disposed || epoch !== this.feedbackEpoch || action !== this.feedbackAction) return;
+                // A lost RPC reply may hide a durable admission. Refresh; never replay it.
+                this.feedbackIssue = (error as { data?: { code?: string } })?.data?.code ? 'failed' : 'ambiguous';
+            }
+        }).finally(() => {
+            --this.feedbackTotalQueued;
+            if (!this.disposed && epoch === this.feedbackEpoch) {
+                --this.feedbackQueued;
+                this.renderFeedback();
+            }
+        });
+    }
+
+    private renderFeedback(): void {
+        const current = Boolean(this.snapshot?.current);
+        for (const [button, capability, value] of [
+            [this.feedbackLike, 'like', 'like'], [this.feedbackDislike, 'dislike', 'dislike'], [this.feedbackClear, 'clear', 'neutral'],
+        ] as const) {
+            button.hidden = !current || !this.feedback?.capabilities[capability];
+            button.disabled = !this.fresh() || this.feedback?.readStatus !== 'known' || this.feedbackTotalQueued >= 16 || !this.feedback?.capabilities[capability];
+            const hint = this.hints.get(button);
+            if (hint) hint.hidden = button.hidden;
+            if (value !== 'neutral') button.setAttribute('aria-pressed', String(this.fresh() && this.feedback?.readStatus === 'known' && this.feedback.preference === value));
+        }
+        let label = '';
+        if (current) {
+            const operation = this.feedback?.operation;
+            const state = !this.fresh() ? 'unknown' : this.feedbackQueued ? 'pending' : this.feedbackIssue || (this.feedbackLoading ? 'loading' : '');
+            const preference = this.feedback?.readStatus === 'known' ? this.feedback.preference : this.feedback?.readStatus ?? 'unknown';
+            label = [t(`playback.feedback.${state || preference}`),
+                !state && operation ? t(`playback.feedback.${operation.status}`) : '',
+                this.feedback?.rejected ? t('playback.feedback.rejected') : '',
+            ].filter(Boolean).join(' ');
+        }
+        this.setText(this.feedbackStatus, label);
+        this.renderRefresh();
+        this.updateMessages();
+    }
+
+    private renderRefresh(): void {
+        const snapshot = this.snapshot;
+        const feedbackNeedsRefresh = snapshot?.current && (this.feedbackIssue || this.feedback?.readStatus === 'unknown'
+            || ['failed', 'ambiguous', 'conflict'].includes(this.feedback?.operation?.status ?? ''));
+        const sourceLabel = snapshot?.current && this.serverIdentities.get(snapshot.current.source.serverId)?.label;
+        this.refresh.hidden = this.fresh() && !feedbackNeedsRefresh
+            && (!snapshot?.current || Boolean(sourceLabel && (snapshot.playback.metadata || this.metadata?.status === 'available')));
+    }
 
     private async startRadio(): Promise<void> {
         if (this.disposed || !this.fresh() || this.startBusy) return;
@@ -453,6 +617,7 @@ export class PlaybackControls {
                 this.loadMetadata(this.snapshot, true);
                 void this.refreshServerLabels();
                 void this.refreshOutputs();
+                void this.refreshFeedback();
             }
         } catch { /* Shared connection status explains the failure. */ }
 
@@ -572,12 +737,13 @@ export class PlaybackControls {
     }
 
     private updateMessages(): void {
-        const key = JSON.stringify([this.statusPopup, this.status.textContent, this.startStatus.textContent, this.seekStatus.textContent, this.error.textContent]);
+        const key = JSON.stringify([this.statusPopup, this.status.textContent, this.startStatus.textContent, this.seekStatus.textContent, this.error.textContent, this.feedbackStatus.textContent]);
         if (key !== this.messageKey) {
             this.messageKey = key;
             this.messagesOverride = undefined;
         }
-        this.messagesVisible = this.messagesOverride ?? (this.statusPopup || Boolean(this.startStatus.textContent || this.seekStatus.textContent || this.error.textContent));
+        const feedbackAttention = this.feedbackLoading || this.feedbackQueued > 0 || Boolean(this.feedbackIssue || this.feedback?.operation);
+        this.messagesVisible = this.messagesOverride ?? (this.statusPopup || feedbackAttention || Boolean(this.startStatus.textContent || this.seekStatus.textContent || this.error.textContent));
         this.messages.className = `playback-controls__messages${this.messagesVisible ? ' is-visible' : ''}`;
         this.messagesToggle.setAttribute('aria-expanded', String(this.messagesVisible));
         this.setIcon(this.messagesToggle, 'info-circle', t(this.messagesVisible ? 'playback.guidance.hide' : 'playback.guidance.show'));

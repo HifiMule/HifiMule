@@ -31,6 +31,22 @@ pub struct JellyfinProvider {
 }
 
 impl JellyfinProvider {
+    fn feedback_request(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        let mut url = reqwest::Url::parse(self.url()).map_err(|_| super::feedback::malformed())?;
+        url.path_segments_mut()
+            .map_err(|_| super::feedback::malformed())?
+            .pop_if_empty()
+            .extend(segments);
+        url.set_query(None);
+        Ok(reqwest::Client::new().request(method, url).header(
+            "Authorization",
+            format!("MediaBrowser Token=\"{}\"", self.token()),
+        ))
+    }
     pub fn new(
         client: JellyfinClient,
         server_url: impl Into<String>,
@@ -140,6 +156,61 @@ impl JellyfinProvider {
 
 #[async_trait]
 impl MediaProvider for JellyfinProvider {
+    async fn read_feedback(
+        &self,
+        track_id: &str,
+    ) -> Result<super::feedback::ProviderFeedback, ProviderError> {
+        use super::feedback::*;
+        let info = request_json(
+            self.feedback_request(reqwest::Method::GET, &["System", "Info", "Public"])?,
+        )
+        .await?;
+        if info.get("Version").and_then(serde_json::Value::as_str) != Some("12.1.0") {
+            return Err(unsupported());
+        }
+        let me =
+            request_json(self.feedback_request(reqwest::Method::GET, &["Users", "Me"])?).await?;
+        let user = me
+            .get("Id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| same_jellyfin_id(id, self.user_id()))
+            .ok_or_else(unsupported)?;
+        let raw = request_json(
+            self.feedback_request(reqwest::Method::GET, &["UserItems", track_id, "UserData"])?
+                .query(&[("userId", self.user_id())]),
+        )
+        .await?;
+        let normalized = uuid::Uuid::parse_str(user)
+            .map(|id| id.to_string())
+            .unwrap_or_else(|_| user.into());
+        Ok(ProviderFeedback {
+            capabilities: FeedbackCapabilities::ratings(),
+            value: jellyfin_value(&raw, track_id)?,
+            account_scope: account_scope(&normalized),
+        })
+    }
+
+    async fn set_feedback(
+        &self,
+        track_id: &str,
+        value: super::feedback::Preference,
+    ) -> Result<(), ProviderError> {
+        use super::feedback::*;
+        self.read_feedback(track_id).await?;
+        let method = if value == Preference::Neutral {
+            reqwest::Method::DELETE
+        } else {
+            reqwest::Method::POST
+        };
+        let mut request = self
+            .feedback_request(method, &["UserItems", track_id, "Rating"])?
+            .query(&[("userId", self.user_id())]);
+        if value != Preference::Neutral {
+            request = request.query(&[("likes", value == Preference::Like)]);
+        }
+        request_json(request).await?;
+        Ok(())
+    }
     async fn related_artists(
         &self,
         artist_id: &str,

@@ -2,6 +2,7 @@ use super::model::*;
 use super::reporting::{HeardEvidence, LiveReportRow, LiveStatusSample, TerminalReason};
 mod album_admission;
 pub(crate) use album_admission::{AlbumAdmission, AlbumReservation};
+mod feedback;
 mod output_selection;
 use crate::db::Database;
 use output_selection::*;
@@ -63,6 +64,7 @@ type ApplyGate = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
 
 #[derive(Clone)]
 pub struct PlaybackSession {
+    feedback_verification: Arc<Mutex<Option<feedback::Verification>>>,
     instance_id: String,
     inner: Arc<Mutex<Inner>>,
     generation_serial: Arc<AtomicU64>,
@@ -97,6 +99,17 @@ pub enum NativeControlIntent {
 }
 
 enum OwnerCommand {
+    FeedbackTarget(
+        super::feedback::FeedbackQuery,
+        mpsc::Sender<PResult<super::feedback::FeedbackTarget>>,
+    ),
+    AcceptFeedback(
+        super::feedback::FeedbackTarget,
+        crate::providers::feedback::ProviderFeedback,
+        super::feedback::FeedbackWrite,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<super::feedback::FeedbackOperation>>,
+    ),
     ReserveAlbum(
         PlayAlbumParams,
         Option<crate::sync::MutationGuard>,
@@ -740,6 +753,7 @@ impl PlaybackSession {
             .expect("playback owner thread must start");
         Self {
             instance_id: owner_id,
+            feedback_verification: Arc::new(Mutex::new(None)),
             output_gate,
             control_epoch,
             events,
@@ -1686,6 +1700,24 @@ fn owner_loop(
                 let i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(with_metadata(snapshot(&i), &i));
             }
+            Ok(OwnerCommand::FeedbackTarget(query, reply)) => {
+                let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    feedback::target(&i, &query)
+                };
+                let _ = reply.send(with_metadata(result, &i));
+            }
+            Ok(OwnerCommand::AcceptFeedback(target, verified, write, _guard, reply)) => {
+                let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    feedback::accept(&i, target, verified, write)
+                };
+                let _ = reply.send(with_metadata(result, &i));
+            }
             Ok(OwnerCommand::ReserveRadio(reply)) => {
                 let mut i = inner.lock().unwrap_or_else(|error| error.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
@@ -2562,6 +2594,12 @@ fn reject_unstarted(command: OwnerCommand) {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::Snapshot(reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::FeedbackTarget(_, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::AcceptFeedback(_, _, _, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::List(_, reply) => {
@@ -5729,6 +5767,323 @@ mod tests {
         .unwrap();
         let s = p.snapshot().unwrap();
         (db, p, s)
+    }
+
+    #[test]
+    fn feedback_owner_freezes_source_and_rejects_stale_occurrence_without_transport_effects() {
+        use super::super::feedback::*;
+        use crate::providers::feedback::*;
+        let (db, p, s) = queued();
+        let _cleanup = OwnerThreadCleanup(p.clone());
+        let query = FeedbackQuery {
+            schema_version: 1,
+            expected_session_id: s.session_id.clone(),
+            occurrence_id: s.current.as_ref().unwrap().occurrence_id.clone(),
+        };
+        let frozen = p.feedback_target(query.clone()).unwrap();
+        let make_write = || FeedbackWrite {
+            schema_version: 1,
+            expected_session_id: query.expected_session_id.clone(),
+            occurrence_id: query.occurrence_id.clone(),
+            operation_id: Uuid::new_v4().to_string(),
+            value: Preference::Like,
+        };
+        let verified = ProviderFeedback {
+            capabilities: FeedbackCapabilities::ratings(),
+            value: Preference::Neutral,
+            account_scope: "account".into(),
+        };
+        let row = p
+            .accept_feedback(frozen.clone(), verified.clone(), make_write(), None)
+            .unwrap();
+        assert_eq!(row.target.source, s.current.as_ref().unwrap().source);
+        let after = p.snapshot().unwrap();
+        assert_eq!(after.queue_revision, s.queue_revision);
+        assert_eq!(after.generation_id, s.generation_id);
+        assert_eq!(after.state, s.state);
+        assert!(db.list_live_reports(&s.session_id, 50).unwrap().is_empty());
+        p.apply(params(
+            &s,
+            SessionOperation::PlayTrack {
+                source: TrackSource {
+                    server_id: "other-server".into(),
+                    track_id: "track".into(),
+                },
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            p.accept_feedback(frozen, verified, make_write(), None)
+                .unwrap_err()
+                .code,
+            "STALE_FEEDBACK_OCCURRENCE"
+        );
+        assert!(
+            db.latest_feedback(
+                &TrackSource {
+                    server_id: "other-server".into(),
+                    track_id: "track".into()
+                },
+                "account"
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn feedback_rejection_survives_journal_failure_and_like_reverses_only_the_same_occurrence() {
+        use super::super::feedback::*;
+        use crate::providers::feedback::*;
+        let (db, p, s) = queued();
+        let _cleanup = OwnerThreadCleanup(p.clone());
+        let current = s.current.as_ref().unwrap().occurrence_id.clone();
+        let submit = |value| {
+            let query = FeedbackQuery {
+                schema_version: 1,
+                expected_session_id: s.session_id.clone(),
+                occurrence_id: current.clone(),
+            };
+            let frozen = p.feedback_target(query).unwrap();
+            p.accept_feedback(
+                frozen,
+                ProviderFeedback {
+                    capabilities: FeedbackCapabilities::ratings(),
+                    value: Preference::Neutral,
+                    account_scope: "account".into(),
+                },
+                FeedbackWrite {
+                    schema_version: 1,
+                    expected_session_id: s.session_id.clone(),
+                    occurrence_id: current.clone(),
+                    operation_id: Uuid::new_v4().to_string(),
+                    value,
+                },
+                None,
+            )
+            .unwrap()
+        };
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER reject_feedback_journal BEFORE INSERT ON playback_feedback BEGIN SELECT RAISE(ABORT,'test'); END").unwrap();
+        assert_eq!(
+            submit(Preference::Dislike).status,
+            FeedbackOperationStatus::Failed
+        );
+        assert_eq!(
+            db.rejected_playback_occurrences(&s.session_id).unwrap(),
+            vec![current.clone()]
+        );
+        assert_eq!(p.snapshot().unwrap().queue_revision, s.queue_revision);
+        assert!(db.list_live_reports(&s.session_id, 50).unwrap().is_empty());
+        assert_eq!(
+            submit(Preference::Like).status,
+            FeedbackOperationStatus::Failed
+        );
+        assert!(
+            db.rejected_playback_occurrences(&s.session_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn feedback_preview_rejection_is_separate_from_main_and_survives_paused_restore() {
+        use super::super::feedback::*;
+        use crate::providers::feedback::*;
+        let (db, p, main) = queued();
+        let preview = p
+            .preview_with_guard(preview_params(&main, "track"), None)
+            .unwrap();
+        let id = preview.current.as_ref().unwrap().occurrence_id.clone();
+        let query = FeedbackQuery {
+            schema_version: 1,
+            expected_session_id: preview.session_id.clone(),
+            occurrence_id: id.clone(),
+        };
+        let frozen = p.feedback_target(query).unwrap();
+        p.accept_feedback(
+            frozen,
+            ProviderFeedback {
+                capabilities: FeedbackCapabilities::ratings(),
+                value: Preference::Neutral,
+                account_scope: "account".into(),
+            },
+            FeedbackWrite {
+                schema_version: 1,
+                expected_session_id: preview.session_id.clone(),
+                occurrence_id: id.clone(),
+                operation_id: Uuid::new_v4().to_string(),
+                value: Preference::Dislike,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.rejected_playback_occurrences(&main.session_id).unwrap(),
+            vec![id.clone()]
+        );
+        assert_ne!(id, main.current.as_ref().unwrap().occurrence_id);
+        assert_eq!(p.snapshot().unwrap().main_current, preview.main_current);
+        p.shutdown_checkpoint().unwrap();
+        p.stop_and_join().unwrap();
+        let restored = PlaybackSession::restore(db.clone(), "restored".into());
+        let state = restored.snapshot().unwrap();
+        assert_eq!(state.session_id, main.session_id);
+        assert_eq!(state.state, TransportState::Paused);
+        assert_eq!(
+            db.rejected_playback_occurrences(&main.session_id).unwrap(),
+            vec![id.clone()]
+        );
+        restored
+            .apply(params(
+                &state,
+                SessionOperation::ReplaceQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "track".into(),
+                    }],
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            db.rejected_playback_occurrences(&main.session_id).unwrap(),
+            vec![id]
+        );
+        restored.stop_and_join().unwrap();
+        // Queue replacement retains the logical session. Actual session replacement expires its dispositions.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE playback_sessions SET session_id=?1",
+                [Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+        assert!(
+            db.rejected_playback_occurrences(&main.session_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn feedback_duplicate_occurrence_and_replayed_operation_cannot_reverse_a_later_choice() {
+        use super::super::feedback::*;
+        use crate::providers::feedback::*;
+        let (db, p, main) = queued();
+        let _cleanup = OwnerThreadCleanup(p.clone());
+        let submit = |state: &SessionSnapshot, value, id: String| {
+            let query = FeedbackQuery {
+                schema_version: 1,
+                expected_session_id: state.session_id.clone(),
+                occurrence_id: state.current.as_ref().unwrap().occurrence_id.clone(),
+            };
+            let target = p.feedback_target(query.clone()).unwrap();
+            p.accept_feedback(
+                target,
+                ProviderFeedback {
+                    capabilities: FeedbackCapabilities::ratings(),
+                    value: Preference::Neutral,
+                    account_scope: "account".into(),
+                },
+                FeedbackWrite {
+                    schema_version: 1,
+                    expected_session_id: query.expected_session_id,
+                    occurrence_id: query.occurrence_id,
+                    operation_id: id,
+                    value,
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let first_id = Uuid::new_v4().to_string();
+        submit(&main, Preference::Dislike, first_id.clone());
+        submit(&main, Preference::Like, Uuid::new_v4().to_string());
+        submit(&main, Preference::Dislike, first_id);
+        assert!(
+            db.rejected_playback_occurrences(&main.session_id)
+                .unwrap()
+                .is_empty()
+        );
+        submit(&main, Preference::Dislike, Uuid::new_v4().to_string());
+        submit(&main, Preference::Neutral, Uuid::new_v4().to_string());
+        let preview = p
+            .preview_with_guard(preview_params(&main, "track"), None)
+            .unwrap();
+        assert_eq!(
+            preview.current.as_ref().unwrap().source.track_id,
+            main.current.as_ref().unwrap().source.track_id
+        );
+        submit(&preview, Preference::Like, Uuid::new_v4().to_string());
+        assert_eq!(
+            db.rejected_playback_occurrences(&main.session_id).unwrap(),
+            vec![main.current.as_ref().unwrap().occurrence_id.clone()]
+        );
+        assert_eq!(p.snapshot().unwrap().generation_id, preview.generation_id);
+        assert_eq!(p.snapshot().unwrap().queue_revision, preview.queue_revision);
+        assert!(
+            db.list_live_reports(&main.session_id, 50)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn feedback_rejection_is_bound_to_the_radio_logical_session() {
+        use super::super::feedback::*;
+        use crate::providers::feedback::*;
+        let (db, p, main) = queued();
+        let _cleanup = OwnerThreadCleanup(p.clone());
+        let radio_op = || SessionOperation::StartRadio {
+            source: TrackSource {
+                server_id: "offline".into(),
+                track_id: "track".into(),
+            },
+            center: None,
+            settings: None,
+            recording: None,
+        };
+        p.apply(params(&main, radio_op())).unwrap();
+        let state = p.snapshot().unwrap();
+        let query = FeedbackQuery {
+            schema_version: 1,
+            expected_session_id: state.session_id.clone(),
+            occurrence_id: state.current.as_ref().unwrap().occurrence_id.clone(),
+        };
+        let frozen = p.feedback_target(query.clone()).unwrap();
+        assert_eq!(
+            frozen.logical_session_id,
+            state.radio.as_ref().unwrap().logical_id
+        );
+        p.accept_feedback(
+            frozen,
+            ProviderFeedback {
+                capabilities: FeedbackCapabilities::ratings(),
+                value: Preference::Neutral,
+                account_scope: "account".into(),
+            },
+            FeedbackWrite {
+                schema_version: 1,
+                expected_session_id: state.session_id.clone(),
+                occurrence_id: query.occurrence_id,
+                operation_id: Uuid::new_v4().to_string(),
+                value: Preference::Dislike,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.rejected_playback_occurrences(&state.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        p.apply(params(&state, radio_op())).unwrap();
+        assert!(
+            db.rejected_playback_occurrences(&state.session_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

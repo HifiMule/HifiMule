@@ -2421,6 +2421,10 @@ h2 {
 .playback-controls__source { color: var(--accent); font-size: 1rem; }
 .playback-controls__status, .playback-controls__artist { font-size: .8rem; color: var(--ink-dim); }
 .playback-controls__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; }
+.playback-controls [data-playback-feedback] { display: inline-flex; align-items: center; justify-content: center; min-width: 2rem; min-height: 2rem; padding: .35rem; border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--panel-bg); color: var(--ink); font: inherit; cursor: pointer; }
+.playback-controls [data-playback-feedback]:hover { border-color: var(--accent); }
+.playback-controls [data-playback-feedback][aria-pressed="true"] { background: var(--accent); color: var(--app-bg); border-color: var(--accent); }
+.playback-controls [data-playback-feedback]:disabled { opacity: .5; cursor: default; }
 .playback-controls__start-route { padding: .35rem .5rem; border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--panel-bg); color: var(--accent); font: inherit; cursor: pointer; }
 .playback-controls__start-route:hover { border-color: currentColor; }
 .playback-controls__output-trigger { display: inline-flex; }

@@ -241,6 +241,74 @@ fn is_navidrome_server_type(server_type: Option<&str>) -> bool {
 
 #[async_trait]
 impl MediaProvider for SubsonicProvider {
+    async fn read_feedback(
+        &self,
+        track_id: &str,
+    ) -> Result<super::feedback::ProviderFeedback, ProviderError> {
+        use super::feedback::*;
+        // Feedback qualification is independent of playbackReport and scrobbling.
+        let ping: SubsonicEnvelope<PingBody> = self
+            .client
+            .get_envelope_url_with_limit(
+                self.client.signed_url("ping", &[])?,
+                Some(MAX_FEEDBACK_RESPONSE_BYTES),
+            )
+            .await?;
+        let version = ping
+            .response
+            .body
+            .implementation_version
+            .as_deref()
+            .unwrap_or_default();
+        if !is_navidrome_server_type(ping.response.server_type.as_deref())
+            || ping.response.open_subsonic != Some(true)
+            || version.split([' ', '(']).next() != Some("0.64.2")
+        {
+            return Err(unsupported());
+        }
+        #[derive(Default, Deserialize)]
+        struct FeedbackSong {
+            song: Option<serde_json::Value>,
+        }
+        let result: SubsonicEnvelope<FeedbackSong> = self
+            .client
+            .get_envelope_url_with_limit(
+                self.client.signed_url("getSong", &[("id", track_id)])?,
+                Some(MAX_FEEDBACK_RESPONSE_BYTES),
+            )
+            .await?;
+        let song = result.response.body.song.ok_or_else(malformed)?;
+        Ok(ProviderFeedback {
+            capabilities: FeedbackCapabilities::favorites(),
+            value: navidrome_value(&song, track_id)?,
+            account_scope: account_scope(&self.client.username),
+        })
+    }
+
+    async fn set_feedback(
+        &self,
+        track_id: &str,
+        value: super::feedback::Preference,
+    ) -> Result<(), ProviderError> {
+        use super::feedback::*;
+        if value == Preference::Dislike {
+            return Err(unsupported());
+        }
+        self.read_feedback(track_id).await?;
+        let endpoint = if value == Preference::Like {
+            "star"
+        } else {
+            "unstar"
+        };
+        let _: SubsonicEnvelope<NoBody> = self
+            .client
+            .get_envelope_url_with_limit(
+                self.client.signed_url(endpoint, &[("id", track_id)])?,
+                Some(MAX_FEEDBACK_RESPONSE_BYTES),
+            )
+            .await?;
+        Ok(())
+    }
     async fn related_artists(
         &self,
         artist_id: &str,

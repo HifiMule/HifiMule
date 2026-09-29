@@ -431,6 +431,32 @@ export async function playbackListLiveReports(sessionId: string): Promise<LiveRe
     return result.data.reports;
 }
 
+export type PlaybackPreference = 'neutral' | 'like' | 'dislike';
+export interface PlaybackFeedbackTarget {
+    sessionId: string; logicalSessionId: string; occurrenceId: string; source: PlaybackTrackSource;
+}
+export interface PlaybackFeedbackOperation {
+    operationId: string; sequence: string; target: PlaybackFeedbackTarget; requestedValue: PlaybackPreference;
+    status: 'pending' | 'sending' | 'confirmed' | 'failed' | 'ambiguous' | 'conflict' | 'reconciled';
+    diagnostic: string | null; observedValue: PlaybackPreference | null;
+}
+export interface PlaybackFeedback {
+    schemaVersion: 1; target: PlaybackFeedbackTarget;
+    capabilities: { like: boolean; dislike: boolean; clear: boolean };
+    preference: PlaybackPreference | null; readStatus: 'known' | 'unknown' | 'unsupported';
+    operation: PlaybackFeedbackOperation | null; rejected: boolean; diagnostic: string | null;
+}
+export async function playbackGetFeedback(observed: PlaybackSessionSnapshot): Promise<PlaybackFeedback> {
+    return (await rpcCall('playback.getFeedback', {
+        schemaVersion: 1, expectedSessionId: observed.sessionId, occurrenceId: observed.current?.occurrenceId,
+    })).data;
+}
+export async function playbackSetFeedback(observed: PlaybackSessionSnapshot, value: PlaybackPreference, operationId = crypto.randomUUID()): Promise<PlaybackFeedbackOperation> {
+    return (await rpcCall('playback.setFeedback', {
+        schemaVersion: 1, expectedSessionId: observed.sessionId, occurrenceId: observed.current?.occurrenceId, operationId, value,
+    })).data;
+}
+
 export type PlaybackSelectionKind = 'playlist' | 'artist' | 'genre';
 export type PlaybackSelectionOrdering = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery' | 'rarity';
 export interface PlaybackSelectionSource { serverId: string; kind: PlaybackSelectionKind; ref: string }

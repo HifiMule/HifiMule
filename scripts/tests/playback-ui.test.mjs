@@ -70,6 +70,8 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
           playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
           playbackSeek: outputRpc.seek ?? (async () => snapshot),
           playbackDescribeOccurrences: outputRpc.describe ?? (async () => []),
+          playbackGetFeedback: outputRpc.feedbackRead ?? (async observed => feedbackView(observed, null, { like: false, dislike: false, clear: false })),
+          playbackSetFeedback: outputRpc.feedbackWrite ?? (async (observed, value) => ({ operationId: 'op', sequence: '1', target: feedbackView(observed).target, requestedValue: value, status: 'pending', diagnostic: null, observedValue: null })),
         }
       : name === '../state/playback'
         ? { playbackStore: storeExports.playbackStore }
@@ -101,6 +103,137 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
   };
 }
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
+
+function feedbackView(observed, preference = 'neutral', capabilities = { like: true, dislike: true, clear: true }) {
+  return { schemaVersion: 1, target: { sessionId: observed.sessionId, logicalSessionId: observed.radio?.logicalId ?? observed.sessionId, occurrenceId: observed.current?.occurrenceId, source: observed.current?.source }, capabilities,
+    preference, readStatus: preference === null ? 'unsupported' : 'known', operation: null, rejected: false, diagnostic: null };
+}
+
+test('feedback controls reflect verified capabilities and keep keyboard focus during status changes', async () => {
+  const initial = snapshot('playing');
+  let value = 'neutral'; let transports = 0;
+  const h = harness(initial, async () => transports++, { feedbackRead: async observed => feedbackView(observed, value, { like: true, dislike: false, clear: true }) });
+  await h.tick();
+  assert.equal(h.component.feedbackLike.hidden, false);
+  assert.equal(h.component.feedbackDislike.hidden, true);
+  assert.equal(h.component.feedbackLike.attributes['aria-pressed'], 'false');
+  assert.equal(h.component.feedbackStatus.attributes['aria-live'], 'polite');
+  h.component.feedbackLike.focus();
+  value = 'like'; await h.component.refreshFeedback();
+  assert.equal(h.component.feedbackLike.attributes['aria-pressed'], 'true');
+  assert.equal(h.document.activeElement, h.component.feedbackLike);
+  assert.equal(transports, 0);
+  h.component.destroy();
+});
+
+test('feedback unknown state never looks neutral or confirms a pending action', async () => {
+  const initial = snapshot('playing');
+  let resolveRead;
+  const h = harness(initial, undefined, { feedbackRead: () => new Promise(resolve => { resolveRead = resolve; }) });
+  await h.tick();
+  assert.match(h.component.feedbackStatus.textContent, /playback.feedback.loading/);
+  resolveRead({ ...feedbackView(initial), preference: null, readStatus: 'unknown' }); await h.tick();
+  assert.match(h.component.feedbackStatus.textContent, /playback.feedback.unknown/);
+  assert.equal(h.component.feedbackLike.attributes['aria-pressed'], 'false');
+  h.component.destroy();
+});
+
+test('feedback discards a late main read after switching to a Preview on another source with the same track ID', async () => {
+  const initial = snapshot('playing');
+  let oldRead;
+  const h = harness(initial, undefined, { feedbackRead: observed => observed.current.occurrenceId === 'occurrence'
+    ? new Promise(resolve => { oldRead = resolve; }) : Promise.resolve(feedbackView(observed, 'dislike')) });
+  await h.tick();
+  const preview = { ...snapshot('playing', '2'), mode: 'audition', current: { occurrenceId: 'preview', source: { serverId: 'other', trackId: 'track' } } };
+  h.setSnapshot(preview); await h.tick();
+  oldRead(feedbackView(initial, 'like')); await h.tick();
+  assert.equal(h.component.feedbackLike.attributes['aria-pressed'], 'false');
+  assert.equal(h.component.feedbackDislike.attributes['aria-pressed'], 'true');
+  h.component.destroy();
+});
+
+test('rapid opposing feedback is submitted in click order and never invokes transport', async () => {
+  const initial = snapshot('playing');
+  const writes = []; const finishes = []; let transports = 0;
+  const h = harness(initial, async () => transports++, { feedbackRead: async observed => feedbackView(observed),
+    feedbackWrite: (observed, value) => { writes.push({ observed, value }); return new Promise(resolve => finishes.push(() => resolve({ operationId: `op${writes.length}`, sequence: String(writes.length), target: feedbackView(observed).target, requestedValue: value, status: 'pending', diagnostic: null }))); } });
+  await h.tick();
+  await h.component.feedbackDislike.click(); await h.tick();
+  await h.component.feedbackLike.click(); await h.tick();
+  assert.deepEqual(writes.map(w => w.value), ['dislike']);
+  assert.match(h.component.feedbackStatus.textContent, /playback.feedback.pending/);
+  finishes.shift()(); await h.tick();
+  assert.deepEqual(writes.map(w => w.value), ['dislike', 'like']);
+  finishes.shift()(); await h.tick();
+  assert.equal(transports, 0);
+  assert.ok(writes.every(w => w.observed.current.source.serverId === 'server'));
+  h.component.destroy();
+});
+
+test('feedback reconnect reads another client change and does not replay an uncertain write', async () => {
+  const initial = snapshot('playing'); let hang = false; let value = 'like'; let writes = 0;
+  const h = harness(initial, undefined, { load: () => hang ? new Promise(() => {}) : initial,
+    feedbackRead: async observed => feedbackView(observed, value),
+    feedbackWrite: async () => { writes++; throw new Error('lost reply'); } });
+  await h.tick(); await h.component.feedbackDislike.click(); await h.tick();
+  assert.match(h.component.feedbackStatus.textContent, /playback.feedback.ambiguous/);
+  assert.equal(h.component.refresh.hidden, false);
+  hang = true; h.advance(2001); await h.tick();
+  assert.equal(h.component.feedbackLike.attributes['aria-pressed'], 'false');
+  assert.equal(h.component.feedbackLike.disabled, true);
+  value = 'dislike'; hang = false; await h.component.refreshPlayback(); await h.tick();
+  assert.equal(h.component.feedbackDislike.attributes['aria-pressed'], 'true');
+  assert.equal(writes, 1); h.component.destroy();
+});
+
+test('feedback journal failure remains visible after polling and keeps the local rejection', async () => {
+  const initial = snapshot('playing');
+  const h = harness(initial, undefined, { feedbackRead: async observed => ({ ...feedbackView(observed), rejected: true }),
+    feedbackWrite: async (observed, value) => ({ operationId: 'failed', sequence: '0', target: feedbackView(observed).target,
+      requestedValue: value, status: 'failed', diagnostic: 'journalUnavailable', observedValue: null }) });
+  await h.tick(); h.component.feedbackDislike.focus(); await h.component.feedbackDislike.click(); await h.tick();
+  await h.component.refreshFeedback();
+  assert.match(h.component.feedbackStatus.textContent, /playback.feedback.failed/);
+  assert.equal(h.component.refresh.hidden, false);
+  assert.match(h.component.feedbackStatus.textContent, /playback.feedback.rejected/);
+  assert.equal(h.component.feedbackDislike.attributes['aria-pressed'], 'false');
+  assert.equal(h.document.activeElement, h.component.feedbackDislike); h.component.destroy();
+});
+
+test('feedback unavailable reads keep the focused verified control disabled and clear its pressed state', async () => {
+  const initial = snapshot('playing'); let unavailable = false;
+  const h = harness(initial, undefined, { feedbackRead: async observed => unavailable
+    ? { ...feedbackView(observed, null, { like: false, dislike: false, clear: false }), readStatus: 'unknown' }
+    : feedbackView(observed, 'like') });
+  await h.tick(); h.component.feedbackLike.focus(); unavailable = true;
+  await h.component.refreshFeedback();
+  assert.equal(h.component.feedbackLike.hidden, false); assert.equal(h.component.feedbackLike.disabled, true);
+  assert.equal(h.component.feedbackLike.attributes['aria-pressed'], 'false');
+  assert.equal(h.document.activeElement, h.component.feedbackLike); h.component.destroy();
+});
+
+test('feedback abandons queued clicks and late replies after occurrence replacement or destruction', async () => {
+  const initial = snapshot('playing'); let finish; let writes = 0;
+  const h = harness(initial, undefined, { feedbackRead: async observed => feedbackView(observed),
+    feedbackWrite: async observed => { writes++; return new Promise(resolve => { finish = () => resolve({
+      operationId: 'old', sequence: '1', target: feedbackView(observed).target, status: 'confirmed', requestedValue: 'like' }); }); } });
+  await h.tick(); await h.component.feedbackLike.click(); await h.tick(); await h.component.feedbackDislike.click();
+  h.setSnapshot({ ...initial, stateSequence: '2', current: { ...initial.current, occurrenceId: 'duplicate' } }); await h.tick();
+  finish(); await h.tick();
+  assert.equal(writes, 1); assert.doesNotMatch(h.component.feedbackStatus.textContent, /confirmed|pending/);
+  const before = h.component.feedbackStatus.textContent;
+  h.component.destroy(); await h.component.refreshFeedback();
+  assert.equal(h.component.feedbackStatus.textContent, before);
+});
+
+test('feedback actions and all outcomes have distinct translations in four locales', () => {
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  const states = ['loading', 'unknown', 'unsupported', 'neutral', 'like', 'dislike', 'pending', 'sending', 'confirmed', 'failed', 'ambiguous', 'conflict', 'reconciled', 'rejected'];
+  for (const locale of ['en', 'fr', 'es', 'de']) {
+    for (const key of [...states, 'action_like', 'action_dislike', 'action_neutral']) assert.ok(catalog[locale][`playback.feedback.${key}`]);
+    assert.equal(new Set(states.map(key => catalog[locale][`playback.feedback.${key}`])).size, states.length);
+  }
+});
 
 test('idle Play something uses the shared start RPC and keeps manual navigation', async () => {
   const idle = { ...snapshot('paused'), current: null };
