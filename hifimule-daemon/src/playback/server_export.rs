@@ -9,8 +9,8 @@ use uuid::Uuid;
 type Result<T> = std::result::Result<T, PlaybackError>;
 pub const MAX_EXPORT_ENTRIES: usize = 10_000;
 pub const MAX_EXPORT_PARTS: usize = 32;
-pub const MAX_PROVIDER_IDS: usize = 1_000;
 pub const RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+pub const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 fn err(code: &'static str) -> PlaybackError {
     PlaybackError {
@@ -73,14 +73,14 @@ impl PartState {
                 Self::Succeeded | Self::Failed | Self::Ambiguous | Self::Partial | Self::Denied
             ) | (
                 Self::Populating,
-                Self::Succeeded | Self::Partial | Self::Ambiguous | Self::Failed
+                Self::Succeeded | Self::Partial | Self::Ambiguous | Self::Failed | Self::Unresolved
             ) | (
                 Self::Partial,
                 Self::Populating | Self::Unresolved | Self::Canceled
             ) | (Self::Failed, Self::Pending | Self::Canceled)
                 | (
                     Self::Ambiguous,
-                    Self::Succeeded | Self::Partial | Self::Unresolved
+                    Self::Succeeded | Self::Partial | Self::Populating | Self::Unresolved
                 )
                 | (Self::Unresolved, Self::Canceled)
         )
@@ -353,20 +353,22 @@ impl Database {
                 return Err(err("EXPORT_OPERATION_REUSED"));
             }
             drop(tx);
+            drop(conn);
             return self.get_server_export(ExportLocator {
                 schema_version: 1,
                 operation_id: p.operation_id,
             });
         }
-        let reserved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_server_exports WHERE snapshot_id=?1 AND name=?2)",params![p.snapshot_id,plan.name],|r|r.get(0)).map_err(storage)?;
-        if reserved {
-            return Err(err("EXPORT_COLLISION"));
-        }
+        tx.execute("DELETE FROM playback_server_export_parts WHERE operation_id IN (SELECT operation_id FROM playback_server_exports WHERE updated_at < unixepoch()-?1)",[RETENTION_SECONDS]).map_err(storage)?;
         tx.execute(
             "DELETE FROM playback_server_exports WHERE updated_at < unixepoch()-?1",
             [RETENTION_SECONDS],
         )
         .map_err(storage)?;
+        let reserved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_server_exports WHERE snapshot_id=?1 AND name=?2)",params![p.snapshot_id,plan.name],|r|r.get(0)).map_err(storage)?;
+        if reserved {
+            return Err(err("EXPORT_COLLISION"));
+        }
         tx.execute("INSERT INTO playback_server_exports(operation_id,schema_version,snapshot_id,name,canonical_request)VALUES(?1,1,?2,?3,?4)",params![p.operation_id,p.snapshot_id,plan.name,canonical]).map_err(storage)?;
         for (ordinal, part) in plan.parts.iter().enumerate() {
             tx.execute("INSERT INTO playback_server_export_parts(operation_id,ordinal,server_id,source_label,state,track_ids_json,expected_count)VALUES(?1,?2,?3,?4,'pending',?5,?6)",params![p.operation_id,ordinal as i64,part.server_id,part.source_label,serde_json::to_string(&part.track_ids).unwrap(),part.track_ids.len() as i64]).map_err(storage)?;
@@ -386,7 +388,7 @@ impl Database {
         let Some((snapshot_id, name, created)) = head else {
             return Err(err("EXPORT_NOT_FOUND"));
         };
-        let mut stmt=conn.prepare("SELECT server_id,source_label,state,expected_count,confirmed_count,playlist_id,reason,attempt,track_ids_json FROM playback_server_export_parts WHERE operation_id=?1 ORDER BY ordinal").map_err(storage)?;
+        let mut stmt=conn.prepare("SELECT server_id,source_label,state,expected_count,confirmed_count,playlist_id,reason,attempt,track_ids_json,next_attempt_at FROM playback_server_export_parts WHERE operation_id=?1 ORDER BY ordinal").map_err(storage)?;
         let parts = stmt
             .query_map([&p.operation_id], |r| {
                 Ok((
@@ -399,6 +401,7 @@ impl Database {
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, i64>(7)?,
                     r.get::<_, String>(8)?,
+                    r.get::<_, i64>(9)?,
                 ))
             })
             .map_err(storage)?
@@ -413,10 +416,18 @@ impl Database {
                     reason,
                     attempt,
                     tracks,
+                    next_attempt_at,
                 ) = row.map_err(storage)?;
                 let state = PartState::parse(&state)?;
                 let track_ids = serde_json::from_str::<Vec<String>>(&tracks)
                     .map_err(|_| err("EXPORT_CORRUPT"))?;
+                let safe_to_retry = state == PartState::Failed
+                    && attempt < MAX_RETRY_ATTEMPTS as i64
+                    && next_attempt_at <= chrono::Utc::now().timestamp()
+                    && matches!(
+                        reason.as_deref(),
+                        Some("sourceUnavailable" | "collisionCheckFailed")
+                    );
                 Ok(ExportPart {
                     server_id,
                     source_label,
@@ -426,7 +437,7 @@ impl Database {
                     playlist_id,
                     reason,
                     attempt: attempt as u32,
-                    safe_to_retry: state == PartState::Failed,
+                    safe_to_retry,
                     track_ids,
                 })
             })
@@ -457,7 +468,7 @@ impl Database {
         }
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction().map_err(storage)?;
-        let changed=tx.execute("UPDATE playback_server_export_parts SET state=?1,playlist_id=COALESCE(?2,playlist_id),confirmed_count=?3,reason=?4,attempt=attempt+CASE WHEN ?1='creating' THEN 1 ELSE 0 END,generation=generation+1,updated_at=unixepoch() WHERE operation_id=?5 AND server_id=?6 AND state=?7",params![next.as_str(),playlist_id,confirmed as i64,reason,operation_id,server_id,expected.as_str()]).map_err(storage)?;
+        let changed=tx.execute("UPDATE playback_server_export_parts SET state=?1,playlist_id=COALESCE(?2,playlist_id),confirmed_count=?3,reason=?4,attempt=attempt+CASE WHEN ?1 IN ('creating','failed') THEN 1 ELSE 0 END,next_attempt_at=CASE WHEN ?1='failed' THEN unixepoch()+MIN(300,(1 << MIN(attempt,8))) ELSE 0 END,generation=generation+1,updated_at=unixepoch() WHERE operation_id=?5 AND server_id=?6 AND state=?7",params![next.as_str(),playlist_id,confirmed as i64,reason,operation_id,server_id,expected.as_str()]).map_err(storage)?;
         if changed != 1 {
             return Err(err("EXPORT_STALE_TRANSITION"));
         }
@@ -475,6 +486,61 @@ impl Database {
         .into_iter()
         .find(|v| v.server_id == server_id)
         .ok_or_else(|| err("EXPORT_CORRUPT"))
+    }
+
+    pub fn pending_server_exports(&self) -> Result<Vec<ExportOperation>> {
+        let ids = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stmt = conn.prepare("SELECT DISTINCT e.operation_id FROM playback_server_exports e JOIN playback_server_export_parts p ON p.operation_id=e.operation_id WHERE p.state='pending' ORDER BY e.created_at").map_err(storage)?;
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .map_err(storage)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(storage)?
+        };
+        ids.into_iter()
+            .map(|operation_id| {
+                self.get_server_export(ExportLocator {
+                    schema_version: 1,
+                    operation_id,
+                })
+            })
+            .collect()
+    }
+
+    pub fn retry_export_part(&self, operation_id: &str, server_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE playback_server_export_parts SET state='pending',reason=NULL,next_attempt_at=0,generation=generation+1,updated_at=unixepoch() WHERE operation_id=?1 AND server_id=?2 AND state='failed' AND attempt<?3 AND next_attempt_at<=unixepoch() AND reason IN ('sourceUnavailable','collisionCheckFailed')",
+            params![operation_id, server_id, MAX_RETRY_ATTEMPTS],
+        ).map_err(storage)?;
+        if changed != 1 {
+            return Err(err("EXPORT_RETRY_NOT_SAFE"));
+        }
+        conn.execute(
+            "UPDATE playback_server_exports SET updated_at=unixepoch() WHERE operation_id=?1",
+            [operation_id],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    pub fn checkpoint_export_part(
+        &self,
+        operation_id: &str,
+        server_id: &str,
+        confirmed: usize,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute("UPDATE playback_server_export_parts SET confirmed_count=?1,generation=generation+1,updated_at=unixepoch() WHERE operation_id=?2 AND server_id=?3 AND state='populating' AND confirmed_count<=?1", params![confirmed as i64, operation_id, server_id]).map_err(storage)?;
+        if changed != 1 {
+            return Err(err("EXPORT_STALE_TRANSITION"));
+        }
+        conn.execute(
+            "UPDATE playback_server_exports SET updated_at=unixepoch() WHERE operation_id=?1",
+            [operation_id],
+        )
+        .map_err(storage)?;
+        Ok(())
     }
 }
 fn validate_request(version: u32, snapshot_id: &str) -> Result<()> {

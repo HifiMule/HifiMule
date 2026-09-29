@@ -4,7 +4,7 @@ baseline_commit: d75cd5f234ad0717a91ceea531918dea748f84af
 
 # Story 16.10: Save a listening snapshot as playlists on its source servers
 
-Status: review
+Status: done
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created. -->
 
@@ -76,6 +76,22 @@ so that I can reuse my discoveries in other clients while understanding what was
   - [x] UI tests execute production components for confirmation, accessibility, per-part progress, partial/ambiguous recovery, retry targeting, disposal/late replies, restart, focus, and bounded DOM/paging.
   - [x] Regression tests prove no playback transport/session/revision mutation, no provider write before explicit confirmation, no basket/device/sync call, and no changes to existing generic playlist curation.
   - [x] Update daemon API/data-model documentation with schemas, transitions, bounds, provider matrix, collision policy, recovery semantics, and evidence limitations.
+
+### Review Findings
+
+- [x] [Review][Patch] Release the database mutex before serving an idempotent repeated start to prevent a self-deadlock [hifimule-daemon/src/playback/server_export.rs:355]
+- [x] [Review][Patch] Resume or safely reclassify journaled pending parts after daemon restart [hifimule-daemon/src/playback/server_export.rs:223]
+- [x] [Review][Patch] Process valid 1,001-10,000-track parts with durable bounded batches instead of rejecting them [hifimule-daemon/src/rpc/playback_export.rs:115]
+- [x] [Review][Patch] Capability-gate and explain every source during planning before user confirmation [hifimule-daemon/src/playback/server_export.rs:298]
+- [x] [Review][Patch] Require a verified provider export-fidelity contract instead of enabling writes from the legacy boolean capability [hifimule-daemon/src/rpc/playback_export.rs:161]
+- [x] [Review][Patch] Render each part's persisted failure or limitation reason in the export UI [hifimule-ui/src/components/PlaybackSnapshots.ts:140]
+- [x] [Review][Patch] Derive retry safety from persisted remote-effect evidence and enforce bounded attempts with capped backoff [hifimule-daemon/src/playback/server_export.rs:429]
+- [x] [Review][Patch] Provide a safe reconciliation or recovery action for partial parts with a known playlist identity [hifimule-daemon/src/rpc/playback_export.rs:260]
+- [x] [Review][Patch] Delete retained child part rows transactionally when their export operation expires [hifimule-daemon/src/playback/server_export.rs:365]
+- [x] [Review][Patch] Purge expired reservations before checking snapshot/name collisions [hifimule-daemon/src/playback/server_export.rs:361]
+- [x] [Review][Patch] Fence planning without leaving the export button disabled after switching snapshots mid-request [hifimule-ui/src/components/PlaybackSnapshots.ts:135]
+- [x] [Review][Patch] Detach bounded per-source execution from the initiating RPC so a slow source cannot block later independent parts or strand journaled work on client cancellation [hifimule-daemon/src/rpc/playback_export.rs:435]
+- [x] [Review][Patch] Surface durable export-recovery load failures instead of silently presenting an empty status [hifimule-ui/src/components/PlaybackSnapshots.ts:133]
 
 ## Dev Notes
 
@@ -216,3 +232,4 @@ GPT-5 Codex
 ## Change Log
 
 - 2026-09-29: Implemented durable, source-partitioned listening-snapshot playlist export with recovery-safe daemon state, strict RPCs, accessible UI, localization, tests, and documentation.
+- 2026-09-29: Code review applied 13 patches covering deadlock prevention, provider fidelity gating, bounded durable batching, restart recovery, retry evidence/backoff, retention cleanup, partial reconciliation, detached execution, and UI truthfulness.

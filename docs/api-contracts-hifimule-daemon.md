@@ -1478,12 +1478,12 @@ The playlist-export surface is separate from local snapshot capture and generic 
 - `playback.getSnapshotPlaylistExport` reads durable authoritative state by `operationId`.
 - `playback.listSnapshotPlaylistExports` recovers up to 20 durable operations for a saved `snapshotId` after view disposal or daemon restart.
 - `playback.retrySnapshotPlaylistExport` targets one `serverId` and is accepted only for a proven no-effect `failed` part.
-- `playback.reconcileSnapshotPlaylistExport` targets one ambiguous part and moves irreconcilable create uncertainty to `unresolved`; it never repeats the create.
+- `playback.reconcileSnapshotPlaylistExport` targets an ambiguous or partial part. A known playlist identity is read back before any safe continuation; create uncertainty without an identity moves to `unresolved` and never repeats the create.
 - `playback.cancelSnapshotPlaylistExport` stops safe future work for one part and never deletes a remote playlist.
 
 All DTOs reject unknown fields and use camelCase `schemaVersion: 1`. The daemon routes exclusively through the snapshot's portable `serverId` and track IDs. Credentials and provider URLs are never returned. The response exposes each source label, state, expected/confirmed counts, known playlist ID, reason, attempt count, and safe retry flag. A mixed result is `partial`, never generic success.
 
-The current verified path uses one bounded create-with-items request (maximum 1,000 occurrences), preflight same-name collision detection, and ordered read-back. A post-submit error is `ambiguous`; a returned identity with unavailable or mismatched read-back is `partial`. There is no blind append replay or implicit rollback.
+The current verified path uses an explicit adapter export contract, preflight same-name collision detection, and exact ordered read-back. Requests are limited to 1,000 occurrences: larger parts use one bounded create followed by bounded append batches, with a durable confirmed-count checkpoint after every exact read-back. A post-submit or read-back error is `ambiguous`; a verified mismatch is `partial` or `unresolved`. At most four source parts execute concurrently, independently of the initiating RPC. Journaled pre-submit work resumes after restart. There is no blind append replay or implicit rollback. Proven no-effect failures allow at most five user retries with capped exponential backoff.
 
 Provider support matrix:
 

@@ -1,4 +1,4 @@
-import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot } from '../rpc';
+import { playbackListSnapshots, playbackListSnapshotEntries, playbackPlanSnapshotPlaylistExport, playbackStartSnapshotPlaylistExport, playbackGetSnapshotPlaylistExport, playbackRetrySnapshotPlaylistExport, playbackReconcileSnapshotPlaylistExport, playbackListSnapshotPlaylistExports, type SnapshotPlaylistExport, type ListeningSnapshotSummary, type PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
 import { withDeadline } from '../lifecycleDeadline';
 import { playbackStore } from '../state/playback';
@@ -61,6 +61,7 @@ export class PlaybackSnapshots {
     private request = 0;
     private loading = false;
     private disposed = false;
+    private exportPoll?: ReturnType<typeof setTimeout>;
     private requiresRefresh = false;
     private readonly unsubscribers: (() => void)[] = [];
 
@@ -92,7 +93,7 @@ export class PlaybackSnapshots {
         }));
         if (snapshotSaves.pending) void snapshotSaves.recover();
     }
-    destroy(): void { this.disposed = true; ++this.request; for (const unsubscribe of this.unsubscribers) unsubscribe(); }
+    destroy(): void { this.disposed = true; ++this.request; if(this.exportPoll)clearTimeout(this.exportPoll);for (const unsubscribe of this.unsubscribers) unsubscribe(); }
     focus(): boolean { if (this.panel.hidden || this.disposed) return false; this.heading.focus(); return true; }
     private async refreshLive(): Promise<void> {
         this.requiresRefresh = true; this.renderSave();
@@ -126,19 +127,20 @@ export class PlaybackSnapshots {
         this.onSavedView(true); this.heading.focus(); void this.loadPage();
     }
     private showEntries(snapshot: ListeningSnapshotSummary): void {
+        if(this.exportPoll)clearTimeout(this.exportPoll);
         this.selection = snapshot; this.reset(); this.panel.hidden = false; this.savedList.hidden = false;
         this.heading.textContent = snapshot.name;
         this.details.textContent = `${new Date(snapshot.createdAt).toLocaleString()} · ${t('playback.snapshots.count', { count: snapshot.entryCount })}`;
-        this.exportName.value=snapshot.name;this.exportStatus.replaceChildren();
-        this.onSavedView(true); this.heading.focus(); void this.loadPage(); void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(v=>{if(v[0])this.renderExport(v[0]);}).catch(()=>{});
+        this.exportName.value=snapshot.name;this.exportStatus.replaceChildren();this.exportButton.disabled=false;
+        this.onSavedView(true); this.heading.focus(); void this.loadPage(); void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(v=>{if(v[0])this.renderExport(v[0]);}).catch(error=>{if(!this.disposed&&this.selection?.snapshotId===snapshot.snapshotId)this.exportStatus.textContent=message(snapshotErrorCode(error));});
     }
     private async confirmExport():Promise<void>{
         const snapshot=this.selection;if(!snapshot||this.disposed)return;const request=++this.request;this.exportButton.disabled=true;this.exportStatus.textContent=t('playback.snapshots.export.planning');
-        try{const plan=await playbackPlanSnapshotPlaylistExport(snapshot.snapshotId,this.exportName.value);if(this.disposed||request!==this.request||this.selection?.snapshotId!==snapshot.snapshotId)return;const parts=plan.parts.map(p=>`${p.sourceLabel}: ${p.expectedCount}`).join('\n');if(!window.confirm(t('playback.snapshots.export.confirm',{name:plan.name,parts})))return;this.renderExport(await playbackStartSnapshotPlaylistExport(snapshot.snapshotId,plan.name));}
+        try{const plan=await playbackPlanSnapshotPlaylistExport(snapshot.snapshotId,this.exportName.value);if(this.disposed||request!==this.request||this.selection?.snapshotId!==snapshot.snapshotId)return;const parts=plan.parts.map(p=>`${p.sourceLabel}: ${p.expectedCount} · ${t(`playback.snapshots.export.state.${p.state}`)}${p.reason?` · ${t(`playback.snapshots.export.reason.${p.reason}`)}`:''}`).join('\n');if(!plan.parts.some(p=>p.state==='planned')){this.renderExport(plan);return;}if(!window.confirm(t('playback.snapshots.export.confirm',{name:plan.name,parts})))return;this.renderExport(await playbackStartSnapshotPlaylistExport(snapshot.snapshotId,plan.name));}
         catch(error){this.exportStatus.textContent=message(snapshotErrorCode(error));}finally{if(!this.disposed&&request===this.request)this.exportButton.disabled=false;}
     }
     private renderExport(operation:SnapshotPlaylistExport):void{
-        if(this.disposed||operation.snapshotId!==this.selection?.snapshotId)return;const list=document.createElement('ul');for(const part of operation.parts){const row=document.createElement('li');row.append(`${part.sourceLabel}: ${t(`playback.snapshots.export.state.${part.state}`)} · ${part.confirmedCount}/${part.expectedCount}${part.playlistId?` · ${part.playlistId}`:''}`);if(part.safeToRetry&&operation.operationId)row.append(button('playback.retry',()=>void playbackRetrySnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));if(part.state==='ambiguous'&&operation.operationId)row.append(button('playback.snapshots.export.reconcile',()=>void playbackReconcileSnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));list.append(row);}this.exportStatus.replaceChildren(document.createTextNode(t(`playback.snapshots.export.aggregate.${operation.status}`)),list);
+        if(this.disposed||operation.snapshotId!==this.selection?.snapshotId)return;const list=document.createElement('ul');for(const part of operation.parts){const row=document.createElement('li');row.append(`${part.sourceLabel}: ${t(`playback.snapshots.export.state.${part.state}`)} · ${part.confirmedCount}/${part.expectedCount}${part.playlistId?` · ${part.playlistId}`:''}${part.reason?` · ${t(`playback.snapshots.export.reason.${part.reason}`)}`:''}`);if(part.safeToRetry&&operation.operationId)row.append(button('playback.retry',()=>void playbackRetrySnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));if((part.state==='ambiguous'||part.state==='partial')&&operation.operationId)row.append(button('playback.snapshots.export.reconcile',()=>void playbackReconcileSnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));list.append(row);}this.exportStatus.replaceChildren(document.createTextNode(t(`playback.snapshots.export.aggregate.${operation.status}`)),list);if(this.exportPoll)clearTimeout(this.exportPoll);if(operation.status==='running'&&operation.operationId){const snapshotId=operation.snapshotId;this.exportPoll=setTimeout(()=>void playbackGetSnapshotPlaylistExport(operation.operationId!).then(next=>{if(!this.disposed&&this.selection?.snapshotId===snapshotId)this.renderExport(next);}).catch(error=>{if(!this.disposed&&this.selection?.snapshotId===snapshotId)this.exportStatus.textContent=message(snapshotErrorCode(error));}),1000);}
     }
     private paging(): void {
         this.first.disabled = this.loading || this.cursor === null;

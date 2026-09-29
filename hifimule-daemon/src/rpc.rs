@@ -317,6 +317,7 @@ pub async fn run_server(
         #[cfg(not(test))]
         pending_audiobookshelf_setups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
+    playback_export::resume_pending_exports(state.clone());
     let menu_state = state.clone();
     tokio::spawn(async move {
         while let Some(request) = menu_starts.recv().await {

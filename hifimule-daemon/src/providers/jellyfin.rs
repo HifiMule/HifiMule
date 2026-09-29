@@ -522,6 +522,15 @@ impl MediaProvider for JellyfinProvider {
             .map_err(Self::map_error)
     }
 
+    fn playlist_export_support(&self) -> Option<crate::providers::PlaylistExportSupport> {
+        Some(crate::providers::PlaylistExportSupport {
+            max_create_ids: 1_000,
+            max_append_ids: 1_000,
+            preserves_order_and_repeats: true,
+            reliable_ordered_read_back: true,
+        })
+    }
+
     async fn remove_from_playlist(
         &self,
         playlist_id: &str,

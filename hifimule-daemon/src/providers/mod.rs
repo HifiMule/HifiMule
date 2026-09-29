@@ -756,6 +756,13 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    /// Conservative contract for durable snapshot export. Providers must opt in
+    /// explicitly after their order, duplicate, append, and read-back semantics
+    /// have been verified; the legacy playlist-write boolean is not sufficient.
+    fn playlist_export_support(&self) -> Option<PlaylistExportSupport> {
+        None
+    }
+
     async fn remove_from_playlist(
         &self,
         _playlist_id: &str,
@@ -892,6 +899,14 @@ pub struct Capabilities {
     pub supports_server_transcoding: bool,
     pub supports_playlist_write: bool,
     pub browse: BrowseCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaylistExportSupport {
+    pub max_create_ids: usize,
+    pub max_append_ids: usize,
+    pub preserves_order_and_repeats: bool,
+    pub reliable_ordered_read_back: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
