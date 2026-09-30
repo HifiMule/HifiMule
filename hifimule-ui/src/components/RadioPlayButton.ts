@@ -8,7 +8,8 @@ let starting = false;
 
 export function createRadioPlayButton(item: BrowseDisplayItem): HTMLElement | null {
     const kind = item.type === 'MusicArtist' && item.basketType !== 'BookAuthor'
-        ? 'artist' : item.type === 'Playlist' && item.playablePlaylist ? 'playlist' : null;
+        ? 'artist' : item.type === 'Playlist' && item.playablePlaylist ? 'playlist'
+        : item.type === 'MusicGenre' ? 'genre' : null;
     if (!kind || !item.serverId || !item.id || (kind === 'playlist' && item.childCount === 0)) return null;
     const source = { serverId: item.serverId, kind, ref: item.id } as const;
     const button = document.createElement('sl-icon-button') as HTMLElement & { name: string; label: string; disabled: boolean };

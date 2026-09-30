@@ -597,6 +597,20 @@ h2 {
   border-color: rgba(var(--accent-rgb), 0.35);
 }
 
+/* Radio hints must escape card clipping and sit above neighboring cards.
+   Disable paint containment only while a user interacts with the card. */
+.media-card--radio:hover,
+.media-card--radio:focus-within {
+  content-visibility: visible;
+  position: relative;
+  z-index: 20;
+}
+
+.media-card--radio::part(base),
+.media-card--radio .card-content {
+  overflow: visible;
+}
+
 @starting-style {
   .media-card {
     opacity: 0;

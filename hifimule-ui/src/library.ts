@@ -342,6 +342,7 @@ function mapPlaylists(playlists: BrowsePlaylist[]): BrowseDisplayItem[] {
 function mapGenres(genres: BrowseGenre[]): BrowseDisplayItem[] {
     return genres.map(g => ({
         id: g.id,
+        serverId: state.isBookLibrary ? undefined : basketStore.getActiveServerId() ?? undefined,
         name: g.name,
         type: 'MusicGenre' as const,
         coverArtId: g.coverArtId,

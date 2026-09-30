@@ -28,8 +28,8 @@ function load(overrides = {}) {
 const artist = { type: 'MusicArtist', serverId: 'original-server', id: 'original-artist', basketId: 'favorite:artist', name: 'Artist' };
 const click = button => button.listeners.click({ stopPropagation() {} });
 
-test('artist and playlist replace sources while preserving settings, save before start and capture identity', async () => {
-  for (const item of [artist, { ...artist, type: 'Playlist', playablePlaylist: true, childCount: 3 }]) {
+test('artist, playlist and genre replace sources while preserving settings, save before start and capture identity', async () => {
+  for (const item of [artist, { ...artist, type: 'Playlist', playablePlaylist: true, childCount: 3 }, { ...artist, type: 'MusicGenre', id: 'original-genre' }]) {
     const h = load(), copy = { ...item }, tooltip = h.create(copy), button = tooltip.children[0];
     copy.serverId = 'changed'; copy.id = 'changed';
     assert.equal(button.name, 'broadcast');
@@ -38,7 +38,7 @@ test('artist and playlist replace sources while preserving settings, save before
     button.listeners.mousedown({ stopPropagation() { stopped++; } });
     await button.listeners.click({ stopPropagation() { stopped++; } });
     assert.equal(stopped, 2);
-    assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), ['read', ['save', { ...h.config, sources: [{ serverId: item.serverId, kind: item.type === 'Playlist' ? 'playlist' : 'artist', ref: item.id }] }], 'start']);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), ['read', ['save', { ...h.config, sources: [{ serverId: item.serverId, kind: item.type === 'Playlist' ? 'playlist' : item.type === 'MusicGenre' ? 'genre' : 'artist', ref: item.id }] }], 'start']);
     assert.equal(button.disabled, false);
   }
 });
@@ -77,7 +77,7 @@ test('concurrent card and row activations cannot interleave replacement or start
 });
 test('all locales include item-specific labels and both layouts use the shared action', () => {
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
-  for (const locale of ['en','fr','es','de']) for (const kind of ['artist','playlist']) assert.ok(catalog[locale][`playback.radio.start_${kind}`]?.includes('{title}'));
+  for (const locale of ['en','fr','es','de']) for (const kind of ['artist','playlist','genre']) assert.ok(catalog[locale][`playback.radio.start_${kind}`]?.includes('{title}'));
   for (const path of ['library.ts','components/MediaCard.ts']) assert.match(readFileSync(new URL(`../../hifimule-ui/src/${path}`, import.meta.url), 'utf8'), /createRadioPlayButton\(item/);
   const library = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8');
   assert.match(library, /serverId: basketStore.getActiveServerId\(\) \?\? undefined/);
