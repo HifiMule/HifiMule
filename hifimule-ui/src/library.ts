@@ -41,6 +41,7 @@ import { appendTracksToQueueFromLibrary } from './state/queue';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { createAlbumPlayButton } from './components/AlbumPlayButton';
 import { createPlaylistPlayButton } from './components/PlaylistPlayButton';
+import { createRadioPlayButton } from './components/RadioPlayButton';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { TracksBrowseView } from './components/TracksBrowseView';
 import { createTrackPreviewButton } from './components/TrackPreviewButton';
@@ -226,7 +227,7 @@ function showSpinner(container: HTMLElement) {
 function mapArtists(artists: BrowseArtist[]): BrowseDisplayItem[] {
     return artists.map(a => ({
         id: a.id,
-        serverId: state.isBookLibrary ? state.bookServerId ?? undefined : undefined,
+        serverId: state.isBookLibrary ? state.bookServerId ?? undefined : basketStore.getActiveServerId() ?? undefined,
         name: a.name,
         type: 'MusicArtist' as const,
         basketType: state.isBookLibrary ? 'BookAuthor' : undefined,
@@ -254,6 +255,7 @@ function mapFavoriteArtists(tree: FavoriteTree): BrowseDisplayItem[] {
         );
         return {
             id: artist.id,
+            serverId: basketStore.getActiveServerId() ?? undefined,
             name: artist.name,
             type: 'MusicArtist' as const,
             basketId: directFavorite ? artist.id : favoriteBasketId('artist', artist.id),
@@ -326,7 +328,7 @@ function mapPlaylists(playlists: BrowsePlaylist[]): BrowseDisplayItem[] {
         serverId: p.serverId,
         name: p.name,
         type: 'Playlist' as const,
-        playablePlaylist: state.browseMode === 'playlists',
+        playablePlaylist: !state.isBookLibrary && state.browseMode === 'playlists',
         coverArtId: null,
         subtitle: state.isBookLibrary
             ? t(p.id.startsWith('abs-series-') ? 'library.books.series_read_only' : 'library.books.collection_read_only')
@@ -1371,6 +1373,8 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     if (item.playablePlaylist) {
         row.appendChild(createPlaylistPlayButton(item.id, item.serverId, item.name, item.childCount));
     }
+    const radio = createRadioPlayButton(item);
+    if (radio) row.appendChild(radio);
     // Curate button: appears on Playlist rows when playlist write is supported (mirrors MediaCard grid behavior)
     if (onCurate && item.type === 'Playlist') {
         const curateBtn = document.createElement('sl-icon-button') as any;

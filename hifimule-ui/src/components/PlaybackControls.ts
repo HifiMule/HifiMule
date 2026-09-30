@@ -74,7 +74,7 @@ export class PlaybackControls {
     private readonly messagesToggle = document.createElement('sl-icon-button');
     private readonly back = this.button('back');
     private readonly primary = this.button('resume');
-    private readonly playSomething = document.createElement('sl-button') as HTMLElement & { disabled: boolean };
+    private readonly playSomething = document.createElement('sl-icon-button') as HTMLElement & { disabled: boolean };
     private readonly startRoute = document.createElement('button');
     private readonly stop = this.button('stop');
     private readonly next = this.button('next');
@@ -189,7 +189,10 @@ export class PlaybackControls {
         this.setIcon(this.refresh, 'arrow-clockwise', t('playback.refresh'));
         this.refresh.addEventListener('click', () => void this.refreshPlayback());
         this.setIcon(this.messagesToggle, 'info-circle', t('playback.guidance.hide'));
-        this.playSomething.textContent = t('playback.play_something');
+        this.playSomething.setAttribute('name', 'broadcast');
+        this.playSomething.setAttribute('label', t('playback.play_something'));
+        this.playSomething.setAttribute('aria-label', t('playback.play_something'));
+        this.playSomething.dataset.playbackHelp = t('playback.play_something_help');
         this.playSomething.className = 'playback-controls__play-something';
         this.playSomething.setAttribute('aria-description', t('playback.play_something_help'));
         this.playSomething.disabled = true;
@@ -221,7 +224,7 @@ export class PlaybackControls {
             this.setIcon(button, icon, t(`playback.feedback.action_${value}`));
             button.addEventListener('click', () => this.submitFeedback(value));
         }
-        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry, this.feedbackLike, this.feedbackDislike, this.feedbackClear].map(button => this.hint(button)), this.playSomething, this.startRoute, this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
+        actions.append(...[this.back, this.primary, this.returnToSession, this.stop, this.next, this.retry, this.feedbackLike, this.feedbackDislike, this.feedbackClear].map(button => this.hint(button)), this.hint(this.playSomething), this.startRoute, this.outputDropdown, this.hint(this.surfaceToggle, 'top-end'), this.hint(this.messagesToggle, 'top-end', 16), this.hint(this.refresh, 'top-end', 16));
         this.messages.className = 'playback-controls__messages';
         this.reportStatus.setAttribute('role', 'status');
         this.reportStatus.setAttribute('aria-live', 'polite');

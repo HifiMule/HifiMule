@@ -241,7 +241,9 @@ test('idle Play something uses the shared start RPC and keeps manual navigation'
   const h = harness(idle, undefined, { start: async () => { starts++; } }); await h.tick();
   assert.equal(h.component.playSomething.hidden, false);
   assert.equal(h.component.playSomething.disabled, false);
-  assert.equal(h.component.playSomething.textContent, 'playback.play_something');
+  assert.equal(h.component.playSomething.attributes.name, 'broadcast');
+  assert.equal(h.component.playSomething.attributes['aria-label'], 'playback.play_something');
+  assert.equal(h.component.hints.get(h.component.playSomething).attributes.content, 'playback.play_something_help');
   assert.equal(h.component.startStatus.attributes['aria-live'], 'polite');
   await h.component.playSomething.click(); await h.tick();
   assert.equal(starts, 1);
@@ -843,7 +845,7 @@ test('playback source renders the configured server icon before the title with a
 test('audio output selection is tucked behind a compact icon control', async () => {
   const h = harness(snapshot()); await h.tick();
   const dropdown = h.container.querySelector('sl-dropdown');
-  const outputButton = h.container.querySelector('sl-icon-button');
+  const outputButton = dropdown.querySelector('sl-icon-button');
   assert.ok(dropdown);
   assert.ok(outputButton);
   assert.equal(outputButton.attributes.label, 'playback.output.label');

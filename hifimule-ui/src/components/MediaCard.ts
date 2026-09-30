@@ -7,6 +7,7 @@ import { t } from '../i18n';
 import { showToast } from '../toast';
 import { createAlbumPlayButton } from './AlbumPlayButton';
 import { createPlaylistPlayButton } from './PlaylistPlayButton';
+import { createRadioPlayButton } from './RadioPlayButton';
 import { createTrackPreviewButton } from './TrackPreviewButton';
 import { createTrackQueueButton } from './TrackQueueButton';
 import { bookBasketItem } from '../state/mediaSyncSelection';
@@ -152,6 +153,11 @@ export class MediaCard {
         }
 
         // Load image asynchronously via Tauri proxy
+        if (isBrowseItem) {
+            const radio = createRadioPlayButton(item as BrowseDisplayItem);
+            if (radio) card.querySelector('.card-content')?.appendChild(radio);
+        }
+
         const cardImage = card.querySelector('.card-image') as HTMLElement;
         let imageId: string;
         if (isBrowseItem) {

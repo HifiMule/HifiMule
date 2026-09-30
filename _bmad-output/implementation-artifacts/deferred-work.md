@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Deferred from: library radio actions review (2026-09-30)
+
+- **Selection save/start uses shared mutable configuration** (`hifimule-daemon/src/rpc/playback_selection.rs:206`, `hifimule-daemon/src/rpc/playback_selection.rs:249`) — the existing separate save and start RPCs allow another client to save settings between them, so startup can load that other configuration. Library actions now suppress overlapping library requests, but atomic configuration-bound startup would require a separate daemon contract change. Deferred as pre-existing architecture outside this UI scope.
+
 ## Follow-up from: Story 16.7 verification scope decision (2026-09-29)
 
 - **Verify installed live listening reports on Windows, macOS, and Linux** — Run installed HifiMule with configured Jellyfin 12.1.0 and Navidrome 0.64.2 test accounts on each platform. Record app build, OS and architecture, server version, source-scoped now-playing and play-count changes for completion, early skip, seek, audition/return, repeat, restart, and ambiguous network outcomes. Keep unverified provider/version semantics disabled; do not infer installed behavior from the macOS arm64 direct API probes in `docs/playback-evidence/reporting-contract-2026-09-29.json`.
