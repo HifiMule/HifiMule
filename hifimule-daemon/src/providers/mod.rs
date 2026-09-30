@@ -520,6 +520,50 @@ pub trait MediaProvider: Send + Sync {
 
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError>;
 
+    /// Native bounded artist tracks when supported; other providers expand albums.
+    async fn get_artist_tracks_page(
+        &self,
+        _artist_id: &str,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Option<TrackListPage>, ProviderError> {
+        Ok(None)
+    }
+
+    /// Search the complete artist catalog, with offsets relative to matches.
+    async fn search_artists(
+        &self,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Artist>, ProviderError> {
+        let query = query.to_lowercase();
+        let mut scan = 0;
+        let mut skipped = 0;
+        let mut matches = Vec::new();
+        loop {
+            let (page, total) = self.list_artists(None, None, scan, 400).await?;
+            let count = page.len() as u32;
+            for artist in page {
+                if !artist.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                matches.push(artist);
+                if matches.len() >= limit as usize {
+                    return Ok(matches);
+                }
+            }
+            scan = scan.saturating_add(count);
+            if count == 0 || scan >= total {
+                return Ok(matches);
+            }
+        }
+    }
+
     async fn list_albums(
         &self,
         library_id: Option<&str>,

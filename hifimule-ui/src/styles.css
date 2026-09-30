@@ -2528,6 +2528,11 @@ h2 {
 .playback-selection-settings button { padding: .45rem .7rem; color: inherit; background: var(--surface-raised); border: 1px solid var(--surface-border); border-radius: var(--radius); cursor: pointer; }
 .playback-selection-settings button:disabled { opacity: .55; cursor: default; }
 .playback-selection-settings__explanation { color: var(--ink-dim); }
+.playback-selection-settings__picker { position: relative; min-width: 8rem; flex: 1 1 14rem; }
+.playback-selection-settings__suggestions { position: absolute; top: 100%; left: 0; right: 0; z-index: 10; max-height: 16rem; overflow-y: auto; background: var(--panel-bg); border: 1px solid var(--surface-border); border-radius: var(--radius); box-shadow: 0 .3rem 1rem #0005; }
+.playback-selection-settings__suggestions[hidden] { display: none; }
+.playback-selection-settings__suggestions button { display: block; width: 100%; text-align: start; border: 0; border-radius: 0; overflow-wrap: anywhere; }
+.playback-selection-settings__suggestions button:hover, .playback-selection-settings__suggestions button[aria-selected="true"] { background: var(--surface-raised); }
 .playback-selection-settings select:focus-visible, .playback-selection-settings input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .destination-hub__issues { display: grid; gap: .25rem; margin-block-start: .35rem; }
 .destination-hub__issue { color: var(--amber-warn); font-size: .8rem; }

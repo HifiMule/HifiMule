@@ -161,12 +161,24 @@ struct OptionsParams {
     kind: SelectionKind,
     #[serde(default)]
     offset: u32,
+    #[serde(default)]
+    query: String,
+    #[serde(default, rename = "ref")]
+    ref_id: Option<String>,
 }
 
 pub async fn options(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
     let args: OptionsParams = serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|_| error(SelectionError::Setup))?;
-    if args.schema_version != 1 || args.server_id.is_empty() {
+    if args.schema_version != 1
+        || args.server_id.is_empty()
+        || args.query.len() > 1024
+        || args.query.contains('\0')
+        || args
+            .ref_id
+            .as_ref()
+            .is_some_and(|id| id.len() > 1024 || id.contains('\0'))
+    {
         return Err(error(SelectionError::Setup));
     }
     let provider = provider(state, &args.server_id).await?;
@@ -190,13 +202,36 @@ pub async fn options(state: &AppState, params: Option<Value>) -> Result<Value, J
     }
     match tokio::time::timeout(
         DEADLINE,
-        selection::options_page(provider.as_ref(), args.kind, args.offset),
+        selection::search_options_page(provider.as_ref(), args.kind, args.offset, &args.query),
     )
     .await
     {
-        Ok(Ok(page)) => Ok(
-            json!({"data": {"supported": true, "options": page.options, "hasMore": page.has_more}}),
-        ),
+        Ok(Ok(page)) => {
+            let selected = if let Some(ref_id) = args.ref_id.filter(|id| !id.is_empty()) {
+                if let Some(option) = page.options.iter().find(|option| option.id == ref_id) {
+                    Some(option.clone())
+                } else {
+                    let source = selection::SelectionSource {
+                        server_id: args.server_id,
+                        kind: args.kind,
+                        ref_id,
+                    };
+                    tokio::time::timeout(
+                        DEADLINE,
+                        selection::resolve_option(provider.as_ref(), &source),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                }
+            } else {
+                None
+            };
+            Ok(
+                json!({"data": {"supported": true, "options": page.options, "hasMore": page.has_more, "selected": selected}}),
+            )
+        }
         _ => Ok(
             json!({"data": {"supported": false, "options": [], "reason": "PLAYBACK_SELECTION_SOURCE_UNAVAILABLE"}}),
         ),

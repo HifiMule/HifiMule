@@ -457,6 +457,15 @@ pub async fn options_page(
     kind: SelectionKind,
     offset: u32,
 ) -> Result<SelectionOptionPage, SelectionError> {
+    search_options_page(provider, kind, offset, "").await
+}
+
+pub async fn search_options_page(
+    provider: &dyn MediaProvider,
+    kind: SelectionKind,
+    offset: u32,
+    query: &str,
+) -> Result<SelectionOptionPage, SelectionError> {
     if !provider
         .capabilities()
         .browse
@@ -466,12 +475,15 @@ pub async fn options_page(
         return Err(SelectionError::SourceUnavailable);
     }
     let limit = MAX_CANDIDATES_PER_SOURCE as u32;
+    let query = query.trim();
+    let query_lower = query.to_lowercase();
     let values = match kind {
         SelectionKind::Playlist => provider
             .list_playlists()
             .await
             .map_err(|_| SelectionError::SourceUnavailable)?
             .into_iter()
+            .filter(|p| p.name.to_lowercase().contains(&query_lower))
             .skip(offset as usize)
             .take(MAX_CANDIDATES_PER_SOURCE + 1)
             .map(|p| SelectionOption {
@@ -479,7 +491,7 @@ pub async fn options_page(
                 name: p.name,
             })
             .collect(),
-        SelectionKind::Artist => provider
+        SelectionKind::Artist if query.is_empty() => provider
             .list_artists(None, None, offset, limit + 1)
             .await
             .map_err(|_| SelectionError::SourceUnavailable)?
@@ -490,22 +502,102 @@ pub async fn options_page(
                 name: a.name,
             })
             .collect(),
-        SelectionKind::Genre => provider
-            .list_genres(None, offset, limit + 1)
+        SelectionKind::Artist => provider
+            .search_artists(&query, offset, limit + 1)
             .await
             .map_err(|_| SelectionError::SourceUnavailable)?
-            .0
             .into_iter()
-            .map(|g| SelectionOption {
-                id: g.id,
-                name: g.name,
+            .map(|a| SelectionOption {
+                id: a.id,
+                name: a.name,
             })
             .collect(),
+        SelectionKind::Genre => {
+            let mut matches = Vec::new();
+            let mut scan = 0;
+            let mut skipped = 0;
+            loop {
+                let (genres, total) = provider
+                    .list_genres(None, scan, limit + 1)
+                    .await
+                    .map_err(|_| SelectionError::SourceUnavailable)?;
+                let count = genres.len() as u32;
+                for genre in genres {
+                    if !genre.name.to_lowercase().contains(&query_lower) {
+                        continue;
+                    }
+                    if skipped < offset {
+                        skipped += 1;
+                        continue;
+                    }
+                    matches.push(SelectionOption {
+                        id: genre.id,
+                        name: genre.name,
+                    });
+                    if matches.len() > limit as usize {
+                        break;
+                    }
+                }
+                scan = scan.saturating_add(count);
+                if matches.len() > limit as usize || count == 0 || u64::from(scan) >= total {
+                    break;
+                }
+            }
+            matches
+        }
     };
     let mut options: Vec<SelectionOption> = values;
     let has_more = options.len() > MAX_CANDIDATES_PER_SOURCE;
     options.truncate(MAX_CANDIDATES_PER_SOURCE);
     Ok(SelectionOptionPage { options, has_more })
+}
+
+/// Resolve display metadata by exact identity, independently of search results.
+pub async fn resolve_option(
+    provider: &dyn MediaProvider,
+    source: &SelectionSource,
+) -> Result<Option<SelectionOption>, SelectionError> {
+    match source.kind {
+        SelectionKind::Artist => {
+            let artist = provider
+                .get_artist(&source.ref_id)
+                .await
+                .map_err(|_| SelectionError::SourceUnavailable)?;
+            Ok(Some(SelectionOption {
+                id: artist.artist.id,
+                name: artist.artist.name,
+            }))
+        }
+        SelectionKind::Playlist => Ok(provider
+            .list_playlists()
+            .await
+            .map_err(|_| SelectionError::SourceUnavailable)?
+            .into_iter()
+            .find(|p| p.id == source.ref_id)
+            .map(|p| SelectionOption {
+                id: p.id,
+                name: p.name,
+            })),
+        SelectionKind::Genre => {
+            let mut offset = 0;
+            loop {
+                let page = options_page(provider, source.kind, offset).await?;
+                if let Some(option) = page
+                    .options
+                    .into_iter()
+                    .find(|item| item.id == source.ref_id)
+                {
+                    return Ok(Some(option));
+                }
+                if !page.has_more {
+                    return Ok(None);
+                }
+                offset = offset
+                    .checked_add(MAX_CANDIDATES_PER_SOURCE as u32)
+                    .ok_or(SelectionError::Setup)?;
+            }
+        }
+    }
 }
 
 /// Validate an exact reference independently of the UI's current page.
@@ -553,6 +645,20 @@ pub async fn fetch_source(
     provider: &dyn MediaProvider,
     source: &SelectionSource,
 ) -> Result<SelectionPool, SelectionError> {
+    if source.kind == SelectionKind::Artist
+        && let Some(page) = provider
+            .get_artist_tracks_page(&source.ref_id, 0, MAX_CANDIDATES_PER_SOURCE as u32)
+            .await
+            .map_err(|_| SelectionError::SourceUnavailable)?
+    {
+        if page.tracks.len() > MAX_CANDIDATES_PER_SOURCE {
+            return Err(SelectionError::SourceUnavailable);
+        }
+        return Ok(SelectionPool {
+            source: source.clone(),
+            tracks: page.tracks,
+        });
+    }
     if matches!(source.kind, SelectionKind::Genre) && !reference_exists(provider, source).await? {
         return Err(SelectionError::SourceUnavailable);
     }
@@ -621,6 +727,10 @@ pub struct RadioSourceCursor {
     pub intra: u32,
 }
 
+// Distinguishes native track offsets from persisted album-index cursors. Older
+// album cursors keep their original meaning when a session is restored.
+const ARTIST_TRACK_OFFSET: u32 = u32::MAX;
+
 async fn fetch_offset_window<F, Fut, E>(
     cursor: RadioSourceCursor,
     mut fetch: F,
@@ -681,6 +791,39 @@ pub async fn fetch_radio_window(
     source: &SelectionSource,
     cursor: RadioSourceCursor,
 ) -> Result<(SelectionPool, Option<RadioSourceCursor>), SelectionError> {
+    if source.kind == SelectionKind::Artist
+        && (cursor == RadioSourceCursor::default() || cursor.intra == ARTIST_TRACK_OFFSET)
+        && let Some(page) = provider
+            .get_artist_tracks_page(
+                &source.ref_id,
+                cursor.index,
+                MAX_CANDIDATES_PER_SOURCE as u32,
+            )
+            .await
+            .map_err(|_| SelectionError::SourceUnavailable)?
+    {
+        if page.tracks.len() > MAX_CANDIDATES_PER_SOURCE {
+            return Err(SelectionError::SourceUnavailable);
+        }
+        let end = cursor
+            .index
+            .checked_add(page.tracks.len() as u32)
+            .ok_or(SelectionError::SourceUnavailable)?;
+        if page.tracks.is_empty() && end < page.total {
+            return Err(SelectionError::SourceUnavailable);
+        }
+        let next = (end < page.total).then_some(RadioSourceCursor {
+            index: end,
+            intra: ARTIST_TRACK_OFFSET,
+        });
+        return Ok((
+            SelectionPool {
+                source: source.clone(),
+                tracks: page.tracks,
+            },
+            next,
+        ));
+    }
     let mut next = None;
     let tracks = match source.kind {
         SelectionKind::Playlist => {

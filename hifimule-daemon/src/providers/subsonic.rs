@@ -446,6 +446,35 @@ impl MediaProvider for SubsonicProvider {
         Ok((page, total))
     }
 
+    async fn search_artists(
+        &self,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Artist>, ProviderError> {
+        let count = limit.to_string();
+        let offset = offset.to_string();
+        let response: Search3Body = self
+            .client
+            .get(
+                "search3",
+                &[
+                    ("query", query),
+                    ("artistCount", &count),
+                    ("artistOffset", &offset),
+                    ("albumCount", "0"),
+                    ("songCount", "0"),
+                ],
+            )
+            .await?;
+        Ok(response
+            .search_result3
+            .artist
+            .into_iter()
+            .map(artist_from_dto)
+            .collect())
+    }
+
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError> {
         let artist = self.client.get_artist(artist_id).await?;
         let albums = artist
@@ -3356,6 +3385,46 @@ mod tests {
         assert_eq!(result.albums.len(), 1);
         assert_eq!(result.songs.len(), 1);
         assert_eq!(result.playlists.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn radio_artist_autocomplete_uses_artist_offsets_without_fetching_albums_or_songs() {
+        let mut server = Server::new_async().await;
+        let search = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                for (key, value) in [
+                    ("query", "Warrant"),
+                    ("artistCount", "401"),
+                    ("artistOffset", "400"),
+                    ("albumCount", "0"),
+                    ("songCount", "0"),
+                ] {
+                    matchers.push(Matcher::UrlEncoded(key.into(), value.into()));
+                }
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""searchResult3":{"artist":[{"id":"late","name":"Warrant"}]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+        let page = crate::playback::selection::search_options_page(
+            &provider,
+            crate::playback::selection::SelectionKind::Artist,
+            400,
+            "Warrant",
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.options[0].id, "late");
+        assert_eq!(page.options[0].name, "Warrant");
+        assert!(!page.has_more);
+        search.assert_async().await;
     }
 
     #[tokio::test]

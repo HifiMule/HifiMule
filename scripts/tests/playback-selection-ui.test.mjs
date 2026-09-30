@@ -20,6 +20,8 @@ class Element {
   }
   add(option) { this.append(option); if (!this.value) this.value = option.value; }
   setAttribute(key, value) { this.attributes[key] = value; }
+  focus() { this.ownerDocument.activeElement = this; this.listeners.get('focus')?.(); }
+  blur() { this.ownerDocument.activeElement = null; this.listeners.get('blur')?.(); }
   addEventListener(key, handler) { this.listeners.set(key, handler); }
   click() { if (!this.disabled) { this.listeners.get('click')?.(); this.onclick?.(); } }
   find(predicate) { return predicate(this) ? this : this.children.map(child => child.find(predicate)).find(Boolean); }
@@ -37,11 +39,11 @@ function load(mocks) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const exports = {};
-  const document = { createElement: tag => new Element(tag) };
+  const document = { activeElement: null, createElement: tag => { const element = new Element(tag); element.ownerDocument = document; return element; } };
   const Option = class extends Element {
     constructor(label, value) { super('option'); this.textContent = label; this.value = value; }
   };
-  vm.runInNewContext(source, { exports, document, Option, require: name => ({
+  vm.runInNewContext(source, { exports, document, Option, setTimeout, clearTimeout, require: name => ({
     '../rpc': mocks,
     '../i18n': { t: key => key },
     '../serverIdentity': { formatServerIdentity: server => ({ label: server.name ?? server.serverId }) },
@@ -135,7 +137,7 @@ test('saving a seed edit preserves advanced ordering and track cap', async () =>
     playbackSaveSelectionConfig: async value => { saved = value; },
   });
   await tick();
-  const seed = root.find(node => node.tagName === 'input');
+  const seed = root.find(node => node.tagName === 'input' && node.type === 'number');
   seed.value = '8'; seed.listeners.get('input')();
   button(root, 'playback.selection.save').click();
   await tick();
@@ -157,10 +159,88 @@ test('source options can be paged beyond the first page', async () => {
     },
   });
   await tick(); await tick();
+  const input = root.find(node => node.attributes.role === 'combobox');
+  input.focus();
+  input.blur(); // A native button takes focus when More is clicked.
   assert.equal(button(root, 'playback.selection.more').disabled, false);
   button(root, 'playback.selection.more').click();
   await tick();
   assert.deepEqual(offsets, [0, 400]);
-  assert.ok(root.all(node => node.tagName === 'option').some(option => option.value === 'later'));
+  assert.ok(root.all(node => node.attributes.role === 'option').some(option => option.textContent.includes('Later')));
+  assert.equal(root.find(node => node.attributes.role === 'listbox').hidden, false);
+  settings.destroy();
+});
+
+test('autocomplete searches beyond the initial page and saves the selected artist ID', async () => {
+  let saved;
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => ({ ...config, sources: [{ serverId: 'portable', kind: 'artist', ref: 'early' }] }),
+    serverList: async () => [server],
+    playbackSelectionOptions: async (_server, _kind, _offset, query) => ({ supported: true,
+      options: query === 'Zebra' ? [{ id: 'late', name: 'Zebra' }] : [{ id: 'early', name: 'Alpha' }], hasMore: false }),
+    playbackSaveSelectionConfig: async value => { saved = value; },
+  });
+  await tick();
+  const input = root.find(node => node.attributes.role === 'combobox');
+  assert.ok(input, 'source must be a searchable combobox');
+  input.value = 'Zebra'; input.listeners.get('input')();
+  assert.equal(button(root, 'playback.selection.save').disabled, true, 'unselected text cannot be saved as an ID');
+  await new Promise(resolve => setTimeout(resolve, 350)); await tick();
+  const match = root.find(node => node.attributes.role === 'option' && node.textContent === 'Zebra');
+  assert.ok(match); match.click();
+  button(root, 'playback.selection.save').click(); await tick();
+  assert.equal(saved.sources[0].ref, 'late');
+  assert.equal(input.value, 'Zebra');
+  settings.destroy();
+});
+
+test('a source added from the library displays its resolved name outside the options page', async () => {
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => ({ ...config, sources: [{ serverId: 'portable', kind: 'artist', ref: 'late' }] }),
+    serverList: async () => [server],
+    playbackSelectionOptions: async (_server, _kind, _offset, _query, ref) => ({ supported: true,
+      options: [{ id: 'early', name: 'Alpha' }], selected: ref === 'late' ? { id: 'late', name: 'Zebra' } : null }),
+  });
+  await tick();
+  await tick();
+  assert.equal(root.find(node => node.attributes.role === 'combobox')?.value, 'Zebra');
+  settings.destroy();
+});
+
+test('typing invalidates an earlier options response before the debounce finishes', async () => {
+  const old = deferred();
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => ({ ...config, sources: [{ serverId: 'portable', kind: 'artist', ref: 'late' }] }),
+    serverList: async () => [server],
+    playbackSelectionOptions: (_server, _kind, _offset, query) => query ? Promise.resolve({ supported: true, options: [] }) : old.promise,
+  });
+  await tick();
+  const input = root.find(node => node.attributes.role === 'combobox');
+  assert.ok(input);
+  input.value = 'New query'; input.listeners.get('input')();
+  old.resolve({ supported: true, options: [{ id: 'late', name: 'Old name' }], selected: { id: 'late', name: 'Old name' } });
+  await tick();
+  assert.equal(input.value, 'New query');
+  assert.equal(button(root, 'playback.selection.save').disabled, true);
+  settings.destroy();
+});
+
+test('keyboard selection distinguishes duplicate names and remains editable after saving', async () => {
+  const saved = [];
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => ({ ...config, sources: [{ serverId: 'portable', kind: 'artist', ref: 'first' }] }),
+    serverList: async () => [server],
+    playbackSelectionOptions: async () => ({ supported: true, options: [{ id: 'first', name: 'Same name' }, { id: 'second', name: 'Same name' }] }),
+    playbackSaveSelectionConfig: async value => saved.push(value),
+  });
+  await tick(); await tick();
+  const input = root.find(node => node.attributes.role === 'combobox');
+  const key = value => input.listeners.get('keydown')({ key: value, preventDefault() {} });
+  key('ArrowDown'); key('Enter');
+  button(root, 'playback.selection.save').click(); await tick();
+  key('ArrowDown'); key('ArrowDown'); key('Enter');
+  button(root, 'playback.selection.save').click(); await tick();
+  assert.deepEqual(saved.map(value => value.sources[0].ref), ['first', 'second']);
+  assert.deepEqual(root.all(node => node.attributes.role === 'option').map(node => node.textContent), ['Same name (first)', 'Same name (second)']);
   settings.destroy();
 });

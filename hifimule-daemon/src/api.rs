@@ -634,6 +634,40 @@ impl JellyfinClient {
         Ok(items_response)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_artist_tracks_page(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        artist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+        let endpoint = format!(
+            "{}/Items?userId={}&AlbumArtistIds={}&IncludeItemTypes=Audio&Recursive=true&StartIndex={}&Limit={}&SortBy=Name,Album&Fields=MediaSources,ProviderIds,ArtistItems",
+            url.trim_end_matches('/'),
+            user_id,
+            url_encode(artist_id),
+            offset,
+            limit
+        );
+        let response = self
+            .client
+            .get(&endpoint)
+            .headers(jellyfin_token_headers(token)?)
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// Get total size in bytes for each item. For containers (Albums, Playlists, Artists),
     /// recursively fetches child items and sums their MediaSources sizes.
     pub async fn get_item_sizes(
@@ -802,6 +836,21 @@ impl JellyfinClient {
         title: &str,
         item_type: &str,
     ) -> Result<JellyfinItemsResponse> {
+        self.search_audio_items_page(url, token, user_id, title, item_type, 0, 50)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_audio_items_page(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        title: &str,
+        item_type: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -809,11 +858,13 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes={}&Recursive=true&Limit=50&Fields=Id,Name,Album,AlbumArtist,Artists,ArtistItems,AlbumId,RecursiveItemCount,CumulativeRunTimeTicks,ProviderIds",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes={}&Recursive=true&StartIndex={}&Limit={}&SortBy=SortName&Fields=Id,Name,Album,AlbumArtist,Artists,ArtistItems,AlbumId,RecursiveItemCount,CumulativeRunTimeTicks,ProviderIds",
             url.trim_end_matches('/'),
             user_id,
             encoded_title,
-            item_type
+            item_type,
+            offset,
+            limit
         );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;

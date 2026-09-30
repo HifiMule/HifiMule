@@ -30,7 +30,9 @@ export class PlaybackSelectionSettings {
     private dirty = false;
     private editRevision = 0;
     private request = 0;
-    private optionRequests = new WeakMap<HTMLSelectElement, number>();
+    private optionRequests = new WeakMap<HTMLInputElement, number>();
+    private searchTimers = new Set<ReturnType<typeof setTimeout>>();
+    private static nextPickerId = 0;
 
     constructor() {
         this.element.className = 'playback-selection-settings';
@@ -67,6 +69,7 @@ export class PlaybackSelectionSettings {
     destroy(): void {
         this.disposed = true;
         ++this.request;
+        this.clearSearchTimers();
         if (this.busy) void playbackCancelSelectionStart().catch(() => undefined);
     }
 
@@ -118,6 +121,7 @@ export class PlaybackSelectionSettings {
     }
 
     private renderRows(): void {
+        this.clearSearchTimers();
         this.rows.replaceChildren();
         this.config.sources.forEach((source, index) => {
             const row = document.createElement('div'); row.className = 'playback-selection-settings__row';
@@ -129,64 +133,139 @@ export class PlaybackSelectionSettings {
             const kind = document.createElement('select');
             for (const value of kinds) kind.add(new Option(t(`playback.selection.kind.${value}`), value));
             kind.value = source.kind;
-            const ref = document.createElement('select'); ref.setAttribute('aria-label', t('playback.selection.input'));
+            const ref = document.createElement('input'); ref.type = 'text'; ref.autocomplete = 'off';
+            ref.setAttribute('role', 'combobox'); ref.setAttribute('aria-autocomplete', 'list');
+            ref.setAttribute('aria-expanded', 'false');
+            ref.placeholder = t('playback.selection.choose');
+            const picker = document.createElement('div'); picker.className = 'playback-selection-settings__picker';
+            const suggestions = document.createElement('div'); suggestions.setAttribute('role', 'listbox');
+            suggestions.id = `radio-source-${++PlaybackSelectionSettings.nextPickerId}`;
+            suggestions.setAttribute('aria-label', t('playback.selection.input'));
+            suggestions.className = 'playback-selection-settings__suggestions'; suggestions.hidden = true;
+            ref.setAttribute('aria-controls', suggestions.id);
+            let choices: PlaybackSelectionOption[] = [];
+            let active = -1;
+            let query = '';
+            let timer: ReturnType<typeof setTimeout> | undefined;
             const more = document.createElement('button'); more.type = 'button';
             more.textContent = t('playback.selection.more'); more.hidden = true;
             const explanation = document.createElement('span'); explanation.className = 'playback-selection-settings__explanation';
             const remove = document.createElement('button'); remove.type = 'button';
             remove.textContent = t('playback.selection.remove');
             remove.setAttribute('aria-label', `${t('playback.selection.remove')} ${index + 1}`);
-            server.addEventListener('change', () => { source.serverId = server.value; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation, more); });
-            kind.addEventListener('change', () => { source.kind = kind.value as PlaybackSelectionKind; source.ref = ''; this.markDirty(); void this.loadOptions(source, ref, explanation, more); });
-            ref.addEventListener('change', () => { source.ref = ref.value; this.markDirty(); });
+            const show = (visible: boolean) => {
+                suggestions.hidden = !visible || choices.length === 0;
+                ref.setAttribute('aria-expanded', String(!suggestions.hidden));
+            };
+            const highlight = () => {
+                Array.from(suggestions.children).forEach((item, i) => item.setAttribute('aria-selected', String(i === active)));
+                ref.setAttribute('aria-activedescendant', active < 0 ? '' : `${suggestions.id}-${active}`);
+                suggestions.children[active]?.scrollIntoView?.({ block: 'nearest' });
+            };
+            const select = (option: PlaybackSelectionOption) => {
+                source.ref = option.id; ref.value = option.name; query = ''; active = -1;
+                this.optionRequests.set(ref, (this.optionRequests.get(ref) ?? 0) + 1);
+                if (timer) { clearTimeout(timer); this.searchTimers.delete(timer); }
+                inputBusy(false); more.hidden = true;
+                highlight(); show(false); this.markDirty();
+            };
+            const renderChoices = (options: PlaybackSelectionOption[]) => {
+                choices = options; active = -1; suggestions.replaceChildren();
+                const names = new Map<string, number>();
+                for (const option of choices) names.set(option.name, (names.get(option.name) ?? 0) + 1);
+                choices.forEach((option, i) => {
+                    const item = document.createElement('button'); item.type = 'button'; item.tabIndex = -1;
+                    item.id = `${suggestions.id}-${i}`; item.setAttribute('role', 'option');
+                    item.textContent = (names.get(option.name) ?? 0) > 1 ? `${option.name} (${option.id})` : option.name;
+                    item.addEventListener('mousedown', event => event.preventDefault());
+                    item.addEventListener('click', () => { select(option); ref.focus(); });
+                    suggestions.append(item);
+                });
+                highlight(); show(document.activeElement === ref);
+            };
+            const inputBusy = (busy: boolean) => ref.setAttribute('aria-busy', String(busy));
+            const load = (offset = 0, resolveSelected = false) => void this.loadOptions(source, ref, explanation, more, query, offset, resolveSelected,
+                options => renderChoices(offset === 0 ? options : [...choices, ...options.filter(option => !choices.some(existing => existing.id === option.id))]),
+                next => load(next));
+            const reset = () => {
+                if (timer) { clearTimeout(timer); this.searchTimers.delete(timer); }
+                source.ref = ''; ref.value = ''; query = ''; this.markDirty(); load();
+            };
+            server.addEventListener('change', () => { source.serverId = server.value; reset(); });
+            kind.addEventListener('change', () => { source.kind = kind.value as PlaybackSelectionKind; reset(); });
+            ref.addEventListener('input', () => {
+                this.optionRequests.set(ref, (this.optionRequests.get(ref) ?? 0) + 1);
+                if (timer) { clearTimeout(timer); this.searchTimers.delete(timer); }
+                query = ref.value.trim(); source.ref = ''; this.markDirty();
+                inputBusy(false);
+                choices = []; active = -1; suggestions.replaceChildren(); highlight(); show(false); more.hidden = true;
+                timer = setTimeout(() => { this.searchTimers.delete(timer!); load(); }, 250);
+                this.searchTimers.add(timer);
+            });
+            ref.addEventListener('focus', () => show(true));
+            ref.addEventListener('blur', () => show(false));
+            ref.addEventListener('keydown', event => {
+                if (event.key === 'Escape') { show(false); return; }
+                if (event.key === 'Enter' && active >= 0 && !suggestions.hidden) {
+                    event.preventDefault(); select(choices[active]); return;
+                }
+                if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && choices.length) {
+                    event.preventDefault(); show(true);
+                    active = event.key === 'ArrowDown' ? (active + 1) % choices.length : (active <= 0 ? choices.length : active) - 1;
+                    highlight();
+                }
+            });
             remove.addEventListener('click', () => { this.config.sources.splice(index, 1); this.markDirty(); this.renderRows(); });
+            picker.append(this.label('playback.selection.input', ref), suggestions);
             row.append(this.label('playback.selection.server', server), this.label('playback.selection.kind', kind),
-                this.label('playback.selection.input', ref), more, remove, explanation);
+                picker, more, remove, explanation);
             this.rows.append(row);
-            void this.loadOptions(source, ref, explanation, more);
+            load(0, true);
         });
         this.updateActions();
     }
 
-    private async loadOptions(source: PlaybackSelectionSource, select: HTMLSelectElement, explanation: HTMLElement, more: HTMLButtonElement, offset = 0): Promise<void> {
-        const request = (this.optionRequests.get(select) ?? 0) + 1;
-        this.optionRequests.set(select, request);
-        select.disabled = true;
+    private clearSearchTimers(): void {
+        for (const timer of this.searchTimers) clearTimeout(timer);
+        this.searchTimers.clear();
+    }
+
+    private async loadOptions(source: PlaybackSelectionSource, input: HTMLInputElement, explanation: HTMLElement, more: HTMLButtonElement,
+        query: string, offset: number, resolveSelected: boolean, render: (options: PlaybackSelectionOption[]) => void, next: (offset: number) => void): Promise<void> {
+        const request = (this.optionRequests.get(input) ?? 0) + 1;
+        this.optionRequests.set(input, request);
+        input.setAttribute('aria-busy', 'true');
         more.disabled = true;
         if (offset === 0) {
             more.hidden = true;
-            select.replaceChildren(new Option(t('playback.selection.loading'), ''));
+            render([]);
+            explanation.textContent = t('playback.selection.loading');
         }
         try {
-            const result = await playbackSelectionOptions(source.serverId, source.kind, offset);
-            if (this.disposed || request !== this.optionRequests.get(select) || !select.isConnected) return;
+            const result = await playbackSelectionOptions(source.serverId, source.kind, offset, query, resolveSelected ? source.ref : undefined);
+            if (this.disposed || request !== this.optionRequests.get(input) || !input.isConnected) return;
             if (!result.supported) {
                 explanation.textContent = t(result.reason === 'UNSUPPORTED_CAPABILITY'
                     ? 'playback.selection.unsupported' : 'playback.selection.unavailable');
                 more.hidden = true;
                 return;
             }
-            if (offset === 0) select.replaceChildren(new Option(t('playback.selection.choose'), ''));
-            for (const option of result.options as PlaybackSelectionOption[]) {
-                const existing = Array.from(select.options).find(item => item.value === option.id);
-                if (existing) existing.textContent = option.name;
-                else select.add(new Option(option.name, option.id));
+            if (resolveSelected && source.ref) {
+                const selected = result.selected ?? result.options.find(option => option.id === source.ref);
+                input.value = selected?.name ?? source.ref;
             }
-            if (source.ref && !Array.from(select.options).some(item => item.value === source.ref)) {
-                select.add(new Option(source.ref, source.ref));
-            }
-            select.value = source.ref;
-            explanation.textContent = select.options.length > 1 ? '' : t('playback.selection.no_inputs');
-            select.disabled = select.options.length <= 1;
+            render(result.options);
+            explanation.textContent = result.options.length > 0 ? '' : t('playback.selection.no_inputs');
             more.hidden = !result.hasMore;
             more.disabled = false;
-            more.onclick = () => void this.loadOptions(source, select, explanation, more, offset + result.options.length);
+            more.onclick = () => { input.focus(); next(offset + result.options.length); };
         } catch {
-            if (!this.disposed && request === this.optionRequests.get(select) && select.isConnected) {
+            if (!this.disposed && request === this.optionRequests.get(input) && input.isConnected) {
                 explanation.textContent = t('playback.selection.unavailable');
-                select.disabled = offset === 0;
                 more.disabled = false;
             }
+        } finally {
+            if (request === this.optionRequests.get(input)) input.setAttribute('aria-busy', 'false');
         }
         this.updateActions();
     }
@@ -207,7 +286,7 @@ export class PlaybackSelectionSettings {
             await playbackSaveSelectionConfig(config);
             if (this.disposed) return;
             if (revision === this.editRevision) {
-                this.config = config; this.dirty = false;
+                this.config = { ...config, sources: this.config.sources }; this.dirty = false;
                 this.status.textContent = t('playback.selection.saved');
             } else {
                 this.status.textContent = t('playback.selection.save_again');

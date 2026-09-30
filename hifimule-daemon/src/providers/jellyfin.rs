@@ -282,6 +282,54 @@ impl MediaProvider for JellyfinProvider {
         ))
     }
 
+    async fn search_artists(
+        &self,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Artist>, ProviderError> {
+        let response = self
+            .client
+            .search_audio_items_page(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                query,
+                "MusicArtist",
+                offset,
+                limit,
+            )
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(artist_from_item).collect())
+    }
+
+    async fn get_artist_tracks_page(
+        &self,
+        artist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Option<TrackListPage>, ProviderError> {
+        let response = self
+            .client
+            .get_artist_tracks_page(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                artist_id,
+                offset,
+                limit,
+            )
+            .await
+            .map_err(Self::map_error)?;
+        Ok(Some(TrackListPage {
+            tracks: response.items.into_iter().map(song_from_item).collect(),
+            total: response.total_record_count,
+            start_index: response.start_index,
+            limit,
+        }))
+    }
+
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError> {
         let item = self
             .client
@@ -2375,6 +2423,133 @@ mod tests {
         assert_eq!(artist.artist.id, "artist1");
         assert_eq!(artist.albums.len(), 1);
         assert_eq!(artist.albums[0].id, "album1");
+    }
+
+    #[tokio::test]
+    async fn radio_artist_start_fetches_bounded_tracks_without_expanding_every_album() {
+        use crate::playback::selection::{self, SelectionKind, SelectionSource};
+        let mut server = Server::new_async().await;
+        let tracks = server.mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("AlbumArtistIds".into(), "late-artist".into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "0".into()),
+                Matcher::UrlEncoded("Limit".into(), "400".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds,ArtistItems".into()),
+            ]))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"track","Name":"Song","Type":"Audio","ArtistItems":[{"Id":"late-artist","Name":"Warrant"}]}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async().await;
+        let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+        let source = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Artist,
+            ref_id: "late-artist".into(),
+        };
+        let pool = selection::fetch_source(&provider, &source)
+            .await
+            .expect("bounded artist source");
+        assert_eq!(pool.tracks.len(), 1);
+        assert_eq!(pool.tracks[0].id, "track");
+        assert_eq!(pool.tracks[0].artist_id.as_deref(), Some("late-artist"));
+        tracks.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn radio_artist_native_windows_resume_at_the_next_track_offset() {
+        use crate::playback::selection::{self, RadioSourceCursor, SelectionKind, SelectionSource};
+        let mut server = Server::new_async().await;
+        let first = server.mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("AlbumArtistIds".into(), "artist".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "0".into()),
+                Matcher::UrlEncoded("Limit".into(), "400".into()),
+            ]))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"first","Name":"First","Type":"Audio"}],"TotalRecordCount":2,"StartIndex":0}"#)
+            .create_async().await;
+        let second = server.mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("AlbumArtistIds".into(), "artist".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "1".into()),
+            ]))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"second","Name":"Second","Type":"Audio"}],"TotalRecordCount":2,"StartIndex":1}"#)
+            .create_async().await;
+        let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+        let source = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Artist,
+            ref_id: "artist".into(),
+        };
+        let (page, cursor) =
+            selection::fetch_radio_window(&provider, &source, RadioSourceCursor::default())
+                .await
+                .unwrap();
+        assert_eq!(page.tracks[0].id, "first");
+        // Round trip the same cursor that durable Radio stores for reconnects.
+        let restored =
+            serde_json::from_str(&serde_json::to_string(&cursor.unwrap()).unwrap()).unwrap();
+        let (page, next) = selection::fetch_radio_window(&provider, &source, restored)
+            .await
+            .unwrap();
+        assert_eq!(page.tracks[0].id, "second");
+        assert!(next.is_none());
+        first.assert_async().await;
+        second.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn radio_artist_autocomplete_search_is_paged_and_resolves_an_off_page_name() {
+        use crate::playback::selection::{self, SelectionKind, SelectionSource};
+        let mut server = Server::new_async().await;
+        let search = server.mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("SearchTerm".into(), "Warrant".into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicArtist".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "400".into()),
+                Matcher::UrlEncoded("Limit".into(), "401".into()),
+            ]))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"late","Name":"Warrant","Type":"MusicArtist"}],"TotalRecordCount":401,"StartIndex":400}"#)
+            .create_async().await;
+        let artist = server
+            .mock("GET", "/Items/late")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id":"late","Name":"Warrant","Type":"MusicArtist"}"#)
+            .create_async()
+            .await;
+        let albums = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::UrlEncoded("AlbumArtistIds".into(), "late".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#)
+            .create_async()
+            .await;
+        let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+        let page = selection::search_options_page(&provider, SelectionKind::Artist, 400, "Warrant")
+            .await
+            .unwrap();
+        assert_eq!(page.options[0].id, "late");
+        assert!(!page.has_more);
+        let selected = selection::resolve_option(
+            &provider,
+            &SelectionSource {
+                server_id: "portable".into(),
+                kind: SelectionKind::Artist,
+                ref_id: "late".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.name, "Warrant");
+        search.assert_async().await;
+        artist.assert_async().await;
+        albums.assert_async().await;
     }
 
     #[tokio::test]
