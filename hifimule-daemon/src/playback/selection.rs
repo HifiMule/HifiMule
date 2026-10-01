@@ -29,6 +29,7 @@ const MAX_FILE_BYTES: usize = 16 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SelectionKind {
+    Library,
     Playlist,
     Artist,
     Genre,
@@ -67,6 +68,8 @@ impl Default for PlaybackSelectionConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
+    #[error("PLAYBACK_SELECTION_NO_MUSIC_SERVER")]
+    NoMusicServer,
     #[error("PLAYBACK_SELECTION_SETUP")]
     Setup,
     #[error("PLAYBACK_SELECTION_SAVE_FAILED")]
@@ -93,7 +96,8 @@ impl PlaybackSelectionConfig {
             || self.sources.iter().any(|source| {
                 source.server_id.is_empty()
                     || source.server_id.len() > 1024
-                    || source.ref_id.is_empty()
+                    || (source.kind != SelectionKind::Library && source.ref_id.is_empty())
+                    || (source.kind == SelectionKind::Library && !source.ref_id.is_empty())
                     || source.ref_id.len() > 1024
                     || source.server_id.contains('\0')
                     || source.ref_id.contains('\0')
@@ -445,6 +449,7 @@ pub struct SelectionOptionPage {
 
 fn browse_mode(kind: SelectionKind) -> BrowseMode {
     match kind {
+        SelectionKind::Library => BrowseMode::Tracks,
         SelectionKind::Playlist => BrowseMode::Playlists,
         SelectionKind::Artist => BrowseMode::Artists,
         SelectionKind::Genre => BrowseMode::Genres,
@@ -466,6 +471,9 @@ pub async fn search_options_page(
     offset: u32,
     query: &str,
 ) -> Result<SelectionOptionPage, SelectionError> {
+    if kind == SelectionKind::Library {
+        return Err(SelectionError::Setup);
+    }
     if !provider
         .capabilities()
         .browse
@@ -478,6 +486,7 @@ pub async fn search_options_page(
     let query = query.trim();
     let query_lower = query.to_lowercase();
     let values = match kind {
+        SelectionKind::Library => return Err(SelectionError::Setup),
         SelectionKind::Playlist => provider
             .list_playlists()
             .await
@@ -558,6 +567,7 @@ pub async fn resolve_option(
     source: &SelectionSource,
 ) -> Result<Option<SelectionOption>, SelectionError> {
     match source.kind {
+        SelectionKind::Library => Ok(None),
         SelectionKind::Artist => {
             let artist = provider
                 .get_artist(&source.ref_id)
@@ -605,6 +615,9 @@ pub async fn reference_exists(
     provider: &dyn MediaProvider,
     source: &SelectionSource,
 ) -> Result<bool, SelectionError> {
+    if source.kind == SelectionKind::Library {
+        return Ok(source.ref_id.is_empty());
+    }
     if !provider
         .capabilities()
         .browse
@@ -614,6 +627,7 @@ pub async fn reference_exists(
         return Err(SelectionError::SourceUnavailable);
     }
     match source.kind {
+        SelectionKind::Library => Ok(true),
         SelectionKind::Playlist => Ok(provider
             .list_playlists()
             .await
@@ -645,6 +659,11 @@ pub async fn fetch_source(
     provider: &dyn MediaProvider,
     source: &SelectionSource,
 ) -> Result<SelectionPool, SelectionError> {
+    if source.kind == SelectionKind::Library {
+        return fetch_radio_window(provider, source, RadioSourceCursor::default())
+            .await
+            .map(|(pool, _)| pool);
+    }
     if source.kind == SelectionKind::Artist
         && let Some(page) = provider
             .get_artist_tracks_page(&source.ref_id, 0, MAX_CANDIDATES_PER_SOURCE as u32)
@@ -663,6 +682,7 @@ pub async fn fetch_source(
         return Err(SelectionError::SourceUnavailable);
     }
     let mut tracks = match source.kind {
+        SelectionKind::Library => unreachable!("library handled above"),
         SelectionKind::Playlist => provider
             .get_playlist_tracks_bounded(&source.ref_id, MAX_CANDIDATES_PER_SOURCE as u32)
             .await
@@ -826,6 +846,17 @@ pub async fn fetch_radio_window(
     }
     let mut next = None;
     let tracks = match source.kind {
+        SelectionKind::Library => {
+            let (tracks, following) = fetch_offset_window(cursor, |offset, limit| async move {
+                provider
+                    .list_all_songs_page(None, offset, limit)
+                    .await
+                    .map(|(tracks, _)| tracks)
+            })
+            .await?;
+            next = following;
+            tracks
+        }
         SelectionKind::Playlist => {
             let (tracks, following) = fetch_offset_window(cursor, |offset, limit| {
                 provider.get_playlist_tracks_window(&source.ref_id, offset, limit)
@@ -1046,6 +1077,226 @@ fn select_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct GlobalProvider {
+        tracks: Vec<Song>,
+        calls: std::sync::Mutex<Vec<(Option<String>, u32, u32)>>,
+        fail_offset: Option<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl MediaProvider for GlobalProvider {
+        async fn list_libraries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Library>, crate::providers::ProviderError> {
+            unreachable!()
+        }
+        async fn list_artists(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Artist>, u32), crate::providers::ProviderError>
+        {
+            unreachable!()
+        }
+        async fn get_artist(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::ArtistWithAlbums, crate::providers::ProviderError>
+        {
+            unreachable!()
+        }
+        async fn list_albums(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Album>, u32), crate::providers::ProviderError>
+        {
+            unreachable!()
+        }
+        async fn get_album(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::AlbumWithTracks, crate::providers::ProviderError>
+        {
+            unreachable!()
+        }
+        async fn list_playlists(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Playlist>, crate::providers::ProviderError> {
+            unreachable!()
+        }
+        async fn get_playlist(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::PlaylistWithTracks, crate::providers::ProviderError>
+        {
+            unreachable!()
+        }
+        async fn search(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::SearchResult, crate::providers::ProviderError> {
+            unreachable!()
+        }
+        async fn download_url(
+            &self,
+            _: &str,
+            _: Option<&crate::providers::TranscodeProfile>,
+        ) -> Result<String, crate::providers::ProviderError> {
+            unreachable!()
+        }
+        async fn cover_art_url(&self, _: &str) -> Result<String, crate::providers::ProviderError> {
+            unreachable!()
+        }
+        async fn changes_since_with_context(
+            &self,
+            _: Option<&str>,
+            _: &crate::providers::ProviderChangeContext,
+        ) -> Result<Vec<crate::domain::models::ChangeEvent>, crate::providers::ProviderError>
+        {
+            unreachable!()
+        }
+        async fn scrobble(
+            &self,
+            _: crate::providers::ScrobbleRequest,
+        ) -> Result<(), crate::providers::ProviderError> {
+            unreachable!()
+        }
+        fn server_type(&self) -> crate::providers::ServerType {
+            crate::providers::ServerType::Subsonic
+        }
+        fn capabilities(&self) -> crate::providers::Capabilities {
+            crate::providers::Capabilities {
+                open_subsonic: false,
+                supports_changes_since: false,
+                supports_server_transcoding: false,
+                supports_playlist_write: false,
+                browse: crate::providers::BrowseCapabilities { list_modes: vec![] },
+            }
+        }
+        async fn list_all_songs_page(
+            &self,
+            library: Option<&str>,
+            offset: u32,
+            limit: u32,
+        ) -> Result<(Vec<Song>, u32), crate::providers::ProviderError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((library.map(str::to_owned), offset, limit));
+            if self.fail_offset == Some(offset) {
+                return Err(crate::providers::ProviderError::UnsupportedCapability(
+                    "failed".into(),
+                ));
+            }
+            Ok((
+                self.tracks
+                    .iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .cloned()
+                    .collect(),
+                self.tracks.len() as u32,
+            ))
+        }
+    }
+
+    #[test]
+    fn library_requires_no_reference_and_explicit_sources_still_require_one() {
+        let mut config = PlaybackSelectionConfig {
+            sources: vec![SelectionSource {
+                server_id: "portable".into(),
+                kind: SelectionKind::Library,
+                ref_id: String::new(),
+            }],
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        config.sources[0].ref_id = "unexpected".into();
+        assert!(config.validate().is_err());
+        config.sources[0].ref_id.clear();
+        config.sources[0].kind = SelectionKind::Playlist;
+        assert!(config.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn library_start_and_refill_use_bounded_global_pages_and_portable_identity() {
+        let provider = GlobalProvider {
+            tracks: (0..450).map(|i| song(&i.to_string(), "Track")).collect(),
+            calls: Default::default(),
+            fail_offset: None,
+        };
+        let source = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Library,
+            ref_id: String::new(),
+        };
+        let initial = fetch_source(&provider, &source).await.unwrap();
+        assert_eq!(initial.tracks.len(), MAX_CANDIDATES_PER_SOURCE);
+        let config = PlaybackSelectionConfig {
+            sources: vec![source.clone()],
+            max_tracks: 3,
+            ..Default::default()
+        };
+        let selected = select_with_recordings(&config, vec![initial]).unwrap();
+        assert_eq!(selected.len(), 3);
+        assert!(selected.iter().all(|track| track.server_id == "portable"));
+        let (_, next) = fetch_radio_window(&provider, &source, RadioSourceCursor::default())
+            .await
+            .unwrap();
+        assert_eq!(next.unwrap().index, 400);
+        let (second, end) = fetch_radio_window(&provider, &source, next.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(second.tracks.len(), 50);
+        assert_eq!(second.tracks[0].id, "400");
+        assert!(end.is_none());
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            vec![
+                (None, 0, 400),
+                (None, 0, 400),
+                (None, 400, 400),
+                (None, 450, 1)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_global_library_and_failed_fetch_remain_distinct() {
+        let source = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Library,
+            ref_id: String::new(),
+        };
+        let provider = GlobalProvider {
+            tracks: vec![],
+            calls: Default::default(),
+            fail_offset: None,
+        };
+        let pool = fetch_source(&provider, &source).await.unwrap();
+        let config = PlaybackSelectionConfig {
+            sources: vec![source.clone()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            select(&config, vec![pool]),
+            Err(SelectionError::Empty)
+        ));
+        let failed = GlobalProvider {
+            fail_offset: Some(0),
+            ..provider
+        };
+        assert!(matches!(
+            fetch_source(&failed, &source).await,
+            Err(SelectionError::SourceUnavailable)
+        ));
+    }
 
     #[tokio::test]
     async fn short_radio_page_requires_a_successful_next_offset_probe() {

@@ -510,7 +510,7 @@ export async function playbackSetFeedback(observed: PlaybackSessionSnapshot, val
     })).data;
 }
 
-export type PlaybackSelectionKind = 'playlist' | 'artist' | 'genre';
+export type PlaybackSelectionKind = 'library' | 'playlist' | 'artist' | 'genre';
 export type PlaybackSelectionOrdering = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery' | 'rarity';
 export interface PlaybackSelectionSource { serverId: string; kind: PlaybackSelectionKind; ref: string }
 export interface PlaybackSelectionConfig {

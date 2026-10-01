@@ -36,6 +36,113 @@ pub(crate) fn begin_start() -> u64 {
 mod ordering_tests {
     use super::*;
 
+    fn server(id: &str, role: Option<&str>) -> crate::db::ServerConfig {
+        crate::db::ServerConfig {
+            id: id.into(),
+            server_id: Some(format!("portable-{id}")),
+            url: String::new(),
+            server_type: if role.is_some() {
+                "audiobookshelf"
+            } else {
+                "subsonic"
+            }
+            .into(),
+            username: String::new(),
+            server_version: None,
+            name: None,
+            icon: None,
+            updated_at: 0,
+            selected: false,
+            server_reported_id: None,
+            provider_library_id: None,
+            provider_library_role: role.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn automatic_radio_resolves_current_music_or_first_music_in_order() {
+        let servers = vec![
+            server("books", Some("audiobook")),
+            server("first", None),
+            server("podcasts", Some("podcast")),
+            server("current", None),
+        ];
+        for (selected, expected) in [
+            (Some("current"), "portable-current"),
+            (Some("books"), "portable-first"),
+            (Some("podcasts"), "portable-first"),
+            (None, "portable-first"),
+        ] {
+            let original = PlaybackSelectionConfig {
+                seed: 72,
+                max_tracks: 3,
+                ..Default::default()
+            };
+            let resolved = resolve_default_config(original.clone(), &servers, selected).unwrap();
+            assert!(original.sources.is_empty());
+            assert_eq!(resolved.sources.len(), 1);
+            assert_eq!(resolved.sources[0].server_id, expected);
+            assert_eq!(resolved.sources[0].kind, SelectionKind::Library);
+            assert!(resolved.sources[0].ref_id.is_empty());
+            assert_eq!(resolved.seed, 72);
+            assert_eq!(resolved.max_tracks, 3);
+            assert_eq!(resolved.ordering, original.ordering);
+            // Session restoration uses the concrete scope even after browsing changes.
+            assert_eq!(
+                resolve_default_config(resolved.clone(), &servers, Some("first")).unwrap(),
+                resolved
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_resolution_preserves_explicit_sources_and_configuration_errors() {
+        let explicit = PlaybackSelectionConfig {
+            sources: vec![selection::SelectionSource {
+                server_id: "missing".into(),
+                kind: SelectionKind::Playlist,
+                ref_id: "saved".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_default_config(explicit.clone(), &[], None).unwrap(),
+            explicit
+        );
+        assert!(matches!(
+            resolve_default_config(
+                PlaybackSelectionConfig::default(),
+                &[
+                    server("books", Some("audiobook")),
+                    server("podcasts", Some("podcast"))
+                ],
+                None
+            ),
+            Err(SelectionError::NoMusicServer)
+        ));
+        assert!(matches!(
+            resolve_default_config(
+                PlaybackSelectionConfig {
+                    schema_version: 2,
+                    ..Default::default()
+                },
+                &[],
+                None
+            ),
+            Err(SelectionError::Setup)
+        ));
+        let mut missing_identity = server("first", None);
+        missing_identity.server_id = None;
+        assert!(matches!(
+            resolve_default_config(
+                PlaybackSelectionConfig::default(),
+                &[missing_identity, server("second", None)],
+                None
+            ),
+            Err(SelectionError::SourceUnavailable)
+        ));
+    }
+
     #[test]
     fn later_session_command_invalidates_pending_start() {
         let ticket = START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
@@ -83,7 +190,7 @@ pub(super) async fn test_ticket() -> u64 {
 
 fn error(kind: SelectionError) -> JsonRpcError {
     let code = match kind {
-        SelectionError::Setup => ERR_INVALID_PARAMS,
+        SelectionError::Setup | SelectionError::NoMusicServer => ERR_INVALID_PARAMS,
         SelectionError::Save => ERR_STORAGE_ERROR,
         SelectionError::SourceUnavailable | SelectionError::PreparationFailed => {
             super::ERR_CONNECTION_FAILED
@@ -183,6 +290,7 @@ pub async fn options(state: &AppState, params: Option<Value>) -> Result<Value, J
     }
     let provider = provider(state, &args.server_id).await?;
     let required_mode = match args.kind {
+        SelectionKind::Library => return Err(error(SelectionError::Setup)),
         SelectionKind::Playlist => crate::providers::BrowseMode::Playlists,
         SelectionKind::Artist => crate::providers::BrowseMode::Artists,
         SelectionKind::Genre => crate::providers::BrowseMode::Genres,
@@ -297,6 +405,38 @@ pub(crate) async fn start_with_ticket(
     start_with_config(state, config, ticket, mutation_guard).await
 }
 
+/// Resolve once per start; only the admitted session stores this concrete scope.
+fn resolve_default_config(
+    mut config: PlaybackSelectionConfig,
+    servers: &[crate::db::ServerConfig],
+    selected_id: Option<&str>,
+) -> Result<PlaybackSelectionConfig, SelectionError> {
+    config.validate()?;
+    if !config.sources.is_empty() {
+        return Ok(config);
+    }
+    let music = |server: &&crate::db::ServerConfig| {
+        server.provider_library_role.is_none() && server.server_type != "audiobookshelf"
+    };
+    let server = servers
+        .iter()
+        .filter(music)
+        .find(|server| Some(server.id.as_str()) == selected_id)
+        .or_else(|| servers.iter().find(music))
+        .ok_or(SelectionError::NoMusicServer)?;
+    let server_id = server
+        .server_id
+        .as_ref()
+        .filter(|id| !id.is_empty())
+        .ok_or(SelectionError::SourceUnavailable)?;
+    config.sources.push(selection::SelectionSource {
+        server_id: server_id.clone(),
+        kind: SelectionKind::Library,
+        ref_id: String::new(),
+    });
+    Ok(config)
+}
+
 pub(super) async fn start_with_config(
     state: &AppState,
     config: PlaybackSelectionConfig,
@@ -306,9 +446,17 @@ pub(super) async fn start_with_config(
     if START_EPOCH.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
-    if config.sources.is_empty() {
-        return Err(error(SelectionError::Setup));
-    }
+    config.validate().map_err(error)?;
+    let config = if config.sources.is_empty() {
+        let servers = state
+            .db
+            .list_servers()
+            .map_err(|_| error(SelectionError::Save))?;
+        let selected = state.server_manager.read().await.selected_server_id.clone();
+        resolve_default_config(config, &servers, selected.as_deref()).map_err(error)?
+    } else {
+        config
+    };
     let fetch = async {
         let mut pools: Vec<SelectionPool> = Vec::with_capacity(config.sources.len());
         for source in &config.sources {

@@ -107,8 +107,8 @@ export class PlaybackSelectionSettings {
 
     private updateActions(): void {
         this.add.disabled = this.busy || this.saving || this.config.sources.length >= 8 || this.servers.length === 0;
-        this.save.disabled = this.busy || this.saving || !this.dirty || this.config.sources.some(source => !source.ref);
-        this.start.disabled = this.busy || this.cancelling || this.saving || this.dirty || this.config.sources.length === 0;
+        this.save.disabled = this.busy || this.saving || !this.dirty || this.config.sources.some(source => source.kind !== 'library' && !source.ref);
+        this.start.disabled = this.busy || this.cancelling || this.saving || this.dirty;
         this.cancel.disabled = !this.busy || this.cancelling;
     }
 
@@ -131,7 +131,7 @@ export class PlaybackSelectionSettings {
             }
             server.value = source.serverId;
             const kind = document.createElement('select');
-            for (const value of kinds) kind.add(new Option(t(`playback.selection.kind.${value}`), value));
+            for (const value of source.kind === 'library' ? ['library', ...kinds] : kinds) kind.add(new Option(t(`playback.selection.kind.${value}`), value));
             kind.value = source.kind;
             const ref = document.createElement('input'); ref.type = 'text'; ref.autocomplete = 'off';
             ref.setAttribute('role', 'combobox'); ref.setAttribute('aria-autocomplete', 'list');
@@ -189,7 +189,14 @@ export class PlaybackSelectionSettings {
                 next => load(next));
             const reset = () => {
                 if (timer) { clearTimeout(timer); this.searchTimers.delete(timer); }
-                source.ref = ''; ref.value = ''; query = ''; this.markDirty(); load();
+                source.ref = ''; ref.value = ''; query = ''; this.markDirty();
+                ref.disabled = source.kind === 'library';
+                if (ref.disabled) {
+                    this.optionRequests.set(ref, (this.optionRequests.get(ref) ?? 0) + 1);
+                    inputBusy(false); more.hidden = true; renderChoices([]);
+                    explanation.textContent = '';
+                    ref.value = t('playback.selection.kind.library');
+                } else load();
             };
             server.addEventListener('change', () => { source.serverId = server.value; reset(); });
             kind.addEventListener('change', () => { source.kind = kind.value as PlaybackSelectionKind; reset(); });
@@ -220,7 +227,12 @@ export class PlaybackSelectionSettings {
             row.append(this.label('playback.selection.server', server), this.label('playback.selection.kind', kind),
                 picker, more, remove, explanation);
             this.rows.append(row);
-            load(0, true);
+            if (source.kind === 'library') {
+                ref.disabled = true;
+                ref.value = t('playback.selection.kind.library');
+            } else {
+                load(0, true);
+            }
         });
         this.updateActions();
     }
@@ -272,7 +284,7 @@ export class PlaybackSelectionSettings {
 
     private async saveConfig(): Promise<void> {
         const seed = Number(this.seed.value);
-        if (!Number.isSafeInteger(seed) || seed < 0 || seed > 4294967295 || this.config.sources.some(source => !source.ref)) {
+        if (!Number.isSafeInteger(seed) || seed < 0 || seed > 4294967295 || this.config.sources.some(source => source.kind !== 'library' && !source.ref)) {
             this.status.textContent = t('playback.selection.invalid'); return;
         }
         const ordering = this.ordering.value === this.config.ordering[0]
@@ -312,6 +324,7 @@ export class PlaybackSelectionSettings {
                     : message.includes('PLAYBACK_BUSY') ? t('playback.selection.busy')
                     : message.includes('OUTPUT_') ? t('playback.output.choose')
                     : message.includes('PLAYBACK_SELECTION_EMPTY') ? t('playback.selection.empty')
+                    : message.includes('PLAYBACK_SELECTION_NO_MUSIC_SERVER') ? t('playback.selection.no_music_server')
                     : message.includes('PLAYBACK_SELECTION_SETUP') ? t('playback.selection.invalid')
                     : message.includes('PLAYBACK_SELECTION_CANCELLED') ? t('playback.selection.cancelled')
                     : t('playback.selection.unavailable');

@@ -597,6 +597,7 @@ export class PlaybackControls {
                 this.startStatus.textContent = t(code.includes('PLAYBACK_SELECTION_SAVE_FAILED') ? 'playback.selection.load_failed'
                     : code.includes('PLAYBACK_SELECTION_PREPARATION_FAILED') ? 'playback.selection.preparation_failed'
                     : code.includes('PLAYBACK_SELECTION_EMPTY') ? 'playback.selection.empty'
+                    : code.includes('PLAYBACK_SELECTION_NO_MUSIC_SERVER') ? 'playback.selection.no_music_server'
                     : code.includes('PLAYBACK_SELECTION_SETUP') ? 'playback.selection.invalid' : 'playback.selection.unavailable');
             }
         } finally {

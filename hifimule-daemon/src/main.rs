@@ -730,6 +730,7 @@ fn playback_failure_message(code: &str) -> String {
 
 fn play_something_failure_message(code: &str) -> String {
     let key = match code {
+        "PLAYBACK_SELECTION_NO_MUSIC_SERVER" => "playback.selection.no_music_server",
         "PLAYBACK_SELECTION_SETUP" => "playback.selection.invalid",
         "PLAYBACK_SELECTION_SAVE_FAILED" => "playback.selection.load_failed",
         "PLAYBACK_SELECTION_EMPTY" => "playback.selection.empty",

@@ -43,7 +43,8 @@ export function createRadioPlayButton(item: BrowseDisplayItem): HTMLElement | nu
                 : code.includes('PERSISTENCE_FAILED') ? 'playback.command_error.persistence'
                 : code.includes('PLAYBACK_SELECTION_PREPARATION_FAILED') ? 'playback.selection.preparation_failed'
                 : code.includes('PLAYBACK_SELECTION_EMPTY') ? 'playback.selection.empty'
-                : code.includes('PLAYBACK_SELECTION_SETUP') ? 'playback.selection.invalid'
+                : code.includes('PLAYBACK_SELECTION_NO_MUSIC_SERVER') ? 'playback.selection.no_music_server'
+                    : code.includes('PLAYBACK_SELECTION_SETUP') ? 'playback.selection.invalid'
                 : 'playback.selection.unavailable';
             showToast(t(key), 'danger');
         } finally {

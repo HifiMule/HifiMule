@@ -17910,7 +17910,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(empty.data.unwrap()["code"], "PLAYBACK_SELECTION_SETUP");
+        assert_eq!(empty.data.unwrap()["code"], "PLAYBACK_SELECTION_NO_MUSIC_SERVER");
         let config = PlaybackSelectionConfig {
             sources: vec![SelectionSource {
                 server_id: "missing-portable".into(),
