@@ -1067,6 +1067,45 @@ fn select_inner(
         .filter(|source| seen.insert((source.server_id.clone(), source.track_id.clone())))
         .take(usize::from(config.max_tracks))
         .collect();
+    if group_recordings {
+        static LOG_PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pass = LOG_PASS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::daemon_log!(
+            "[Radio] ranking pass={} seed={} ordering={:?} limit={} fetched={} unique_tracks={} recording_groups={} selected={} copy_policy=same_codec_bitrate_then_source_order",
+            pass,
+            config.seed,
+            config.ordering,
+            config.max_tracks,
+            pools.iter().map(|pool| pool.tracks.len()).sum::<usize>(),
+            identities.len(),
+            best_copy.len(),
+            result.len(),
+        );
+        // Only this bounded prefix can be attempted before Radio's preparation
+        // budget is spent. Avoid a log write for every configured initial track.
+        for (rank, source) in result
+            .iter()
+            .take(super::radio::AUTO_UPCOMING_TARGET + super::radio::MAX_PREPARATION_FAILURES)
+            .enumerate()
+        {
+            let song = pools
+                .iter()
+                .filter(|pool| pool.source.server_id == source.server_id)
+                .flat_map(|pool| &pool.tracks)
+                .find(|song| song.id == source.track_id);
+            crate::daemon_log!(
+                "[Radio] ranked_candidate pass={} rank={} server={:?} track={:?} title={:?} artist={:?} codec={:?} bitrate_kbps={:?}",
+                pass,
+                rank + 1,
+                source.server_id,
+                source.track_id,
+                song.map(|song| &song.title),
+                song.map(|song| &song.artist_name),
+                song.and_then(|song| song.suffix.as_deref()),
+                song.and_then(|song| song.bitrate_kbps),
+            );
+        }
+    }
     if result.is_empty() {
         Err(SelectionError::Empty)
     } else {

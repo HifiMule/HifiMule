@@ -457,6 +457,13 @@ pub(super) async fn start_with_config(
     } else {
         config
     };
+    crate::daemon_log!(
+        "[Radio] start ticket={} sources={} seed={} ordering={:?}",
+        ticket,
+        config.sources.len(),
+        config.seed,
+        config.ordering
+    );
     let fetch = async {
         let mut pools: Vec<SelectionPool> = Vec::with_capacity(config.sources.len());
         for source in &config.sources {
@@ -464,10 +471,31 @@ pub(super) async fn start_with_config(
                 return Err(error(SelectionError::Cancelled));
             }
             let Ok(provider) = provider(state, &source.server_id).await else {
+                crate::daemon_log!(
+                    "[Radio] start_source_failed ticket={} server={:?} kind={:?} stage=provider",
+                    ticket,
+                    source.server_id,
+                    source.kind
+                );
                 continue;
             };
             if let Ok(pool) = selection::fetch_source(provider.as_ref(), source).await {
+                crate::daemon_log!(
+                    "[Radio] start_source ticket={} server={:?} kind={:?} reference={:?} fetched={}",
+                    ticket,
+                    source.server_id,
+                    source.kind,
+                    source.ref_id,
+                    pool.tracks.len()
+                );
                 pools.push(pool);
+            } else {
+                crate::daemon_log!(
+                    "[Radio] start_source_failed ticket={} server={:?} kind={:?} stage=fetch",
+                    ticket,
+                    source.server_id,
+                    source.kind
+                );
             }
         }
         if pools.is_empty() {
@@ -504,8 +532,23 @@ pub(super) async fn start_with_config(
                         crate::playback::audio::prepare_selection_source(description).await
                 {
                     let center = selection::radio_center_for_source(&config, &pools, &source);
+                    crate::daemon_log!(
+                        "[Radio] start_prepared ticket={} server={:?} track={:?} alternate={} center={:?}",
+                        ticket,
+                        source.server_id,
+                        source.track_id,
+                        source != primary,
+                        center
+                    );
                     return Ok((source, center, prepared));
                 }
+                crate::daemon_log!(
+                    "[Radio] start_preparation_failed ticket={} server={:?} track={:?} alternate={}",
+                    ticket,
+                    source.server_id,
+                    source.track_id,
+                    source != primary
+                );
                 failures += 1;
             }
         }
@@ -570,13 +613,46 @@ pub(super) async fn run_radio_worker(
             Ok(Ok(Some(lease))) => lease,
             _ => continue,
         };
+        crate::daemon_log!(
+            "[Radio] refill_begin refill={} session={} cycle={} capacity={} center={:?}",
+            lease.refill_id,
+            lease.session_id,
+            lease.cycle,
+            lease.capacity,
+            lease.center
+        );
         let (candidates, reason, more_windows, transition) =
             gather_radio_candidates(&state, &lease).await;
+        crate::daemon_log!(
+            "[Radio] refill_plan refill={} candidates={} reason={:?} more_windows={} transition={:?}",
+            lease.refill_id,
+            candidates.len(),
+            reason,
+            more_windows,
+            transition
+        );
         let owner = state.playback.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let refill_id = lease.refill_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
             owner.admit_radio_refill_plan(lease, candidates, reason, more_windows, transition)
         })
         .await;
+        match result {
+            Ok(Ok(admitted)) => crate::daemon_log!(
+                "[Radio] refill_result refill={} admitted={}",
+                refill_id,
+                admitted
+            ),
+            Ok(Err(error)) => crate::daemon_log!(
+                "[Radio] refill_failed refill={} code={}",
+                refill_id,
+                error.code
+            ),
+            Err(_) => crate::daemon_log!(
+                "[Radio] refill_failed refill={} code=WORKER_JOIN_FAILED",
+                refill_id
+            ),
+        }
     }
 }
 
@@ -589,12 +665,24 @@ async fn prepare_radio_copy(
         return false;
     }
     let Ok(source_provider) = provider(state, &source.server_id).await else {
+        crate::daemon_log!(
+            "[Radio] preparation_failed refill={} server={:?} track={:?} stage=provider",
+            lease.refill_id,
+            source.server_id,
+            source.track_id
+        );
         return false;
     };
     if !state.playback.radio_lease_current(lease) {
         return false;
     }
     let Ok(description) = source_provider.resolve_playback(&source.track_id).await else {
+        crate::daemon_log!(
+            "[Radio] preparation_failed refill={} server={:?} track={:?} stage=resolve",
+            lease.refill_id,
+            source.server_id,
+            source.track_id
+        );
         return false;
     };
     if !state.playback.radio_lease_current(lease) {
@@ -603,7 +691,16 @@ async fn prepare_radio_copy(
     let prepared = crate::playback::audio::prepare_selection_source(description)
         .await
         .is_ok();
-    prepared && state.playback.radio_lease_current(lease)
+    let current = state.playback.radio_lease_current(lease);
+    crate::daemon_log!(
+        "[Radio] preparation_result refill={} server={:?} track={:?} playable={} lease_current={}",
+        lease.refill_id,
+        source.server_id,
+        source.track_id,
+        prepared,
+        current
+    );
+    prepared && current
 }
 
 async fn gather_radio_candidates(
@@ -672,9 +769,14 @@ async fn gather_radio_candidates(
                     if !state.playback.radio_lease_current(lease) {
                         break;
                     }
+                    let fetched = pool.tracks.len();
+                    let mut ambiguous = 0;
+                    let mut unrelated = 0;
+                    let mut already_used = 0;
                     let mut eligible = Vec::new();
                     for song in pool.tracks.drain(..) {
                         if song.provider_metadata.ambiguous_music_artist {
+                            ambiguous += 1;
                             continue;
                         }
                         let same_artist =
@@ -687,6 +789,7 @@ async fn gather_radio_candidates(
                             .map(|key| key.as_str().to_owned());
                         if !same_artist && key.as_ref().is_none_or(|key| !anchor_keys.contains(key))
                         {
+                            unrelated += 1;
                             continue;
                         }
                         let identity = crate::playback::model::TrackSource {
@@ -713,10 +816,25 @@ async fn gather_radio_candidates(
                                         .unwrap_or(true)
                                 })
                         {
+                            already_used += 1;
                             continue;
                         }
                         eligible.push(song);
                     }
+                    crate::daemon_log!(
+                        "[Radio] source_window refill={} phase=center server={:?} kind={:?} reference={:?} cursor={:?} fetched={} eligible={} ambiguous={} unrelated={} already_used_or_history_unavailable={} more={}",
+                        lease.refill_id,
+                        source.server_id,
+                        source.kind,
+                        source.ref_id,
+                        cursor,
+                        fetched,
+                        eligible.len(),
+                        ambiguous,
+                        unrelated,
+                        already_used,
+                        next.is_some()
+                    );
                     if eligible.is_empty() {
                         if state.playback.radio_lease_current(lease) {
                             if state
@@ -741,7 +859,16 @@ async fn gather_radio_candidates(
                     pool.tracks = eligible;
                     pools.push(pool);
                 }
-                Err(_) => failed_source = true,
+                Err(_) => {
+                    crate::daemon_log!(
+                        "[Radio] source_window_failed refill={} phase=center server={:?} kind={:?} cursor={:?}",
+                        lease.refill_id,
+                        source.server_id,
+                        source.kind,
+                        cursor
+                    );
+                    failed_source = true;
+                }
             }
         }
         pools
@@ -939,6 +1066,13 @@ async fn gather_transition_candidates(
     });
     let related_phase = lease.center.is_some() && !ranked.is_empty() && related_remaining;
     let phase = if related_phase { "related" } else { "fresh" };
+    crate::daemon_log!(
+        "[Radio] transition_phase refill={} phase={} relations={} relation_unknown={}",
+        lease.refill_id,
+        phase,
+        ranked.len(),
+        relation_unknown
+    );
     let (mut pools, cursors, failed) = match tokio::time::timeout(DEADLINE, async {
         let mut pools = Vec::new();
         let mut cursors = Vec::new();
@@ -974,6 +1108,7 @@ async fn gather_transition_candidates(
                     if !state.playback.radio_lease_current(lease) {
                         break;
                     }
+                    let fetched = pool.tracks.len();
                     let mut seen_heard = false;
                     pool.tracks.retain(|song| {
                         if song.provider_metadata.ambiguous_music_artist
@@ -1036,10 +1171,17 @@ async fn gather_transition_candidates(
                                         .unwrap_or(true)
                                 })
                     });
+                    crate::daemon_log!("[Radio] source_window refill={} phase={} server={:?} kind={:?} reference={:?} cursor={:?} fetched={} eligible={} filtered={} saw_heard={} more={}",
+                        lease.refill_id, phase, source.server_id, source.kind, source.ref_id, cursor,
+                        fetched, pool.tracks.len(), fetched - pool.tracks.len(), seen_heard, next.is_some());
                     pools.push(pool);
                     cursors.push((key, cursor, next, seen_heard));
                 }
-                Err(_) => failed = true,
+                Err(_) => {
+                    crate::daemon_log!("[Radio] source_window_failed refill={} phase={} server={:?} kind={:?} cursor={:?}",
+                        lease.refill_id, phase, source.server_id, source.kind, cursor);
+                    failed = true;
+                }
             }
         }
         (pools, cursors, failed)

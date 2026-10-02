@@ -143,7 +143,23 @@ pub fn choose_transition(
             pool
         })
         .collect();
+    crate::daemon_log!(
+        "[Radio] transition_search relations={} allow_fresh={} fetched={} stable_artist_tracks={}",
+        relations.len(),
+        allow_fresh,
+        pools.iter().map(|pool| pool.tracks.len()).sum::<usize>(),
+        valid_pools
+            .iter()
+            .map(|pool| pool.tracks.len())
+            .sum::<usize>(),
+    );
     for relation in relations {
+        crate::daemon_log!(
+            "[Radio] transition_attempt kind={:?} server={:?} artist_id={:?}",
+            relation.kind,
+            relation.center.server_id,
+            relation.center.artist_id,
+        );
         let scoped = valid_pools
             .iter()
             .cloned()
@@ -162,10 +178,20 @@ pub fn choose_transition(
         if let Ok(ordered) = super::selection::select_radio_order(settings, scoped)
             && !ordered.is_empty()
         {
+            crate::daemon_log!(
+                "[Radio] transition_proposed kind={:?} server={:?} artist_id={:?} candidates={}",
+                relation.kind,
+                relation.center.server_id,
+                relation.center.artist_id,
+                ordered.len()
+            );
             return Some((relation.clone(), ordered));
         }
     }
     if !allow_fresh {
+        crate::daemon_log!(
+            "[Radio] transition_search no_related_candidate; continuing related scan"
+        );
         return None;
     }
     let ordered = super::selection::select_radio_order(settings, valid_pools.clone()).ok()?;
@@ -198,6 +224,12 @@ pub fn choose_transition(
         if let Ok(ordered) = super::selection::select_radio_order(settings, scoped)
             && !ordered.is_empty()
         {
+            crate::daemon_log!(
+                "[Radio] transition_proposed kind=NewStartingPoint server={:?} artist_id={:?} candidates={}",
+                center.server_id,
+                center.artist_id,
+                ordered.len()
+            );
             return Some((
                 RadioTransition::new(center, RadioTransitionKind::NewStartingPoint),
                 ordered,

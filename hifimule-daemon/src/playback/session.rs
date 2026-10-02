@@ -2536,6 +2536,10 @@ fn admit_radio_inner(
     generation_serial: &AtomicU64,
 ) -> PResult<bool> {
     if i.radio_inflight.as_deref() != Some(lease.refill_id.as_str()) {
+        crate::daemon_log!(
+            "[Radio] refill_discarded refill={} reason=superseded",
+            lease.refill_id
+        );
         return Ok(false);
     }
     i.radio_inflight = None;
@@ -2554,6 +2558,10 @@ fn admit_radio_inner(
             .as_ref()
             .is_none_or(|radio| radio.cycle != lease.cycle)
     {
+        crate::daemon_log!(
+            "[Radio] refill_discarded refill={} reason=session_or_queue_changed",
+            lease.refill_id
+        );
         wake_radio(i);
         return Ok(false);
     }
@@ -2604,6 +2612,15 @@ fn admit_radio_inner(
         } else {
             i.db.checkpoint_radio_state(&next).map_err(storage)?;
         }
+        crate::daemon_log!(
+            "[Radio] cycle_result refill={} cycle={:?} status={:?} reason={:?}",
+            lease.refill_id,
+            next.radio.as_ref().map(|radio| radio.cycle),
+            next.radio.as_ref().map(|radio| radio.status),
+            next.radio
+                .as_ref()
+                .and_then(|radio| radio.reason.as_deref())
+        );
         i.session = next;
         i.state_sequence = i.state_sequence.saturating_add(1);
         return Ok(false);
@@ -2632,6 +2649,12 @@ fn admit_radio_inner(
                     .and_then(|e| e.key())
                     .is_some())
         }) {
+            crate::daemon_log!(
+                "[Radio] admission_skipped refill={} server={:?} track={:?} reason=artist_mismatch",
+                lease.refill_id,
+                candidate.source.server_id,
+                candidate.source.track_id
+            );
             continue;
         }
         if i.db
@@ -2642,6 +2665,12 @@ fn admit_radio_inner(
                 .map_err(storage)?
             || sources.contains(&candidate.source)
         {
+            crate::daemon_log!(
+                "[Radio] admission_skipped refill={} server={:?} track={:?} reason=track_already_used",
+                lease.refill_id,
+                candidate.source.server_id,
+                candidate.source.track_id
+            );
             continue;
         }
         if let Some(key) = candidate
@@ -2656,6 +2685,12 @@ fn admit_radio_inner(
                 .map_err(storage)?
                 || !recording_keys.insert(key.as_str().to_owned())
             {
+                crate::daemon_log!(
+                    "[Radio] admission_skipped refill={} server={:?} track={:?} reason=recording_already_used",
+                    lease.refill_id,
+                    candidate.source.server_id,
+                    candidate.source.track_id
+                );
                 continue;
             }
         }
@@ -2685,11 +2720,24 @@ fn admit_radio_inner(
     }
     if sources.is_empty() {
         i.db.checkpoint_radio_state(&next).map_err(storage)?;
+        crate::daemon_log!(
+            "[Radio] refill_empty refill={} status={:?} reason={:?} more_windows={}",
+            lease.refill_id,
+            next.radio.as_ref().map(|radio| radio.status),
+            next.radio
+                .as_ref()
+                .and_then(|radio| radio.reason.as_deref()),
+            more_windows
+        );
         i.session = next;
         i.state_sequence = i.state_sequence.saturating_add(1);
         return Ok(false);
     }
     if fence_successor_for_edit(i).is_err() {
+        crate::daemon_log!(
+            "[Radio] refill_discarded refill={} reason=successor_transition_in_progress",
+            lease.refill_id
+        );
         i.radio_wait_for_transition = true;
         return Ok(false);
     }
@@ -2707,6 +2755,33 @@ fn admit_radio_inner(
     next.queue_revision = checked_next_revision(next.queue_revision)?;
     i.db.append_radio_occurrences(&next, current_id, &assigned, &accepted)
         .map_err(storage)?;
+    for (occurrence, candidate) in assigned.iter().zip(&accepted) {
+        crate::daemon_log!(
+            "[Radio] track_chosen refill={} session={} cycle={} ordinal={} server={:?} track={:?} title={:?} artist={:?} center={:?} reason={:?}",
+            lease.refill_id,
+            next.session_id,
+            lease.cycle,
+            occurrence.ordinal,
+            candidate.source.server_id,
+            candidate.source.track_id,
+            candidate.song.title,
+            candidate.song.artist_name,
+            next.radio.as_ref().and_then(|radio| radio.center.as_ref()),
+            next.radio
+                .as_ref()
+                .and_then(|radio| radio.reason.as_deref())
+        );
+    }
+    crate::daemon_log!(
+        "[Radio] refill_committed refill={} admitted={} queue_revision={} status={:?} reason={:?}",
+        lease.refill_id,
+        assigned.len(),
+        next.queue_revision,
+        next.radio.as_ref().map(|radio| radio.status),
+        next.radio
+            .as_ref()
+            .and_then(|radio| radio.reason.as_deref())
+    );
     i.session = next;
     i.state_sequence = i.state_sequence.saturating_add(1);
     if resume {
@@ -3615,6 +3690,19 @@ fn apply_inner_with_album_context(
             code: code.into(),
             retryable: true,
         });
+    }
+    if let SessionOperation::StartRadio { source, .. } = &p.operation {
+        crate::daemon_log!(
+            "[Radio] start_committed session={} server={:?} track={:?} center={:?} queue_revision={}",
+            i.session.session_id,
+            source.server_id,
+            source.track_id,
+            i.session
+                .radio
+                .as_ref()
+                .and_then(|radio| radio.center.as_ref()),
+            i.session.queue_revision
+        );
     }
     Ok(ApplyResult {
         start_audio: matches!(
