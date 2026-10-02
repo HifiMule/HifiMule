@@ -18,6 +18,9 @@ use crate::playback::{
 pub(crate) static START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) static START_EPOCH: AtomicU64 = AtomicU64::new(0);
 const DEADLINE: Duration = Duration::from_secs(15);
+// Full-library startup ranking streams bounded pages; allow larger catalogues
+// more retrieval time without lengthening preparation or refill deadlines.
+const LIBRARY_START_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A later accepted session command wins over any selection still fetching or
 /// preparing. The same gate orders invalidation against the owner's final
@@ -57,6 +60,96 @@ mod ordering_tests {
             provider_library_id: None,
             provider_library_role: role.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn new_radio_seed_changes_without_mutating_saved_priorities() {
+        let saved = PlaybackSelectionConfig {
+            seed: 0,
+            ordering: vec![crate::auto_fill::pipeline::OrderingKey::Favorite],
+            ..Default::default()
+        };
+        let first = fresh_radio_config(saved.clone());
+        let next = fresh_radio_config(first.clone());
+        assert_ne!(first.seed, saved.seed);
+        assert_ne!(next.seed, first.seed);
+        assert_eq!(next.ordering, saved.ordering);
+        assert_eq!(saved.seed, 0);
+        next.validate().unwrap();
+    }
+
+    #[test]
+    fn previous_radio_track_is_source_qualified_and_sorted_last() {
+        use crate::playback::model::TrackSource;
+        let previous = TrackSource {
+            server_id: "one".into(),
+            track_id: "top".into(),
+        };
+        let alternative = TrackSource {
+            server_id: "one".into(),
+            track_id: "next".into(),
+        };
+        let other_server = TrackSource {
+            server_id: "two".into(),
+            track_id: "top".into(),
+        };
+        assert!(!repeats_previous_start(
+            &other_server,
+            Some(&previous),
+            None,
+            &[]
+        ));
+        let mut selected = vec![previous.clone(), alternative.clone()];
+        selected.sort_by_key(|source| repeats_previous_start(source, Some(&previous), None, &[]));
+        assert_eq!(selected, vec![alternative, previous]);
+    }
+
+    #[test]
+    fn previous_recording_copy_is_avoided_even_when_original_is_not_in_shortlist() {
+        use crate::playback::{
+            model::TrackSource,
+            recording::{RecordingEvidence, RecordingProvenance},
+        };
+        let previous = TrackSource {
+            server_id: "old".into(),
+            track_id: "original".into(),
+        };
+        let copy = TrackSource {
+            server_id: "new".into(),
+            track_id: "copy".into(),
+        };
+        let mut song: crate::domain::models::Song = serde_json::from_value(
+            serde_json::json!({"id":"copy", "title":"Take", "duration":180}),
+        )
+        .unwrap();
+        let evidence = RecordingEvidence::from_recording_field(
+            RecordingProvenance::OpenSubsonicSong,
+            Some("189002e7-3285-4e2e-92a3-7f6c30d407a2"),
+            "Take",
+        );
+        let key = evidence.key().unwrap().as_str().to_owned();
+        song.provider_metadata.recording = Some(evidence);
+        let pools = vec![SelectionPool {
+            source: selection::SelectionSource {
+                server_id: "new".into(),
+                kind: SelectionKind::Library,
+                ref_id: String::new(),
+            },
+            tracks: vec![song],
+        }];
+        assert!(repeats_previous_start(
+            &copy,
+            Some(&previous),
+            Some(&key),
+            &pools
+        ));
+        assert!(!repeats_previous_start(
+            &copy,
+            Some(&previous),
+            None,
+            &pools
+        ));
+        assert!(!repeats_previous_start(&copy, None, Some(&key), &pools));
     }
 
     #[test]
@@ -437,6 +530,43 @@ fn resolve_default_config(
     Ok(config)
 }
 
+fn fresh_radio_config(mut config: PlaybackSelectionConfig) -> PlaybackSelectionConfig {
+    let old = config.seed;
+    loop {
+        config.seed = u64::from(rand::random::<u32>());
+        if config.seed != old {
+            return config;
+        }
+    }
+}
+
+fn repeats_previous_start(
+    source: &crate::playback::model::TrackSource,
+    previous: Option<&crate::playback::model::TrackSource>,
+    previous_recording: Option<&str>,
+    pools: &[SelectionPool],
+) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    if source == previous {
+        return true;
+    }
+    let recording = |source: &crate::playback::model::TrackSource| {
+        pools
+            .iter()
+            .filter(|pool| pool.source.server_id == source.server_id)
+            .flat_map(|pool| &pool.tracks)
+            .find(|song| song.id == source.track_id)
+            .and_then(|song| song.provider_metadata.recording.as_ref())
+            .and_then(|e| e.key())
+    };
+    if let Some(previous_recording) = previous_recording {
+        return recording(source).is_some_and(|key| key.as_str() == previous_recording);
+    }
+    recording(previous).is_some_and(|key| recording(source).is_some_and(|other| key == other))
+}
+
 pub(super) async fn start_with_config(
     state: &AppState,
     config: PlaybackSelectionConfig,
@@ -456,6 +586,33 @@ pub(super) async fn start_with_config(
         resolve_default_config(config, &servers, selected.as_deref()).map_err(error)?
     } else {
         config
+    };
+    let config = fresh_radio_config(config);
+    let before = state.playback.snapshot().map_err(super::playback_error)?;
+    let previous = (before.queue_kind == crate::playback::model::QueueKind::Radio)
+        .then(|| {
+            before
+                .main_current
+                .as_ref()
+                .or(before.current.as_ref())
+                .map(|item| item.source.clone())
+        })
+        .flatten();
+    let previous_recording = if previous.is_some() {
+        before
+            .main_current
+            .as_ref()
+            .or(before.current.as_ref())
+            .map(|item| {
+                state
+                    .db
+                    .radio_occurrence_recording_key(&before.session_id, &item.occurrence_id)
+            })
+            .transpose()
+            .map_err(|_| error(SelectionError::Save))?
+            .flatten()
+    } else {
+        None
     };
     crate::daemon_log!(
         "[Radio] start ticket={} sources={} seed={} ordering={:?}",
@@ -479,23 +636,29 @@ pub(super) async fn start_with_config(
                 );
                 continue;
             };
-            if let Ok(pool) = selection::fetch_source(provider.as_ref(), source).await {
-                crate::daemon_log!(
-                    "[Radio] start_source ticket={} server={:?} kind={:?} reference={:?} fetched={}",
-                    ticket,
-                    source.server_id,
-                    source.kind,
-                    source.ref_id,
-                    pool.tracks.len()
-                );
-                pools.push(pool);
-            } else {
-                crate::daemon_log!(
+            match selection::fetch_radio_start_source(provider.as_ref(), source, &config, || {
+                START_EPOCH.load(Ordering::Acquire) == ticket
+            })
+            .await
+            {
+                Ok(pool) => {
+                    crate::daemon_log!(
+                        "[Radio] start_source ticket={} server={:?} kind={:?} reference={:?} candidates={}",
+                        ticket,
+                        source.server_id,
+                        source.kind,
+                        source.ref_id,
+                        pool.tracks.len()
+                    );
+                    pools.push(pool);
+                }
+                Err(SelectionError::Cancelled) => return Err(error(SelectionError::Cancelled)),
+                Err(_) => crate::daemon_log!(
                     "[Radio] start_source_failed ticket={} server={:?} kind={:?} stage=fetch",
                     ticket,
                     source.server_id,
                     source.kind
-                );
+                ),
             }
         }
         if pools.is_empty() {
@@ -503,14 +666,52 @@ pub(super) async fn start_with_config(
         }
         Ok(pools)
     };
-    let mut pools = tokio::time::timeout(DEADLINE, fetch)
+    let retrieval_deadline = if config
+        .sources
+        .iter()
+        .any(|source| source.kind == SelectionKind::Library)
+    {
+        LIBRARY_START_DEADLINE
+    } else {
+        DEADLINE
+    };
+    let mut pools = tokio::time::timeout(retrieval_deadline, fetch)
         .await
-        .map_err(|_| error(SelectionError::SourceUnavailable))??;
+        .map_err(|_| {
+            crate::daemon_log!(
+                "[Radio] start_failed ticket={} stage=fetch code=TIMEOUT",
+                ticket
+            );
+            error(SelectionError::SourceUnavailable)
+        })??;
     selection::clear_conflicting_recordings(&mut pools);
     if START_EPOCH.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
-    let selected = selection::select_with_recordings(&config, pools.clone()).map_err(error)?;
+    let mut start_ranking = config.clone();
+    // Keep enough alternatives to use the existing bounded preparation budget.
+    start_ranking.max_tracks = start_ranking
+        .max_tracks
+        .max((crate::playback::radio::MAX_PREPARATION_FAILURES + 1) as u16);
+    let mut selected =
+        selection::select_with_recordings(&start_ranking, pools.clone()).map_err(error)?;
+    // Keep the previous track as a last resort for a one-playable-track scope.
+    selected.sort_by_key(|source| {
+        repeats_previous_start(
+            source,
+            previous.as_ref(),
+            previous_recording.as_deref(),
+            &pools,
+        )
+    });
+    if let Some(previous) = &previous {
+        crate::daemon_log!(
+            "[Radio] start_avoid_previous ticket={} server={:?} track={:?}",
+            ticket,
+            previous.server_id,
+            previous.track_id
+        );
+    }
     // Resolve before touching the owner. A missing or expired source leaves the current
     // listening session intact and generates no skip/taste signal. Try the next
     // bounded selected result if a track vanished after candidate retrieval.
@@ -520,6 +721,19 @@ pub(super) async fn start_with_config(
             let attempts = std::iter::once(primary.clone())
                 .chain(selection::radio_copy_alternates(&config, &pools, &primary));
             for source in attempts {
+                if !repeats_previous_start(
+                    &primary,
+                    previous.as_ref(),
+                    previous_recording.as_deref(),
+                    &pools,
+                ) && repeats_previous_start(
+                    &source,
+                    previous.as_ref(),
+                    previous_recording.as_deref(),
+                    &pools,
+                ) {
+                    continue;
+                }
                 if START_EPOCH.load(Ordering::Acquire) != ticket {
                     return Err(error(SelectionError::Cancelled));
                 }
@@ -533,11 +747,17 @@ pub(super) async fn start_with_config(
                 {
                     let center = selection::radio_center_for_source(&config, &pools, &source);
                     crate::daemon_log!(
-                        "[Radio] start_prepared ticket={} server={:?} track={:?} alternate={} center={:?}",
+                        "[Radio] start_prepared ticket={} server={:?} track={:?} alternate={} repeat_previous={} center={:?}",
                         ticket,
                         source.server_id,
                         source.track_id,
                         source != primary,
+                        repeats_previous_start(
+                            &source,
+                            previous.as_ref(),
+                            previous_recording.as_deref(),
+                            &pools
+                        ),
                         center
                     );
                     return Ok((source, center, prepared));

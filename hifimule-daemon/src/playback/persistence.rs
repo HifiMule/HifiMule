@@ -953,6 +953,19 @@ impl Database {
         )?)
     }
 
+    pub fn radio_occurrence_recording_key(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(conn.query_row(
+            "SELECT recording_key FROM playback_radio_recording WHERE session_id=?1 AND occurrence_id=?2 AND resolver_version=?3",
+            params![session_id, occurrence_id, super::recording::RESOLVER_VERSION],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
     pub fn radio_recording_used(&self, session_id: &str, recording_key: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
         Ok(conn.query_row(

@@ -1966,7 +1966,11 @@ fn song_from_dto(song: SongDto) -> Song {
         date_added: song.created,
         last_played_at: song.played,
         play_count: non_negative_i32(song.play_count),
-        is_favorite: None,
+        is_favorite: Some(
+            song.starred
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        ),
         content_type: song.content_type,
         suffix: song.suffix,
         size_bytes: song.size,
@@ -2460,6 +2464,7 @@ struct SongDto {
     suffix: Option<String>,
     #[serde(rename = "playCount")]
     play_count: Option<i32>,
+    starred: Option<String>,
     played: Option<String>,
     created: Option<String>,
     #[serde(default)]
@@ -2571,6 +2576,26 @@ mod tests {
             .map(|(_, value)| value.into_owned())
     }
 
+    #[tokio::test]
+    async fn library_page_preserves_navidrome_starred_and_play_count() {
+        let mut server = Server::new_async().await;
+        let mock = server.mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("songOffset".into(), "0".into()), Matcher::UrlEncoded("songCount".into(), "100".into())]))
+            .with_body(ok(r#""searchResult3":{"song":[{"id":"fav","title":"Favorite","starred":"2026-10-02T12:00:00Z","playCount":37},{"id":"plain","title":"Other","playCount":2}]}"#))
+            .create_async().await;
+        let page = provider(&server)
+            .await
+            .list_all_songs_page(None, 0, 100)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(page[0].is_favorite, Some(true));
+        assert_eq!(page[0].play_count, Some(37));
+        assert_eq!(page[1].is_favorite, Some(false));
+        assert_eq!(page[1].play_count, Some(2));
+        mock.assert_async().await;
+    }
+
     #[test]
     fn song_conversion_preserves_subsonic_units_and_optional_fields() {
         let song = song_from_dto(SongDto {
@@ -2592,6 +2617,7 @@ mod tests {
             content_type: Some("audio/flac".to_string()),
             suffix: Some("flac".to_string()),
             play_count: Some(12),
+            starred: Some("2026-05-22T12:00:00Z".into()),
             played: Some("2026-05-22T12:00:00Z".to_string()),
             created: Some("2026-05-01T00:00:00Z".to_string()),
             artists: None,
@@ -2607,6 +2633,7 @@ mod tests {
         assert_eq!(song.content_type.as_deref(), Some("audio/flac"));
         assert_eq!(song.suffix.as_deref(), Some("flac"));
         assert_eq!(song.play_count, Some(12));
+        assert_eq!(song.is_favorite, Some(true));
         assert_eq!(song.last_played_at.as_deref(), Some("2026-05-22T12:00:00Z"));
         assert_eq!(song.date_added.as_deref(), Some("2026-05-01T00:00:00Z"));
         assert_ne!(song.cover_art_id.as_deref(), Some("song-id"));
@@ -2672,12 +2699,14 @@ mod tests {
             content_type: None,
             suffix: None,
             play_count: None,
+            starred: None,
             played: None,
             created: None,
             artists: None,
             replay_gain: None,
         });
 
+        assert_eq!(song.is_favorite, Some(false));
         assert_eq!(song.duration_seconds, 0);
         assert_eq!(song.bitrate_kbps, None);
         assert_eq!(song.cover_art_id, None);
@@ -3964,6 +3993,7 @@ mod tests {
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
             play_count: None,
+            starred: None,
             played: None,
             created: None,
             artists: None,

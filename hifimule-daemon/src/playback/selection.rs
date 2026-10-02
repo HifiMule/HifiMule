@@ -391,7 +391,7 @@ pub fn select_with_recordings(
     config: &PlaybackSelectionConfig,
     pools: Vec<SelectionPool>,
 ) -> Result<Vec<TrackSource>, SelectionError> {
-    select_inner(config, pools, true)
+    select_inner(config, pools, SelectionMode::Radio)
 }
 
 /// Other fetched copies are tried only after the selected source fails to
@@ -653,6 +653,103 @@ pub async fn reference_exists(
             }
         }
     }
+}
+
+/// Search the whole library for a Radio start without retaining its catalogue.
+/// The RPC owns the deadline and cancellation fence around this operation.
+pub async fn fetch_radio_start_source(
+    provider: &dyn MediaProvider,
+    source: &SelectionSource,
+    config: &PlaybackSelectionConfig,
+    current: impl Fn() -> bool,
+) -> Result<SelectionPool, SelectionError> {
+    if source.kind != SelectionKind::Library {
+        return fetch_source(provider, source).await;
+    }
+    let mut ranking = config.clone();
+    ranking.max_tracks = 100;
+    let mut retained = SelectionPool {
+        source: source.clone(),
+        tracks: Vec::new(),
+    };
+    let mut cursor = RadioSourceCursor::default();
+    let mut scanned = 0;
+    loop {
+        if !current() {
+            return Err(SelectionError::Cancelled);
+        }
+        let (page, next) = fetch_radio_window(provider, source, cursor).await?;
+        scanned += page.tracks.len();
+        retained.tracks.extend(page.tracks);
+        clear_conflicting_recordings(std::slice::from_mut(&mut retained));
+        let mut unique = HashSet::new();
+        retained
+            .tracks
+            .retain(|song| unique.insert(song.id.clone()));
+        // Retain ranking anchors and one preferred copy per recording. Copy
+        // metadata must not replace the anchor's play-count/favorite ranking
+        // before the next page is merged.
+        let selected = match select_inner(
+            &ranking,
+            vec![retained.clone()],
+            SelectionMode::RadioShortlist,
+        ) {
+            Ok(selected) => selected,
+            Err(SelectionError::Empty) => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        let mut keep: HashSet<String> = selected
+            .iter()
+            .map(|source| source.track_id.clone())
+            .collect();
+        let stable = stable_recording_keys(std::slice::from_ref(&retained));
+        let mut copies = HashMap::<String, Vec<RankedCopy>>::new();
+        for song in &retained.tracks {
+            if let Some(key) = stable
+                .get(&(source.server_id.clone(), song.id.clone()))
+                .and_then(Option::as_ref)
+            {
+                copies.entry(key.clone()).or_default().push(RankedCopy::new(
+                    TrackSource {
+                        server_id: source.server_id.clone(),
+                        track_id: song.id.clone(),
+                    },
+                    song,
+                    0,
+                ));
+            }
+        }
+        let preferred: HashMap<_, _> = copies
+            .into_iter()
+            .filter_map(|(key, copies)| {
+                rank_copies(copies)
+                    .into_iter()
+                    .next()
+                    .map(|copy| (key, copy))
+            })
+            .collect();
+        for anchor in &selected {
+            if let Some(copy) = stable
+                .get(&(anchor.server_id.clone(), anchor.track_id.clone()))
+                .and_then(Option::as_ref)
+                .and_then(|key| preferred.get(key))
+            {
+                keep.insert(copy.track_id.clone());
+            }
+        }
+        retained.tracks.retain(|song| keep.contains(&song.id));
+        let Some(next) = next else {
+            break;
+        };
+        cursor = next;
+    }
+    crate::daemon_log!(
+        "[Radio] start_library_scan server={:?} scanned={} retained={}",
+        source.server_id,
+        scanned,
+        retained.tracks.len()
+    );
+    Ok(retained)
 }
 
 pub async fn fetch_source(
@@ -930,14 +1027,23 @@ pub fn select(
     config: &PlaybackSelectionConfig,
     pools: Vec<SelectionPool>,
 ) -> Result<Vec<TrackSource>, SelectionError> {
-    select_inner(config, pools, false)
+    select_inner(config, pools, SelectionMode::Standard)
+}
+
+#[derive(Clone, Copy)]
+enum SelectionMode {
+    Standard,
+    Radio,
+    RadioShortlist,
 }
 
 fn select_inner(
     config: &PlaybackSelectionConfig,
     pools: Vec<SelectionPool>,
-    group_recordings: bool,
+    mode: SelectionMode,
 ) -> Result<Vec<TrackSource>, SelectionError> {
+    let group_recordings = !matches!(mode, SelectionMode::Standard);
+    let shortlist = matches!(mode, SelectionMode::RadioShortlist);
     config.validate()?;
     if config.sources.is_empty() {
         return Err(SelectionError::Setup);
@@ -949,8 +1055,13 @@ fn select_inner(
         .collect::<HashSet<_>>()
         .len()
         > 1;
+    let mut ordering = config.ordering.clone();
+    // Radio varies equal-ranked tracks without weakening the user's priorities.
+    if group_recordings && !ordering.contains(&OrderingKey::Random) {
+        ordering.push(OrderingKey::Random);
+    }
     let pipeline = AutoFillPipeline {
-        ordering: config.ordering.clone(),
+        ordering,
         sources: vec![SourceEntry::new(SourceKind::Library)],
         ..Default::default()
     };
@@ -973,7 +1084,12 @@ fn select_inner(
             .find(|pool| pool.source == *source)
             .map(|pool| pool.tracks.as_slice())
             .unwrap_or(&[]);
-        for song in tracks.iter().take(MAX_CANDIDATES_PER_SOURCE) {
+        let input_limit = if shortlist {
+            MAX_CANDIDATES_PER_SOURCE + 200
+        } else {
+            MAX_CANDIDATES_PER_SOURCE
+        };
+        for song in tracks.iter().take(input_limit) {
             if song.id.is_empty() {
                 continue;
             }
@@ -1058,6 +1174,11 @@ fn select_inner(
                 .is_none_or(|key| seen_recordings.insert(key.clone()))
         })
         .map(|source| {
+            // Streaming shortlist retains the ranking anchor; copy selection
+            // happens after the complete library has been ranked.
+            if shortlist {
+                return source;
+            }
             recording_for_source
                 .get(&(source.server_id.clone(), source.track_id.clone()))
                 .and_then(|key| best_copy.get(key))
@@ -1067,14 +1188,14 @@ fn select_inner(
         .filter(|source| seen.insert((source.server_id.clone(), source.track_id.clone())))
         .take(usize::from(config.max_tracks))
         .collect();
-    if group_recordings {
+    if matches!(mode, SelectionMode::Radio) {
         static LOG_PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let pass = LOG_PASS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::daemon_log!(
             "[Radio] ranking pass={} seed={} ordering={:?} limit={} fetched={} unique_tracks={} recording_groups={} selected={} copy_policy=same_codec_bitrate_then_source_order",
             pass,
             config.seed,
-            config.ordering,
+            pipeline.ordering,
             config.max_tracks,
             pools.iter().map(|pool| pool.tracks.len()).sum::<usize>(),
             identities.len(),
@@ -1094,13 +1215,15 @@ fn select_inner(
                 .flat_map(|pool| &pool.tracks)
                 .find(|song| song.id == source.track_id);
             crate::daemon_log!(
-                "[Radio] ranked_candidate pass={} rank={} server={:?} track={:?} title={:?} artist={:?} codec={:?} bitrate_kbps={:?}",
+                "[Radio] ranked_candidate pass={} rank={} server={:?} track={:?} title={:?} artist={:?} play_count={:?} favorite={:?} codec={:?} bitrate_kbps={:?}",
                 pass,
                 rank + 1,
                 source.server_id,
                 source.track_id,
                 song.map(|song| &song.title),
-                song.map(|song| &song.artist_name),
+                song.and_then(|song| song.artist_name.as_deref()),
+                song.and_then(|song| song.play_count),
+                song.and_then(|song| song.is_favorite),
                 song.and_then(|song| song.suffix.as_deref()),
                 song.and_then(|song| song.bitrate_kbps),
             );
@@ -1243,6 +1366,131 @@ mod tests {
                 self.tracks.len() as u32,
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn radio_start_ranks_favorites_and_play_counts_beyond_first_window() {
+        let library = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Library,
+            ref_id: String::new(),
+        };
+        let mut tracks: Vec<_> = (0..650).map(|i| song(&i.to_string(), "Track")).collect();
+        tracks[600].is_favorite = Some(true);
+        tracks[620].play_count = Some(100);
+        let provider = GlobalProvider {
+            tracks,
+            calls: Default::default(),
+            fail_offset: None,
+        };
+        for (ordering, expected) in [
+            (OrderingKey::Favorite, "600"),
+            (OrderingKey::PlayCount, "620"),
+        ] {
+            let config = PlaybackSelectionConfig {
+                sources: vec![library.clone()],
+                ordering: vec![ordering],
+                seed: 42,
+                max_tracks: 1,
+                ..Default::default()
+            };
+            let pool = fetch_radio_start_source(&provider, &library, &config, || true)
+                .await
+                .unwrap();
+            assert!(pool.tracks.len() <= 200);
+            assert_eq!(
+                select_with_recordings(&config, vec![pool]).unwrap()[0].track_id,
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn radio_start_keeps_ranking_anchor_when_preferred_copy_has_fewer_plays() {
+        let library = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Library,
+            ref_id: String::new(),
+        };
+        let mut tracks: Vec<_> = (0..650).map(|i| song(&i.to_string(), "Track")).collect();
+        let recording = "189002e7-3285-4e2e-92a3-7f6c30d407a2";
+        tracks[0] = recorded_song("anchor", recording, 128, "mp3");
+        tracks[0].play_count = Some(100);
+        tracks[620] = recorded_song("preferred", recording, 320, "mp3");
+        tracks[621].play_count = Some(50);
+        let provider = GlobalProvider {
+            tracks,
+            calls: Default::default(),
+            fail_offset: None,
+        };
+        let config = PlaybackSelectionConfig {
+            sources: vec![library.clone()],
+            ordering: vec![OrderingKey::PlayCount],
+            seed: 42,
+            max_tracks: 1,
+            ..Default::default()
+        };
+        let pool = fetch_radio_start_source(&provider, &library, &config, || true)
+            .await
+            .unwrap();
+        assert_eq!(
+            select_with_recordings(&config, vec![pool]).unwrap()[0].track_id,
+            "preferred"
+        );
+    }
+
+    #[tokio::test]
+    async fn radio_start_scan_cancels_and_propagates_later_page_failures() {
+        let library = SelectionSource {
+            server_id: "portable".into(),
+            kind: SelectionKind::Library,
+            ref_id: String::new(),
+        };
+        let config = PlaybackSelectionConfig {
+            sources: vec![library.clone()],
+            ..Default::default()
+        };
+        let provider = GlobalProvider {
+            tracks: (0..650).map(|i| song(&i.to_string(), "Track")).collect(),
+            calls: Default::default(),
+            fail_offset: Some(400),
+        };
+        assert!(matches!(
+            fetch_radio_start_source(&provider, &library, &config, || false).await,
+            Err(SelectionError::Cancelled)
+        ));
+        assert!(provider.calls.lock().unwrap().is_empty());
+        assert!(matches!(
+            fetch_radio_start_source(&provider, &library, &config, || true).await,
+            Err(SelectionError::SourceUnavailable)
+        ));
+    }
+
+    #[test]
+    fn radio_random_ties_preserve_primary_priority_and_vary_with_seed() {
+        let config = PlaybackSelectionConfig {
+            sources: vec![source("one")],
+            ordering: vec![OrderingKey::PlayCount],
+            max_tracks: 10,
+            ..Default::default()
+        };
+        let mut tracks: Vec<_> = (0..10).map(|i| song(&i.to_string(), "Track")).collect();
+        tracks[0].play_count = Some(100);
+        let pool = SelectionPool {
+            source: source("one"),
+            tracks,
+        };
+        let first = select_with_recordings(&config, vec![pool.clone()]).unwrap();
+        assert_eq!(first[0].track_id, "0");
+        assert_eq!(
+            first,
+            select_with_recordings(&config, vec![pool.clone()]).unwrap()
+        );
+        let other =
+            select_with_recordings(&PlaybackSelectionConfig { seed: 99, ..config }, vec![pool])
+                .unwrap();
+        assert_eq!(other[0].track_id, "0");
+        assert_ne!(first[1..], other[1..]);
     }
 
     #[test]

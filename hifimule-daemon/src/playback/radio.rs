@@ -559,6 +559,22 @@ mod tests {
         let key = evidence("Take").key().unwrap().as_str().to_owned();
         let initial = session.snapshot().unwrap();
         assert!(db.radio_recording_used(&initial.session_id, &key).unwrap());
+        assert_eq!(
+            db.radio_occurrence_recording_key(
+                &initial.session_id,
+                &initial.current.as_ref().unwrap().occurrence_id
+            )
+            .unwrap(),
+            Some(key.clone())
+        );
+        assert_eq!(
+            db.radio_occurrence_recording_key(
+                "another-session",
+                &initial.current.as_ref().unwrap().occurrence_id
+            )
+            .unwrap(),
+            None
+        );
         let lease = session.reserve_radio_refill().unwrap().unwrap();
         let mut copy = candidate("two", "another-local-id", "other-artist");
         copy.song.title = "Take".into();
