@@ -51,6 +51,7 @@ _bmad/
 .codex/
 .opencode/
 .roo/
+skills-lock.json
 
 # python
 __pycache__/

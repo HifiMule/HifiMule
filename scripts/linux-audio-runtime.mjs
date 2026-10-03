@@ -102,9 +102,18 @@ export function preflightLinuxBuild(target, options = {}) {
     const detail = headerProbe.stderr?.toString().trim();
     throw new Error(`Clang cannot compile against the native ${target} libc headers${detail ? `: ${detail}` : "."}\nInstall with: sudo apt-get install ${packages}`);
   }
-  const libclangDir = posix.resolve(resourceDir, "../..");
-  if (!containsLibclang(libclangDir, list)) {
-    throw new Error(`The libclang matching ${resourceDir} is missing from ${libclangDir}.\nInstall the matching Ubuntu toolchain with: sudo apt-get install ${packages}`);
+  const libclangCandidates = [
+    posix.resolve(resourceDir, "../.."),
+    "/usr/lib64",
+  ];
+  const libclangDir = libclangCandidates.find((dir) =>
+    fileExists(dir) && containsLibclang(dir, list)
+  );
+  if (!libclangDir) {
+      throw new Error(
+       `The libclang matching ${resourceDir} was not found.\n` +
+       `Searched: ${libclangCandidates.join(", ")}`
+     );
   }
   return { resourceDir, libclangDir };
 }
