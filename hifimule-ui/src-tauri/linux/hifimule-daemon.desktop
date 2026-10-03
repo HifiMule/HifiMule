@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=HifiMule Daemon
+Comment=Start the HifiMule background daemon at desktop login
+Exec=/usr/bin/hifimule-daemon
+TryExec=/usr/bin/hifimule-daemon
+Terminal=false

@@ -57,4 +57,30 @@ upgrade, rendering and tray actions require their own evidence.
 
 ## Operational state
 
+RPM and DEB installations register `/etc/xdg/autostart/hifimule-daemon.desktop`.
+At the next graphical login, the desktop launches `/usr/bin/hifimule-daemon`
+in the signed-in user's session, without opening the Hub. Startup occurs during
+graphical-session initialization, with access to the user's session services.
+Quit stops the daemon for that session; it is not automatically restarted. Opening the Hub
+again can start it normally. Portable AppImage builds start on manual launch.
+
+To disable login startup for your account, create
+`~/.config/autostart/hifimule-daemon.desktop` (or use `$XDG_CONFIG_HOME/autostart`
+when configured) containing:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=HifiMule Daemon
+Hidden=true
+```
+
+This user override survives package upgrades. Remove the override to enable
+startup again; uninstalling the package removes the system entry. This follows
+the [XDG autostart specification](https://specifications.freedesktop.org/autostart/latest/).
+To verify installed startup, log out and back in without opening the Hub, check
+that `pgrep -a -u "$USER" -x hifimule-daemon` shows the daemon, then open the Hub
+and confirm it attaches to the same process. Repeat with the user override and
+confirm the daemon stays stopped until an explicit launch.
+
 The app stores server metadata, credentials, playback data, and lifecycle runtime records in the user's app-data profile. The daemon binds an available loopback port and publishes it privately; installed clients must attach through the lifecycle descriptor and authenticated health check. Device manifests live on devices and remain portable across machines through deterministic server IDs. Backup and migration checks should treat machine-local vault state and device manifests separately.

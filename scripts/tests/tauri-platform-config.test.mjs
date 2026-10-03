@@ -28,6 +28,29 @@ function merge(left, right) {
   return result;
 }
 
+test("installed Linux packages start only the daemon at desktop login", () => {
+  const effective = merge(base, linux);
+  const destination = "/etc/xdg/autostart/hifimule-daemon.desktop";
+  const source = "linux/hifimule-daemon.desktop";
+  assert.equal(effective.bundle.linux.rpm.files?.[destination], source);
+  assert.equal(effective.bundle.linux.deb.files?.[destination], source);
+  const desktop = readFileSync(resolve(root, "hifimule-ui/src-tauri", source), "utf8");
+  const fields = Object.fromEntries(desktop.trim().split(/\r?\n/).slice(1).map((line) => {
+    const index = line.indexOf("=");
+    return [line.slice(0, index), line.slice(index + 1)];
+  }));
+  assert.equal(desktop.split(/\r?\n/)[0], "[Desktop Entry]");
+  assert.equal(fields.Type, "Application");
+  assert.equal(fields.Exec, "/usr/bin/hifimule-daemon");
+  assert.equal(fields.TryExec, fields.Exec);
+  assert.equal(fields.Terminal, "false");
+  assert.notEqual(fields.Hidden, "true");
+  assert.equal(fields.OnlyShowIn, undefined);
+  assert.equal(fields.NotShowIn, undefined);
+  assert.equal(fields.DBusActivatable, undefined);
+  assert.ok(!Object.keys(effective.bundle.linux.appimage.files).some((path) => path.includes("autostart")));
+});
+
 test("effective native-library resource mappings are non-overlapping by platform", () => {
   assert.equal(base.bundle.resources["bundled-libs/*.dll"], undefined);
   assert.equal(base.bundle.resources["bundled-libs/*"], undefined);
@@ -81,7 +104,7 @@ test("AppImage explicitly places the staged private closure in the loader direct
   // AppImage custom files map destination to source, unlike resource mappings.
   // Copy the whole closure, including libraries excluded by linuxdeploy discovery.
   assert.deepEqual(effective.bundle.linux.appimage.files, { "usr/lib": "bundled-libs" });
-  assert.equal(effective.bundle.linux.deb.files, undefined);
+  assert.equal(effective.bundle.linux.deb.files?.["usr/lib"], undefined);
   assert.deepEqual(effective.bundle.resources["bundled-libs/*"], "bundled-libs/");
 });
 
