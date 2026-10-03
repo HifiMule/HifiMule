@@ -1,6 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
+    "license": "GPL-2.0-only",
+    "homepage": "https://github.com/HifiMule/HifiMule",
     "targets": ["deb", "appimage", "rpm"],
     "resources": {
       "bundled-libs/*": "bundled-libs/"
