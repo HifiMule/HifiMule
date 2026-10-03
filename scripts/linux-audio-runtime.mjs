@@ -26,6 +26,7 @@ const hostRuntimeLibraryPrefixes = Object.freeze([
 ]);
 const isHostRuntimeLibrary = (name) => hostRuntimeLibraryPrefixes.some((prefix) => name.startsWith(prefix));
 export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev", "libpulse-dev", "libdbus-1-dev"]);
+const fedoraBuildPackages = Object.freeze(["gcc", "gcc-c++", "make", "clang", "clang-devel", "glibc-devel", "nasm", "curl", "tar", "xz", "pkgconf-pkg-config", "binutils", "patchelf", "libmtp-devel", "alsa-lib-devel", "pulseaudio-libs-devel", "dbus-devel"]);
 export function requiresHostAudioVerification(platform) { return platform !== "win32"; }
 
 function run(command, args, options = {}) {
@@ -83,24 +84,28 @@ export function preflightLinuxBuild(target, options = {}) {
   const execute = options.run ?? run;
   const fileExists = options.exists ?? existsSync;
   const list = options.readdir ?? readdirSync;
-  const packages = linuxBuildPackages.join(" ");
+  const osRelease = options.osRelease ?? (existsSync("/etc/os-release") ? readFileSync("/etc/os-release", "utf8") : "");
+  const fedora = /^ID=["']?fedora["']?$/m.test(osRelease);
+  const installCommand = fedora
+    ? `sudo dnf install ${fedoraBuildPackages.join(" ")}`
+    : `sudo apt-get install ${linuxBuildPackages.join(" ")}`;
   const tools = ["cc", "make", "curl", "tar", "pkg-config", "readelf", "patchelf", "clang"];
   if (target === "x86_64-unknown-linux-gnu") tools.push("nasm");
   const missing = tools.filter((tool) => !commandExists(tool));
-  if (missing.length) throw new Error(`Missing Linux build tools: ${missing.join(", ")}\nInstall with: sudo apt-get install ${packages}`);
-  if (spawn("pkg-config", ["--exists", "libmtp"], { env: probeEnv }).status !== 0) throw new Error(`libmtp development files are missing.\nInstall with: sudo apt-get install ${packages}`);
-  if (spawn("pkg-config", ["--exists", "alsa"], { env: probeEnv }).status !== 0) throw new Error(`ALSA development files are missing.\nInstall with: sudo apt-get install ${packages}`);
-  if (spawn("pkg-config", ["--exists", "libpulse"], { env: probeEnv }).status !== 0) throw new Error(`PulseAudio development files are missing.\nInstall with: sudo apt-get install ${packages}`);
-  if (spawn("pkg-config", ["--exists", "dbus-1"], { env: probeEnv }).status !== 0) throw new Error(`D-Bus development files are missing.\nInstall with: sudo apt-get install ${packages}`);
-  if (!fileExists("/usr/include/limits.h")) throw new Error(`glibc development headers are missing (/usr/include/limits.h).\nInstall with: sudo apt-get install ${packages}`);
+  if (missing.length) throw new Error(`Missing Linux build tools: ${missing.join(", ")}\nInstall with: ${installCommand}`);
+  if (spawn("pkg-config", ["--exists", "libmtp"], { env: probeEnv }).status !== 0) throw new Error(`libmtp development files are missing.\nInstall with: ${installCommand}`);
+  if (spawn("pkg-config", ["--exists", "alsa"], { env: probeEnv }).status !== 0) throw new Error(`ALSA development files are missing.\nInstall with: ${installCommand}`);
+  if (spawn("pkg-config", ["--exists", "libpulse"], { env: probeEnv }).status !== 0) throw new Error(`PulseAudio development files are missing.\nInstall with: ${installCommand}`);
+  if (spawn("pkg-config", ["--exists", "dbus-1"], { env: probeEnv }).status !== 0) throw new Error(`D-Bus development files are missing.\nInstall with: ${installCommand}`);
+  if (!fileExists("/usr/include/limits.h")) throw new Error(`glibc development headers are missing (/usr/include/limits.h).\nInstall with: ${installCommand}`);
   const resourceDir = execute("clang", ["-print-resource-dir"], { env: probeEnv }).trim();
   if (!resourceDir || !fileExists(posix.join(resourceDir, "include/limits.h"))) {
-    throw new Error(`Clang resource headers are missing (expected <resource-dir>/include/limits.h).\nInstall with: sudo apt-get install ${packages}`);
+    throw new Error(`Clang resource headers are missing (expected <resource-dir>/include/limits.h).\nInstall with: ${installCommand}`);
   }
   const headerProbe = spawn("clang", [`--target=${target}`, `-resource-dir=${resourceDir}`, "-fsyntax-only", "-x", "c", "-"], { input: "#include <limits.h>\n#include <stdint.h>\n", encoding: "utf8", env: probeEnv });
   if (headerProbe.status !== 0) {
     const detail = headerProbe.stderr?.toString().trim();
-    throw new Error(`Clang cannot compile against the native ${target} libc headers${detail ? `: ${detail}` : "."}\nInstall with: sudo apt-get install ${packages}`);
+    throw new Error(`Clang cannot compile against the native ${target} libc headers${detail ? `: ${detail}` : "."}\nInstall with: ${installCommand}`);
   }
   const libclangCandidates = [
     posix.resolve(resourceDir, "../.."),
@@ -112,7 +117,7 @@ export function preflightLinuxBuild(target, options = {}) {
   if (!libclangDir) {
       throw new Error(
        `The libclang matching ${resourceDir} was not found.\n` +
-       `Searched: ${libclangCandidates.join(", ")}`
+       `Searched: ${libclangCandidates.join(", ")}\nInstall with: ${installCommand}`
      );
   }
   return { resourceDir, libclangDir };

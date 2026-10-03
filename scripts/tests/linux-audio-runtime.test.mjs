@@ -54,7 +54,7 @@ test("Windows skips Unix pkg-config verification while macOS retains it", () => 
 
 test("Linux preflight reports the complete Ubuntu compiler prerequisites", () => {
   assert.throws(
-    () => preflightLinuxBuild("aarch64-unknown-linux-gnu", { commandExists: (tool) => tool !== "clang" }),
+    () => preflightLinuxBuild("aarch64-unknown-linux-gnu", { osRelease: "ID=ubuntu", commandExists: (tool) => tool !== "clang" }),
     (error) => error.message.includes("Missing Linux build tools: clang")
       && ["clang", "libclang-dev", "libc6-dev"].every((name) => error.message.includes(name)),
   );
@@ -64,10 +64,29 @@ test("Linux preflight reports the complete Ubuntu compiler prerequisites", () =>
   );
 });
 
+test("Fedora audio preflight reports dnf compiler prerequisites", () => {
+  assert.throws(() => preflightLinuxBuild(target, {
+    osRelease: 'ID="fedora"\nVERSION_ID=44', commandExists: tool => tool !== "clang",
+  }), error => error.message.includes("Missing Linux build tools: clang")
+    && error.message.includes("sudo dnf install gcc gcc-c++ make clang clang-devel glibc-devel")
+    && error.message.includes("curl tar xz")
+    && !error.message.includes("apt-get") && !error.message.includes("libclang-dev"));
+});
+
+test("Fedora missing audio metadata uses Fedora development package names", () => {
+  for (const [module, packageName] of [["libmtp", "libmtp-devel"], ["alsa", "alsa-lib-devel"], ["libpulse", "pulseaudio-libs-devel"], ["dbus-1", "dbus-devel"]]) {
+    assert.throws(() => preflightLinuxBuild(target, {
+      osRelease: "ID=fedora\nVERSION_ID=44", commandExists: () => true,
+      spawn: (_command, args) => ({ status: args.includes(module) ? 1 : 0 }),
+    }), error => error.message.includes("sudo dnf install")
+      && error.message.includes(packageName) && !error.message.includes("apt-get"));
+  }
+});
+
 test("Linux preflight turns a broken native header chain into setup guidance", () => {
   const resourceDir = "/opt/llvm/lib/clang/18";
   assert.throws(
-    () => preflightLinuxBuild("aarch64-unknown-linux-gnu", {
+    () => preflightLinuxBuild("aarch64-unknown-linux-gnu", { osRelease: "ID=ubuntu",
       commandExists: () => true,
       spawn: (command) => command === "clang" ? { status: 1, stderr: "fatal error: 'limits.h' file not found" } : { status: 0 },
       run: (command) => command === "clang" ? `${resourceDir}\n` : "aarch64-linux-gnu\n",
@@ -81,7 +100,7 @@ test("Linux preflight turns a broken native header chain into setup guidance", (
 
 test("Linux x64 preflight requires NASM before configuring FFmpeg", () => {
   assert.throws(
-    () => preflightLinuxBuild("x86_64-unknown-linux-gnu", { commandExists: (tool) => tool !== "nasm" }),
+    () => preflightLinuxBuild("x86_64-unknown-linux-gnu", { osRelease: "ID=ubuntu", commandExists: (tool) => tool !== "nasm" }),
     (error) => error.message.includes("Missing Linux build tools: nasm") && error.message.includes("apt-get install"),
   );
   assert.ok(linuxBuildPackages.includes("nasm"));
@@ -89,7 +108,7 @@ test("Linux x64 preflight requires NASM before configuring FFmpeg", () => {
 
 test("Linux preflight reports missing ALSA development metadata before building", () => {
   assert.throws(
-    () => preflightLinuxBuild(target, {
+    () => preflightLinuxBuild(target, { osRelease: "ID=ubuntu",
       commandExists: () => true,
       spawn: (_command, args) => ({ status: args.includes("alsa") ? 1 : 0 }),
     }),
@@ -699,7 +718,7 @@ test("installed Linux verification permits the host XDo runtime", (t) => {
 
 
 test("Linux preflight requires Pulse shared-output development metadata", () => {
-  assert.throws(() => preflightLinuxBuild(target, {
+  assert.throws(() => preflightLinuxBuild(target, { osRelease: "ID=ubuntu",
     commandExists: () => true,
     spawn: (_command, args) => ({ status: args.includes("libpulse") ? 1 : 0 }),
   }), /PulseAudio development files are missing/);
@@ -707,7 +726,7 @@ test("Linux preflight requires Pulse shared-output development metadata", () => 
 });
 
 test("Linux preflight requires D-Bus native-controls development metadata", () => {
-  assert.throws(() => preflightLinuxBuild(target, {
+  assert.throws(() => preflightLinuxBuild(target, { osRelease: "ID=ubuntu",
     commandExists: () => true,
     spawn: (_command, args) => ({ status: args.includes("dbus-1") ? 1 : 0 }),
   }), /D-Bus development files are missing/);

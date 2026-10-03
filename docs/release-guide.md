@@ -84,6 +84,38 @@ The called smoke workflow installs the release packages. Review its logs as life
 
 Draft-release smoke tests require `contents: write` on both the release workflow's reusable-workflow caller and `smoke-test.yml`. GitHub hides draft releases from tokens without push access, so reducing either side to `contents: read` makes an existing draft appear missing. The smoke tests only download and test assets; they do not publish the draft. Candidate calls grant the same permission ceiling because they invoke the same reusable workflow.
 
+## Fedora RPM verification for current builds
+
+Current Linux bundles additionally include an x86_64 RPM intended for Fedora 44.
+The versioned `0.15.0` contract above remains historical evidence. Adding RPM
+does not extend that old contract or inherit DEB/AppImage desktop qualification.
+The Ubuntu release build provisions `rpm2cpio`, `cpio` and `rpm`, extracts the RPM
+and runs the same installed private-native-closure verifier before candidate
+upload. Candidate checksums and artifact uploads include the RPM automatically.
+
+For a local Fedora build, follow the Development Guide, then inspect and extract
+the actual artifact (replace the filename):
+
+```bash
+rtk rpm -qp --requires target/release/bundle/rpm/HifiMule-0.16.1-1.x86_64.rpm
+rtk rpm -qpl target/release/bundle/rpm/HifiMule-0.16.1-1.x86_64.rpm
+rtk mkdir -p /tmp/hifimule-rpm-root
+rtk rpm2cpio target/release/bundle/rpm/HifiMule-0.16.1-1.x86_64.rpm > /tmp/hifimule-rpm.cpio
+cd /tmp/hifimule-rpm-root
+rtk cpio -idm --no-absolute-filenames < /tmp/hifimule-rpm.cpio
+cd <repository>
+rtk node scripts/linux-audio-runtime.mjs verify-bundle x86_64-unknown-linux-gnu /tmp/hifimule-rpm-root
+```
+
+Use a fresh extraction directory. The verifier checks the daemon RUNPATH,
+private FFmpeg ABI, transitive native closure, manifest and notices. Record RPM
+metadata, architecture, launcher and resources separately. Before describing
+Fedora desktop support as qualified, record clean installation and both menu
+surfaces using the Deployment Guide checklist; GNOME requires enabled
+AppIndicator shell integration. A shell without that integration cannot qualify
+tray visibility or actions. Native results remain distinct from configuration
+and regression-test results.
+
 ## 6. Publish or reject
 
 The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes. A signed row must include a verified signing identity and pass the Windows Authenticode or macOS Developer ID/notarization checks; a row without distribution credentials (including ad-hoc signed macOS) must record signing status `not-configured` without an identity and must not be described as trusted by SmartScreen or Gatekeeper. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.

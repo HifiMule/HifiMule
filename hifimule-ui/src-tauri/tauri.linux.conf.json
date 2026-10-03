@@ -1,11 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["deb", "appimage"],
+    "targets": ["deb", "appimage", "rpm"],
     "resources": {
       "bundled-libs/*": "bundled-libs/"
     },
     "linux": {
+      "rpm": {
+        "depends": ["gtk3", "webkit2gtk4.1", "libsoup3", "libappindicator-gtk3", "libmtp", "openssl-libs", "libxdo"]
+      },
       "appimage": {
         "files": {
           "usr/lib": "bundled-libs"

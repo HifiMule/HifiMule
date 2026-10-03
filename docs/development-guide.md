@@ -29,6 +29,28 @@ sudo apt-get install -y \
 The development packages provide the `pkg-config` metadata used by Rust and
 `linuxdeploy`. `libfuse2` is required by the AppImage tooling/runtime on Ubuntu.
 
+### Fedora 44 x86_64
+
+```bash
+rtk sudo dnf install gcc gcc-c++ make clang clang-devel glibc-devel nasm \
+  gtk3-devel webkit2gtk4.1-devel libsoup3-devel libappindicator-gtk3-devel \
+  libxdo-devel libmtp-devel alsa-lib-devel pulseaudio-libs-devel dbus-devel \
+  pkgconf-pkg-config curl tar xz binutils patchelf rpm cpio
+rtk npm install --prefix hifimule-ui
+rtk npm run tauri --prefix hifimule-ui -- build --bundles rpm
+```
+
+The production build stages the daemon and its controlled audio runtime. Explicit
+RPM builds do not download the AppImage runtime or probe librsvg/FUSE tooling.
+The default Linux build still includes DEB, AppImage and RPM; for AppImage on
+Fedora also install `librsvg2-devel` and `fuse-libs`. Keep the compiler's Clang
+resource headers available; the audio wrapper selects matching include paths.
+
+The desktop UI requires a graphical GTK/WebKitGTK session. The daemon tray uses
+AppIndicator; GNOME needs an enabled AppIndicator shell extension in addition to
+the runtime library. See the [Deployment Guide](./deployment-guide.md) for setup
+and the distinction between tray menus and in-window right-click menus.
+
 ### Windows
 - Visual Studio Build Tools (MSVC)
 - MSYS2 with `make`, `sed`, `grep`, `gawk`, `diffutils`, `pkgconf`, and `gnupg` (the controlled

@@ -9,6 +9,16 @@ const windows = JSON.parse(readFileSync(resolve(root, "hifimule-ui/src-tauri/tau
 const macos = JSON.parse(readFileSync(resolve(root, "hifimule-ui/src-tauri/tauri.macos.conf.json")));
 const linux = JSON.parse(readFileSync(resolve(root, "hifimule-ui/src-tauri/tauri.linux.conf.json")));
 
+test("RPM retains private resources and uses Fedora runtime package names", () => {
+  const effective = merge(base, linux);
+  assert.deepEqual(effective.bundle.targets, ["deb", "appimage", "rpm"]);
+  assert.deepEqual(effective.bundle.linux.rpm.depends, ["gtk3", "webkit2gtk4.1", "libsoup3", "libappindicator-gtk3", "libmtp", "openssl-libs", "libxdo"]);
+  assert.deepEqual(effective.bundle.externalBin, ["sidecars/hifimule-daemon"]);
+  assert.equal(effective.bundle.resources["bundled-libs/*"], "bundled-libs/");
+  assert.equal(effective.bundle.resources["../../hifimule-daemon/audio-runtime.json"], "audio-runtime.json");
+  assert.equal(effective.bundle.resources["../../hifimule-daemon/THIRD_PARTY_AUDIO_NOTICES.md"], "THIRD_PARTY_AUDIO_NOTICES.md");
+});
+
 function merge(left, right) {
   if (!left || !right || Array.isArray(left) || Array.isArray(right) || typeof left !== "object" || typeof right !== "object") return right;
   const result = { ...left };

@@ -147,6 +147,7 @@ jobs:
             curl \
             xz-utils \
             binutils \
+            rpm2cpio cpio rpm \
             pkgconf \
             libxdo-dev \
             libmtp-dev
@@ -375,6 +376,21 @@ jobs:
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/linux-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" deb-root
           rm -rf deb-root
+
+      - name: Verify Linux rpm bundles a resolvable private daemon closure
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          RPM="$(find target hifimule-ui/src-tauri/target -path '*/release/bundle/*' -name '*.rpm' -print -quit 2>/dev/null)"
+          test -n "$RPM" || { echo "RPM artifact not found"; exit 1; }
+          rpm -qp --requires "$RPM"
+          RPM="$(realpath "$RPM")"
+          rm -rf rpm-root
+          mkdir rpm-root
+          (cd rpm-root && rpm2cpio "$RPM" | cpio -idm --no-absolute-filenames)
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          node scripts/linux-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" rpm-root
+          rm -rf rpm-root
 
       - name: Verify macOS controlled runtime bundle
         if: startsWith(matrix.platform, 'macos')

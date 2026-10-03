@@ -14,6 +14,27 @@ test("detects whether a Tauri build includes an AppImage", () => {
   assert.equal(requestsAppImage(["dev"]), false);
 });
 
+test("explicit RPM build checks desktop metadata without AppImage modules or download", () => {
+  const modules = [];
+  tauriEnvironment(["build", "--bundles", "rpm"], {
+    platform: "linux", osRelease: "ID=fedora\nVERSION_ID=44", env: {},
+    probe: module => { modules.push(module); return { status: 0 }; },
+    fileExists: () => true,
+    download: () => assert.fail("RPM must not provision AppImage tooling"),
+  });
+  assert.deepEqual(modules, ["gtk+-3.0", "libsoup-3.0", "webkit2gtk-4.1"]);
+});
+
+test("Fedora prerequisite diagnostics give Fedora development names", () => {
+  assert.throws(() => tauriEnvironment(["build", "--bundles=rpm"], {
+    platform: "linux", osRelease: "ID=fedora\nVERSION_ID=44", env: {},
+    probe: () => ({ status: 1 }), fileExists: () => false,
+  }), error => error.message.includes("sudo dnf install")
+    && error.message.includes("webkit2gtk4.1-devel")
+    && error.message.includes("libxdo-devel")
+    && !error.message.includes("libfuse2"));
+});
+
 test("Linux AppImage builds pass a verified pinned runtime to linuxdeploy", (t) => {
   const cacheDir = mkdtempSync(join(tmpdir(), "hifimule-appimage-runtime-"));
   t.after(() => rmSync(cacheDir, { recursive: true, force: true }));
@@ -47,6 +68,7 @@ test("an explicit runtime override is preserved without provisioning", () => {
 test("AppImage preflight reports missing metadata and the complete Ubuntu package command", () => {
   assert.throws(
     () => assertAppImagePrerequisites({
+      osRelease: "ID=ubuntu",
       probe: (module) => ({ status: module === "librsvg-2.0" ? 1 : 0 }),
       fileExists: () => false,
     }),

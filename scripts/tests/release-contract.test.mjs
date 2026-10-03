@@ -70,7 +70,7 @@ test("Cargo and Tauri versions agree with the platform bundle targets", () => {
   assert.ok(cargoVersion, "Cargo workspace package must define a version");
   assert.equal(json("hifimule-ui/src-tauri/tauri.conf.json").version, cargoVersion);
   assert.deepEqual(json("hifimule-ui/src-tauri/tauri.windows.conf.json").bundle.targets, ["msi", "nsis"]);
-  assert.deepEqual(json("hifimule-ui/src-tauri/tauri.linux.conf.json").bundle.targets, ["deb", "appimage"]);
+  assert.deepEqual(json("hifimule-ui/src-tauri/tauri.linux.conf.json").bundle.targets, ["deb", "appimage", "rpm"]);
   assert.deepEqual(json("hifimule-ui/src-tauri/tauri.macos.conf.json").bundle.targets, ["app", "dmg"]);
 });
 
@@ -84,6 +84,17 @@ test("Tauri opener versions are pinned together across Rust and JavaScript", () 
   assert.equal(packageJsonVersion, cargoManifestVersion);
   assert.equal(packageLock.packages[""].dependencies["@tauri-apps/plugin-opener"], cargoManifestVersion);
   assert.equal(packageLock.packages["node_modules/@tauri-apps/plugin-opener"].version, cargoManifestVersion);
+});
+
+test("release verifies extracted RPM private libraries before candidate upload", () => {
+  const workflow = read(".github/workflows/release.yml");
+  const rpm = workflow.split(/(?=^      - )/m).find(step => step.includes("name: Verify Linux rpm"));
+  assert.ok(rpm);
+  assert.match(workflow, /rpm2cpio cpio rpm/);
+  assert.match(rpm, /set -euo pipefail/);
+  assert.match(rpm, /rpm2cpio.*cpio/);
+  assert.match(rpm, /linux-audio-runtime\.mjs verify-bundle.*rpm-root/);
+  assert.ok(workflow.indexOf(rpm) < workflow.indexOf("name: Upload immutable candidate"));
 });
 
 test("release workflow supports explicit immutable candidates without publishing", () => {

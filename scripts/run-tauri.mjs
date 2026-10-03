@@ -28,6 +28,12 @@ const appImagePkgConfigModules = Object.freeze({
   "webkit2gtk-4.1": "libwebkit2gtk-4.1-dev",
   "librsvg-2.0": "librsvg2-dev",
 });
+const fedoraDevelopmentPackages = Object.freeze({
+  "gtk+-3.0": "gtk3-devel",
+  "libsoup-3.0": "libsoup3-devel",
+  "webkit2gtk-4.1": "webkit2gtk4.1-devel",
+  "librsvg-2.0": "librsvg2-devel",
+});
 const runtimes = Object.freeze({
   arm64: {
     name: "aarch64",
@@ -91,31 +97,43 @@ export function ensureAppImageRuntime(options = {}) {
   return runtimePath;
 }
 
-export function assertAppImagePrerequisites(options = {}) {
+export function assertLinuxPrerequisites(options = {}) {
   const probe = options.probe ?? ((module, env) => spawnSync("pkg-config", ["--exists", module], { env }));
   const fileExists = options.fileExists ?? existsSync;
   const env = options.env ?? process.env;
+  const osRelease = options.osRelease ?? (existsSync("/etc/os-release") ? readFileSync("/etc/os-release", "utf8") : "");
+  const fedora = /^ID=["']?fedora["']?$/m.test(osRelease);
+  const appImage = options.appImage ?? false;
+  const modules = appImage ? appImagePkgConfigModules : Object.fromEntries(Object.entries(appImagePkgConfigModules).filter(([module]) => module !== "librsvg-2.0"));
   const missing = [];
-  for (const [module, packageName] of Object.entries(appImagePkgConfigModules)) {
+  for (const [module, ubuntuPackage] of Object.entries(modules)) {
+    const packageName = fedora ? fedoraDevelopmentPackages[module] : ubuntuPackage;
     const result = probe(module, env);
     if (result.error) throw result.error;
     if (result.status !== 0) missing.push(`${module} (${packageName})`);
   }
-  if (!fileExists("/usr/include/xdo.h")) missing.push("xdo.h (libxdo-dev)");
+  if (!fileExists("/usr/include/xdo.h")) missing.push(`xdo.h (${fedora ? "libxdo-devel" : "libxdo-dev"})`);
   if (missing.length) {
     throw new Error([
-      `Missing Linux AppImage build prerequisites: ${missing.join(", ")}.`,
-      `On Ubuntu/Debian install them with: sudo apt-get install -y ${ubuntuAppImagePackages.join(" ")}`,
+      `Missing Linux ${appImage ? "AppImage " : ""}build prerequisites: ${missing.join(", ")}.`,
+      fedora
+        ? `On Fedora install them with: sudo dnf install ${Object.keys(modules).map(module => fedoraDevelopmentPackages[module]).join(" ")} libxdo-devel${appImage ? " fuse-libs" : ""}`
+        : `On Ubuntu/Debian install them with: sudo apt-get install -y ${ubuntuAppImagePackages.filter(name => appImage || !["libfuse2", "librsvg2-dev"].includes(name)).join(" ")}`,
     ].join("\n"));
   }
+}
+
+export function assertAppImagePrerequisites(options = {}) {
+  assertLinuxPrerequisites({ ...options, appImage: true });
 }
 
 export function tauriEnvironment(args, options = {}) {
   const platform = options.platform ?? process.platform;
   const env = { ...(options.env ?? process.env) };
-  if (platform === "linux" && requestsAppImage(args)) {
-    assertAppImagePrerequisites({ ...options, env });
-    if (!env.LDAI_RUNTIME_FILE) env.LDAI_RUNTIME_FILE = ensureAppImageRuntime(options);
+  if (platform === "linux" && args[0] === "build") {
+    const appImage = requestsAppImage(args);
+    assertLinuxPrerequisites({ ...options, env, appImage });
+    if (appImage && !env.LDAI_RUNTIME_FILE) env.LDAI_RUNTIME_FILE = ensureAppImageRuntime(options);
   }
   return env;
 }
