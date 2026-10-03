@@ -109,7 +109,7 @@ test("Linux bindgen uses matching Clang resource headers for native ARM64", () =
     commandExists: (tool) => tool !== "nasm",
     spawn: (_command, _args, spawnOptions) => { probeEnvironments.push(spawnOptions.env); return { status: 0 }; },
     run: (command, _args, runOptions) => { probeEnvironments.push(runOptions.env); return command === "clang" ? `${resourceDir}\n` : "aarch64-linux-gnu\n"; },
-    exists: (path) => path === "/usr/include/limits.h" || path === `${resourceDir}/include/limits.h`,
+    exists: (path) => path === "/usr/include/limits.h" || path === `${resourceDir}/include/limits.h` || path === libclangDir,
     readdir: (path) => path === libclangDir ? ["libclang.so"] : [],
   };
   const env = linuxBuildEnvironment("aarch64-unknown-linux-gnu", { PATH: "/controlled/bin", BINDGEN_EXTRA_CLANG_ARGS: "-DKEEP_ME", LIBCLANG_PATH: "/unrelated/libclang" }, options);
