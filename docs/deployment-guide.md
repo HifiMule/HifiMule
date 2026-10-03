@@ -30,13 +30,18 @@ runtime dependencies: GTK3, WebKitGTK 4.1, libsoup3, libappindicator-gtk3, libmt
 openssl-libs and libxdo. The package includes a desktop launcher, UI, daemon,
 private audio libraries, manifest and notices; host FFmpeg is not required.
 
-On Fedora GNOME, install `gnome-shell-extension-appindicator`, then enable its
-AppIndicator extension using the Extensions application (a session restart may
-be needed after installing). The shell must display StatusNotifier/AppIndicator
-icons for the daemon tray menu to appear. Installing the library alone does not
-enable GNOME tray support. Desktop environments with a built-in indicator host
-can provide the tray directly. This requirement is separate from the DOM
-right-click menu inside the UI, which offers Add to playlist.
+The Fedora RPM recommends `gnome-shell-extension-appindicator` as an optional,
+soft dependency; it is not required, and DNF may omit weak dependencies. On
+Fedora GNOME, install it with `sudo dnf install gnome-shell-extension-appindicator`.
+Log out and log back in after installation, then enable AppIndicator using the
+Extensions application. On other GNOME distributions, use the
+[AppIndicator extension page](https://extensions.gnome.org/extension/615/appindicator-support/).
+Package installation and extension activation are separate: installing the
+library or package alone does not enable a tray host. HifiMule shows dismissible
+setup guidance after hydration only when GNOME's StatusNotifier host is confirmed
+missing. Check again refreshes detection; temporary bus failures are inconclusive.
+HifiMule does not install packages, enable extensions or execute these commands.
+Desktop environments with a built-in indicator host can provide the tray directly.
 
 For desktop qualification, launch from both the desktop entry and terminal,
 open a media card, list row and track context menu, choose Add to playlist, and

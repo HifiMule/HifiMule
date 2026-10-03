@@ -2611,3 +2611,27 @@ h2 {
   .playback-selection-settings select:focus-visible,
   .playback-selection-settings input:focus-visible { outline: 2px solid Highlight; }
 }
+
+/* Nonmodal tray help remains outside the app/onboarding root. */
+.tray-setup-guidance {
+    position: fixed;
+    z-index: 1000;
+    bottom: 1rem;
+    right: 1rem;
+    width: min(30rem, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    padding: 1rem;
+    border: 1px solid var(--sl-color-neutral-500);
+    border-radius: .5rem;
+    background: var(--sl-color-neutral-100);
+    color: var(--sl-color-neutral-900);
+    box-shadow: 0 4px 20px #0006;
+}
+.tray-setup-guidance[hidden] { display: none; }
+.tray-setup-guidance h2 { font-size: 1rem; margin: 0 0 .5rem; }
+.tray-setup-guidance p { margin: .5rem 0; }
+.tray-setup-guidance code { display: block; overflow-wrap: anywhere; }
+.tray-setup-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.tray-setup-actions button { padding: .5rem; cursor: pointer; }
+.tray-setup-actions button:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }

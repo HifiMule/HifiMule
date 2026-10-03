@@ -121,3 +121,18 @@ and regression-test results.
 The release manager derives the aggregate decision from the per-package records. Publish only when every required row passes. A signed row must include a verified signing identity and pass the Windows Authenticode or macOS Developer ID/notarization checks; a row without distribution credentials (including ad-hoc signed macOS) must record signing status `not-configured` without an identity and must not be described as trusted by SmartScreen or Gatekeeper. Otherwise keep the draft unpublished and record `blocker` or a narrowly scoped `unsupported` disposition with owner and rationale.
 
 Downgrade is not automatically rollback-safe. Preserve a backup before migration testing and document the exact supported recovery procedure without claiming erased device state as success.
+
+### GNOME tray setup verification
+
+The Fedora RPM carries a soft recommendation for
+`gnome-shell-extension-appindicator`. Query the built artifact with
+`rpm -qp --recommends <artifact.rpm>` and confirm the package is recommended,
+not added to the required dependencies. Installation does not activate the
+extension: log out and back in, then enable AppIndicator in Extensions.
+
+Verify hydrated onboarding and the normal app with no active GNOME tray host:
+setup guidance should offer the extension page, Check again and session dismissal.
+Enable the extension and check again to confirm the notice disappears. A failed
+or inconclusive D-Bus check must not initially claim missing support. UI/native
+mock tests qualify these transitions only; real tray visibility and menu actions
+require an AppIndicator-enabled desktop and separate recorded evidence.

@@ -1,3 +1,5 @@
+mod tray_support;
+
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -1123,6 +1125,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            tray_support::get_tray_support,
             get_sidecar_status,
             retry_daemon_startup,
             reload_main_window,

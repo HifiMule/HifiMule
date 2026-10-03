@@ -4,6 +4,7 @@ import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.j
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
+import { mountTraySetupGuidance, type TraySupport } from './components/TraySetupGuidance';
 import { withDeadline } from './lifecycleDeadline';
 import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } from './shutdownStatus';
 import { PlaybackControls } from './components/PlaybackControls';
@@ -77,6 +78,10 @@ async function init() {
         const activation = await invoke<string | null>('report_ui_ready');
         if (activation === 'settings') openPlaybackSettings();
         else if (activation === 'output') openAudioOutput();
+        mountTraySetupGuidance(
+            () => invoke<TraySupport>('get_tray_support'),
+            async url => { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(url); },
+        );
         observeShutdown(rpcCall);
     } catch (e) {
         console.error("Failed to check daemon state", e);

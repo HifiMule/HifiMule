@@ -7,6 +7,7 @@
     },
     "linux": {
       "rpm": {
+        "recommends": ["gnome-shell-extension-appindicator"],
         "depends": ["gtk3", "webkit2gtk4.1", "libsoup3", "libappindicator-gtk3", "libmtp", "openssl-libs", "libxdo"]
       },
       "appimage": {
