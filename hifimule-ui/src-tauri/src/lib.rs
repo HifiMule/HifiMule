@@ -1137,6 +1137,9 @@ pub fn run() {
             settings_set_launch_on_startup
         ])
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            configure_window_controls();
+
             let coordinator = StartupCoordinator(Arc::new(Mutex::new(StartupState {
                 epoch: 0,
                 closed: false,
@@ -1183,6 +1186,50 @@ pub fn run() {
         let _ = watcher.join();
     }
     drop(ui_guard);
+}
+
+#[cfg(target_os = "linux")]
+fn configure_window_controls() {
+    use gtk::prelude::GtkSettingsExt;
+
+    // GTK settings belong to this process; desktop preferences are untouched.
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_decoration_layout(Some("menu:minimize,maximize,close"));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod window_controls_tests {
+    use gtk::prelude::*;
+
+    fn button_count(widget: &gtk::Widget) -> usize {
+        let mut count = usize::from(widget.is::<gtk::Button>());
+        if let Some(container) = widget.downcast_ref::<gtk::Container>() {
+            container.forall(|child| count += button_count(child));
+        }
+        count
+    }
+
+    #[test]
+    #[ignore = "requires a native GTK display; run explicitly with --ignored --test-threads=1"]
+    fn close_only_desktop_layout_restores_three_native_controls() {
+        gtk::init().expect("native GTK display required");
+        let settings = gtk::Settings::default().expect("GTK settings");
+        let previous = settings.gtk_decoration_layout();
+        settings.set_gtk_decoration_layout(Some("appmenu:close"));
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let header = gtk::HeaderBar::new();
+        header.set_show_close_button(true);
+        window.set_titlebar(Some(&header));
+        window.show_all();
+        assert_eq!(button_count(header.upcast_ref()), 1);
+
+        super::configure_window_controls();
+        assert_eq!(button_count(header.upcast_ref()), 3);
+
+        window.close();
+        settings.set_gtk_decoration_layout(previous.as_deref());
+    }
 }
 
 #[cfg(test)]
