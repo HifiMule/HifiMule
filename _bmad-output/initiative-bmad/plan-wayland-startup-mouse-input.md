@@ -77,7 +77,11 @@ context: []
 
 ## Plan Change Log
 
+- Packaged-build follow-up: user reports Tauri CLI rejects Rust 2.12.1 with JavaScript API 2.10.1. The plan's Cargo-only build missed the CLI version gate. Align `hifimule-ui/package.json` API and CLI to stable 2.12 and regenerate its npm lockfile. Verify through `npm run tauri build`, preserving the user-confirmed runtime and three-button fix. Add a meaningful version-family regression check to release contract tests so a future partial runtime update fails validation.
+
 ## Review Triage Log
+
+- Packaging correction quick review: no code defect reported. Full package completion remains unverified because the duplicate verification build was stopped while the user's build ran. The reported mismatch is resolved: API/CLI manifest and lock entries match Rust 2.12, regression passes, and the CLI proceeds beyond the original gate. Do not claim a completed package build from this evidence.
 
 - Final user validation on 2026-10-04: "it's working with 3 buttons." The rebuilt candidate restores working Minimize, Maximize and Close on the affected desktop. This closes the follow-up control regression and the original startup-click report. Separate packaged-release, startup-failure and existing-instance scenarios remain validation limitations; no implementation defect was found by quick review.
 
@@ -119,3 +123,9 @@ context: []
 - User validation of the rebuilt candidate controls and maximize/restore remains pending; the GTK regression verifies widget creation, not user click behavior.
 - Formatting tool unavailable (`rustfmt` not installed); `git diff --check` passes.
 - Follow-up Rust suite: 13 passed, 1 ignored; explicit native test: 1 passed. Debug candidate rebuilt successfully with `rtk cargo build -p hifimule-ui --locked --offline` (exit 0), preserving existing sidecar and installed package. Logs: `/tmp/wayland-controls-rust-tests.log`, `/tmp/wayland-controls-candidate-build.log`, `/tmp/wayland-controls-verification.log`.
+
+### Packaging version alignment (2026-10-04)
+
+- UI JavaScript API and CLI now require stable `~2.12`, both resolving to 2.12.1, matching Cargo.lock Tauri 2.12.1. Only UI package manifest/lock changed; root npm package/lock untouched.
+- Added release contract regression checking selected Rust Tauri major/minor against manifest and resolved API/CLI versions, including manifest/lock agreement and stable-version validation. Original mismatch failed before the fix; replaying the old API declaration produces the exact `2.10 != 2.12` assertion (`/tmp/wayland-packaging-red-detail.log`). Updated release-contract tests pass (12 subtests, `/tmp/wayland-packaging-green-detail.log`).
+- Frontend TypeScript/Vite build passes with updated API (`/tmp/wayland-packaging-frontend.log`). Full `rtk npm run tauri build` was invoked through the project wrapper and reached sidecar Cargo preparation, past the version mismatch gate. A concurrent user-owned release build was already compiling the daemon; our duplicate build was waiting on its Cargo lock. Only our verified process tree was gracefully stopped (exit 143) to avoid contention. The user build was left running; package completion is not claimed.

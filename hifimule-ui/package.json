@@ -11,11 +11,11 @@
   },
   "dependencies": {
     "@shoelace-style/shoelace": "^2.19.1",
-    "@tauri-apps/api": "~2.10",
+    "@tauri-apps/api": "~2.12",
     "@tauri-apps/plugin-opener": "2.5.3"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "~2.10.1",
+    "@tauri-apps/cli": "~2.12",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"
   }

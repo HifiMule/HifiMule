@@ -74,6 +74,23 @@ test("Cargo and Tauri versions agree with the platform bundle targets", () => {
   assert.deepEqual(json("hifimule-ui/src-tauri/tauri.macos.conf.json").bundle.targets, ["app", "dmg"]);
 });
 
+test("Tauri runtime, JavaScript API and CLI share a stable minor release", () => {
+  const runtime = read("Cargo.lock").match(/\[\[package\]\]\s*name = "tauri"\s*version = "([^"]+)"/)?.[1];
+  assert.ok(runtime, "Cargo lockfile must resolve Tauri");
+  const family = (version) => {
+    const match = version.match(/^[~^]?(\d+\.\d+)(?:\.\d+)?$/);
+    assert.ok(match, `expected a stable Tauri version: ${version}`);
+    return match[1];
+  };
+  const manifest = json("hifimule-ui/package.json");
+  const lock = json("hifimule-ui/package-lock.json");
+  for (const [name, section] of [["@tauri-apps/api", "dependencies"], ["@tauri-apps/cli", "devDependencies"]]) {
+    assert.equal(family(manifest[section][name]), family(runtime), `${name} manifest must match Rust runtime`);
+    assert.equal(lock.packages[""][section][name], manifest[section][name], `${name} lock declaration must match manifest`);
+    assert.equal(family(lock.packages[`node_modules/${name}`].version), family(runtime), `${name} resolved version must match Rust runtime`);
+  }
+});
+
 test("Tauri opener versions are pinned together across Rust and JavaScript", () => {
   const cargoManifestVersion = read("hifimule-ui/src-tauri/Cargo.toml").match(/^tauri-plugin-opener = "=([^"]+)"$/m)?.[1];
   const cargoLockVersion = read("Cargo.lock").match(/\[\[package\]\]\s*name = "tauri-plugin-opener"\s*version = "([^"]+)"/)?.[1];
