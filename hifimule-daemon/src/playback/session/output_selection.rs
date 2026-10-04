@@ -13,6 +13,7 @@ pub(super) struct OutputRuntime {
     preferences: PreferenceWorker,
     invalid_config: bool,
     initialize_missing_default: bool,
+    restore_saved_output: bool,
     discovery_sequence: u64,
     switch_generation: Option<String>,
     pub(super) effect: Option<String>,
@@ -78,6 +79,7 @@ impl PlaybackSession {
             preferences: PreferenceWorker::start(path),
             invalid_config: loaded.is_err(),
             initialize_missing_default,
+            restore_saved_output: i.output.selected.is_some(),
             discovery_sequence: 0,
             switch_generation: None,
             effect: None,
@@ -370,6 +372,8 @@ fn select_inner(
     i.output.error = None;
     i.state_sequence += 1;
     let runtime = i.outputs.as_mut().unwrap();
+    runtime.restore_saved_output = false;
+    runtime.initialize_missing_default = false;
     runtime.switch_generation = Some(i.generation_id.clone());
     runtime.effect = None;
     runtime.preferences.submit(SaveRequest {
@@ -395,39 +399,61 @@ pub(super) fn reconcile_outputs(
     let before = i.output.clone();
     let mut checkpoint_output_state = false;
     let inventory = runtime.discovery.inventory(false);
+    // Rebind stale preferences only while restoring, before any native stream
+    // is opened. Live device loss still retires the stream and pauses playback.
+    // Discovery must finish successfully before choosing a replacement.
     if !fenced
-        && runtime.initialize_missing_default
-        && i.output.selected.is_none()
+        && !runtime.invalid_config
+        && (runtime.initialize_missing_default || runtime.restore_saved_output)
         && i.output.pending.is_none()
+        && i.output.active.is_none()
         && inventory.discovery.error.is_none()
     {
-        let mut defaults = inventory
-            .discovery
-            .outputs
-            .iter()
-            .filter(|output| output.available && output.is_default);
-        let default = match (defaults.next(), defaults.next()) {
-            (Some(selected), None) => Some(selected),
-            _ => None,
-        };
-        runtime.initialize_missing_default = false;
-        if let Some(selected) = default {
-            let revision = parse_revision(&i.output.revision)
-                .expect("output revision is always valid")
-                .checked_add(1)
-                .filter(|revision| *revision <= i64::MAX as u64)
-                .expect("initial output revision cannot overflow");
-            i.output.revision = revision.to_string();
-            i.output.pending = Some(selected.clone());
-            i.output.status = "switching".into();
-            runtime.preferences.submit(SaveRequest {
-                revision,
-                config: PlaybackConfig {
-                    schema_version: 1,
-                    output: selected.preference.clone(),
-                },
-                replace_invalid: false,
+        let outputs = &inventory.discovery.outputs;
+        let saved = i.output.selected.as_ref().and_then(|o| o.preference.as_ref());
+        if saved.is_some_and(|p| devices::resolve(p, outputs).is_ok()) {
+            runtime.restore_saved_output = false;
+        } else {
+            fn unique(candidates: Vec<&OutputDescriptor>) -> Option<&OutputDescriptor> {
+                (candidates.len() == 1).then(|| candidates[0])
+            }
+            let matching = saved.and_then(|saved| {
+                unique(
+                    outputs
+                        .iter()
+                        .filter(|o| {
+                            o.available
+                                && o.preference.as_ref().is_some_and(|p| {
+                                    p.backend == saved.backend && p.stable_id == saved.stable_id
+                                })
+                        })
+                        .collect(),
+                )
             });
+            let default = unique(outputs.iter().filter(|o| o.available && o.is_default).collect());
+            let only_available =
+                saved.and_then(|_| unique(outputs.iter().filter(|o| o.available).collect()));
+            let replacement = matching.or(default).or(only_available);
+            if let Some(selected) = replacement {
+                let revision = parse_revision(&i.output.revision)
+                    .expect("output revision is always valid")
+                    .checked_add(1)
+                    .filter(|revision| *revision <= i64::MAX as u64)
+                    .expect("initial output revision cannot overflow");
+                runtime.initialize_missing_default = false;
+                runtime.restore_saved_output = false;
+                i.output.revision = revision.to_string();
+                i.output.pending = Some(selected.clone());
+                i.output.status = "switching".into();
+                runtime.preferences.submit(SaveRequest {
+                    revision,
+                    config: PlaybackConfig {
+                        schema_version: 1,
+                        output: selected.preference.clone(),
+                    },
+                    replace_invalid: false,
+                });
+            }
         }
     }
     if let Some(result) = runtime.preferences.take_result() {
@@ -463,7 +489,10 @@ pub(super) fn reconcile_outputs(
         && let Some(preference) = selected.preference.as_ref()
     {
         match devices::resolve(preference, &inventory.discovery.outputs) {
-            Ok(found) if inventory.discovery.can_resolve() => *selected = found.clone(),
+            Ok(found) if inventory.discovery.can_resolve() => {
+                *selected = found.clone();
+                runtime.restore_saved_output = false;
+            }
             _ => selected.available = false,
         }
     }
@@ -635,6 +664,194 @@ mod tests {
         );
         assert!(session.take_output_effect().is_none());
         assert!(!session.output_gate.load(Ordering::Acquire));
+        session.stop_and_join().unwrap();
+    }
+
+    // These cases catch restoring a stale preference without refreshing it from
+    // the live inventory, leaving a usable output permanently unavailable.
+    #[test]
+    fn stale_output_recovers_and_persists_current_endpoint() {
+        for scenario in 0..3 {
+            let missing = scenario != 0;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("playback.json");
+            let saved = OutputPreference {
+                backend: "pulse".into(),
+                stable_id: "old-output".into(),
+                display_name: "Speakers".into(),
+                identity_properties: BTreeMap::from([
+                    ("device.product.id".into(), "0x2415".into()),
+                    ("port".into(), "analog-output;output-amplifier-on".into()),
+                ]),
+            };
+            config::save(
+                &path,
+                &PlaybackConfig {
+                    schema_version: 1,
+                    output: Some(saved.clone()),
+                },
+                false,
+            )
+            .unwrap();
+            let mut current = saved.clone();
+            current
+                .identity_properties
+                .insert("device.product.id".into(), "0x2668".into());
+            current
+                .identity_properties
+                .insert("port".into(), "analog-output".into());
+            if missing {
+                current.stable_id = "system-default".into();
+            }
+            let mut endpoint = saved_descriptor(current.clone());
+            endpoint.available = true;
+            // The matching output must win even when another output is default.
+            let mut other = endpoint.clone();
+            other.preference.as_mut().unwrap().stable_id = "other-default".into();
+            other.output_id = devices::output_id(other.preference.as_ref().unwrap());
+            other.is_default = true;
+            endpoint.is_default = scenario == 1;
+            let outputs = if missing {
+                vec![endpoint]
+            } else {
+                vec![endpoint, other]
+            };
+            let session = PlaybackSession::restore(
+                Arc::new(Database::memory().unwrap()),
+                Uuid::new_v4().to_string(),
+            );
+            session.enable_outputs_with(path.clone(), move || Discovery {
+                outputs: outputs.clone(),
+                error: None,
+            });
+            let recovered = wait_for(&session, |s| {
+                s.output.pending.is_none()
+                    && s.output.selected.as_ref().is_some_and(|o| o.available)
+            });
+            assert_eq!(
+                recovered.output.selected.as_ref().unwrap().preference,
+                Some(current.clone())
+            );
+            assert_eq!(config::load(&path).unwrap().output, Some(current));
+            assert_eq!(recovered.state, TransportState::Idle);
+            assert_eq!(recovered.position_ms, 0);
+            assert!(recovered.current.is_none());
+            assert!(session.take_output_effect().is_none());
+            assert!(!session.output_gate.load(Ordering::Acquire));
+            session.stop_and_join().unwrap();
+        }
+    }
+
+    #[test]
+    fn restoration_does_not_replace_a_working_choice_or_use_incomplete_discovery() {
+        for partial in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("playback.json");
+            let preference = OutputPreference {
+                backend: "pulse".into(),
+                stable_id: "headphones".into(),
+                display_name: "Headphones".into(),
+                identity_properties: BTreeMap::new(),
+            };
+            config::save(
+                &path,
+                &PlaybackConfig {
+                    schema_version: 1,
+                    output: Some(preference.clone()),
+                },
+                false,
+            )
+            .unwrap();
+            let mut endpoint = saved_descriptor(preference.clone());
+            endpoint.available = true;
+            let mut default = endpoint.clone();
+            default.preference.as_mut().unwrap().stable_id = "speakers".into();
+            default.output_id = devices::output_id(default.preference.as_ref().unwrap());
+            default.is_default = true;
+            let outputs = if partial {
+                vec![default]
+            } else {
+                vec![endpoint, default]
+            };
+            let session = PlaybackSession::restore(
+                Arc::new(Database::memory().unwrap()),
+                Uuid::new_v4().to_string(),
+            );
+            session.enable_outputs_with(path.clone(), move || Discovery {
+                outputs: outputs.clone(),
+                error: partial.then_some("OUTPUT_DISCOVERY_PARTIAL"),
+            });
+            let snapshot = wait_for(&session, |s| {
+                let list = session
+                    .list_outputs(ListOutputsParams { schema_version: 1 })
+                    .unwrap();
+                !list.outputs.is_empty()
+                    && s.output.selected.as_ref().is_some_and(|o| o.available != partial)
+            });
+            assert!(snapshot.output.pending.is_none());
+            assert_eq!(snapshot.output.revision, "0");
+            assert_eq!(
+                snapshot.output.selected.unwrap().preference,
+                Some(preference.clone())
+            );
+            assert_eq!(config::load(&path).unwrap().output, Some(preference));
+            assert!(session.take_output_effect().is_none());
+            session.stop_and_join().unwrap();
+        }
+    }
+
+    #[test]
+    fn healthy_partial_restore_finishes_before_later_device_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playback.json");
+        let preference = OutputPreference {
+            backend: "pulse".into(),
+            stable_id: "headphones".into(),
+            display_name: "Headphones".into(),
+            identity_properties: BTreeMap::new(),
+        };
+        config::save(
+            &path,
+            &PlaybackConfig {
+                schema_version: 1,
+                output: Some(preference.clone()),
+            },
+            false,
+        )
+        .unwrap();
+        let mut endpoint = saved_descriptor(preference.clone());
+        endpoint.available = true;
+        let inventory = Arc::new(Mutex::new(Discovery {
+            outputs: vec![endpoint.clone()],
+            error: Some("OUTPUT_DISCOVERY_PARTIAL"),
+        }));
+        let discovered = inventory.clone();
+        let session = PlaybackSession::restore(
+            Arc::new(Database::memory().unwrap()),
+            Uuid::new_v4().to_string(),
+        );
+        session.enable_outputs_with(path.clone(), move || discovered.lock().unwrap().clone());
+        wait_for(&session, |s| s.output.selected.as_ref().is_some_and(|o| o.available));
+        let mut replacement = endpoint;
+        replacement.preference.as_mut().unwrap().stable_id = "speakers".into();
+        replacement.output_id = devices::output_id(replacement.preference.as_ref().unwrap());
+        replacement.is_default = true;
+        *inventory.lock().unwrap() = Discovery {
+            outputs: vec![replacement],
+            error: None,
+        };
+        let lost = wait_for(&session, |s| {
+            !s.output.selected.as_ref().unwrap().available
+                && session
+                    .list_outputs(ListOutputsParams { schema_version: 1 })
+                    .unwrap()
+                    .error
+                    .is_none()
+        });
+        assert!(lost.output.pending.is_none());
+        assert_eq!(lost.output.revision, "0");
+        assert_eq!(config::load(&path).unwrap().output, Some(preference));
+        assert!(session.take_output_effect().is_none());
         session.stop_and_join().unwrap();
     }
 
