@@ -4,7 +4,7 @@
 ; The daemon loads the bundled audio DLLs. Stop it before Tauri copies any
 ; resources so an upgrade does not first fail on a locked DLL.
 !macro NSIS_HOOK_PREINSTALL
-  !insertmacro CheckIfAppIsRunning "hifimule-daemon.exe" "${PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\hifimule-daemon.exe" "${PRODUCTNAME}"
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

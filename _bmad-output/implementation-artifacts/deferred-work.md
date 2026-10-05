@@ -341,3 +341,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 - Give podcast auto-fill a choice between latest episodes across all podcasts and a selected list of podcasts.
 - Remove the unnecessary verified direct representation confirmation for selected podcast episodes.
 - Prevent podcast destination collisions when distinct feeds share a show title, publication date, and episode title.
+
+## Deferred from: Windows NSIS Restart Manager compatibility review (2026-10-05)
+
+- **Uninstall cancellation removes startup registration before uninstall completes.** `hifimule-ui/src-tauri/nsis/hooks.nsh:25–26` deletes the Run and InstallDir registry entries in PREUNINSTALL, before the UI running-app check in the installer. Canceling that later close prompt leaves the app installed without login startup. This predates the Restart Manager compatibility fix; move cleanup after the uninstall passes its cancellation points and cover that path separately.

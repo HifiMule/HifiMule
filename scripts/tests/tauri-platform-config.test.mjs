@@ -62,7 +62,21 @@ test("effective native-library resource mappings are non-overlapping by platform
 
 test("NSIS stops the daemon before copying its runtime DLLs", () => {
   const hooks = readFileSync(resolve(root, "hifimule-ui/src-tauri/nsis/hooks.nsh"), "utf8");
-  assert.match(hooks, /!macro NSIS_HOOK_PREINSTALL[\s\S]*?!insertmacro CheckIfAppIsRunning "hifimule-daemon\.exe" "\$\{PRODUCTNAME\}"[\s\S]*?!macroend/);
+  assert.match(hooks, /!macro NSIS_HOOK_PREINSTALL[\s\S]*?!insertmacro CheckIfAppIsRunning "\$INSTDIR\\hifimule-daemon\.exe" "\$\{PRODUCTNAME\}"[\s\S]*?!macroend/);
+});
+
+test("NSIS provides Restart Manager macros before hooks and checks installed executable paths", () => {
+  const installer = readFileSync(resolve(root, "hifimule-ui/src-tauri/nsis/installer.nsi"), "utf8");
+  const header = '!include "Win\\RestartManager.nsh"';
+  const includeIndex = installer.indexOf(header);
+  assert.notEqual(includeIndex, -1, "Tauri 2.12 running-app checks require RestartManager.nsh");
+  assert.ok(includeIndex < installer.indexOf('!include "{{installer_hooks}}"'));
+  const calls = [...installer.matchAll(/!insertmacro CheckIfAppIsRunning "([^"]+)"/g)];
+  assert.equal(calls.length, 2, "install and uninstall both check the UI executable");
+  for (const call of calls) {
+    assert.equal(call[1], "$INSTDIR\\${MAINBINARYNAME}.exe");
+    assert.ok(includeIndex < call.index);
+  }
 });
 
 test("Windows installers register the daemon at login on a fresh install", () => {
