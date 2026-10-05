@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.17.0 - 2026-10-05
+
+You can now start **Radio** from the playback bar or tray and let HifiMule choose music from your library, or start from an artist, genre, or playlist while browsing. You can combine sources from your music servers and choose selection priorities, then keep listening as the upcoming queue refills and follows available artist connections. Fresh starts bring more variety, confident copies of the same recording avoid unnecessary repeats across servers, and available loudness metadata helps keep Radio tracks at a consistent level.
+
+HifiMule now includes an **RPM for Fedora 44 on x86_64**, with its audio libraries bundled. On GNOME, setup guidance helps you enable AppIndicator when tray support is missing. RPM and DEB installations also start the background service when you sign in, so you can reach it without opening the main window first. This release restores Wayland mouse input and brings minimize, maximize, and close controls to the Linux window.
+
 ## v0.16.1 - 2026-09-27
 
 On Windows, HifiMule's background service now starts when you sign in after a fresh installation, so it can watch for your devices without requiring you to open the app first. An uninstall now asks the service to finish its work and waits for it to close before removing its files.
