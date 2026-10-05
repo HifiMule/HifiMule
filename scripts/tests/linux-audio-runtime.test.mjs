@@ -316,6 +316,58 @@ function installedBundleFixture(t, reachableNames, nestedNames) {
   return { allFiles, bundleRoot, libdir, options };
 }
 
+test("installed Linux verification ignores desktop metadata preceding the daemon executable", (t) => {
+  const controlledNames = [
+    ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
+    "libmtp.so.9",
+    "libpulse.so.0",
+  ];
+  const fixture = installedBundleFixture(t, controlledNames, []);
+  const desktop = join(fixture.bundleRoot, "etc/xdg/autostart/hifimule-daemon.desktop");
+  mkdirSync(dirname(desktop), { recursive: true });
+  writeFileSync(desktop, "[Desktop Entry]\nExec=hifimule-daemon\n");
+  const inspected = [];
+  const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    walk: () => [desktop, ...fixture.allFiles],
+    assertElf: (path, ...args) => {
+      inspected.push(path);
+      return fixture.options.assertElf(path, ...args);
+    },
+  });
+  assert.equal(result.sidecar, fixture.allFiles[0]);
+  assert.equal(inspected[0], fixture.allFiles[0]);
+  assert.ok(!inspected.includes(desktop));
+  assert.equal(result.libraryCount, controlledNames.length);
+});
+
+test("installed Linux verification rejects metadata and similarly prefixed files without a daemon", (t) => {
+  const fixture = installedBundleFixture(t, [], []);
+  rmSync(fixture.allFiles[0]);
+  for (const name of ["hifimule-daemon.desktop", "hifimule-daemon-backup"]) {
+    writeFileSync(join(fixture.bundleRoot, name), "not a daemon");
+  }
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    assertElf: () => assert.fail("metadata must not reach ELF inspection"),
+  }), /No daemon sidecar under/);
+});
+
+test("installed Linux verification propagates ELF rejection of the exact daemon filename", (t) => {
+  const fixture = installedBundleFixture(t, [], []);
+  const sidecar = fixture.allFiles[0];
+  writeFileSync(sidecar, "not ELF");
+  const elfFailure = new Error("readelf: Not an ELF file - it has the wrong magic bytes at the start");
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options,
+    assertElf: (path) => {
+      assert.equal(path, sidecar);
+      throw elfFailure;
+    },
+    run: () => assert.fail("invalid daemon must fail before RUNPATH inspection"),
+  }), (error) => error === elfFailure);
+});
+
 test("installed Linux verification uses the RUNPATH closure despite duplicate nested libraries and traversal order", (t) => {
   const controlledNames = [
     ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),

@@ -369,7 +369,14 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           set -euo pipefail
-          DEB="$(find target hifimule-ui/src-tauri/target -path '*/release/bundle/*' -name '*.deb' -print -quit 2>/dev/null)"
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
+          DEB="$(find "${TARGET_DIRS[@]}" -path '*/release/bundle/*' -name '*.deb' -print -quit)"
           test -n "$DEB" || { echo "Deb artifact not found"; exit 1; }
           rm -rf deb-root
           dpkg-deb -x "$DEB" deb-root
@@ -381,7 +388,14 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           set -euo pipefail
-          RPM="$(find target hifimule-ui/src-tauri/target -path '*/release/bundle/*' -name '*.rpm' -print -quit 2>/dev/null)"
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
+          RPM="$(find "${TARGET_DIRS[@]}" -path '*/release/bundle/*' -name '*.rpm' -print -quit)"
           test -n "$RPM" || { echo "RPM artifact not found"; exit 1; }
           rpm -qp --requires "$RPM"
           RPM="$(realpath "$RPM")"
@@ -483,10 +497,20 @@ jobs:
           CANDIDATE_VERSION: ${{ inputs.candidate_version }}
         run: |
           set -euo pipefail
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
           mkdir -p candidate-metadata
-          find target hifimule-ui/src-tauri/target -path '*/release/bundle/*' -type f -print0 2>/dev/null \
-            | sort -z \
-            | xargs -0 shasum -a 256 > "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.sha256"
+          ARTIFACT_LIST="$(mktemp)"
+          trap 'rm -f "$ARTIFACT_LIST"' EXIT
+          find "${TARGET_DIRS[@]}" -path '*/release/bundle/*' -type f -print0 \
+            | sort -z > "$ARTIFACT_LIST"
+          test -s "$ARTIFACT_LIST" || { echo "Candidate bundle artifacts not found"; exit 1; }
+          xargs -0 shasum -a 256 < "$ARTIFACT_LIST" > "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.sha256"
           test -s "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.sha256"
           git rev-parse HEAD > "candidate-metadata/${CANDIDATE_ROW}-${CANDIDATE_VERSION}.source-revision"
 

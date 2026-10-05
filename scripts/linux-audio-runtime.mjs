@@ -302,7 +302,7 @@ export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
   const execute = options.run ?? run;
   const verifyResolved = options.resolved ?? resolved;
   const files = listFiles(bundleRoot);
-  const sidecar = files.find((path) => basename(path).startsWith("hifimule-daemon"));
+  const sidecar = files.find((path) => basename(path) === "hifimule-daemon");
   if (!sidecar) throw new Error(`No daemon sidecar under ${bundleRoot}`);
   const sidecarMeta = inspectElf(sidecar, target);
   verifyLinuxAudioLinkage(sidecarMeta.needed);

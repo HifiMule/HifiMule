@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -112,6 +115,83 @@ test("release verifies extracted RPM private libraries before candidate upload",
   assert.match(rpm, /rpm2cpio.*cpio/);
   assert.match(rpm, /linux-audio-runtime\.mjs verify-bundle.*rpm-root/);
   assert.ok(workflow.indexOf(rpm) < workflow.indexOf("name: Upload immutable candidate"));
+});
+
+const workflowRun = (stepName) => {
+  const workflow = normalizeWorkflow(read(".github/workflows/release.yml"));
+  const step = workflow.split(/(?=^      - )/m).find((entry) => entry.includes(`name: ${stepName}`));
+  assert.ok(step, `workflow must define ${stepName}`);
+  const run = step.match(/^        run: \|\n([\s\S]*)/m)?.[1];
+  assert.ok(run, `${stepName} must define a shell script`);
+  return run.replace(/^          /gm, "").trimEnd();
+};
+const discoveryScripts = () => [
+  ...[["deb", "DEB", "Deb"], ["rpm", "RPM", "RPM"]].map(([extension, variable, label]) => ({
+    name: extension,
+    script: workflowRun(`Verify Linux ${extension}`).split(extension === "rpm" ? "rpm -qp" : "rm -rf deb-root")[0]
+      + `printf '%s\\n' "$${variable}"\n`,
+    missing: `${label} artifact not found`,
+  })),
+  {
+    name: "checksums",
+    // Exercise the entire checksum collection, stopping before unrelated source-revision metadata.
+    script: workflowRun("Write immutable candidate checksums").split("git rev-parse HEAD")[0],
+    missing: "Candidate bundle artifacts not found",
+  },
+];
+const releaseFixture = (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "hifimule-release-discovery-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  return cwd;
+};
+const runDiscovery = (script, cwd) => spawnSync("bash", ["-c", script], {
+  cwd,
+  encoding: "utf8",
+  env: { ...process.env, CANDIDATE_ROW: "linux-x64", CANDIDATE_VERSION: "0.17.0" },
+});
+
+test("release artifact discovery and candidate checksums accept either target directory alone", { skip: process.platform === "win32" }, (t) => {
+  for (const targetDir of ["target", "hifimule-ui/src-tauri/target"]) {
+    const cwd = releaseFixture(t);
+    const artifacts = ["deb", "rpm"].map((extension) => `${targetDir}/x86_64-unknown-linux-gnu/release/bundle/${extension}/HifiMule release.${extension}`);
+    for (const artifact of artifacts) {
+      mkdirSync(dirname(join(cwd, artifact)), { recursive: true });
+      writeFileSync(join(cwd, artifact), `package ${artifact}`);
+    }
+    for (const { name, script } of discoveryScripts()) {
+      const result = runDiscovery(script, cwd);
+      assert.equal(result.status, 0, `${targetDir}: ${name}: ${result.stdout}${result.stderr}`);
+      if (name === "checksums") {
+        const checksums = readFileSync(join(cwd, "candidate-metadata/linux-x64-0.17.0.sha256"), "utf8");
+        const expected = artifacts.sort().map((artifact) => {
+          const digest = createHash("sha256").update(readFileSync(join(cwd, artifact))).digest("hex");
+          return `${digest}  ${artifact}\n`;
+        }).join("");
+        assert.equal(checksums, expected);
+      } else {
+        assert.equal(result.stdout.trim(), artifacts.find((artifact) => artifact.endsWith(`.${name}`)));
+      }
+    }
+  }
+});
+
+test("release discovery fails explicitly when existing target directories have no packages", { skip: process.platform === "win32" }, (t) => {
+  const cwd = releaseFixture(t);
+  mkdirSync(join(cwd, "target/release"), { recursive: true });
+  for (const { name, script, missing } of discoveryScripts()) {
+    const result = runDiscovery(script, cwd);
+    assert.notEqual(result.status, 0, `${name} must reject missing packages`);
+    assert.ok(result.stdout.includes(missing), `${name}: ${result.stdout}${result.stderr}`);
+  }
+});
+
+test("release discovery fails explicitly when no target directory exists", { skip: process.platform === "win32" }, (t) => {
+  const cwd = releaseFixture(t);
+  for (const { name, script } of discoveryScripts()) {
+    const result = runDiscovery(script, cwd);
+    assert.notEqual(result.status, 0, `${name} must reject missing target directories`);
+    assert.ok(result.stdout.includes("No Tauri target directory found"), `${name}: ${result.stdout}${result.stderr}`);
+  }
 });
 
 test("release workflow supports explicit immutable candidates without publishing", () => {
