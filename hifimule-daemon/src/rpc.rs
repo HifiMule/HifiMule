@@ -8426,6 +8426,7 @@ async fn handle_sync_execute(
                         .update_manifest_for_device(&sync_manifest.device_id, |m| {
                             m.dirty = false;
                             m.pending_item_ids.clear();
+                            m.last_sync_at = Some(now_unix_secs());
                             m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
                             m.transcoding_profile_dirty = false;
                         })
@@ -8502,6 +8503,7 @@ async fn handle_sync_execute(
                                 .update_manifest_for_device(&sync_manifest.device_id, |m| {
                                     m.dirty = false;
                                     m.pending_item_ids.clear();
+                                    m.last_sync_at = Some(now_unix_secs());
                                     m.last_synced_transcoding_profile_id =
                                         m.transcoding_profile_id.clone();
                                     m.transcoding_profile_dirty = false;
@@ -11318,6 +11320,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: Some("legacy-profile".to_string()),
+            last_sync_at: None,
             last_synced_transcoding_profile_id: Some("legacy-profile".to_string()),
             transcoding_profile_dirty: false,
             playlists: vec![crate::device::PlaylistManifestEntry {
@@ -12535,6 +12538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_execute_uses_active_jellyfin_provider_pipeline() {
+        let started_at = now_unix_secs();
         let mut server = mockito::Server::new_async().await;
         let _download = server
             .mock("GET", "/Items/song1/Download")
@@ -12611,6 +12615,13 @@ mod tests {
             if operation.status != crate::sync::SyncStatus::Running {
                 assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
                 assert!(operation.errors.is_empty(), "{:?}", operation.errors);
+                let manifest: crate::device::DeviceManifest = serde_json::from_slice(
+                    &tokio::fs::read(dir.path().join(".hifimule.json"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(manifest.last_sync_at.unwrap() >= started_at);
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;

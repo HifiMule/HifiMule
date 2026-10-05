@@ -1609,9 +1609,60 @@ fn auto_sync_delta_has_work(delta: &sync::SyncDelta, total_files: usize) -> bool
     total_files > 0 || !delta.id_changes.is_empty() || !delta.playlists.is_empty()
 }
 
+const AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS: i64 = 24 * 60 * 60;
+
+fn auto_sync_cleanup_on_cooldown(
+    destructive_cleanup_count: usize,
+    last_sync_at: Option<i64>,
+    now_unix: i64,
+) -> bool {
+    destructive_cleanup_count > sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+        && last_sync_at.is_some_and(|last_sync| {
+            let age = now_unix.saturating_sub(last_sync);
+            (0..AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS).contains(&age)
+        })
+}
+
 #[cfg(test)]
 mod auto_sync_tests {
     use super::*;
+
+    #[test]
+    fn large_auto_sync_cleanup_waits_only_for_recent_successful_sync() {
+        let now = 1_800_000_000;
+        let count = sync::DESTRUCTIVE_CLEANUP_THRESHOLD + 1;
+        for (last_sync_at, should_skip) in [
+            (None, false),
+            (Some(now), true),
+            (
+                Some(now - AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS + 1),
+                true,
+            ),
+            (
+                Some(now - AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS),
+                false,
+            ),
+            (
+                Some(now - AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS - 1),
+                false,
+            ),
+            (Some(now + 1), false),
+        ] {
+            assert_eq!(
+                auto_sync_cleanup_on_cooldown(count, last_sync_at, now),
+                should_skip,
+                "last_sync_at={last_sync_at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn small_auto_sync_cleanup_is_allowed_after_recent_sync() {
+        let now = 1_800_000_000;
+        for count in [0, sync::DESTRUCTIVE_CLEANUP_THRESHOLD] {
+            assert!(!auto_sync_cleanup_on_cooldown(count, Some(now), now));
+        }
+    }
 
     fn fill_item(id: &str, track_number: Option<u32>) -> auto_fill::AutoFillItem {
         auto_fill::AutoFillItem {
@@ -1884,11 +1935,16 @@ async fn run_auto_sync_via_provider(
         return Ok(());
     }
     let destructive_cleanup_count = sync::destructive_cleanup_count(&delta, manifest);
-    if destructive_cleanup_count > sync::DESTRUCTIVE_CLEANUP_THRESHOLD {
+    if auto_sync_cleanup_on_cooldown(
+        destructive_cleanup_count,
+        manifest.last_sync_at,
+        rpc::now_unix_secs(),
+    ) {
         daemon_log!(
-            "[AutoSync] Skipped: sync would delete {} managed files, exceeding threshold of {}",
+            "[AutoSync] Skipped: sync would delete {} managed files, exceeding threshold of {}; last successful sync was within {} seconds",
             destructive_cleanup_count,
-            sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+            sync::DESTRUCTIVE_CLEANUP_THRESHOLD,
+            AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS
         );
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
@@ -1980,6 +2036,7 @@ async fn run_auto_sync_via_provider(
                         .update_manifest_for_device(&manifest.device_id, |m| {
                             m.dirty = false;
                             m.pending_item_ids.clear();
+                            m.last_sync_at = Some(rpc::now_unix_secs());
                         })
                         .await
                 })

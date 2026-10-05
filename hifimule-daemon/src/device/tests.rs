@@ -2202,6 +2202,7 @@ async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
 fn test_auto_sync_on_connect_serde_default() {
     let json = r#"{"device_id": "dev-1", "name": "iPod", "version": "1.0"}"#;
     let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert_eq!(manifest.last_sync_at, None);
     assert!(
         !manifest.auto_sync_on_connect,
         "auto_sync_on_connect must default to false"
@@ -2213,6 +2214,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
     let dir = tempdir().unwrap();
     let manifest = DeviceManifest {
         device_id: "dev-auto".to_string(),
+        last_sync_at: Some(1_800_000_000),
         name: Some("Auto Device".to_string()),
         icon: None,
         version: "1.0".to_string(),
@@ -2235,6 +2237,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert!(loaded.auto_sync_on_connect);
+    assert_eq!(loaded.last_sync_at, manifest.last_sync_at);
 
     // Verify snake_case serialization (DeviceManifest doesn't use rename_all)
     let raw: serde_json::Value = serde_json::from_str(&content).unwrap();

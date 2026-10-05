@@ -169,6 +169,9 @@ pub struct DeviceManifest {
     pub basket_items: Vec<BasketItem>,
     #[serde(default)]
     pub auto_sync_on_connect: bool,
+    /// Unix timestamp of the last successfully completed sync (manual or automatic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_at: Option<i64>,
     /// Auto-fill config persisted per device, keyed by portable `server_id` (Story 12.2).
     /// Custom serde reads either the legacy `{ enabled, maxBytes }` block or the new
     /// per-server `{ "<serverId>": { …pipeline… } }` map; see [`AutoFillConfig`].
@@ -1817,6 +1820,7 @@ impl DeviceManager {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            last_sync_at: None,
             auto_fill: AutoFillConfig::default(),
             transcoding_profile_id, // stored in .hifimule.json; read back on sync to apply transcoding
             last_synced_transcoding_profile_id: None,
