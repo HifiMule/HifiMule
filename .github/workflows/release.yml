@@ -147,7 +147,7 @@ jobs:
             curl \
             xz-utils \
             binutils \
-            rpm2cpio cpio rpm \
+            libarchive-tools rpm \
             pkgconf \
             libxdo-dev \
             libmtp-dev
@@ -401,7 +401,8 @@ jobs:
           RPM="$(realpath "$RPM")"
           rm -rf rpm-root
           mkdir rpm-root
-          (cd rpm-root && rpm2cpio "$RPM" | cpio -idm --no-absolute-filenames)
+          # Ubuntu 22.04 rpm2cpio can fail on rpm-rs archive-size metadata after extraction.
+          bsdtar -xf "$RPM" -C rpm-root
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/linux-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" rpm-root
           rm -rf rpm-root

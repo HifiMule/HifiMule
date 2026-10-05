@@ -89,7 +89,7 @@ Draft-release smoke tests require `contents: write` on both the release workflow
 Current Linux bundles additionally include an x86_64 RPM intended for Fedora 44.
 The versioned `0.15.0` contract above remains historical evidence. Adding RPM
 does not extend that old contract or inherit DEB/AppImage desktop qualification.
-The Ubuntu release build provisions `rpm2cpio`, `cpio` and `rpm`, extracts the RPM
+The Ubuntu release build provisions `libarchive-tools` and `rpm`, extracts the RPM with `bsdtar`
 and runs the same installed private-native-closure verifier before candidate
 upload. Candidate checksums and artifact uploads include the RPM automatically.
 

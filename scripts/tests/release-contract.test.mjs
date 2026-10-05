@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -110,11 +110,15 @@ test("release verifies extracted RPM private libraries before candidate upload",
   const workflow = read(".github/workflows/release.yml");
   const rpm = workflow.split(/(?=^      - )/m).find(step => step.includes("name: Verify Linux rpm"));
   assert.ok(rpm);
-  assert.match(workflow, /rpm2cpio cpio rpm/);
+  assert.match(workflow, /libarchive-tools rpm/);
   assert.match(rpm, /set -euo pipefail/);
-  assert.match(rpm, /rpm2cpio.*cpio/);
+  assert.match(rpm, /bsdtar -xf "\$RPM" -C rpm-root/);
   assert.match(rpm, /linux-audio-runtime\.mjs verify-bundle.*rpm-root/);
   assert.ok(workflow.indexOf(rpm) < workflow.indexOf("name: Upload immutable candidate"));
+  const build = normalizeWorkflow(read(".github/workflows/build.yml"));
+  const install = build.indexOf("name: Install Linux RPM regression extractor");
+  assert.ok(install >= 0 && install < build.indexOf("name: Run packaging and runtime script regressions"));
+  assert.match(build.slice(install, build.indexOf("name: Run packaging and runtime script regressions")), /if: runner.os == 'Linux'[\s\S]*apt-get install -y libarchive-tools/);
 });
 
 const workflowRun = (stepName) => {
@@ -191,6 +195,57 @@ test("release discovery fails explicitly when no target directory exists", { ski
     const result = runDiscovery(script, cwd);
     assert.notEqual(result.status, 0, `${name} must reject missing target directories`);
     assert.ok(result.stdout.includes("No Tauri target directory found"), `${name}: ${result.stdout}${result.stderr}`);
+  }
+});
+
+test("RPM verification extracts an rpm-rs package and preserves extraction and verifier failures", { skip: process.platform === "win32" }, (t) => {
+  // macOS tar is libarchive's bsdtar; Ubuntu installs the bsdtar executable explicitly.
+  const extractor = process.platform === "darwin" ? "/usr/bin/tar" : "bsdtar";
+  const available = spawnSync(extractor, ["--version"], { encoding: "utf8" });
+  if (available.error?.code === "ENOENT" && !process.env.CI) return t.skip("libarchive-tools is not installed");
+  assert.equal(available.status, 0);
+  assert.match(available.stdout, /bsdtar|libarchive/);
+  const fixture = readFileSync(resolve(root, "scripts/tests/fixtures/rpm/rpm-rs-0.16.0.rpm"));
+  assert.equal(createHash("sha256").update(fixture).digest("hex"), "57886c7ed2136f563e42a1c9386bf5cd5263e02e3aad97ae07fd2ab274adc154");
+  for (const scenario of ["valid", "invalid", "extractor-failure", "verifier-failure"]) {
+    const cwd = releaseFixture(t);
+    const artifact = join(cwd, "target/release/bundle/rpm/HifiMule release.rpm");
+    mkdirSync(dirname(artifact), { recursive: true });
+    writeFileSync(artifact, scenario === "invalid" ? "invalid RPM archive" : fixture);
+    const bin = join(cwd, "bin");
+    mkdirSync(bin);
+    const stubs = {
+      rpm: "exit 0",
+      rustc: 'echo "host: x86_64-unknown-linux-gnu"',
+      "extract-then-fail": `"${extractor}" "$@" || exit 2\nexit 5`,
+      node: `test "$*" = "scripts/linux-audio-runtime.mjs verify-bundle x86_64-unknown-linux-gnu rpm-root" || exit 2
+test "$(cat rpm-root/usr/share/hifimule-fixture/payload.txt)" = "RPM extraction regression" || exit 3
+touch verifier-ran
+exit ${scenario === "verifier-failure" ? 7 : 0}`,
+    };
+    for (const [name, body] of Object.entries(stubs)) {
+      const path = join(bin, name);
+      writeFileSync(path, `#!/bin/sh\n${body}\n`);
+      chmodSync(path, 0o755);
+    }
+    const command = scenario === "extractor-failure" ? "extract-then-fail" : extractor;
+    const script = workflowRun("Verify Linux rpm").replace('bsdtar -xf', `${command} -xf`);
+    const result = spawnSync("bash", ["-c", script], {
+      cwd, encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    if (scenario === "valid") {
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(readFileSync(join(cwd, "verifier-ran"), "utf8"), "");
+    } else if (scenario === "invalid" || scenario === "extractor-failure") {
+      assert.notEqual(result.status, 0, "extractor errors must block verification");
+      if (scenario === "extractor-failure") {
+        assert.equal(result.status, 5);
+        assert.equal(readFileSync(join(cwd, "rpm-root/usr/share/hifimule-fixture/payload.txt"), "utf8"), "RPM extraction regression\n");
+      }
+      assert.throws(() => readFileSync(join(cwd, "verifier-ran")), { code: "ENOENT" });
+    } else {
+      assert.equal(result.status, 7, "private-runtime verifier failures must remain blocking");
+    }
   }
 });
 
