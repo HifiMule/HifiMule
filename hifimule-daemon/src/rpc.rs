@@ -639,6 +639,19 @@ async fn handler(
         "device_list_root_folders" => handle_device_list_root_folders(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         "sync_calculate_delta" => handle_sync_calculate_delta(&state, payload.params).await,
+        "sync_prepare" => {
+            let mut params = payload.params.unwrap_or_else(|| serde_json::json!({}));
+            match params.as_object_mut() {
+                Some(params_object) => {
+                    params_object.insert("prepared".into(),serde_json::json!(true));
+                    handle_sync_calculate_delta(&state, Some(params)).await
+                },
+                None => Err(JsonRpcError {code:ERR_INVALID_PARAMS,message:"Sync preparation params must be an object".into(),data:None}),
+            }
+        },
+        "sync_plan_details" => handle_sync_plan_details(&state, payload.params).await,
+        "sync_plan_discard" => handle_sync_plan_discard(&state, payload.params),
+        "sync_get_warning_details" => handle_sync_warning_details(&state, payload.params),
         "sync_detect_changes" => handle_sync_detect_changes(&state, payload.params).await,
         "sync_execute" => handle_sync_execute(&state, payload.params).await,
         "sync_cancel" => handle_sync_cancel(&state, payload.params).await,
@@ -856,6 +869,8 @@ fn is_mutating_method(method: &str) -> bool {
             | "save_credentials"
             | "set_device_profile"
             | "sync_calculate_delta"
+            | "sync_prepare"
+            | "sync_plan_discard"
             | "sync_execute"
             | "sync_cancel"
             | "sync_get_resume_state"
@@ -4961,16 +4976,21 @@ fn apply_blocked_media_adds(
 ) {
     let blocked_ids: HashSet<&str> = blocked
         .iter()
+        .chain(delta.blocked.iter())
         .map(|item| item.provider_item_id.as_str())
         .collect();
     delta
         .adds
         .retain(|add| !blocked_ids.contains(add.jellyfin_id.as_str()));
     // A failed replacement must not delete its previously managed copy.
-    delta
-        .deletes
-        .retain(|delete| !blocked_ids.contains(delete.jellyfin_id.as_str()));
-    delta.blocked.extend(blocked);
+    let preserved_old_ids: HashSet<String> = delta.id_changes.iter()
+        .filter(|change|blocked_ids.contains(change.new_jellyfin_id.as_str()))
+        .map(|change|change.old_jellyfin_id.clone()).collect();
+    delta.deletes.retain(|delete| !blocked_ids.contains(delete.jellyfin_id.as_str()) && !preserved_old_ids.contains(&delete.jellyfin_id));
+    delta.id_changes.retain(|change| !blocked_ids.contains(change.new_jellyfin_id.as_str()));
+    for item in blocked {
+        if !delta.blocked.iter().any(|existing|existing.provider_item_id == item.provider_item_id && existing.server_id == item.server_id) {delta.blocked.push(item);}
+    }
 }
 
 async fn preflight_provider_media_adds(
@@ -5775,7 +5795,93 @@ async fn provider_calculate_delta(
     crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
-    Ok(delta_value_with_cleanup_metadata(&delta, manifest))
+    finish_sync_delta(_state, delta, manifest, params).await
+}
+
+const SYNC_PLAN_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn sync_plan_error(error: anyhow::Error) -> JsonRpcError {
+    JsonRpcError { code: ERR_STORAGE_ERROR, message:format!("Temporary sync plan failed: {error}"), data:None }
+}
+
+fn stale_plan_error(message: &str) -> JsonRpcError {
+    JsonRpcError { code: ERR_INVALID_PARAMS, message:message.into(), data:Some(serde_json::json!({"requiresSyncPreparation":true})) }
+}
+
+fn destructive_confirmation_error(count:usize) -> JsonRpcError {
+    JsonRpcError {code:ERR_INVALID_PARAMS,message:format!("Sync would delete {} managed files; explicit confirmation is required for more than {} deletions",count,crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD),data:Some(serde_json::json!({"requiresDestructiveCleanupConfirmation":true,"deleteCount":count,"threshold":crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD}))}
+}
+
+async fn sync_target_fingerprint(state: &AppState, target: &crate::sync::SyncTarget) -> Result<String, JsonRpcError> {
+    let servers = state.server_manager.read().await;
+    let (_, connection_revision) = state.device_manager.get_basket_target(&target.manifest.device_id).await.ok_or_else(|| stale_plan_error("Sync destination disconnected"))?;
+    let mut config = format!("{}|{:?}|{:?}|{:?}", connection_revision, servers.selected_server_id, servers.servers, load_selected_transcoding_profile(target.manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?);
+    for server in &servers.servers {
+        if let Ok(credentials) = CredentialManager::get_server_credential(&server.id) {
+            config.push_str(&serde_json::to_string(&(server.id.as_str(),credentials.token_or_password,credentials.user_id)).map_err(|e|sync_plan_error(e.into()))?);
+        }
+    }
+    crate::sync_plan::target_fingerprint(target, &config).map_err(sync_plan_error)
+}
+
+async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest, params: &Value) -> Result<Value, JsonRpcError> {
+    if params.get("prepared").and_then(Value::as_bool) != Some(true) {
+        return Ok(delta_value_with_cleanup_metadata(&delta, manifest));
+    }
+    let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+    if force { apply_force_sync(&mut delta, manifest); }
+    preflight_state_media_adds(state, manifest, &mut delta, None).await?;
+    let target: crate::sync::SyncTarget = state.device_manager.get_selected_sync_target().await.ok_or_else(|| stale_plan_error("Sync destination disconnected during preparation"))?.into();
+    if serde_json::to_string(&target.manifest).map_err(|e|sync_plan_error(e.into()))? != serde_json::to_string(manifest).map_err(|e|sync_plan_error(e.into()))? { return Err(stale_plan_error("Sync destination changed during preparation")); }
+    let fingerprint = sync_target_fingerprint(state, &target).await?;
+    if params.get("preparationFingerprint").and_then(Value::as_str).is_some_and(|expected|expected != fingerprint) {
+        return Err(stale_plan_error("Sync configuration changed during preparation; prepare sync again"));
+    }
+    let plan = crate::sync_plan::SyncPlan::from_delta(delta, manifest).map_err(sync_plan_error)?;
+    plan.validate().map_err(sync_plan_error)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let summary = plan.summary(&id);
+    let manager = Arc::downgrade(&state.sync_operation_manager);
+    let expiry_id=id.clone();
+    let expiry=crate::sync_plan::ExpiryGuard::new(tokio::spawn(async move {
+        tokio::time::sleep(SYNC_PLAN_TTL).await;
+        if let Some(manager) = manager.upgrade() {
+            let mut pending = manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
+            if pending.as_ref().is_some_and(|plan|plan.id == expiry_id) { pending.take(); }
+        }
+    }).abort_handle());
+    {
+        let mut pending=state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
+        if state.sync_operation_manager.is_pipeline_cancelled() || state.sync_operation_manager.is_shutdown_committed() {return Err(sync_cancelled_error());}
+        *pending=Some(crate::sync_plan::PreparedPlan {id,plan,fingerprint,force,created_at:std::time::Instant::now(),_expiry:expiry});
+    }
+    Ok(summary)
+}
+
+async fn handle_sync_plan_details(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| stale_plan_error("Missing plan parameters"))?;
+    let pending = state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
+    let plan = pending.as_ref().filter(|plan|Some(plan.id.as_str()) == params.get("planId").and_then(Value::as_str) && plan.created_at.elapsed() < SYNC_PLAN_TTL).ok_or_else(|| stale_plan_error("Prepared sync plan expired or was discarded"))?;
+    let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let items = plan.plan.blocked.page(offset).map_err(sync_plan_error)?;
+    let next = offset.saturating_add(items.len());
+    Ok(serde_json::json!({"items":items,"total":plan.plan.blocked.len(),"nextOffset":if next < plan.plan.blocked.len() {Some(next)} else {None}}))
+}
+
+fn handle_sync_plan_discard(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+    let id = params.as_ref().and_then(|params|params.get("planId")).and_then(Value::as_str);
+    let mut pending = state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
+    if pending.as_ref().is_some_and(|plan|Some(plan.id.as_str()) == id) { pending.take(); }
+    Ok(serde_json::json!({"discarded":true}))
+}
+
+fn handle_sync_warning_details(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(||stale_plan_error("Missing warning parameters"))?;
+    let operation = params.get("operationId").and_then(Value::as_str).ok_or_else(||stale_plan_error("Missing operationId"))?;
+    let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let (items,total) = state.sync_operation_manager.warning_details(operation,offset).map_err(sync_plan_error)?;
+    let next = offset.saturating_add(items.len());
+    Ok(serde_json::json!({"items":items,"total":total,"nextOffset":if next<total {Some(next)} else {None}}))
 }
 
 fn delta_value_with_cleanup_metadata(
@@ -6932,17 +7038,19 @@ fn patch_delta_bitrate_overrides(
     }
 }
 
-/// Story 13.1: record auto-fill runtime history at sync completion (best-effort; never fails the
-/// sync). For each add that carries a portable `server_id`, upsert `(device, server, track)` with
-/// `last_synced_at = now` and the add's tier; then advance the rotation cursor once per server whose
-/// configured pipeline uses Memory tiers, and prune rows older than the retention window.
-fn record_autofill_history_after_sync(
+fn record_autofill_history_after_plan_sync(
     db: &crate::db::Database,
     manifest: &crate::device::DeviceManifest,
-    delta: &crate::sync::SyncDelta,
+    delta: &crate::sync_plan::SyncPlan,
     errors: &[crate::sync::SyncFileError],
     now: i64,
 ) {
+    if let Err(error) = record_autofill_plan_history(db, manifest, delta, errors, now) {
+        crate::daemon_log!("[AutoFill] history plan read failed (non-fatal): {error}");
+    }
+}
+
+fn record_autofill_plan_history(db: &crate::db::Database, manifest: &crate::device::DeviceManifest, delta: &crate::sync_plan::SyncPlan, errors: &[crate::sync::SyncFileError], now:i64) -> anyhow::Result<()> {
     use std::collections::{HashMap, HashSet};
     let device_id = manifest.device_id.as_str();
 
@@ -6957,23 +7065,26 @@ fn record_autofill_history_after_sync(
     // Every portable server id this sync touches: freshly-added items, id-changed items, and the
     // resident on-device set (needed to refresh the stable core — see step 3).
     let mut servers: HashSet<String> = HashSet::new();
-    for add in &delta.adds {
+    for add in delta.adds.iter()? {
+        let add = add?;
         if let Some(s) = add.server_id.as_deref().filter(|s| !s.is_empty()) {
             servers.insert(s.to_string());
         }
     }
-    for ch in &delta.id_changes {
+    for ch in delta.id_changes.iter()? {
+        let ch = ch?;
         if let Some(s) = ch.source_server_id.as_deref().filter(|s| !s.is_empty()) {
             servers.insert(s.to_string());
         }
     }
-    for item in &manifest.synced_items {
+    for item in delta.residents.iter()? {
+        let item = item?;
         if let Some(s) = item.server_id.as_deref().filter(|s| !s.is_empty()) {
             servers.insert(s.to_string());
         }
     }
     if servers.is_empty() {
-        return; // legacy/Jellyfin items have no portable id → not tracked for cooldown
+        return Ok(()); // legacy/Jellyfin items have no portable id → not tracked for cooldown
     }
 
     // Load existing history once per server: track_id -> tier. Reused to preserve the tier when
@@ -6991,19 +7102,16 @@ fn record_autofill_history_after_sync(
     }
 
     // Tracks leaving the device this sync — never refresh these.
-    let removed: HashSet<&str> = delta
-        .deletes
-        .iter()
-        .map(|d| d.jellyfin_id.as_str())
-        .chain(delta.id_changes.iter().map(|c| c.old_jellyfin_id.as_str()))
-        .collect();
+    let mut removed: HashSet<String> = delta.deletes.iter()?.map(|item|item.map(|item|item.jellyfin_id)).collect::<anyhow::Result<_>>()?;
+    for change in delta.id_changes.iter()? { removed.insert(change?.old_jellyfin_id); }
 
     // Servers that actually had a track written this run — gates the rotation-cursor advance so a
     // fully-failed sync does not rotate the lead tier (AC 8 — "completed sync").
     let mut servers_wrote: HashSet<String> = HashSet::new();
 
     // 1. Freshly-added auto-fill tracks (skip ones that failed to transfer).
-    for add in &delta.adds {
+    for add in delta.adds.iter()? {
+        let add = add?;
         let Some(server_id) = add.server_id.as_deref().filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -7024,7 +7132,8 @@ fn record_autofill_history_after_sync(
 
     // 2. Id-changed tracks: carry history (last_synced_at + tier) from the old id to the new id, so a
     //    server re-key does not reset cooldown / stable-core membership / tier for that track.
-    for ch in &delta.id_changes {
+    for ch in delta.id_changes.iter()? {
+        let ch = ch?;
         let Some(server_id) = ch.source_server_id.as_deref().filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -7056,7 +7165,8 @@ fn record_autofill_history_after_sync(
     // 3. Refresh `last_synced_at` for resident on-device tracks we already track, so a long-lived
     //    stable core is not pruned out from under itself by the retention cutoff. Preserves the
     //    existing tier and never creates rows for manual/untracked items.
-    for item in &manifest.synced_items {
+    for item in delta.residents.iter()? {
+        let item = item?;
         let Some(server_id) = item.server_id.as_deref().filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -7128,6 +7238,7 @@ fn record_autofill_history_after_sync(
             }
         }
     }
+    Ok(())
 }
 
 /// Story 12.4: true when any auto-fill slot's resolved server has a configured NON-default
@@ -7465,7 +7576,7 @@ async fn multi_provider_calculate_delta(
     }
     crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
-    Ok(delta_value_with_cleanup_metadata(&delta, manifest))
+    finish_sync_delta(state, delta, manifest, params).await
 }
 
 async fn handle_sync_calculate_delta(
@@ -7484,7 +7595,7 @@ async fn handle_sync_calculate_delta(
                 data: None,
             })?;
 
-    let params = params.ok_or(JsonRpcError {
+    let mut params = params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing params".to_string(),
         data: None,
@@ -7510,6 +7621,11 @@ async fn handle_sync_calculate_delta(
             message: "No device connected".to_string(),
             data: None,
         })?;
+
+    if params.get("prepared").and_then(Value::as_bool) == Some(true) {
+        let target: crate::sync::SyncTarget = state.device_manager.get_selected_sync_target().await.ok_or_else(||stale_plan_error("Sync destination disconnected"))?.into();
+        params["preparationFingerprint"] = serde_json::json!(sync_target_fingerprint(state,&target).await?);
+    }
 
     // Multi-server routing (AC27/AC28): when the basket (or an auto-fill slot bound
     // to a different server) spans more than one server, resolve each item against
@@ -7990,7 +8106,7 @@ async fn handle_sync_calculate_delta(
     if state.sync_operation_manager.is_pipeline_cancelled() {
         return Err(sync_cancelled_error());
     }
-    Ok(delta_value_with_cleanup_metadata(&delta, &manifest))
+    finish_sync_delta(state, delta, &manifest, &params).await
 }
 
 async fn handle_sync_detect_changes(
@@ -8119,54 +8235,8 @@ async fn handle_sync_detect_changes(
     Ok(serde_json::to_value(enriched).unwrap())
 }
 
-async fn handle_sync_execute(
-    state: &AppState,
-    params: Option<Value>,
-) -> Result<Value, JsonRpcError> {
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let pipeline_guard = state
-        .sync_operation_manager
-        .try_start_pipeline()
-        .ok_or(JsonRpcError {
-            code: ERR_SYNC_IN_PROGRESS,
-            message: "A sync operation is already in progress or the daemon is stopping"
-                .to_string(),
-            data: None,
-        })?;
-
-    // Extract delta from params
-    let mut delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
-        .map_err(|e| JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: format!("Invalid delta parameter: {}", e),
-            data: None,
-        })?;
-    let destructive_cleanup_confirmed = params
-        .get("confirmDestructiveCleanup")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let force_sync = params
-        .get("force")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let target: crate::sync::SyncTarget = state
-        .device_manager
-        .get_selected_sync_target()
-        .await
-        .ok_or(JsonRpcError {
-            code: ERR_CONNECTION_FAILED,
-            message: "No device connected".to_string(),
-            data: None,
-        })?
-        .into();
-    let manifest = &target.manifest;
-
-    // Force sync: promote all currently-synced items to adds+deletes, bypassing the delta.
-    if force_sync {
+fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest) {
+        let blocked_ids: HashSet<&str> = delta.blocked.iter().map(|item|item.provider_item_id.as_str()).collect();
         let delete_ids: std::collections::HashSet<String> = delta
             .deletes
             .iter()
@@ -8185,6 +8255,7 @@ async fn handle_sync_execute(
             .map(|item| item.jellyfin_id.as_str())
             .collect();
         for change in &delta.id_changes {
+            if blocked_ids.contains(change.new_jellyfin_id.as_str()) {continue;}
             let previous = manifest
                 .synced_items
                 .iter()
@@ -8221,6 +8292,7 @@ async fn handle_sync_execute(
         }
         for item in &manifest.synced_items {
             if delete_ids.contains(&item.jellyfin_id)
+                || blocked_ids.contains(item.jellyfin_id.as_str())
                 || changed_ids.contains(item.jellyfin_id.as_str())
                 || already_added_ids.contains(item.jellyfin_id.as_str())
             {
@@ -8263,34 +8335,86 @@ async fn handle_sync_execute(
         delta.adds.extend(force_adds);
         delta.deletes.extend(force_deletes);
         delta.unchanged = 0;
-    }
+        apply_blocked_media_adds(delta,Vec::new());
+}
 
-    let destructive_cleanup_count = crate::sync::destructive_cleanup_count(&delta, manifest);
+async fn handle_sync_execute(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let pipeline_guard = state
+        .sync_operation_manager
+        .try_start_pipeline()
+        .ok_or(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "A sync operation is already in progress or the daemon is stopping"
+                .to_string(),
+            data: None,
+        })?;
+
+    let destructive_cleanup_confirmed = params
+        .get("confirmDestructiveCleanup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let force_sync = params
+        .get("force")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut target: crate::sync::SyncTarget = state
+        .device_manager
+        .get_selected_sync_target()
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "No device connected".to_string(),
+            data: None,
+        })?
+        .into();
+    let plan = if let Some(id) = params.get("planId").and_then(Value::as_str) {
+        let prepared = {
+            let mut pending = state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
+            if !pending.as_ref().is_some_and(|plan|plan.id == id) {
+                return Err(stale_plan_error("Prepared sync plan expired or was replaced"));
+            }
+            let matching=pending.as_ref().expect("matching plan is present while holding its ownership lock");
+            if matching.created_at.elapsed() < SYNC_PLAN_TTL && matching.plan.destructive_cleanup_count > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD && !destructive_cleanup_confirmed {
+                return Err(destructive_confirmation_error(matching.plan.destructive_cleanup_count));
+            }
+            pending.take().expect("matching plan is present while holding its ownership lock")
+        };
+        if prepared.created_at.elapsed() >= SYNC_PLAN_TTL {
+            return Err(stale_plan_error("Prepared sync plan expired or was replaced"));
+        }
+        let fingerprint = sync_target_fingerprint(state, &target).await?;
+        if prepared.fingerprint != fingerprint || prepared.force != force_sync {
+            return Err(stale_plan_error("Sync destination or configuration changed; prepare sync again"));
+        }
+        prepared.plan
+    } else {
+        let mut delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
+            .map_err(|e| JsonRpcError { code:ERR_INVALID_PARAMS, message:format!("Invalid delta parameter: {e}"), data:None })?;
+        if force_sync { apply_force_sync(&mut delta, &target.manifest); }
+        preflight_state_media_adds(state, &target.manifest, &mut delta, None).await?;
+        crate::sync_plan::SyncPlan::from_delta(delta, &target.manifest).map_err(sync_plan_error)?
+    };
+    plan.validate().map_err(sync_plan_error)?;
+    let delta = plan;
+    let manifest = &target.manifest;
+
+    let destructive_cleanup_count = delta.destructive_cleanup_count;
     if destructive_cleanup_count > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
         && !destructive_cleanup_confirmed
     {
-        return Err(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: format!(
-                "Sync would delete {} managed files; explicit confirmation is required for more than {} deletions",
-                destructive_cleanup_count,
-                crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
-            ),
-            data: Some(serde_json::json!({
-                "requiresDestructiveCleanupConfirmation": true,
-                "deleteCount": destructive_cleanup_count,
-                "threshold": crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
-            })),
-        });
+        return Err(destructive_confirmation_error(destructive_cleanup_count));
     }
 
     // Derive basket IDs that need downloading — used for dirty-resume (Story 4.4)
-    let pending_item_ids: Vec<String> = delta
-        .adds
-        .iter()
-        .map(|a| a.jellyfin_id.clone())
-        .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
-        .collect();
+    let pending_item_ids = delta.pending_ids().map_err(sync_plan_error)?;
 
     if state
         .sync_operation_manager
@@ -8310,18 +8434,7 @@ async fn handle_sync_execute(
     // single non-selected server — route each server's items to its own provider.
     // Single-server syncs (no tagged adds, or all adds on the selected server) keep
     // the existing dispatch unchanged (AC21).
-    let add_servers: Vec<String> = {
-        let mut seen = HashSet::new();
-        let mut ordered = Vec::new();
-        for add in &delta.adds {
-            if let Some(sid) = add.server_id.clone()
-                && seen.insert(sid.clone())
-            {
-                ordered.push(sid);
-            }
-        }
-        ordered
-    };
+    let add_servers: Vec<String> = delta.provider_groups().map_err(sync_plan_error)?.into_iter().filter_map(|(id,_,_)|id).collect();
     // Adds carry the portable serverId (Story 2.13); compare/route against the
     // selected server's portable id.
     let selected_for_exec = current_server_portable_id(state)?;
@@ -8360,7 +8473,7 @@ async fn handle_sync_execute(
         .device_manager
         .update_manifest_for_device(&manifest.device_id, |m| {
             m.dirty = true;
-            m.pending_item_ids = pending_item_ids.clone();
+            m.pending_item_ids = pending_item_ids;
         })
         .await
     {
@@ -8377,6 +8490,9 @@ async fn handle_sync_execute(
             data: None,
         });
     }
+
+    crate::sync_plan::compact_target(&mut target);
+    drop(params);
 
     if needs_provider_routing {
         // Resolve every group's provider up front so connection errors surface here.
@@ -8438,7 +8554,7 @@ async fn handle_sync_execute(
                 }
                 (default_provider, providers)
             };
-            let result = crate::sync::execute_provider_sync_with_protection(
+            let result = crate::sync::execute_plan_sync_with_protection(
                 &delta,
                 &target,
                 crate::sync::ProviderSyncSource {
@@ -8475,7 +8591,7 @@ async fn handle_sync_execute(
                 })
                 .await;
             if outcome == crate::sync::SyncStatus::Complete {
-                record_autofill_history_after_sync(
+                record_autofill_history_after_plan_sync(
                     &db,
                     sync_manifest,
                     &delta,
@@ -8521,7 +8637,7 @@ async fn handle_sync_execute(
                 }
             };
 
-            let result = crate::sync::execute_provider_sync_with_protection(
+            let result = crate::sync::execute_plan_sync_with_protection(
                 &delta,
                 &target,
                 crate::sync::ProviderSyncSource {
@@ -8553,7 +8669,7 @@ async fn handle_sync_execute(
                         })
                         .await;
                     if outcome == crate::sync::SyncStatus::Complete {
-                        record_autofill_history_after_sync(
+                        record_autofill_history_after_plan_sync(
                             &db,
                             sync_manifest,
                             &delta,
@@ -10266,6 +10382,7 @@ async fn handle_destination_select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("rpc/sync_plan_tests.rs");
     use crate::api::credential_test_lock;
     use serde_json::json;
     use std::sync::Mutex;

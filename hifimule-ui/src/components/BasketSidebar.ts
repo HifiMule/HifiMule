@@ -1271,11 +1271,13 @@ export class BasketSidebar {
             });
         }
 
+        let pendingPlanId: string | null = null;
+        const force = this.forceSyncMode;
+        deltaParams.force = force;
         try {
-
-            const delta = await rpcCall('sync_calculate_delta', deltaParams);
-            const blocked = Array.isArray((delta as any)?.blocked) ? (delta as any).blocked as Array<{ name?: string; reason?: string; reasonCode?: string }> : [];
-            if (blocked.length > 0 && !await this.confirmBlockedMedia(blocked)) {
+            const delta = await rpcCall('sync_prepare', deltaParams);
+            pendingPlanId = (delta as any).planId as string;
+            if ((delta as any).blockedCount > 0 && !await this.confirmBlockedPlan(pendingPlanId, (delta as any).blockedCount)) {
                 this.stopPolling();
                 this.isSyncing = false;
                 this.currentOperationId = null;
@@ -1302,9 +1304,9 @@ export class BasketSidebar {
                 this.render();
                 return;
             }
-            const force = this.forceSyncMode;
             this.forceSyncMode = false;
-            const result = await rpcCall('sync_execute', { delta, confirmDestructiveCleanup, force });
+            const result = await rpcCall('sync_execute', { planId: pendingPlanId, confirmDestructiveCleanup, force });
+            pendingPlanId = null;
             this.currentOperationId = result.operationId as string;
 
             this.startPolling();
@@ -1324,6 +1326,10 @@ export class BasketSidebar {
                 return;
             }
             this.showError(t('basket.sync.failed_to_start', { message: (err as Error).message }));
+        } finally {
+            if (pendingPlanId) {
+                await rpcCall('sync_plan_discard', { planId: pendingPlanId }).catch(() => {});
+            }
         }
     }
 
@@ -1493,8 +1499,14 @@ export class BasketSidebar {
         return t('basket.sync.minutes_left', { count: Math.round(etaSeconds / 60) });
     }
 
+    private async confirmBlockedPlan(planId: string, total: number): Promise<boolean> {
+        const first = await rpcCall('sync_plan_details', { planId, offset: 0 }) as { items: Array<{ name?: string; reason?: string; reasonCode?: string }>; nextOffset: number | null };
+        return this.confirmBlockedMedia(first.items, { planId, total, nextOffset: first.nextOffset });
+    }
+
     private confirmBlockedMedia(
         blocked: Array<{ name?: string; reason?: string; reasonCode?: string }>,
+        page?: { planId: string; total: number; nextOffset: number | null },
     ): Promise<boolean> {
         return new Promise((resolve) => {
             const dialog = document.createElement('sl-dialog') as any;
@@ -1512,16 +1524,48 @@ export class BasketSidebar {
             };
             dialog.innerHTML = `
                 <p>${t('basket.sync.blocked_help')}</p>
-                <ul>${blocked.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(t('library.books.compatibility_blocked'))} — ${this.escapeHtml(reason(item))}</li>`).join('')}</ul>
+                <p id="blocked-page-count">${blocked.length} / ${page?.total ?? blocked.length}</p>
+                <ul id="blocked-page-items">${blocked.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(t('library.books.compatibility_blocked'))} — ${this.escapeHtml(reason(item))}</li>`).join('')}</ul>
+                ${page ? '<sl-button id="blocked-previous">←</sl-button><sl-button id="blocked-next">→</sl-button>' : ''}
                 <sl-button slot="footer" variant="default" id="blocked-cancel">${t('basket.actions.cancel')}</sl-button>
                 <sl-button slot="footer" variant="primary" id="blocked-continue">${t('basket.actions.start_sync')}</sl-button>
             `;
             document.body.appendChild(dialog);
             let proceed = false;
-            dialog.querySelector('#blocked-cancel')?.addEventListener('click', () => dialog.hide());
-            dialog.querySelector('#blocked-continue')?.addEventListener('click', () => { proceed = true; dialog.hide(); });
-            dialog.addEventListener('sl-after-hide', () => { dialog.remove(); resolve(proceed); }, { once: true });
-            customElements.whenDefined('sl-dialog').then(() => dialog.show());
+            let closed = false;
+            if (page) {
+                let offset = 0;
+                let nextOffset = page.nextOffset;
+                const previousOffsets: number[] = [];
+                const previous = dialog.querySelector('#blocked-previous') as any;
+                const next = dialog.querySelector('#blocked-next') as any;
+                const updateButtons = () => { previous.disabled = previousOffsets.length === 0; next.disabled = nextOffset === null; };
+                const loadPage = async (requested: number) => {
+                    previous.disabled = next.disabled = true;
+                    try {
+                        const result = await rpcCall('sync_plan_details', { planId: page.planId, offset: requested }) as { items: typeof blocked; nextOffset: number | null };
+                        if (closed) return;
+                        offset = requested;
+                        nextOffset = result.nextOffset;
+                        dialog.querySelector('#blocked-page-items').innerHTML = result.items.map(item => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(reason(item))}</li>`).join('');
+                        dialog.querySelector('#blocked-page-count').textContent = `${offset + 1}–${offset + result.items.length} / ${page.total}`;
+                        updateButtons();
+                    } catch (error) {
+                        if (closed) return;
+                        closed = true;
+                        dialog.hide();
+                        this.showError(t('basket.sync.failed_to_start', { message: (error as Error).message }));
+                    }
+                };
+                previous.addEventListener('click', () => { const requested = previousOffsets.pop(); if (requested !== undefined) void loadPage(requested); });
+                next.addEventListener('click', () => { if (nextOffset !== null) { previousOffsets.push(offset); void loadPage(nextOffset); } });
+                updateButtons();
+            }
+            dialog.querySelector('#blocked-cancel')?.addEventListener('click', () => { closed = true; dialog.hide(); });
+            dialog.querySelector('#blocked-continue')?.addEventListener('click', () => { proceed = true; closed = true; dialog.hide(); });
+            dialog.addEventListener('sl-hide', () => { closed = true; });
+            dialog.addEventListener('sl-after-hide', () => { closed = true; dialog.remove(); resolve(proceed); }, { once: true });
+            customElements.whenDefined('sl-dialog').then(() => { if (!closed) dialog.show(); });
         });
     }
 

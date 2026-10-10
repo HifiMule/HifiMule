@@ -626,6 +626,8 @@ struct ShutdownTracker {
 
 /// Manager for tracking active sync operations in memory.
 pub struct SyncOperationManager {
+    pub(crate) pending_plan: Mutex<Option<crate::sync_plan::PreparedPlan>>,
+    warning_journals: Mutex<HashMap<String, Arc<SyncWarningJournal>>>,
     operations: Arc<RwLock<HashMap<String, SyncOperation>>>,
     /// True while a sync pipeline (delta calculation or execution) is active.
     /// Covers the window between pipeline start and the first `create_operation` call,
@@ -650,6 +652,8 @@ pub struct SyncOperationManager {
 impl SyncOperationManager {
     pub fn new() -> Self {
         Self {
+            pending_plan: Mutex::new(None),
+            warning_journals: Mutex::new(HashMap::new()),
             operations: Arc::new(RwLock::new(HashMap::new())),
             pipeline_active: Arc::new(AtomicBool::new(false)),
             pipeline_cancelled: Arc::new(AtomicBool::new(false)),
@@ -663,6 +667,30 @@ impl SyncOperationManager {
             finalization_gate: tokio::sync::Mutex::new(()),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    fn warning_journal(&self, operation_id: &str) -> Result<Arc<SyncWarningJournal>> {
+        let mut journals = self.warning_journals.lock().unwrap_or_else(|e|e.into_inner());
+        if let Some(journal) = journals.get(operation_id) { return Ok(Arc::clone(journal)); }
+        let journal = Arc::new(SyncWarningJournal { state:Mutex::new(WarningJournalState::default()), count:AtomicUsize::new(0) });
+        journals.insert(operation_id.into(),Arc::clone(&journal));
+        Ok(journal)
+    }
+
+    pub fn warning_details(&self, operation_id: &str, offset:usize) -> Result<(Vec<String>,usize)> {
+        use std::io::BufRead;
+        let journal = self.warning_journals.lock().unwrap_or_else(|e|e.into_inner()).get(operation_id).cloned().ok_or_else(||anyhow::anyhow!("Sync operation warnings are no longer available"))?;
+        let guard = journal.state.lock().unwrap_or_else(|e|e.into_inner());
+        let Some(path)=guard.path.as_ref() else {return Ok((Vec::new(),0));};
+        let file=std::fs::File::open(path)?;
+        let total=journal.count.load(Ordering::Acquire);
+        drop(guard);
+        // Read only lines committed before opening the snapshot, so a concurrent
+        // append cannot expose a partial JSON line while historical pages scan.
+        let limit=crate::sync_plan::PAGE_SIZE.min(total.saturating_sub(offset));
+        let lines = std::io::BufReader::new(file).lines().skip(offset).take(limit);
+        let items = lines.map(|line|Ok(serde_json::from_str::<String>(&line?)?)).collect::<Result<Vec<_>>>()?;
+        Ok((items,total))
     }
 
     /// Atomically claim the sync pipeline. Returns a [`PipelineGuard`] that releases
@@ -697,6 +725,11 @@ impl SyncOperationManager {
     pub fn request_pipeline_cancel(&self) -> bool {
         if self.pipeline_active.load(Ordering::Acquire) {
             self.pipeline_cancelled.store(true, Ordering::Release);
+            // A publisher checks cancellation under this same lock. If it saw
+            // the old flag, wait for its publication and release that plan here;
+            // otherwise its check rejects publication. Cancellation owns both
+            // outcomes before returning success to the caller.
+            self.pending_plan.lock().unwrap_or_else(|e|e.into_inner()).take();
             true
         } else {
             false
@@ -868,6 +901,8 @@ impl SyncOperationManager {
         let _finalization = self.finalization_gate.lock().await;
         self.shutdown_committed.store(true, Ordering::Release);
         self.pipeline_cancelled.store(true, Ordering::Release);
+        self.pending_plan.lock().unwrap_or_else(|e|e.into_inner()).take();
+        self.warning_journals.lock().unwrap_or_else(|e|e.into_inner()).clear();
         {
             let mut shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
             let tracker = shutdown.get_or_insert_with(|| ShutdownTracker {
@@ -2476,6 +2511,10 @@ async fn delete_scheduled_managed_item(
     None
 }
 
+fn plan_read_error(error:anyhow::Error) -> SyncFileError {
+    SyncFileError {jellyfin_id:String::new(),filename:"sync-plan".into(),error_message:error.to_string()}
+}
+
 struct StagedTrack {
     add_item: SyncAddItem,
     staged_path: std::path::PathBuf,
@@ -2488,6 +2527,66 @@ struct StagedTrack {
     _byte_permit: StagedBytePermit,
 }
 
+struct SyncWarningJournal {
+    state: Mutex<WarningJournalState>,
+    count: AtomicUsize,
+}
+
+#[derive(Default)]
+struct WarningJournalState {
+    path: Option<tempfile::TempPath>,
+    writer: Option<std::fs::File>,
+    closed: bool,
+}
+
+impl SyncWarningJournal {
+    fn record(&self, warning:&str) -> Result<()> {
+        use std::io::Write;
+        let mut state = self.state.lock().unwrap_or_else(|e|e.into_inner());
+        if state.closed {anyhow::bail!("Sync warning journal is already finalized");}
+        if state.writer.is_none() {
+            let (file,path)=tempfile::Builder::new().prefix("hifimule-sync-warnings-").tempfile()?.into_parts();
+            state.path=Some(path);
+            state.writer=Some(file);
+        }
+        let file=state.writer.as_mut().expect("warning append handle is initialized");
+        writeln!(file,"{}",serde_json::to_string(warning)?)?;
+        file.flush()?;
+        self.count.fetch_add(1,Ordering::Release);
+        Ok(())
+    }
+
+    fn close_writer(&self) -> Result<()> {
+        use std::io::Write;
+        let mut state=self.state.lock().unwrap_or_else(|e|e.into_inner());
+        state.closed=true;
+        if let Some(mut writer)=state.writer.take() {writer.flush()?;}
+        Ok(())
+    }
+}
+
+struct WarningWriterGuard(Arc<SyncWarningJournal>);
+impl Drop for WarningWriterGuard {fn drop(&mut self) {let _=self.0.close_writer();}}
+
+/// Polling keeps a bounded sample; paged warning details retain all evidence.
+struct SyncWarnings { items:Vec<String>, omitted:usize, journal:Arc<SyncWarningJournal>, failure:Option<String> }
+impl SyncWarnings {
+    fn new(journal:Arc<SyncWarningJournal>) -> Self {Self {items:Vec::new(),omitted:0,journal,failure:None}}
+    fn push(&mut self, warning:String) {
+        crate::daemon_log!("{warning}");
+        if let Err(error) = self.journal.record(&warning) { self.failure = Some(format!("Failed to record sync warning evidence: {error}")); }
+        if self.items.len() < 100 { self.items.push(warning); } else { self.omitted += 1; }
+    }
+    fn finish(mut self) -> Vec<String> {
+        if self.omitted > 0 { self.items.push(format!("{} additional sync warnings available through sync_get_warning_details",self.omitted)); }
+        self.items
+    }
+    fn checked_finish(mut self) -> Result<Vec<String>> {
+        if let Some(error)=self.failure.take() {anyhow::bail!(error);}
+        Ok(self.finish())
+    }
+}
+
 struct ProviderProducerOutcome {
     errors: Vec<SyncFileError>,
     warnings: Vec<String>,
@@ -2497,6 +2596,7 @@ struct ProviderProducerOutcome {
     staging: TransferTotals,
 }
 
+#[cfg(test)]
 pub async fn execute_provider_sync(
     delta: &SyncDelta,
     target: &SyncTarget,
@@ -2505,18 +2605,10 @@ pub async fn execute_provider_sync(
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
-    execute_provider_sync_with_protection(
-        delta,
-        target,
-        source,
-        operation_manager,
-        operation_id,
-        device_manager,
-        None,
-    )
-    .await
+    execute_provider_sync_with_protection(delta, target, source, operation_manager, operation_id, device_manager, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn execute_provider_sync_with_protection(
     delta: &SyncDelta,
     target: &SyncTarget,
@@ -2526,6 +2618,23 @@ pub(crate) async fn execute_provider_sync_with_protection(
     device_manager: Arc<crate::device::DeviceManager>,
     protection_observer: Option<protection::Observer>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+    let plan = crate::sync_plan::SyncPlan::from_delta(delta.clone(), &target.manifest)?;
+    let (_, errors) = execute_plan_sync_with_protection(&plan, target, source, operation_manager, operation_id, Arc::clone(&device_manager), protection_observer).await?;
+    let ids: HashSet<&str> = delta.adds.iter().map(|a|a.jellyfin_id.as_str()).chain(delta.id_changes.iter().map(|a|a.new_jellyfin_id.as_str())).collect();
+    let items = device_manager.get_manifest_for_device(&target.manifest.device_id).await.unwrap().synced_items.into_iter().filter(|i|ids.contains(i.jellyfin_id.as_str())).collect();
+    Ok((items, errors))
+}
+
+pub(crate) async fn execute_plan_sync_with_protection(
+    delta: &crate::sync_plan::SyncPlan,
+    target: &SyncTarget,
+    source: ProviderSyncSource,
+    operation_manager: Arc<SyncOperationManager>,
+    operation_id: String,
+    device_manager: Arc<crate::device::DeviceManager>,
+    protection_observer: Option<protection::Observer>,
+) -> Result<(usize, Vec<SyncFileError>)> {
+    delta.validate()?;
     let device_path = target.path.as_path();
     let device_io = Arc::clone(&target.io);
     let ProviderSyncSource {
@@ -2533,16 +2642,12 @@ pub(crate) async fn execute_provider_sync_with_protection(
         transcoding_profile,
         providers_by_server,
     } = source;
-    let mut synced_items = Vec::new();
+    let mut synced_count = 0;
     let mut errors = Vec::new();
+    let warning_journal = operation_manager.warning_journal(&operation_id)?;
+    let _warning_writer=WarningWriterGuard(Arc::clone(&warning_journal));
     let mut sync_warnings = Vec::new();
-    if let Err(e) = device_io.begin_sync_job().await {
-        errors.push(SyncFileError {
-            jellyfin_id: String::new(),
-            filename: String::new(),
-            error_message: format!("Failed to begin device sync job: {}", e),
-        });
-    }
+
 
     crate::daemon_log!(
         "[Sync] execute_provider_sync preparing: adds={} deletes={} id_changes={} playlists={}",
@@ -2551,8 +2656,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
         delta.id_changes.len(),
         delta.playlists.len()
     );
-    let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
-        + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
+    let total_job_bytes = delta.total_bytes;
     if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
         operation.total_bytes = total_job_bytes;
         operation_manager
@@ -2562,18 +2666,9 @@ pub(crate) async fn execute_provider_sync_with_protection(
 
     let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let manifest_snapshot = Some(target.manifest.clone());
+    let manifest_snapshot = Some(Arc::new(target.manifest.clone()));
     let operation_device_id = target.manifest.device_id.clone();
-    let owned_manifest_paths: HashSet<String> = manifest_snapshot
-        .as_ref()
-        .map(|manifest| {
-            manifest
-                .synced_items
-                .iter()
-                .map(|item| normalized_device_folder(&item.local_path))
-                .collect()
-        })
-        .unwrap_or_default();
+    let owned_manifest_paths: HashSet<String> = delta.residents.iter()?.map(|item| item.map(|item| normalized_device_folder(&item.local_path))).collect::<Result<_>>()?;
 
     let managed_path = {
         let subfolder = manifest_snapshot
@@ -2600,67 +2695,31 @@ pub(crate) async fn execute_provider_sync_with_protection(
     };
     let compatibility =
         audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
-    let mut readd_ids: HashSet<&str> = delta
-        .adds
-        .iter()
-        .map(|add| add.jellyfin_id.as_str())
-        .collect();
-    let mut readd_delete_by_id: HashMap<&str, &SyncDeleteItem> = delta
-        .deletes
-        .iter()
-        .filter(|delete| readd_ids.contains(delete.jellyfin_id.as_str()))
-        .map(|delete| (delete.jellyfin_id.as_str(), delete))
-        .collect();
-    // Force-sync transfers a reassigned ID, retaining the old path as its paired replacement.
-    let force_id_changes: HashMap<&str, &str> = delta
-        .id_changes
-        .iter()
-        .filter(|change| readd_ids.contains(change.new_jellyfin_id.as_str()))
-        .map(|change| {
-            (
-                change.new_jellyfin_id.as_str(),
-                change.old_jellyfin_id.as_str(),
-            )
-        })
-        .collect();
-    for (&new_id, &old_id) in &force_id_changes {
-        if let Some(delete) = delta.deletes.iter().find(|item| item.jellyfin_id == old_id) {
-            readd_ids.insert(old_id);
-            readd_delete_by_id.insert(new_id, delete);
-        }
-    }
-
-    let mut pending_deletes = delta
-        .deletes
-        .iter()
-        .filter(|delete| !readd_ids.contains(delete.jellyfin_id.as_str()));
+    let readd_ids: HashSet<String> = delta.adds.iter()?.map(|item|item.map(|item|item.jellyfin_id)).collect::<Result<_>>()?;
+    let force_id_changes: HashMap<String, String> = delta.id_changes.iter()?.filter_map(|item| match item {
+        Ok(item) if readd_ids.contains(&item.new_jellyfin_id) => Some(Ok((item.new_jellyfin_id,item.old_jellyfin_id))),
+        Ok(_) => None, Err(error) => Some(Err(error)),
+    }).collect::<Result<_>>()?;
+    let replaced_ids: HashSet<String> = readd_ids.iter().cloned().chain(force_id_changes.values().cloned()).collect();
+    let mut pending_deletes = delta.deletes.iter()?.filter_map(|item|match item {
+        Ok(item) if !replaced_ids.contains(&item.jellyfin_id) => Some(Ok(item)),
+        Ok(_) => None, Err(error) => Some(Err(error)),
+    });
     let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
     let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
     let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
     let reader_started = Arc::new(std::time::Instant::now());
     let reader_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut producer_groups: std::collections::HashMap<Option<String>, Vec<SyncAddItem>> =
-        std::collections::HashMap::new();
-    for add in delta.adds.clone() {
-        producer_groups
-            .entry(add.server_id.clone())
-            .or_default()
-            .push(add);
-    }
-    let protection_sync_sources = Arc::new(
-        producer_groups
-            .keys()
-            .filter_map(Clone::clone)
-            .collect::<std::collections::HashSet<_>>(),
-    );
+    let producer_groups = delta.provider_groups()?;
+    let protection_sync_sources = Arc::new(producer_groups.iter().filter_map(|(id,_,_)|id.clone()).collect::<HashSet<_>>());
     let priority_barrier = Arc::new(tokio::sync::Barrier::new(producer_groups.len().max(1)));
 
     macro_rules! spawn_provider {
-        ($server_id:expr, $producer_adds:expr, $producer_provider:expr) => {{
+        ($server_id:expr, $producer_adds:expr, $producer_provider:expr, $count:expr, $manual:expr) => {{
         let server_id = $server_id;
         let producer_adds = $producer_adds;
-        let producer_add_count = producer_adds.len();
-        let first_auto_fill = producer_adds.partition_point(|add| !add.is_auto_fill);
+        let producer_add_count = $count;
+        let first_auto_fill = $manual;
         let producer_provider = $producer_provider;
         let producer_providers_by_server: std::collections::HashMap<
             String,
@@ -2679,16 +2738,30 @@ pub(crate) async fn execute_provider_sync_with_protection(
         let producer_reader_bytes = Arc::clone(&reader_bytes);
         let producer_protection_observer = protection_observer.clone();
         let producer_protection_sync_sources = Arc::clone(&protection_sync_sources);
+        let producer_warning_journal = Arc::clone(&warning_journal);
         let staged_tx = staged_tx.clone();
         tokio::spawn(async move {
         let mut errors = Vec::new();
-        let mut warnings = Vec::new();
+        let mut warnings = SyncWarnings::new(producer_warning_journal);
         let mut staging_dir: Option<tempfile::TempDir> = None;
         let mut blocked = Duration::ZERO;
         let mut staging = TransferTotals::default();
 
           let mut priority_barrier_passed = false;
-          for (index, add_item) in producer_adds.into_iter().enumerate() {
+          for (index, add_item) in producer_adds.enumerate() {
+            if let Some(error) = warnings.failure.take() {
+                errors.push(SyncFileError { jellyfin_id:String::new(),filename:"sync-warnings".into(),error_message:error });
+                let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                break;
+            }
+            let add_item = match add_item {
+                Ok(item) => item,
+                Err(error) => {
+                    errors.push(SyncFileError { jellyfin_id:String::new(), filename:"sync-plan".into(), error_message:error.to_string() });
+                    let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                    break;
+                }
+            };
             if index == first_auto_fill {
                 let passed = tokio::select! {
                     _ = producer_priority_barrier.wait() => true,
@@ -3380,7 +3453,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
                         let _ = tokio::fs::remove_file(&returned.staged_path).await;
                         return ProviderProducerOutcome {
                             errors,
-                            warnings,
+                            warnings: warnings.finish(),
                             staging_dir,
                             blocked,
                             server_id,
@@ -3398,9 +3471,13 @@ pub(crate) async fn execute_provider_sync_with_protection(
             }
         }
 
+        if let Some(error) = warnings.failure.take() {
+            errors.push(SyncFileError {jellyfin_id:String::new(),filename:"sync-warnings".into(),error_message:error});
+            let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+        }
         ProviderProducerOutcome {
             errors,
-            warnings,
+            warnings: warnings.finish(),
             staging_dir,
             blocked,
             server_id,
@@ -3410,15 +3487,26 @@ pub(crate) async fn execute_provider_sync_with_protection(
     }};
     }
 
+    // Open every fallible plan cursor before beginning device work or spawning a producer.
+    let producer_groups = producer_groups.into_iter().map(|(server_id, count, manual)| {
+        let adds = delta.adds.cursor(Some(server_id.clone()), true)?;
+        Ok((server_id, count, manual, adds))
+    }).collect::<Result<Vec<_>>>()?;
+    if let Err(e) = device_io.begin_sync_job().await {
+        errors.push(SyncFileError {
+            jellyfin_id: String::new(),
+            filename: String::new(),
+            error_message: format!("Failed to begin device sync job: {}", e),
+        });
+    }
     let mut producers = Vec::new();
-    for (server_id, mut adds) in producer_groups {
-        adds.sort_by_key(|add| add.is_auto_fill);
+    for (server_id, count, manual, adds) in producer_groups {
         let group_provider = server_id
             .as_ref()
             .and_then(|id| providers_by_server.get(id))
             .cloned()
             .unwrap_or_else(|| Arc::clone(&provider));
-        producers.push(spawn_provider!(server_id, adds, group_provider));
+        producers.push(spawn_provider!(server_id, adds, group_provider, count, manual));
     }
     drop(staged_tx);
 
@@ -3533,7 +3621,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
                     byte_limiter.used()
                 );
                 let synced_at = now_iso8601();
-                synced_items.push(crate::device::SyncedItem {
+                let synced_item = crate::device::SyncedItem {
                     media_role: staged.add_item.media_role,
                     jellyfin_id: staged.add_item.jellyfin_id.clone(),
                     name: staged.add_item.name.clone(),
@@ -3552,7 +3640,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
                     original_container: staged.add_item.provider_suffix.clone(),
                     track_number: staged.add_item.track_number,
                     server_id: staged.add_item.server_id.clone(),
-                });
+                };
                 completed_bytes_arc.fetch_add(
                     staged.add_item.size_bytes,
                     std::sync::atomic::Ordering::Relaxed,
@@ -3566,13 +3654,21 @@ pub(crate) async fn execute_provider_sync_with_protection(
                             Some(average_write_timing.speed_mb_s);
                     })
                     .await;
-                let synced_item = synced_items.last().unwrap().clone();
+                let replacement_id = force_id_changes.get(&staged.add_item.jellyfin_id).unwrap_or(&staged.add_item.jellyfin_id);
+                let replacement_delete: Option<SyncDeleteItem> = match delta.get("delete", replacement_id) {
+                    Ok(item) => item,
+                    Err(error) => {
+                        errors.push(plan_read_error(error));
+                        let _ = operation_manager.request_cancel(&operation_id).await;
+                        writer_failed = true;
+                        continue;
+                    }
+                };
                 let mut replacement_cleanup_failed = false;
-                let replacement_deletes_file = readd_delete_by_id
-                    .get(staged.add_item.jellyfin_id.as_str())
+                let replacement_deletes_file = replacement_delete.as_ref()
                     .is_some_and(|item| item.local_path != staged.rel_path);
                 if let Some(delete_item) =
-                    readd_delete_by_id.get(staged.add_item.jellyfin_id.as_str())
+                    replacement_delete.as_ref()
                     && let Some(error) = cleanup_replaced_file_after_write(
                         delete_item,
                         &staged.rel_path,
@@ -3617,26 +3713,22 @@ pub(crate) async fn execute_provider_sync_with_protection(
                         .await;
                     let _ = operation_manager.request_cancel(&operation_id).await;
                     writer_failed = true;
-                } else if !replacement_deletes_file
-                    && !replacement_cleanup_failed
-                    && !operation_manager.is_cancelled(&operation_id).await
-                    && let Some(delete_item) = pending_deletes.next()
-                    && let Some(error) = delete_scheduled_managed_item(
-                        delete_item,
-                        device_path,
-                        &managed_path,
-                        managed_subfolder_for_delete.as_deref(),
-                        is_mtp,
-                        &owned_manifest_paths,
-                        &device_io,
-                        &device_manager,
-                        &operation_manager,
-                        &operation_id,
-                        &operation_device_id,
-                    )
-                    .await
-                {
-                    errors.push(error);
+                } else {
+                    synced_count += 1;
+                    if !replacement_deletes_file && !replacement_cleanup_failed && !operation_manager.is_cancelled(&operation_id).await {
+                        if let Some(delete_item) = pending_deletes.next() {
+                            match delete_item {
+                                Ok(delete_item) => {
+                                    if let Some(error) = delete_scheduled_managed_item(&delete_item, device_path, &managed_path, managed_subfolder_for_delete.as_deref(), is_mtp, &owned_manifest_paths, &device_io, &device_manager, &operation_manager, &operation_id, &operation_device_id).await {errors.push(error);}
+                                },
+                                Err(error) => {
+                                    errors.push(plan_read_error(error));
+                                    let _ = operation_manager.request_cancel(&operation_id).await;
+                                    writer_failed = true;
+                                },
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -3720,11 +3812,15 @@ pub(crate) async fn execute_provider_sync_with_protection(
     }
 
     for delete_item in pending_deletes {
+        let delete_item = match delete_item {
+            Ok(item) => item,
+            Err(error) => { errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; break; }
+        };
         if operation_manager.is_cancelled(&operation_id).await {
             break;
         }
         if let Some(error) = delete_scheduled_managed_item(
-            delete_item,
+            &delete_item,
             device_path,
             &managed_path,
             managed_subfolder_for_delete.as_deref(),
@@ -3752,26 +3848,29 @@ pub(crate) async fn execute_provider_sync_with_protection(
         eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
     }
 
-    for id_change in &delta.id_changes {
+    let id_changes = match delta.id_changes.iter() {
+        Ok(cursor) => Some(cursor),
+        Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; None},
+    };
+    for id_change in id_changes.into_iter().flatten() {
+        let id_change = match id_change {
+            Ok(item) => item,
+            Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; break},
+        };
         if force_id_changes.contains_key(id_change.new_jellyfin_id.as_str()) {
             continue;
         }
         if operation_manager.is_cancelled(&operation_id).await {
             break;
         }
+        let old_origin = match delta.get::<crate::sync_plan::ResidentIdentity>("resident", &id_change.old_jellyfin_id) {
+            Ok(item) => item.is_some_and(|item|item.is_auto_fill),
+            Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; break},
+        };
         let synced_at = now_iso8601();
-        synced_items.push(crate::device::SyncedItem {
+        let synced_item = crate::device::SyncedItem {
             media_role: id_change.media_role,
-            is_auto_fill: id_change.is_auto_fill.unwrap_or_else(|| {
-                manifest_snapshot
-                    .as_ref()
-                    .and_then(|m| {
-                        m.synced_items
-                            .iter()
-                            .find(|item| item.jellyfin_id == id_change.old_jellyfin_id)
-                    })
-                    .is_some_and(|item| item.is_auto_fill)
-            }),
+            is_auto_fill: id_change.is_auto_fill.unwrap_or(old_origin),
             jellyfin_id: id_change.new_jellyfin_id.clone(),
             name: id_change.name.clone(),
             album: id_change.album.clone(),
@@ -3788,8 +3887,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
             original_container: None,
             track_number: None,
             server_id: id_change.source_server_id.clone(),
-        });
-        let synced_item = synced_items.last().unwrap().clone();
+        };
         let id_to_remove = id_change.old_jellyfin_id.clone();
         if let Err(e) = device_manager
             .update_manifest_for_device(&operation_device_id, |m| {
@@ -3804,17 +3902,19 @@ pub(crate) async fn execute_provider_sync_with_protection(
                 error_message: format!("Per-ID-change manifest write failed: {e}"),
             });
             let _ = operation_manager.request_cancel(&operation_id).await;
-        }
+        } else { synced_count += 1; }
     }
 
-    if !operation_manager.is_cancelled(&operation_id).await && !delta.provenance_updates.is_empty()
+    if !operation_manager.is_cancelled(&operation_id).await && !delta.provenance.is_empty()
     {
+        let origins: HashMap<String, bool> = match delta.provenance.iter().and_then(|cursor|cursor.collect::<Result<_>>()) {
+            Ok(origins) => origins,
+            Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; HashMap::new()},
+        };
         if let Err(e) = device_manager
             .update_manifest_for_device(&operation_device_id, |m| {
                 for item in &mut m.synced_items {
-                    if let Some(&origin) = delta.provenance_updates.get(&item.jellyfin_id) {
-                        item.is_auto_fill = origin;
-                    }
+                    if let Some(&origin) = origins.get(&item.jellyfin_id) { item.is_auto_fill = origin; }
                 }
             })
             .await
@@ -3834,15 +3934,15 @@ pub(crate) async fn execute_provider_sync_with_protection(
             .await
         && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
     {
-        let warnings = generate_m3u_files(
-            &delta.playlists,
-            device_path,
-            &managed_path,
-            &manifest_snapshot.synced_items.clone(),
-            &mut manifest_snapshot,
-            Arc::clone(&device_io),
-        )
-        .await;
+        let paths: HashMap<String,String> = std::mem::take(&mut manifest_snapshot.synced_items).into_iter().map(|item|(item.jellyfin_id,item.local_path)).collect();
+        let warnings = match generate_plan_m3u_files(delta, device_path, &managed_path, &paths, &mut manifest_snapshot, Arc::clone(&device_io), Arc::clone(&warning_journal)).await {
+            Ok(warnings) => warnings,
+            Err(error) => {
+                errors.push(SyncFileError { jellyfin_id:String::new(), filename:"sync-plan-playlists".into(), error_message:error.to_string() });
+                let _ = operation_manager.request_cancel(&operation_id).await;
+                Vec::new()
+            }
+        };
         for warning in &warnings {
             eprintln!("{}", warning);
         }
@@ -3863,13 +3963,27 @@ pub(crate) async fn execute_provider_sync_with_protection(
     }
 
     let mut device_warnings = sync_warnings;
-    device_warnings.extend(device_io.take_warnings().await);
+    for warning in device_io.take_warnings().await {
+        if let Err(error) = warning_journal.record(&warning) {
+            errors.push(SyncFileError {jellyfin_id:String::new(),filename:"sync-warnings".into(),error_message:error.to_string()});
+            let _ = operation_manager.request_cancel(&operation_id).await;
+        }
+        device_warnings.push(warning);
+    }
+    if device_warnings.len() > 100 {
+        device_warnings.truncate(100);
+        device_warnings.push(format!("Complete warning details ({} entries) available through sync_get_warning_details",warning_journal.count.load(Ordering::Acquire)));
+    }
     if let Err(e) = device_io.end_sync_job().await {
         errors.push(SyncFileError {
             jellyfin_id: String::new(),
             filename: "device-cleanup".into(),
             error_message: format!("Failed to end device sync job cleanly: {e}"),
         });
+    }
+    if let Err(error)=warning_journal.close_writer() {
+        errors.push(SyncFileError {jellyfin_id:String::new(),filename:"sync-warnings".into(),error_message:error.to_string()});
+        let _=operation_manager.request_cancel(&operation_id).await;
     }
     if !device_warnings.is_empty()
         && let Some(mut operation) = operation_manager.get_operation(&operation_id).await
@@ -3880,7 +3994,7 @@ pub(crate) async fn execute_provider_sync_with_protection(
             .await;
     }
 
-    Ok((synced_items, errors))
+    Ok((synced_count, errors))
 }
 
 async fn wait_for_protection_admission(
@@ -4118,6 +4232,94 @@ pub async fn augment_delta_with_existence_check(
 /// `device_path` is the device root (local_path in SyncedItem is relative to this).
 /// `managed_path` is the music folder (e.g. `device_path/Music`).
 /// Playlist files are written to manifest.playlist_path, falling back to managed_path.
+async fn generate_plan_m3u_files(
+    plan: &crate::sync_plan::SyncPlan,
+    device_path: &Path,
+    managed_path: &Path,
+    paths: &HashMap<String,String>,
+    manifest: &mut DeviceManifest,
+    device_io: Arc<dyn crate::device_io::DeviceIO>,
+    journal: Arc<SyncWarningJournal>,
+) -> Result<Vec<String>> {
+    use std::io::Write;
+    let managed_subfolder = managed_path.strip_prefix(device_path).map(|p|p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let raw = manifest.resolved_playlist_path().map(normalized_device_folder).unwrap_or_else(||normalized_device_folder(&managed_subfolder));
+    let mut warnings = SyncWarnings::new(journal);
+    let playlist_subfolder = match validate_device_relative_folder(&raw) {
+        Ok(path) => path,
+        Err(error) => { warnings.push(format!("[M3U] Invalid playlist folder: {error}")); return warnings.checked_finish(); },
+    };
+    if let Err(error) = device_io.ensure_dir(&playlist_subfolder).await { warnings.push(format!("[M3U] Failed to create playlist folder {playlist_subfolder}: {error}")); return warnings.checked_finish(); }
+    let active_ids: HashSet<String> = plan.playlists.iter()?.map(|p|p.map(|p|p.jellyfin_id)).collect::<Result<_>>()?;
+    let to_remove: Vec<_> = manifest.playlists.iter().filter(|p|!active_ids.contains(&p.jellyfin_id)).cloned().collect();
+    for entry in to_remove {
+        let rel = playlist_manifest_rel_path(&entry.filename,&playlist_subfolder);
+        match device_io.delete_file(&rel).await {
+            Ok(()) => {},
+            Err(error) if is_missing_delete_error(&error) => {},
+            Err(error) => { warnings.push(format!("[M3U] Failed to delete {rel}: {error}")); continue; },
+        }
+        manifest.playlists.retain(|p|p.jellyfin_id != entry.jellyfin_id);
+    }
+    let mut filenames = HashSet::new();
+    for (ordinal,playlist) in plan.playlists.iter()?.enumerate() {
+        let playlist = playlist?;
+        let name = sanitize_path_component(&playlist.name);
+        let base = if name.is_empty() { playlist.jellyfin_id[..playlist.jellyfin_id.len().min(32)].to_string() } else {name};
+        let candidate = truncate_filename(&base,"m3u",255);
+        let filename = if filenames.contains(&candidate) {
+            let tag = &playlist.jellyfin_id[..8.min(playlist.jellyfin_id.len())];
+            let value = truncate_filename(&format!("{base} ({tag})"),"m3u",255);
+            warnings.push(format!("[M3U] Filename collision for '{}', using '{}'",playlist.name,value));
+            value
+        } else { candidate };
+        filenames.insert(filename.clone());
+        let mut track_ids = Vec::new();
+        for track in plan.playlist_tracks(ordinal)? {
+            let track = track?;
+            let Some(_path) = paths.get(&track.jellyfin_id) else {
+                let warning = format!("[M3U] Track {} not in manifest — omitted from {}",track.jellyfin_id,filename);
+                warnings.push(warning);
+                continue;
+            };
+            track_ids.push(track.jellyfin_id);
+        }
+        if track_ids.is_empty() { warnings.push(format!("[M3U] No tracks resolved for playlist {} — skipping write",playlist.name)); continue; }
+        let rel = prefixed_device_path(&playlist_subfolder,&filename);
+        let previous = manifest.playlists.iter().find(|p|p.jellyfin_id == playlist.jellyfin_id);
+        let old_filename = previous.map(|p|p.filename.clone());
+        let needs_write = previous.is_none_or(|p|manifest.transcoding_profile_dirty || playlist_manifest_rel_path(&p.filename,&playlist_subfolder) != rel || p.track_ids != track_ids);
+        if !needs_write && device_file_exists(device_io.as_ref(),&rel).await {continue;}
+        let staged = tempfile::Builder::new().prefix("hifimule-playlist-").tempfile()?;
+        let mut writer = std::io::BufWriter::new(staged.as_file());
+        writeln!(writer,"#EXTM3U")?;
+        // The first bounded pass records warnings and compact identity evidence. Render
+        // only changed/missing playlists in a second pass, without duplicating warnings.
+        for track in plan.playlist_tracks(ordinal)? {
+            let track=track?;
+            let Some(path)=paths.get(&track.jellyfin_id) else {continue;};
+            let label = match track.artist { Some(artist) => format!("{} - {}",artist,extract_display_name(path)), None => extract_display_name(path).to_string() };
+            writeln!(writer,"#EXTINF:{},{}",track.run_time_seconds,label)?;
+            writeln!(writer,"{}",relative_device_path_from_folder(&playlist_subfolder,path))?;
+        }
+        writer.flush()?;
+        drop(writer);
+        match device_io.write_with_verify_from_path(&rel,staged.path()).await {
+            Ok(_) => {
+                if let Some(old) = old_filename.filter(|old|*old != filename) {
+                    let old_rel = playlist_manifest_rel_path(&old,&playlist_subfolder);
+                    if old_rel != rel && let Err(error) = device_io.delete_file(&old_rel).await && !is_missing_delete_error(&error) { warnings.push(format!("[M3U] Failed to delete old file {old_rel}: {error}")); }
+                }
+                manifest.playlists.retain(|p|p.jellyfin_id != playlist.jellyfin_id);
+                manifest.playlists.push(crate::device::PlaylistManifestEntry { jellyfin_id:playlist.jellyfin_id, filename, track_count:track_ids.len() as u32,track_ids,last_modified:now_iso8601() });
+            },
+            Err(error) => warnings.push(format!("[M3U] Failed to write {filename}: {error}")),
+        }
+    }
+    warnings.checked_finish()
+}
+
+#[cfg(test)]
 async fn generate_m3u_files(
     playlist_items: &[PlaylistSyncItem],
     device_path: &Path,
@@ -4126,224 +4328,12 @@ async fn generate_m3u_files(
     manifest: &mut crate::device::DeviceManifest,
     device_io: Arc<dyn crate::device_io::DeviceIO>,
 ) -> Vec<String> {
-    // Subfolder prefix for computing device-relative paths (e.g. "Music")
-    let managed_subfolder = managed_path
-        .strip_prefix(device_path)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    let mut warnings: Vec<String> = Vec::new();
-    let raw_playlist_subfolder = manifest
-        .resolved_playlist_path()
-        .map(normalized_device_folder)
-        .unwrap_or_else(|| normalized_device_folder(&managed_subfolder));
-    let playlist_subfolder = match validate_device_relative_folder(&raw_playlist_subfolder) {
-        Ok(path) => path,
-        Err(e) => {
-            warnings.push(format!("[M3U] Invalid playlist folder: {}", e));
-            return warnings;
-        }
-    };
-
-    if let Err(e) = device_io.ensure_dir(&playlist_subfolder).await {
-        warnings.push(format!(
-            "[M3U] Failed to create playlist folder {}: {}",
-            playlist_subfolder, e
-        ));
-        return warnings;
-    }
-
-    // Build a lookup: jellyfin_id → local_path (relative to device_path)
-    let path_lookup: HashMap<&str, &str> = all_synced_items
-        .iter()
-        .map(|i| (i.jellyfin_id.as_str(), i.local_path.as_str()))
-        .collect();
-
-    // Track which playlist jellyfin IDs are still active (for cleanup)
-    let active_ids: HashSet<&str> = playlist_items
-        .iter()
-        .map(|p| p.jellyfin_id.as_str())
-        .collect();
-
-    // CLEANUP: remove .m3u for playlists no longer in basket
-    let to_remove: Vec<crate::device::PlaylistManifestEntry> = manifest
-        .playlists
-        .iter()
-        .filter(|e| !active_ids.contains(e.jellyfin_id.as_str()))
-        .cloned()
-        .collect();
-    for entry in &to_remove {
-        let rel_path = playlist_manifest_rel_path(&entry.filename, &playlist_subfolder);
-        match device_io.delete_file(&rel_path).await {
-            Ok(()) => {
-                println!("[M3U] Deleted removed playlist: {}", rel_path);
-            }
-            Err(e) if is_missing_delete_error(&e) => {}
-            Err(e) => {
-                warnings.push(format!("[M3U] Failed to delete {}: {}", rel_path, e));
-                continue;
-            }
-        }
-        manifest
-            .playlists
-            .retain(|e2| e2.jellyfin_id != entry.jellyfin_id);
-    }
-
-    // Track filenames committed this run to detect collisions across playlists
-    let mut used_filenames: HashSet<String> = HashSet::new();
-
-    // GENERATE / REGENERATE for each playlist in basket
-    for playlist in playlist_items {
-        // Build .m3u filename — fall back to jellyfin_id if name sanitizes to empty
-        let sanitized_name = sanitize_path_component(&playlist.name);
-        let base_name = if sanitized_name.is_empty() {
-            playlist.jellyfin_id[..playlist.jellyfin_id.len().min(32)].to_string()
-        } else {
-            sanitized_name
-        };
-        let m3u_filename = {
-            let candidate = truncate_filename(&base_name, "m3u", 255);
-            if used_filenames.contains(&candidate) {
-                // Two playlists produced the same sanitized name — disambiguate with a short ID tag
-                let id_tag = &playlist.jellyfin_id[..8.min(playlist.jellyfin_id.len())];
-                let tagged = format!("{} ({})", base_name, id_tag);
-                let deduped = truncate_filename(&tagged, "m3u", 255);
-                warnings.push(format!(
-                    "[M3U] Filename collision for '{}', using '{}'",
-                    playlist.name, deduped
-                ));
-                deduped
-            } else {
-                candidate
-            }
-        };
-        used_filenames.insert(m3u_filename.clone());
-
-        // Resolve which tracks are available; emit warnings for missing ones.
-        // Only resolved tracks are written to the M3U and stored in track_ids — this ensures
-        // the manifest accurately reflects file content and re-triggers a write if a previously
-        // missing track becomes available on the next sync.
-        let mut resolved_tracks: Vec<(&PlaylistTrackInfo, &str)> = Vec::new();
-        for track in &playlist.tracks {
-            match path_lookup.get(track.jellyfin_id.as_str()) {
-                None => {
-                    warnings.push(format!(
-                        "[M3U] Track {} not in manifest — omitted from {}",
-                        track.jellyfin_id, m3u_filename
-                    ));
-                }
-                Some(rel_path) => {
-                    resolved_tracks.push((track, rel_path));
-                }
-            }
-        }
-
-        if resolved_tracks.is_empty() {
-            warnings.push(format!(
-                "[M3U] No tracks resolved for playlist {} — skipping write",
-                playlist.name
-            ));
-            continue;
-        }
-
-        let resolved_track_ids: Vec<String> = resolved_tracks
-            .iter()
-            .map(|(t, _)| t.jellyfin_id.clone())
-            .collect();
-
-        let rel_m3u = prefixed_device_path(&playlist_subfolder, &m3u_filename);
-
-        // Determine if regeneration is needed (filename or resolved track list changed)
-        let (needs_write, old_filename_opt) = match manifest
-            .playlists
-            .iter()
-            .find(|e| e.jellyfin_id == playlist.jellyfin_id)
-        {
-            None => (true, None),
-            Some(e) => {
-                let old_rel_m3u = playlist_manifest_rel_path(&e.filename, &playlist_subfolder);
-                let changed = manifest.transcoding_profile_dirty
-                    || old_rel_m3u != rel_m3u
-                    || e.track_ids != resolved_track_ids;
-                (changed, Some(e.filename.clone()))
-            }
-        };
-
-        if !needs_write {
-            if device_file_exists(device_io.as_ref(), &rel_m3u).await {
-                println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
-                continue;
-            }
-            println!(
-                "[M3U] Playlist manifest unchanged but file missing, rewriting: {}",
-                m3u_filename
-            );
-        }
-
-        // Build M3U content
-        let mut lines: Vec<String> = vec!["#EXTM3U".to_string()];
-        for (track, rel_path) in &resolved_tracks {
-            let label = match &track.artist {
-                Some(a) => format!("{} - {}", a, extract_display_name(rel_path)),
-                None => extract_display_name(rel_path).to_string(),
-            };
-            lines.push(format!("#EXTINF:{},{}", track.run_time_seconds, label));
-            // local_path is relative to device_path; M3U entries are relative to the
-            // playlist folder and always use forward slashes.
-            let track_entry = relative_device_path_from_folder(&playlist_subfolder, rel_path);
-            lines.push(track_entry);
-        }
-
-        let content = lines.join("\n") + "\n";
-
-        // Write via device IO abstraction (handles Write-Temp-Rename internally)
-        match device_io
-            .write_with_verify(&rel_m3u, content.as_bytes())
-            .await
-        {
-            Ok(()) => {
-                println!(
-                    "[M3U] Wrote {}: {} tracks",
-                    m3u_filename,
-                    resolved_tracks.len()
-                );
-
-                // Delete old file if the playlist was renamed
-                if let Some(old_fn) = &old_filename_opt
-                    && *old_fn != m3u_filename
-                {
-                    let rel_old = playlist_manifest_rel_path(old_fn, &playlist_subfolder);
-                    if rel_old != rel_m3u
-                        && let Err(e) = device_io.delete_file(&rel_old).await
-                        && !is_missing_delete_error(&e)
-                    {
-                        warnings.push(format!(
-                            "[M3U] Failed to delete old file {}: {}",
-                            rel_old, e
-                        ));
-                    }
-                }
-
-                let now = now_iso8601();
-                manifest
-                    .playlists
-                    .retain(|e| e.jellyfin_id != playlist.jellyfin_id);
-                manifest
-                    .playlists
-                    .push(crate::device::PlaylistManifestEntry {
-                        jellyfin_id: playlist.jellyfin_id.clone(),
-                        filename: m3u_filename,
-                        track_count: resolved_tracks.len() as u32,
-                        track_ids: resolved_track_ids,
-                        last_modified: now,
-                    });
-            }
-            Err(e) => {
-                warnings.push(format!("[M3U] Failed to write {}: {}", m3u_filename, e));
-            }
-        }
-    }
-
-    warnings
+    let mut delta = calculate_delta(&[], &DeviceManifest::default());
+    delta.playlists = playlist_items.to_vec();
+    let plan = crate::sync_plan::SyncPlan::from_delta(delta, manifest).unwrap();
+    let paths = all_synced_items.iter().map(|item| (item.jellyfin_id.clone(), item.local_path.clone())).collect();
+    let journal = SyncOperationManager::new().warning_journal("playlist-test").unwrap();
+    generate_plan_m3u_files(&plan, device_path, managed_path, &paths, manifest, device_io, journal).await.unwrap()
 }
 
 /// Calculates the delta between desired items (from basket) and the current manifest.
@@ -4701,6 +4691,84 @@ mod tests {
             Some(observer),
         )
         .await
+    }
+
+    include!("sync_memory_benchmark.rs");
+
+    #[tokio::test]
+    async fn reviewed_playlist_early_warning_cannot_hide_journal_storage_failure() {
+        for invalid_folder in [true,false] {
+            let dir=tempfile::tempdir().unwrap();
+            let mut manifest=empty_manifest();
+            if invalid_folder {manifest.playlist_path=Some("../escape".into());} else {std::fs::write(dir.path().join("Music"),b"not a folder").unwrap();}
+            let plan=crate::sync_plan::SyncPlan::from_delta(calculate_delta(&[],&Default::default()),&manifest).unwrap();
+            let journal=SyncOperationManager::new().warning_journal("storage-failure").unwrap();
+            let tempfile=tempfile::NamedTempFile::new().unwrap();
+            let (file,path)=tempfile.into_parts();
+            drop(file);
+            let readonly=std::fs::File::open(&path).unwrap();
+            *journal.state.lock().unwrap()=WarningJournalState {writer:Some(readonly),path:Some(path),closed:false};
+            let result=generate_plan_m3u_files(&plan,dir.path(),&dir.path().join("Music"),&HashMap::new(),&mut manifest,Arc::new(crate::device_io::MscBackend::new(dir.path().into())),journal).await;
+            assert!(result.is_err(),"Warning persistence failed, so finalization must fail too");
+        }
+    }
+
+    #[test]
+    fn reviewed_zero_warning_journal_does_not_create_a_spool_file() {
+        let journal=SyncOperationManager::new().warning_journal("no-warning").unwrap();
+        assert!(journal.state.lock().unwrap().path.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewed_warning_append_handle_closes_at_execution_end_and_shutdown_removes_evidence() {
+        let dir=tempfile::tempdir().unwrap();
+        let (devices,io)=setup_provider_sync_device(dir.path()).await;
+        let target=SyncTarget {path:dir.path().into(),manifest:devices.get_current_device().await.unwrap(),io};
+        let operations=Arc::new(SyncOperationManager::new());
+        let plan=crate::sync_plan::SyncPlan::from_delta(calculate_delta(&[],&Default::default()),&target.manifest).unwrap();
+        execute_plan_sync_with_protection(&plan,&target,ProviderSyncSource {provider:subsonic_provider("http://127.0.0.1:9".into()),transcoding_profile:None,providers_by_server:HashMap::new()},operations.clone(),"empty".into(),devices,None).await.unwrap();
+        {
+            let journal=operations.warning_journal("empty").unwrap();
+            let state=journal.state.lock().unwrap();
+            assert!(state.closed);
+            assert!(state.writer.is_none());
+            assert!(state.path.is_none());
+        }
+        assert_eq!(operations.warning_details("empty",0).unwrap(),(Vec::<String>::new(),0));
+        let journal=operations.warning_journal("evidence").unwrap();
+        journal.record("Complete warning").unwrap();
+        journal.close_writer().unwrap();
+        let path=journal.state.lock().unwrap().path.as_ref().unwrap().to_path_buf();
+        drop(journal);
+        assert!(path.exists());
+        operations.commit_shutdown().await;
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn long_sync_warning_evidence_is_paged_while_polling_sample_stays_bounded() {
+        let manager = SyncOperationManager::new();
+        let journal = manager.warning_journal("warning-fixture").unwrap();
+        let mut warnings = SyncWarnings::new(Arc::clone(&journal));
+        for index in 0..1100 { warnings.push(format!("Warning {index}")); }
+        let path = journal.state.lock().unwrap().path.as_ref().unwrap().to_path_buf();
+        journal.close_writer().unwrap();
+        assert!(journal.state.lock().unwrap().writer.is_none());
+        let sample = warnings.finish();
+        assert_eq!(sample.len(),101);
+        assert_eq!(sample[0],"Warning 0");
+        assert!(sample[100].contains("1000 additional"));
+        let (first,total) = manager.warning_details("warning-fixture",0).unwrap();
+        assert_eq!(total,1100);
+        assert_eq!(first.len(),500);
+        assert_eq!(first[499],"Warning 499");
+        let (last,total) = manager.warning_details("warning-fixture",1000).unwrap();
+        assert_eq!(total,1100);
+        assert_eq!(last.len(),100);
+        assert_eq!(last[99],"Warning 1099");
+        drop(journal);
+        drop(manager);
+        assert!(!path.exists());
     }
 
     use super::*;
@@ -5734,6 +5802,7 @@ mod tests {
         inner: Arc<dyn crate::device_io::DeviceIO>,
         trace: std::sync::Mutex<Vec<&'static str>>,
         writes: std::sync::atomic::AtomicUsize,
+        block_at_write: std::sync::atomic::AtomicUsize,
         fail_first: AtomicBool,
         fail_all: AtomicBool,
         refused_delete: std::sync::Mutex<Option<String>>,
@@ -5753,6 +5822,7 @@ mod tests {
                 inner,
                 trace: std::sync::Mutex::new(Vec::new()),
                 writes: std::sync::atomic::AtomicUsize::new(0),
+                block_at_write: std::sync::atomic::AtomicUsize::new(0),
                 fail_first: AtomicBool::new(false),
                 fail_all: AtomicBool::new(false),
                 refused_delete: std::sync::Mutex::new(None),
@@ -5790,7 +5860,7 @@ mod tests {
             if self
                 .writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                == 0
+                == self.block_at_write.load(Ordering::SeqCst)
             {
                 self.first_write_started.notify_one();
                 self.release_first_write.notified().await;
@@ -5809,7 +5879,7 @@ mod tests {
             if self
                 .writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                == 0
+                == self.block_at_write.load(Ordering::SeqCst)
             {
                 if self.fail_first.swap(false, Ordering::SeqCst) {
                     anyhow::bail!("injected path write failure");

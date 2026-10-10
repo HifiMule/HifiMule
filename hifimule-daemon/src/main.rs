@@ -90,6 +90,7 @@ mod rpc;
 mod scrobbler;
 mod server_manager;
 mod sync;
+mod sync_plan;
 mod transcoding;
 mod vault;
 
@@ -1826,7 +1827,7 @@ async fn run_auto_sync_via_provider(
         .try_start_pipeline()
         .ok_or_else(|| anyhow::anyhow!("[AutoSync] Aborting: sync pipeline already active"))?;
 
-    let target: sync::SyncTarget = device_manager
+    let mut target: sync::SyncTarget = device_manager
         .get_sync_target_for_device(&device_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("Auto-sync device disconnected"))?
@@ -1980,6 +1981,9 @@ async fn run_auto_sync_via_provider(
         delta.id_changes.len()
     );
 
+    let delta = sync_plan::SyncPlan::from_delta(delta, manifest)?;
+    delta.validate()?;
+    let pending_ids = delta.pending_ids()?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     device_manager
         .admit_sync_operation(
@@ -1990,12 +1994,6 @@ async fn run_auto_sync_via_provider(
         )
         .await?;
 
-    let pending_ids: Vec<String> = delta
-        .adds
-        .iter()
-        .map(|a| a.jellyfin_id.clone())
-        .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
-        .collect();
 
     if let Err(error) = device_manager
         .update_manifest_for_device(&manifest.device_id, |m| {
@@ -2036,7 +2034,12 @@ async fn run_auto_sync_via_provider(
         None
     };
 
-    let result = sync::execute_provider_sync_with_protection(
+    drop(desired_items);
+    drop(auto_fill_ids);
+    drop(seen_ids);
+    sync_plan::compact_target(&mut target);
+    let manifest = &target.manifest;
+    let result = sync::execute_plan_sync_with_protection(
         &delta,
         &target,
         sync::ProviderSyncSource {

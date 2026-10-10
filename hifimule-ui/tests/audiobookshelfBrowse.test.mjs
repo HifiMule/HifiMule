@@ -57,7 +57,7 @@ test('source groupings use read-only browse presentation and compatibility stays
     assert.match(library, /collection_read_only/);
     assert.match(library, /compatibility_unknown/);
     assert.match(library, /state\.browseMode === 'playlists' && _supportsPlaylistWrite/);
-    assert.match(basketSidebar, /blocked\.length > 0 && !await this\.confirmBlockedMedia\(blocked\)/);
+    assert.match(basketSidebar, /\.blockedCount > 0 && !await this\.confirmBlockedPlan\(pendingPlanId, \(delta as any\)\.blockedCount\)/);
     assert.doesNotMatch(basketSidebar, /compatibility_help|verified-direct-format/);
     assert.match(basketSidebar, /incompatible-direct-format/);
     for (const locale of Object.values(catalog)) {
