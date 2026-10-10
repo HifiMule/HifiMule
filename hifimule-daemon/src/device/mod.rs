@@ -62,6 +62,9 @@ impl MediaRole {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncedItem {
+    /// Selected explicitly or resolved by Auto-Fill. Older manifests default to selection.
+    #[serde(default)]
+    pub is_auto_fill: bool,
     #[serde(default)]
     pub media_role: MediaRole,
     #[serde(rename = "providerItemId")]
@@ -200,6 +203,17 @@ pub struct DeviceManifest {
 }
 
 impl DeviceManifest {
+    pub fn synced_byte_totals(&self) -> (u64, u64) {
+        self.synced_items
+            .iter()
+            .fold((0_u64, 0_u64), |(selected, autofill), item| {
+                if item.is_auto_fill {
+                    (selected, autofill.saturating_add(item.size_bytes))
+                } else {
+                    (selected.saturating_add(item.size_bytes), autofill)
+                }
+            })
+    }
     pub fn media_path(&self, role: MediaRole) -> Option<&str> {
         let override_path = match role {
             MediaRole::Music => None,

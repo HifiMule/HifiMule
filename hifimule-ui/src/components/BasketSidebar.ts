@@ -11,6 +11,7 @@ import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 import { formatServerIdentity } from '../serverIdentity';
 import type { ServerSummary, PodcastShow } from '../rpc';
+import { syncCapacity, type SyncedCapacityItem } from '../state/syncCapacity';
 
 interface StorageInfo {
     totalBytes: number;
@@ -85,16 +86,7 @@ function formatSize(bytes: number): string {
     return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
-type CapacityZone = 'green' | 'amber' | 'red';
-
-function getCapacityZone(projectedBytes: number, freeBytes: number, totalBytes: number): CapacityZone {
-    if (projectedBytes > freeBytes) return 'red';
-    const remainingAfterSync = freeBytes - projectedBytes;
-    if (remainingAfterSync < totalBytes * 0.1) return 'amber';
-    return 'green';
-}
-
-function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: number): string {
+function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: number, syncedItems: SyncedCapacityItem[] = []): string {
     if (!storageInfo) {
         // No device state (AC #5)
         if (projectedBytes > 0) {
@@ -116,15 +108,14 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
         return '';
     }
 
-    const { totalBytes, freeBytes, usedBytes } = storageInfo;
+    const { totalBytes } = storageInfo;
     if (totalBytes === 0) return '';
-    const zone = getCapacityZone(projectedBytes, freeBytes, totalBytes);
-
-    const usedPct = Math.min((usedBytes / totalBytes) * 100, 100);
-    const projectedPct = Math.min((projectedBytes / totalBytes) * 100, 100 - usedPct);
-    const freePct = Math.max(100 - usedPct - projectedPct, 0);
-
-    const remaining = freeBytes - projectedBytes;
+    const capacity = syncCapacity(storageInfo, projectedBytes, syncedItems)!;
+    const zone = capacity.zone;
+    const usedPct = capacity.usedFraction * 100;
+    const projectedPct = capacity.selectedFraction * 100;
+    const freePct = capacity.freeFraction * 100;
+    const remaining = capacity.remainingBytes;
 
     let statusMessage = '';
     let statusIcon = '';
@@ -163,6 +154,10 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
 }
 
 export class BasketSidebar {
+
+    private selectedCapacity() {
+        return syncCapacity(this.storageInfo, basketStore.getManualSizeBytes(), this.currentDevice?.synced_items ?? []);
+    }
     private container: HTMLElement;
     private updateListener: () => void;
     private isDestroyed: boolean = false;
@@ -397,10 +392,7 @@ export class BasketSidebar {
     /** The local budget readout for a slot: the pipeline's byte ceiling capped by available device
      * capacity, else all available capacity (AC12 — derived locally, no RPC). */
     private slotSizeBytes(pipeline: AutoFillPipeline): number {
-        const manualSize = basketStore.getManualSizeBytes();
-        const available = this.storageInfo
-            ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
-            : 0;
+        const available = this.selectedCapacity()?.autofillCapacityBytes ?? 0;
         const max = pipeline.budget.maxBytes;
         if (typeof max === 'number') {
             return this.storageInfo ? Math.min(max, available) : max;
@@ -475,9 +467,7 @@ export class BasketSidebar {
         // Capacity available for this fill (free − manual), derived identically to slotSizeBytes so
         // the preview's capped maxBytes matches the slot-card readout. Undefined when no device is
         // connected → the daemon falls back to device free bytes.
-        const availableBytes = this.storageInfo
-            ? Math.max(this.storageInfo.freeBytes - basketStore.getManualSizeBytes(), 0)
-            : undefined;
+        const availableBytes = this.selectedCapacity()?.autofillCapacityBytes;
 
         const panel = new AutoFillPanel({
             serverId,
@@ -1066,14 +1056,11 @@ export class BasketSidebar {
         }
 
         const totalTracks = items.reduce((sum, item) => sum + item.childCount, 0);
-        const totalSizeBytes = basketStore.getTotalSizeBytes();
-        const zone = this.storageInfo
-            ? getCapacityZone(totalSizeBytes, this.storageInfo.freeBytes, this.storageInfo.totalBytes)
-            : null;
+        const totalSizeBytes = basketStore.getManualSizeBytes();
+        const capacity = this.selectedCapacity();
+        const zone = capacity?.zone ?? null;
         const isOverLimit = zone === 'red';
-        const overAmount = isOverLimit && this.storageInfo
-            ? totalSizeBytes - this.storageInfo.freeBytes
-            : 0;
+        const overAmount = capacity?.overBytes ?? 0;
 
         this.container.innerHTML = `
             <div class="basket-header">
@@ -1098,7 +1085,7 @@ export class BasketSidebar {
                  <div class="basket-summary">
                     <span>${t('basket.summary.tracks_size', { count: totalTracks, size: formatSize(totalSizeBytes) })}</span>
                 </div>
-                ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
+                ${renderCapacityBar(this.storageInfo, totalSizeBytes, this.currentDevice?.synced_items ?? [])}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
                 ${this.renderDeviceFolders()}
@@ -1268,15 +1255,13 @@ export class BasketSidebar {
             // Story 12.6 (AC14): emit an array of per-server auto-fill descriptors targeting the
             // shipped Story 12.3 `parse_auto_fill_descriptors` contract. Budget is fresh from
             // current storage state (each slot's recorded sizeBytes may be stale).
-            const manualSize = basketStore.getManualSizeBytes();
-            const availableBytes = this.storageInfo
-                ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
-                : 0;
+            const availableBytes = this.selectedCapacity()?.autofillCapacityBytes;
             deltaParams.autoFill = autoFillSlots.map(slot => {
                 const serverId = slot.serverId ?? this.currentServerId ?? undefined;
                 const pipeline = slot.serverId ? this.autoFillPipelines.get(slot.serverId) : undefined;
-                const fallbackBytes = availableBytes > 0 ? availableBytes : (slot.sizeBytes || 0);
-                const maxBytes = pipeline?.budget.maxBytes ?? (fallbackBytes > 0 ? fallbackBytes : undefined);
+                const ceiling = pipeline?.budget.maxBytes ?? (slot.sizeBytes > 0 ? slot.sizeBytes : undefined);
+                const maxBytes = availableBytes === undefined ? ceiling
+                    : Math.min(ceiling ?? availableBytes, availableBytes);
                 // This server's manual ids being synced — the per-server exclude set (the daemon's
                 // manual-wins dedup is the safety net).
                 const excludeItemIds = serverId

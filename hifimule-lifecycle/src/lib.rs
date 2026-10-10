@@ -1008,7 +1008,10 @@ fn prepare_runtime_dir(app_data: &Path) -> Result<PathBuf, LifecycleError> {
     {
         std::fs::create_dir_all(&runtime).map_err(access_error)?;
         #[cfg(windows)]
-        protect_windows_path(&runtime)?;
+        // Reusing a verified directory avoids concurrent ownership/DACL writes.
+        if validate_windows_path(&runtime).is_err() {
+            protect_windows_path(&runtime)?;
+        }
     }
     validate_runtime_dir(app_data)
 }
@@ -1123,6 +1126,9 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
     let mut file = private_open(&temp, true)?;
     file.write_all(bytes).map_err(access_error)?;
     file.sync_all().map_err(access_error)?;
+    // Windows keeps a replaced destination pending deletion while its writer
+    // is open, preventing another concurrent writer from replacing it again.
+    drop(file);
     atomic_replace(&temp, path)?;
     #[cfg(unix)]
     File::open(parent)
@@ -1148,17 +1154,29 @@ fn atomic_replace(temp: &Path, destination: &Path) -> Result<(), LifecycleError>
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(access_error(std::io::Error::last_os_error()))
-    } else {
-        Ok(())
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+    let deadline = Instant::now() + HEALTH_TIMEOUT;
+    loop {
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // Concurrent replacements can briefly leave the destination open or
+        // pending deletion. Retry only these Windows conflicts, with a bound
+        // so actual permission failures still reach the caller.
+        if !matches!(error.raw_os_error(), Some(code) if code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32)
+            || Instant::now() >= deadline
+        {
+            return Err(access_error(error));
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -1188,10 +1206,12 @@ fn protect_windows_path(path: &Path) -> Result<(), LifecycleError> {
 #[cfg(windows)]
 fn set_windows_owner_to_current_user(path: &Path) -> Result<(), LifecycleError> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
     use windows_sys::Win32::Security::{
-        GetTokenInformation, OWNER_SECURITY_INFORMATION, TOKEN_USER, TokenUser,
+        EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -1237,6 +1257,32 @@ fn set_windows_owner_to_current_user(path: &Path) -> Result<(), LifecycleError> 
     }
     let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
     let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut owner = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    let result = unsafe {
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if result != 0 {
+        return Err(access_error(std::io::Error::from_raw_os_error(
+            result as i32,
+        )));
+    }
+    let already_owned = !owner.is_null() && unsafe { EqualSid(owner, user.User.Sid) } != 0;
+    unsafe { LocalFree(descriptor) };
+    // Concurrent launchers must not rewrite ownership of their shared runtime
+    // directory when it already belongs to the current user.
+    if already_owned {
+        return Ok(());
+    }
     let result = unsafe {
         SetNamedSecurityInfoW(
             wide_path.as_ptr(),

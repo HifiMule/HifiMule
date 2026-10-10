@@ -5772,7 +5772,7 @@ async fn provider_calculate_delta(
             );
         }
     }
-    patch_delta_auto_fill(&mut delta, &af_item_ids);
+    crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
@@ -6913,16 +6913,6 @@ fn patch_delta_tiers(
     }
 }
 
-/// Mark every item actually added by Auto-Fill, including non-tiered fills.
-fn patch_delta_auto_fill(
-    delta: &mut crate::sync::SyncDelta,
-    auto_fill_ids: &std::collections::HashSet<String>,
-) {
-    for add in &mut delta.adds {
-        add.is_auto_fill = auto_fill_ids.contains(&add.jellyfin_id);
-    }
-}
-
 /// Story 13.5 #20: copy the encoding-from-goals derived per-slot max-bitrate (kbps) onto the matching
 /// `delta.adds` entries (keyed by provider track id), so the sync transcode applies it to those
 /// auto-fill downloads only. Mirrors [`patch_delta_tiers`]. Manual items are never in the map, so the
@@ -7473,7 +7463,7 @@ async fn multi_provider_calculate_delta(
         )
         .await;
     }
-    patch_delta_auto_fill(&mut delta, &af_item_ids);
+    crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
@@ -7995,7 +7985,7 @@ async fn handle_sync_calculate_delta(
             crate::sync::format_change_reason_summary(&delta)
         );
     }
-    patch_delta_auto_fill(&mut delta, &af_item_ids);
+    crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
 
     if state.sync_operation_manager.is_pipeline_cancelled() {
         return Err(sync_cancelled_error());
@@ -8184,8 +8174,56 @@ async fn handle_sync_execute(
             .collect();
         let mut force_adds: Vec<crate::sync::SyncAddItem> = Vec::new();
         let mut force_deletes: Vec<crate::sync::SyncDeleteItem> = Vec::new();
+        let changed_ids: std::collections::HashSet<&str> = delta
+            .id_changes
+            .iter()
+            .map(|change| change.old_jellyfin_id.as_str())
+            .collect();
+        let already_added_ids: std::collections::HashSet<&str> = delta
+            .adds
+            .iter()
+            .map(|item| item.jellyfin_id.as_str())
+            .collect();
+        for change in &delta.id_changes {
+            let previous = manifest
+                .synced_items
+                .iter()
+                .find(|item| item.jellyfin_id == change.old_jellyfin_id);
+            force_adds.push(crate::sync::SyncAddItem {
+                media_role: change.media_role,
+                jellyfin_id: change.new_jellyfin_id.clone(),
+                name: change.name.clone(),
+                album: change.album.clone(),
+                artist: change.artist.clone(),
+                size_bytes: change.size_bytes,
+                etag: change.etag.clone(),
+                provider_album_id: change.provider_album_id.clone(),
+                provider_content_type: change.provider_content_type.clone(),
+                provider_suffix: change.provider_suffix.clone(),
+                original_bitrate: previous.and_then(|item| item.original_bitrate),
+                track_number: previous.and_then(|item| item.track_number),
+                reason_code: Some("force-sync".into()),
+                reason: Some("force sync requested".into()),
+                server_id: change.source_server_id.clone(),
+                tier: None,
+                is_auto_fill: change
+                    .is_auto_fill
+                    .unwrap_or_else(|| previous.is_some_and(|item| item.is_auto_fill)),
+                max_bitrate_override_kbps: None,
+            });
+            force_deletes.push(crate::sync::SyncDeleteItem {
+                jellyfin_id: change.old_jellyfin_id.clone(),
+                local_path: change.old_local_path.clone(),
+                name: change.name.clone(),
+                reason_code: Some("force-sync".into()),
+                reason: Some("force sync requested".into()),
+            });
+        }
         for item in &manifest.synced_items {
-            if delete_ids.contains(&item.jellyfin_id) {
+            if delete_ids.contains(&item.jellyfin_id)
+                || changed_ids.contains(item.jellyfin_id.as_str())
+                || already_added_ids.contains(item.jellyfin_id.as_str())
+            {
                 continue;
             }
             force_adds.push(crate::sync::SyncAddItem {
@@ -8205,7 +8243,11 @@ async fn handle_sync_execute(
                 reason: Some("force sync requested".to_string()),
                 server_id: item.server_id.clone(),
                 tier: None,
-                is_auto_fill: false,
+                is_auto_fill: delta
+                    .provenance_updates
+                    .get(&item.jellyfin_id)
+                    .copied()
+                    .unwrap_or(item.is_auto_fill),
                 // Story 13.5 #20: force-sync re-adds an existing managed item — not an auto-fill slot
                 // expansion — so it never carries an encoding-from-goals override.
                 max_bitrate_override_kbps: None,
@@ -8220,7 +8262,6 @@ async fn handle_sync_execute(
         }
         delta.adds.extend(force_adds);
         delta.deletes.extend(force_deletes);
-        delta.id_changes.clear();
         delta.unchanged = 0;
     }
 
@@ -10258,6 +10299,7 @@ mod tests {
     fn patch_delta_bitrate_overrides_scopes_to_autofill_items_only() {
         // A manual item (not in the map) and two auto-fill items (in the map) on the same server.
         let mut delta = crate::sync::SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![
                 add_item("manual-1", Some("srv")),
@@ -10297,6 +10339,7 @@ mod tests {
 
         // An empty map is a no-op (nothing stamped).
         let mut delta2 = crate::sync::SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item("x", Some("srv"))],
             deletes: Vec::new(),
@@ -10310,8 +10353,9 @@ mod tests {
     }
 
     #[test]
-    fn patch_delta_auto_fill_marks_non_tiered_items_only() {
+    fn classify_provenance_marks_non_tiered_items_only() {
         let mut delta = crate::sync::SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![
                 add_item("manual", Some("srv")),
@@ -10323,8 +10367,10 @@ mod tests {
             playlists: Vec::new(),
             pity_fired_servers: Vec::new(),
         };
-        patch_delta_auto_fill(
+        crate::sync::classify_provenance(
             &mut delta,
+            &[],
+            &crate::device::DeviceManifest::default(),
             &std::collections::HashSet::from(["auto".to_string()]),
         );
 
@@ -11296,6 +11342,7 @@ mod tests {
             podcast_path: None,
             playlist_path: None,
             synced_items: vec![crate::device::SyncedItem {
+                is_auto_fill: false,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song-1".to_string(),
                 name: "Track".to_string(),
@@ -12529,6 +12576,293 @@ mod tests {
             if operation.status != crate::sync::SyncStatus::Running {
                 assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
                 assert!(operation.errors.is_empty(), "{:?}", operation.errors);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("sync operation did not complete");
+    }
+
+    #[tokio::test]
+    async fn force_sync_preserves_resolved_and_legacy_autofill_origin() {
+        assert_force_origin_after_execution(false).await;
+    }
+
+    #[tokio::test]
+    async fn force_sync_preserves_manual_origin_after_missing_file_recovery() {
+        assert_force_origin_after_execution(true).await;
+    }
+
+    async fn assert_force_origin_after_execution(manual_recovery: bool) {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "subsonic-exec-dev".to_string(),
+            name: Some("Exec Dev".to_string()),
+            icon: None,
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![serde_json::from_value(json!({
+                "providerItemId": "song1", "name": "Track One", "album": "Album One", "artist": "Artist One",
+                "sizeBytes": 4, "syncedAt": "before", "localPath": "Music/old.mp3", "isAutoFill": true,
+                "providerSuffix": "mp3", "providerContentType": "audio/mpeg"
+            })).unwrap()],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillConfig::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+            storage_id: None,
+            ..Default::default()
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let mut delta = json!({
+            "adds": [{
+                "jellyfinId": "song1",
+                "name": "Track One",
+                "album": "Album One",
+                "artist": "Artist One",
+                "sizeBytes": 4,
+                "etag": null,
+                "providerAlbumId": "album1",
+                "providerContentType": "audio/mpeg",
+                "providerSuffix": "mp3"
+            }],
+            "deletes": [],
+            "idChanges": [],
+            "unchanged": 0,
+            "playlists": []
+        });
+
+        delta["adds"] = json!([]);
+        if manual_recovery {
+            let manifest = state.device_manager.get_current_device().await.unwrap();
+            let target = state
+                .device_manager
+                .get_selected_sync_target()
+                .await
+                .unwrap();
+            let desired = vec![crate::sync::DesiredItem {
+                media_role: crate::device::MediaRole::Music,
+                jellyfin_id: "song1".into(),
+                name: "Track One".into(),
+                album: Some("Album One".into()),
+                artist: Some("Artist One".into()),
+                size_bytes: 4,
+                etag: None,
+                provider_album_id: None,
+                provider_content_type: Some("audio/mpeg".into()),
+                provider_suffix: Some("mp3".into()),
+                original_bitrate: None,
+                track_number: None,
+                server_id: None,
+            }];
+            let mut recovered = crate::sync::calculate_delta(&desired, &manifest);
+            crate::sync::augment_delta_with_existence_check(
+                &mut recovered,
+                &desired,
+                &manifest,
+                target.2.as_ref(),
+            )
+            .await;
+            crate::sync::classify_provenance(
+                &mut recovered,
+                &desired,
+                &manifest,
+                &std::collections::HashSet::new(),
+            );
+            assert_eq!(recovered.adds.len(), 1);
+            assert!(recovered.deletes.is_empty());
+            assert!(!recovered.adds[0].is_auto_fill);
+            assert!(recovered.provenance_updates.is_empty());
+            delta = serde_json::to_value(recovered).unwrap();
+        }
+        let result = handle_sync_execute(&state, Some(json!({ "delta": delta, "force": true })))
+            .await
+            .expect("Subsonic execute should use active provider");
+
+        assert!(result["operationId"].as_str().is_some());
+        for _ in 0..20 {
+            let operation = state
+                .sync_operation_manager
+                .get_operation(result["operationId"].as_str().unwrap())
+                .await
+                .expect("operation");
+            if operation.status != crate::sync::SyncStatus::Running {
+                assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
+                assert!(operation.errors.is_empty(), "{:?}", operation.errors);
+                let manifest = state.device_manager.get_current_device().await.unwrap();
+                assert_eq!(manifest.synced_items.len(), 1);
+                assert_eq!(manifest.synced_items[0].is_auto_fill, !manual_recovery);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("sync operation did not complete");
+    }
+
+    #[tokio::test]
+    async fn force_sync_preserves_resolved_id_change_origin() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "subsonic-exec-dev".to_string(),
+            name: Some("Exec Dev".to_string()),
+            icon: None,
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![serde_json::from_value(json!({
+                "providerItemId": "song1", "name": "Track One", "album": "Album One", "artist": "Artist One",
+                "sizeBytes": 4, "syncedAt": "before", "localPath": "Music/old.mp3", "isAutoFill": true,
+                "providerSuffix": "mp3", "providerContentType": "audio/mpeg"
+            })).unwrap()],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillConfig::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+            storage_id: None,
+            ..Default::default()
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let mut delta = json!({
+            "adds": [{
+                "jellyfinId": "song1",
+                "name": "Track One",
+                "album": "Album One",
+                "artist": "Artist One",
+                "sizeBytes": 4,
+                "etag": null,
+                "providerAlbumId": "album1",
+                "providerContentType": "audio/mpeg",
+                "providerSuffix": "mp3"
+            }],
+            "deletes": [],
+            "idChanges": [],
+            "unchanged": 0,
+            "playlists": []
+        });
+
+        delta["adds"] = json!([]);
+        delta["idChanges"] = json!([{
+            "oldJellyfinId": "song1", "newJellyfinId": "song2", "oldLocalPath": "Music/old.mp3",
+            "name": "Track One", "album": "Album One", "artist": "Artist One", "sizeBytes": 4,
+            "isAutoFill": false, "providerSuffix": "mp3", "providerContentType": "audio/mpeg"
+        }]);
+        let result = handle_sync_execute(&state, Some(json!({ "delta": delta, "force": true })))
+            .await
+            .expect("Subsonic execute should use active provider");
+
+        assert!(result["operationId"].as_str().is_some());
+        for _ in 0..20 {
+            let operation = state
+                .sync_operation_manager
+                .get_operation(result["operationId"].as_str().unwrap())
+                .await
+                .expect("operation");
+            if operation.status != crate::sync::SyncStatus::Running {
+                assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
+                assert!(operation.errors.is_empty(), "{:?}", operation.errors);
+                let manifest = state.device_manager.get_current_device().await.unwrap();
+                assert_eq!(manifest.synced_items.len(), 1);
+                assert_eq!(manifest.synced_items[0].jellyfin_id, "song2");
+                assert!(!manifest.synced_items[0].is_auto_fill);
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -14157,6 +14491,7 @@ mod tests {
             version: "1.1".to_string(),
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![crate::device::SyncedItem {
+                is_auto_fill: false,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song1".to_string(),
                 name: "Existing".to_string(),
@@ -14261,6 +14596,7 @@ mod tests {
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![
                 crate::device::SyncedItem {
+                    is_auto_fill: false,
                     media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "item-a".to_string(),
                     name: "Track A".to_string(),
@@ -14280,6 +14616,7 @@ mod tests {
                     server_id: None,
                 },
                 crate::device::SyncedItem {
+                    is_auto_fill: false,
                     media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "item-b".to_string(),
                     name: "Track B".to_string(),
@@ -17921,7 +18258,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(empty.data.unwrap()["code"], "PLAYBACK_SELECTION_NO_MUSIC_SERVER");
+        assert_eq!(
+            empty.data.unwrap()["code"],
+            "PLAYBACK_SELECTION_NO_MUSIC_SERVER"
+        );
         let config = PlaybackSelectionConfig {
             sources: vec![SelectionSource {
                 server_id: "missing-portable".into(),

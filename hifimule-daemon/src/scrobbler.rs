@@ -519,6 +519,7 @@ Led Zeppelin\tLed Zeppelin IV\tStairway to Heaven\t4\t482\tL\t1706752800\tsome-m
             device_id: "test-device-id".to_string(),
             version: "1.0".to_string(),
             synced_items: vec![crate::device::SyncedItem {
+                is_auto_fill: false,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "6aff97688560276ce460ff2187ff8a6f".to_string(),
                 name: "Stick To Your Guns".to_string(),
@@ -796,6 +797,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
             device_id: "test-device-id".to_string(),
             version: "1.0".to_string(),
             synced_items: vec![crate::device::SyncedItem {
+                is_auto_fill: false,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: item_id.to_string(),
                 name: "Stick To Your Guns".to_string(),

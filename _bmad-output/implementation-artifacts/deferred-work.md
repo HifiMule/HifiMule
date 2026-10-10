@@ -1,5 +1,10 @@
 # Deferred Work
 
+## Deferred from: autofill-aware sync capacity verification (2026-10-10)
+
+- **Windows UI test entrypoint paths are invalid** (`hifimule-ui/tests/radioDefaults.test.mjs:6`, `hifimule-ui/tests/serverSwitchBrowse.test.mjs:6`) — existing tests pass URL `.pathname` values such as `/C:/Workspaces/...` to esbuild. The broader UI run passed 51 tests but these two files failed before executing. Use `fileURLToPath` in a focused test-harness fix; these files were unchanged by the sync work.
+- **Playback selection rejection test fails in parallel suite** (`rpc::tests::rejected_control_does_not_supersede_pending_selection`) — parallel daemon runs observed `PLAYBACK_SELECTION_CANCELLED` instead of `PLAYBACK_SELECTION_SOURCE_UNAVAILABLE`; the isolated test and full serial suite passed. Investigate shared test state or scheduling separately; playback code was unchanged.
+
 ## Deferred from: library radio actions review (2026-09-30)
 
 - **Selection save/start uses shared mutable configuration** (`hifimule-daemon/src/rpc/playback_selection.rs:206`, `hifimule-daemon/src/rpc/playback_selection.rs:249`) — the existing separate save and start RPCs allow another client to save settings between them, so startup can load that other configuration. Library actions now suppress overlapping library requests, but atomic configuration-bound startup would require a separate daemon contract change. Deferred as pre-existing architecture outside this UI scope.

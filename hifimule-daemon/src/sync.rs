@@ -160,6 +160,9 @@ pub struct SyncBlockedItem {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncIdChangeItem {
+    /// None on legacy deltas preserves the previous manifest origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_auto_fill: Option<bool>,
     #[serde(default)]
     pub media_role: crate::device::MediaRole,
     pub old_jellyfin_id: String,
@@ -210,6 +213,9 @@ pub struct PlaylistSyncItem {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncDelta {
+    /// Origin changes for retained tracks; previews never apply these to the manifest.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub provenance_updates: HashMap<String, bool>,
     pub adds: Vec<SyncAddItem>,
     #[serde(default)]
     pub blocked: Vec<SyncBlockedItem>,
@@ -226,6 +232,43 @@ pub struct SyncDelta {
     /// paths after `calculate_delta`, mirroring `patch_delta_tiers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pity_fired_servers: Vec<String>,
+}
+
+/// Classify the complete resolved selection after manual-first deduplication.
+/// Missing entries on old/client deltas preserve retained manifest provenance.
+pub fn classify_provenance(
+    delta: &mut SyncDelta,
+    desired_items: &[DesiredItem],
+    manifest: &DeviceManifest,
+    auto_fill_ids: &HashSet<String>,
+) {
+    for add in &mut delta.adds {
+        add.is_auto_fill = auto_fill_ids.contains(&add.jellyfin_id);
+    }
+    for change in &mut delta.id_changes {
+        change.is_auto_fill = Some(auto_fill_ids.contains(&change.new_jellyfin_id));
+    }
+    let resolved: HashSet<&str> = desired_items
+        .iter()
+        .map(|item| item.jellyfin_id.as_str())
+        .collect();
+    let transferring: HashSet<&str> = delta
+        .adds
+        .iter()
+        .map(|item| item.jellyfin_id.as_str())
+        .collect();
+    delta.provenance_updates = manifest
+        .synced_items
+        .iter()
+        .filter(|item| {
+            resolved.contains(item.jellyfin_id.as_str())
+                && !transferring.contains(item.jellyfin_id.as_str())
+        })
+        .filter_map(|item| {
+            let origin = auto_fill_ids.contains(&item.jellyfin_id);
+            (item.is_auto_fill != origin).then(|| (item.jellyfin_id.clone(), origin))
+        })
+        .collect();
 }
 
 fn change_reason(code: &str) -> String {
@@ -2378,6 +2421,61 @@ impl Drop for StagedBytePermit {
     }
 }
 
+async fn delete_scheduled_managed_item(
+    item: &SyncDeleteItem,
+    device_path: &Path,
+    managed_path: &Path,
+    managed_subfolder: Option<&str>,
+    is_mtp: bool,
+    owned_manifest_paths: &HashSet<String>,
+    device_io: &Arc<dyn crate::device_io::DeviceIO>,
+    device_manager: &Arc<crate::device::DeviceManager>,
+    operation_manager: &Arc<SyncOperationManager>,
+    operation_id: &str,
+    device_id: &str,
+) -> Option<SyncFileError> {
+    let error = |message| SyncFileError {
+        jellyfin_id: item.jellyfin_id.clone(),
+        filename: item.name.clone(),
+        error_message: message,
+    };
+    if let Err(message) = validate_delete_path_for_managed_zone(
+        device_path,
+        managed_path,
+        managed_subfolder,
+        &item.local_path,
+        is_mtp,
+        owned_manifest_paths,
+    ) {
+        return Some(error(message));
+    }
+    if let Err(e) = device_io.delete_file(&item.local_path).await {
+        if !is_missing_delete_error(&e) {
+            return Some(error(format!("Failed to delete file: {e}")));
+        }
+    }
+    operation_manager
+        .modify_operation(operation_id, |operation| {
+            operation.files_completed += 1;
+        })
+        .await;
+    if let Err(e) = device_manager
+        .update_manifest_for_device(device_id, |m| {
+            m.synced_items.retain(|i| i.jellyfin_id != item.jellyfin_id);
+        })
+        .await
+    {
+        operation_manager
+            .modify_operation(operation_id, |operation| {
+                operation.files_completed = operation.files_completed.saturating_sub(1);
+            })
+            .await;
+        let _ = operation_manager.request_cancel(operation_id).await;
+        return Some(error(format!("Per-delete manifest write failed: {e}")));
+    }
+    None
+}
+
 struct StagedTrack {
     add_item: SyncAddItem,
     staged_path: std::path::PathBuf,
@@ -2502,18 +2600,40 @@ pub(crate) async fn execute_provider_sync_with_protection(
     };
     let compatibility =
         audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
-    let readd_ids: HashSet<&str> = delta
+    let mut readd_ids: HashSet<&str> = delta
         .adds
         .iter()
         .map(|add| add.jellyfin_id.as_str())
         .collect();
-    let readd_delete_by_id: HashMap<&str, &SyncDeleteItem> = delta
+    let mut readd_delete_by_id: HashMap<&str, &SyncDeleteItem> = delta
         .deletes
         .iter()
         .filter(|delete| readd_ids.contains(delete.jellyfin_id.as_str()))
         .map(|delete| (delete.jellyfin_id.as_str(), delete))
         .collect();
+    // Force-sync transfers a reassigned ID, retaining the old path as its paired replacement.
+    let force_id_changes: HashMap<&str, &str> = delta
+        .id_changes
+        .iter()
+        .filter(|change| readd_ids.contains(change.new_jellyfin_id.as_str()))
+        .map(|change| {
+            (
+                change.new_jellyfin_id.as_str(),
+                change.old_jellyfin_id.as_str(),
+            )
+        })
+        .collect();
+    for (&new_id, &old_id) in &force_id_changes {
+        if let Some(delete) = delta.deletes.iter().find(|item| item.jellyfin_id == old_id) {
+            readd_ids.insert(old_id);
+            readd_delete_by_id.insert(new_id, delete);
+        }
+    }
 
+    let mut pending_deletes = delta
+        .deletes
+        .iter()
+        .filter(|delete| !readd_ids.contains(delete.jellyfin_id.as_str()));
     let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
     let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
     let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
@@ -3420,7 +3540,8 @@ pub(crate) async fn execute_provider_sync_with_protection(
                     album: staged.add_item.album.clone(),
                     artist: staged.add_item.artist.clone(),
                     local_path: staged.rel_path.clone(),
-                    size_bytes: staged.add_item.size_bytes,
+                    size_bytes: staged.staged_size,
+                    is_auto_fill: staged.add_item.is_auto_fill,
                     synced_at,
                     original_name: staged.original_name.clone(),
                     etag: staged.add_item.etag.clone(),
@@ -3446,6 +3567,10 @@ pub(crate) async fn execute_provider_sync_with_protection(
                     })
                     .await;
                 let synced_item = synced_items.last().unwrap().clone();
+                let mut replacement_cleanup_failed = false;
+                let replacement_deletes_file = readd_delete_by_id
+                    .get(staged.add_item.jellyfin_id.as_str())
+                    .is_some_and(|item| item.local_path != staged.rel_path);
                 if let Some(delete_item) =
                     readd_delete_by_id.get(staged.add_item.jellyfin_id.as_str())
                     && let Some(error) = cleanup_replaced_file_after_write(
@@ -3462,13 +3587,20 @@ pub(crate) async fn execute_provider_sync_with_protection(
                     )
                     .await
                 {
+                    replacement_cleanup_failed = true;
                     errors.push(error);
                 }
                 let id_to_replace = staged.add_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest_for_device(&operation_device_id, |m| {
-                        m.synced_items
-                            .retain(|item| item.jellyfin_id != id_to_replace);
+                        m.synced_items.retain(|item| {
+                            item.jellyfin_id != id_to_replace
+                                && force_id_changes
+                                    .get(id_to_replace.as_str())
+                                    .is_none_or(|old| {
+                                        replacement_cleanup_failed || item.jellyfin_id != *old
+                                    })
+                        });
                         m.synced_items.push(synced_item);
                     })
                     .await
@@ -3485,6 +3617,26 @@ pub(crate) async fn execute_provider_sync_with_protection(
                         .await;
                     let _ = operation_manager.request_cancel(&operation_id).await;
                     writer_failed = true;
+                } else if !replacement_deletes_file
+                    && !replacement_cleanup_failed
+                    && !operation_manager.is_cancelled(&operation_id).await
+                    && let Some(delete_item) = pending_deletes.next()
+                    && let Some(error) = delete_scheduled_managed_item(
+                        delete_item,
+                        device_path,
+                        &managed_path,
+                        managed_subfolder_for_delete.as_deref(),
+                        is_mtp,
+                        &owned_manifest_paths,
+                        &device_io,
+                        &device_manager,
+                        &operation_manager,
+                        &operation_id,
+                        &operation_device_id,
+                    )
+                    .await
+                {
+                    errors.push(error);
                 }
             }
             Err(e) => {
@@ -3567,93 +3719,26 @@ pub(crate) async fn execute_provider_sync_with_protection(
         );
     }
 
-    for delete_item in delta
-        .deletes
-        .iter()
-        .filter(|delete| !readd_ids.contains(delete.jellyfin_id.as_str()))
-    {
+    for delete_item in pending_deletes {
         if operation_manager.is_cancelled(&operation_id).await {
             break;
         }
-        if let Err(error_message) = validate_delete_path_for_managed_zone(
+        if let Some(error) = delete_scheduled_managed_item(
+            delete_item,
             device_path,
             &managed_path,
             managed_subfolder_for_delete.as_deref(),
-            &delete_item.local_path,
             is_mtp,
             &owned_manifest_paths,
-        ) {
-            errors.push(SyncFileError {
-                jellyfin_id: delete_item.jellyfin_id.clone(),
-                filename: delete_item.name.clone(),
-                error_message,
-            });
-            continue;
-        }
-
-        let delete_result = device_io.delete_file(&delete_item.local_path).await;
-        let already_absent = matches!(&delete_result, Err(e) if is_missing_delete_error(e));
-        match delete_result {
-            Ok(_) => {
-                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-                    operation.files_completed += 1;
-                    operation_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
-                let id_to_remove = delete_item.jellyfin_id.clone();
-                if let Err(e) = device_manager
-                    .update_manifest_for_device(&operation_device_id, |m| {
-                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
-                    })
-                    .await
-                {
-                    errors.push(SyncFileError {
-                        jellyfin_id: delete_item.jellyfin_id.clone(),
-                        filename: delete_item.name.clone(),
-                        error_message: format!("Per-delete manifest write failed: {e}"),
-                    });
-                    operation_manager
-                        .modify_operation(&operation_id, |operation| {
-                            operation.files_completed = operation.files_completed.saturating_sub(1);
-                        })
-                        .await;
-                    let _ = operation_manager.request_cancel(&operation_id).await;
-                }
-            }
-            Err(_) if already_absent => {
-                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-                    operation.files_completed += 1;
-                    operation_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
-
-                let id_to_remove = delete_item.jellyfin_id.clone();
-                if let Err(e) = device_manager
-                    .update_manifest_for_device(&operation_device_id, |m| {
-                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
-                    })
-                    .await
-                {
-                    errors.push(SyncFileError {
-                        jellyfin_id: delete_item.jellyfin_id.clone(),
-                        filename: delete_item.name.clone(),
-                        error_message: format!("Per-delete manifest write failed: {e}"),
-                    });
-                    operation_manager
-                        .modify_operation(&operation_id, |operation| {
-                            operation.files_completed = operation.files_completed.saturating_sub(1);
-                        })
-                        .await;
-                    let _ = operation_manager.request_cancel(&operation_id).await;
-                }
-            }
-            Err(e) => errors.push(SyncFileError {
-                jellyfin_id: delete_item.jellyfin_id.clone(),
-                filename: delete_item.name.clone(),
-                error_message: format!("Failed to delete file: {}", e),
-            }),
+            &device_io,
+            &device_manager,
+            &operation_manager,
+            &operation_id,
+            &operation_device_id,
+        )
+        .await
+        {
+            errors.push(error);
         }
     }
 
@@ -3668,12 +3753,25 @@ pub(crate) async fn execute_provider_sync_with_protection(
     }
 
     for id_change in &delta.id_changes {
+        if force_id_changes.contains_key(id_change.new_jellyfin_id.as_str()) {
+            continue;
+        }
         if operation_manager.is_cancelled(&operation_id).await {
             break;
         }
         let synced_at = now_iso8601();
         synced_items.push(crate::device::SyncedItem {
             media_role: id_change.media_role,
+            is_auto_fill: id_change.is_auto_fill.unwrap_or_else(|| {
+                manifest_snapshot
+                    .as_ref()
+                    .and_then(|m| {
+                        m.synced_items
+                            .iter()
+                            .find(|item| item.jellyfin_id == id_change.old_jellyfin_id)
+                    })
+                    .is_some_and(|item| item.is_auto_fill)
+            }),
             jellyfin_id: id_change.new_jellyfin_id.clone(),
             name: id_change.name.clone(),
             album: id_change.album.clone(),
@@ -3704,6 +3802,27 @@ pub(crate) async fn execute_provider_sync_with_protection(
                 jellyfin_id: id_change.new_jellyfin_id.clone(),
                 filename: id_change.name.clone(),
                 error_message: format!("Per-ID-change manifest write failed: {e}"),
+            });
+            let _ = operation_manager.request_cancel(&operation_id).await;
+        }
+    }
+
+    if !operation_manager.is_cancelled(&operation_id).await && !delta.provenance_updates.is_empty()
+    {
+        if let Err(e) = device_manager
+            .update_manifest_for_device(&operation_device_id, |m| {
+                for item in &mut m.synced_items {
+                    if let Some(&origin) = delta.provenance_updates.get(&item.jellyfin_id) {
+                        item.is_auto_fill = origin;
+                    }
+                }
+            })
+            .await
+        {
+            errors.push(SyncFileError {
+                jellyfin_id: String::new(),
+                filename: "manifest".into(),
+                error_message: format!("Provenance manifest write failed: {e}"),
             });
             let _ = operation_manager.request_cancel(&operation_id).await;
         }
@@ -4448,6 +4567,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     .map(|s| s.to_string());
                 id_changes.push(annotate_id_change(
                     SyncIdChangeItem {
+                        is_auto_fill: None,
                         media_role: add.media_role,
                         old_jellyfin_id: del.jellyfin_id.clone(),
                         new_jellyfin_id: add.jellyfin_id.clone(),
@@ -4455,7 +4575,10 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                         name: add.name.clone(),
                         album: add.album.clone(),
                         artist: add.artist.clone(),
-                        size_bytes: add.size_bytes,
+                        size_bytes: synced_by_id
+                            .get(del.jellyfin_id.as_str())
+                            .map(|item| item.size_bytes)
+                            .unwrap_or(add.size_bytes),
                         etag: add.etag.clone(),
                         provider_album_id: add.provider_album_id.clone(),
                         provider_content_type: add.provider_content_type.clone(),
@@ -4492,6 +4615,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .collect();
 
     SyncDelta {
+        provenance_updates: std::collections::HashMap::new(),
         blocked: vec![],
         adds,
         deletes,
@@ -4678,6 +4802,7 @@ mod tests {
         artist: Option<&str>,
     ) -> SyncedItem {
         SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: name.to_string(),
@@ -4696,6 +4821,107 @@ mod tests {
             track_number: None,
             server_id: None,
         }
+    }
+
+    #[test]
+    fn synced_origin_survives_manifest_roundtrip_and_legacy_defaults_to_selected() {
+        let legacy = serde_json::to_value(make_synced_item("one", "One", None, None)).unwrap();
+        let mut autofill = legacy.clone();
+        autofill["isAutoFill"] = serde_json::json!(true);
+        let decoded: SyncedItem = serde_json::from_value(autofill).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap()["isAutoFill"], true);
+        let decoded: SyncedItem = serde_json::from_value(legacy).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap()["isAutoFill"], false);
+    }
+
+    #[tokio::test]
+    async fn retained_origin_updates_are_read_only_until_execution_and_preserve_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        manager
+            .update_manifest(|m| {
+                m.synced_items = vec![
+                    make_synced_item("one", "One", None, None),
+                    make_synced_item("other", "Other", None, None),
+                ];
+            })
+            .await
+            .unwrap();
+        let manifest = manager.get_current_device().await.unwrap();
+        let desired = vec![make_desired("one", "One", None, None)];
+        let mut encoded = serde_json::to_value(calculate_delta(&desired, &manifest)).unwrap();
+        encoded["provenanceUpdates"] = serde_json::json!({"one": true});
+        encoded["deletes"] = serde_json::json!([]);
+        let delta: SyncDelta = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            manager.get_current_device().await.unwrap().synced_items,
+            manifest.synced_items
+        );
+        let (_, errors) = execute_test_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider("http://localhost".into()),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            Arc::new(SyncOperationManager::new()),
+            "origin-metadata".into(),
+            manager.clone(),
+            device_io,
+        )
+        .await
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let updated = manager.get_current_device().await.unwrap();
+        let one = serde_json::to_value(&updated.synced_items[0]).unwrap();
+        assert_eq!(one["isAutoFill"], true);
+        assert_eq!(updated.synced_items[0].size_bytes, 10_000_000);
+        assert_eq!(updated.synced_items[1], manifest.synced_items[1]);
+    }
+
+    #[test]
+    fn id_change_preserves_written_size_instead_of_source_estimate() {
+        let mut manifest = empty_manifest();
+        let mut old = make_synced_item("old", "One", None, None);
+        old.size_bytes = 123;
+        manifest.synced_items.push(old);
+        let delta = calculate_delta(&[make_desired("new", "One", None, None)], &manifest);
+        assert_eq!(delta.id_changes.len(), 1);
+        assert_eq!(delta.id_changes[0].size_bytes, 123);
+    }
+
+    #[test]
+    fn resolved_provenance_handles_retained_transitions_adds_and_id_changes() {
+        let mut manifest = empty_manifest();
+        let manual = make_synced_item("manual", "Manual", None, None);
+        let mut autofill = make_synced_item("fill", "Fill", None, None);
+        autofill.is_auto_fill = true;
+        let mut old_id = make_synced_item("old", "Reidentified", None, None);
+        old_id.is_auto_fill = true;
+        manifest.synced_items = vec![manual, autofill, old_id];
+        let desired = vec![
+            make_desired("manual", "Manual", None, None),
+            make_desired("fill", "Fill", None, None),
+            make_desired("new", "Reidentified", None, None),
+            make_desired("new-fill", "New Fill", None, None),
+        ];
+        let mut delta = calculate_delta(&desired, &manifest);
+        classify_provenance(
+            &mut delta,
+            &desired,
+            &manifest,
+            &HashSet::from(["manual".into(), "new-fill".into()]),
+        );
+        assert_eq!(delta.provenance_updates.get("manual"), Some(&true));
+        assert_eq!(delta.provenance_updates.get("fill"), Some(&false));
+        assert_eq!(delta.id_changes[0].is_auto_fill, Some(false));
+        assert!(delta.adds[0].is_auto_fill);
+        assert_eq!(
+            manifest.synced_items[0].is_auto_fill, false,
+            "planning must be read-only"
+        );
+        assert_eq!(manifest.synced_byte_totals(), (10_000_000, 20_000_000));
     }
 
     #[derive(Debug)]
@@ -4771,6 +4997,7 @@ mod tests {
             .unwrap();
 
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![],
             deletes: vec![SyncDeleteItem {
@@ -4849,6 +5076,7 @@ mod tests {
             .unwrap();
 
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![],
             deletes: vec![SyncDeleteItem {
@@ -5504,8 +5732,11 @@ mod tests {
 
     struct BlockingFirstWriteDeviceIo {
         inner: Arc<dyn crate::device_io::DeviceIO>,
+        trace: std::sync::Mutex<Vec<&'static str>>,
         writes: std::sync::atomic::AtomicUsize,
         fail_first: AtomicBool,
+        fail_all: AtomicBool,
+        refused_delete: std::sync::Mutex<Option<String>>,
         first_write_started: Notify,
         release_first_write: Notify,
     }
@@ -5520,8 +5751,11 @@ mod tests {
         fn new(inner: Arc<dyn crate::device_io::DeviceIO>) -> Arc<Self> {
             Arc::new(Self {
                 inner,
+                trace: std::sync::Mutex::new(Vec::new()),
                 writes: std::sync::atomic::AtomicUsize::new(0),
                 fail_first: AtomicBool::new(false),
+                fail_all: AtomicBool::new(false),
+                refused_delete: std::sync::Mutex::new(None),
                 first_write_started: Notify::new(),
                 release_first_write: Notify::new(),
             })
@@ -5569,6 +5803,9 @@ mod tests {
             path: &str,
             source: &std::path::Path,
         ) -> anyhow::Result<()> {
+            if self.fail_all.load(Ordering::SeqCst) {
+                anyhow::bail!("injected persistent path write failure");
+            }
             if self
                 .writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -5580,10 +5817,22 @@ mod tests {
                 self.first_write_started.notify_one();
                 self.release_first_write.notified().await;
             }
-            self.inner.write_with_verify_from_path(path, source).await
+            let result = self.inner.write_with_verify_from_path(path, source).await;
+            if result.is_ok() {
+                self.trace.lock().unwrap().push("write");
+            }
+            result
         }
 
         async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+            self.trace.lock().unwrap().push("delete");
+            if self.refused_delete.lock().unwrap().as_deref() == Some(path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected delete refusal",
+                )
+                .into());
+            }
             self.inner.delete_file(path).await
         }
 
@@ -5641,12 +5890,13 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-jellyfin",
                 "flac",
                 "audio/flac",
-                audio.len() as u64,
+                99,
             )],
             deletes: vec![],
             id_changes: vec![],
@@ -5688,6 +5938,275 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_deletes_follow_each_successful_copy_and_drain_leftovers() {
+        assert_scheduled_delete_order(false).await;
+    }
+
+    #[tokio::test]
+    async fn same_path_replacement_reclaims_obsolete_file_before_next_copy() {
+        assert_scheduled_delete_order(true).await;
+    }
+
+    async fn assert_scheduled_delete_order(same_path_replacement: bool) {
+        let mut server = mockito::Server::new_async().await;
+        let _downloads = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(2)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let mut old: Vec<_> = ["old-a", "old-b", "old-c"]
+            .iter()
+            .map(|id| make_synced_item(id, id, None, None))
+            .collect();
+        if same_path_replacement {
+            old[0] = make_synced_item("new-a", "Track new-a", Some("Album"), Some("Artist"));
+            old[0].local_path = "Music/Artist/Album/00 - Track new-a.flac".into();
+        }
+        for item in &old {
+            tokio::fs::create_dir_all(dir.path().join(&item.local_path).parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(dir.path().join(&item.local_path), [9_u8])
+                .await
+                .unwrap();
+        }
+        manager
+            .update_manifest(|m| m.synced_items = old.clone())
+            .await
+            .unwrap();
+        let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
+            blocked: vec![],
+            adds: vec![
+                add_item_with_provider_format("new-a", "flac", "audio/flac", 4),
+                add_item_with_provider_format("new-b", "flac", "audio/flac", 4),
+            ],
+            deletes: old
+                .iter()
+                .map(|item| SyncDeleteItem {
+                    jellyfin_id: item.jellyfin_id.clone(),
+                    local_path: item.local_path.clone(),
+                    name: item.name.clone(),
+                    reason_code: None,
+                    reason: None,
+                })
+                .collect(),
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let tracing = BlockingFirstWriteDeviceIo::new(device_io);
+        tracing.release_first_write.notify_one();
+        let (_, errors) = execute_test_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            Arc::new(SyncOperationManager::new()),
+            "interleaved-cleanup".into(),
+            manager.clone(),
+            tracing.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let expected: &[&str] = if same_path_replacement {
+            &["write", "delete", "write", "delete"]
+        } else {
+            &["write", "delete", "write", "delete", "delete"]
+        };
+        assert_eq!(tracing.trace.lock().unwrap().as_slice(), expected);
+        assert_eq!(
+            manager
+                .get_current_device()
+                .await
+                .unwrap()
+                .synced_items
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_copy_preserves_all_scheduled_deletions() {
+        let mut server = mockito::Server::new_async().await;
+        let _downloads = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let old: Vec<_> = ["old-a", "old-b", "old-c"]
+            .iter()
+            .map(|id| make_synced_item(id, id, None, None))
+            .collect();
+        for item in &old {
+            tokio::fs::create_dir_all(dir.path().join("Music/Unknown"))
+                .await
+                .unwrap();
+            tokio::fs::write(dir.path().join(&item.local_path), [9_u8])
+                .await
+                .unwrap();
+        }
+        manager
+            .update_manifest(|m| m.synced_items = old.clone())
+            .await
+            .unwrap();
+        let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
+            blocked: vec![],
+            adds: vec![
+                add_item_with_provider_format("new-a", "flac", "audio/flac", 4),
+                add_item_with_provider_format("new-b", "flac", "audio/flac", 4),
+            ],
+            deletes: old
+                .iter()
+                .map(|item| SyncDeleteItem {
+                    jellyfin_id: item.jellyfin_id.clone(),
+                    local_path: item.local_path.clone(),
+                    name: item.name.clone(),
+                    reason_code: None,
+                    reason: None,
+                })
+                .collect(),
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let tracing = BlockingFirstWriteDeviceIo::new(device_io);
+        tracing.fail_all.store(true, Ordering::SeqCst);
+        let operations = Arc::new(SyncOperationManager::new());
+        operations
+            .create_operation("interleaved-cleanup".into(), 5)
+            .await;
+        let (_, errors) = execute_test_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            operations,
+            "interleaved-cleanup".into(),
+            manager.clone(),
+            tracing.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!errors.is_empty());
+        assert!(tracing.trace.lock().unwrap().is_empty());
+        assert_eq!(
+            manager.get_current_device().await.unwrap().synced_items,
+            old
+        );
+        for item in &old {
+            assert!(dir.path().join(&item.local_path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_force_id_cleanup_keeps_both_managed_files_tracked() {
+        let mut server = mockito::Server::new_async().await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(dir.path()).await;
+        let mut old = make_synced_item("old-id", "Old", None, None);
+        old.is_auto_fill = true;
+        old.size_bytes = 3;
+        tokio::fs::create_dir_all(dir.path().join("Music/Unknown"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join(&old.local_path), [9_u8; 3])
+            .await
+            .unwrap();
+        manager
+            .update_manifest(|m| m.synced_items = vec![old.clone()])
+            .await
+            .unwrap();
+        let add = add_item_with_provider_format("new-id", "flac", "audio/flac", 4);
+        let delta = SyncDelta {
+            provenance_updates: HashMap::new(), blocked: vec![], adds: vec![add.clone()],
+            deletes: vec![SyncDeleteItem {
+                jellyfin_id: old.jellyfin_id.clone(), local_path: old.local_path.clone(), name: old.name.clone(),
+                reason_code: None, reason: None,
+            }], id_changes: vec![serde_json::from_value(serde_json::json!({
+                "oldJellyfinId": "old-id", "newJellyfinId": "new-id", "oldLocalPath": old.local_path,
+                "name": add.name, "sizeBytes": 3, "isAutoFill": false,
+            })).unwrap()], unchanged: 0, playlists: vec![], pity_fired_servers: vec![],
+        };
+        let tracing = BlockingFirstWriteDeviceIo::new(io);
+        *tracing.refused_delete.lock().unwrap() = Some(old.local_path.clone());
+        tracing.release_first_write.notify_one();
+        let operations = Arc::new(SyncOperationManager::new());
+        operations
+            .create_operation("refused-force-id-cleanup".into(), 2)
+            .await;
+        let (_, errors) = execute_test_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: None,
+                providers_by_server: HashMap::new(),
+            },
+            operations,
+            "refused-force-id-cleanup".into(),
+            manager.clone(),
+            tracing.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(*tracing.trace.lock().unwrap(), ["write", "delete"]);
+        let manifest = manager.get_current_device().await.unwrap();
+        assert_eq!(
+            manifest.synced_items.len(),
+            2,
+            "failed old-file cleanup must retain its managed ownership"
+        );
+        assert_eq!(
+            manifest
+                .synced_items
+                .iter()
+                .find(|item| item.jellyfin_id == "old-id"),
+            Some(&old)
+        );
+        let new = manifest
+            .synced_items
+            .iter()
+            .find(|item| item.jellyfin_id == "new-id")
+            .unwrap();
+        assert!(dir.path().join(&old.local_path).exists());
+        assert!(dir.path().join(&new.local_path).exists());
+        assert_eq!(manifest.synced_byte_totals(), (4, 3));
+    }
+
+    #[tokio::test]
     async fn test_execute_provider_sync_retries_staged_path_write() {
         let audio: Vec<u8> = (0..1_500_000).map(|index| (index % 251) as u8).collect();
         let mut server = mockito::Server::new_async().await;
@@ -5714,6 +6233,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-retry",
@@ -5784,6 +6304,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-missing",
@@ -5864,6 +6385,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
@@ -5938,6 +6460,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
@@ -5994,6 +6517,7 @@ mod tests {
             .await;
         assert!(operation_manager.request_cancel(&operation_id).await);
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
@@ -6068,6 +6592,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
@@ -6131,6 +6656,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
@@ -6213,6 +6739,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-flac",
@@ -6304,6 +6831,7 @@ mod tests {
             .create_operation(operation_id.clone(), 2)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![
                 add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
@@ -6394,6 +6922,7 @@ mod tests {
             add.is_auto_fill = true;
         }
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds,
             deletes: vec![],
@@ -6465,6 +6994,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![add_item_with_provider_format(
                 "song-retry",
@@ -6562,6 +7092,9 @@ mod tests {
         let operation_id = unique_operation_id("op-pipeline-cancel");
         manager
             .update_manifest(|manifest| {
+                manifest
+                    .synced_items
+                    .push(make_synced_item("retained", "Retained", None, None));
                 manifest.dirty = true;
                 manifest.pending_item_ids = vec!["song-a".into(), "song-b".into()];
             })
@@ -6571,12 +7104,19 @@ mod tests {
             .create_operation(operation_id.clone(), 2)
             .await;
         let delta = SyncDelta {
+            provenance_updates: HashMap::from([("retained".into(), true)]),
             blocked: vec![],
             adds: vec![
                 add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
                 add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
             ],
-            deletes: vec![],
+            deletes: vec![SyncDeleteItem {
+                jellyfin_id: "retained".into(),
+                local_path: "Music/Unknown/Retained.flac".into(),
+                name: "Retained".into(),
+                reason_code: None,
+                reason: None,
+            }],
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
@@ -6618,6 +7158,16 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
         let manifest = manager.get_current_device().await.unwrap();
+        let retained = manifest
+            .synced_items
+            .iter()
+            .find(|item| item.jellyfin_id == "retained")
+            .unwrap();
+        assert!(
+            !retained.is_auto_fill,
+            "cancelled metadata updates must not persist"
+        );
+        assert!(!blocking_io.trace.lock().unwrap().contains(&"delete"));
         assert!(
             manifest.dirty,
             "cancelled sync must retain durable dirty evidence"
@@ -7304,12 +7854,14 @@ mod tests {
     #[test]
     fn test_format_id_change_diagnostics_includes_sample_and_omitted_count() {
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![],
             deletes: vec![],
             id_changes: vec![
                 annotate_id_change(
                     SyncIdChangeItem {
+                        is_auto_fill: None,
                         media_role: crate::device::MediaRole::Music,
                         old_jellyfin_id: "old-1".to_string(),
                         new_jellyfin_id: "new-1".to_string(),
@@ -7331,6 +7883,7 @@ mod tests {
                 ),
                 annotate_id_change(
                     SyncIdChangeItem {
+                        is_auto_fill: None,
                         media_role: crate::device::MediaRole::Music,
                         old_jellyfin_id: "old-2".to_string(),
                         new_jellyfin_id: "new-2".to_string(),
@@ -7367,6 +7920,7 @@ mod tests {
     #[test]
     fn test_synced_item_original_name_serializes_as_camel_case() {
         let item = crate::device::SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "id1".to_string(),
             name: "Truncated Track".to_string(),
@@ -7405,6 +7959,7 @@ mod tests {
 
     fn make_playlist_synced_item(id: &str, local_path: &str) -> crate::device::SyncedItem {
         crate::device::SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: local_path.to_string(),
@@ -7508,6 +8063,7 @@ mod tests {
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
         manifest.synced_items = vec![crate::device::SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "old-id".to_string(),
             name: "Song".to_string(),
@@ -7851,6 +8407,7 @@ mod tests {
                 last_modified: "2026-01-01T00:00:00Z".to_string(),
             });
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![],
             deletes: vec![],
@@ -7870,6 +8427,7 @@ mod tests {
     #[test]
     fn test_change_reason_summary_counts_replacement_pair_once() {
         let delta = SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![annotate_add(
                 SyncAddItem {
@@ -7906,6 +8464,7 @@ mod tests {
             )],
             id_changes: vec![annotate_id_change(
                 SyncIdChangeItem {
+                    is_auto_fill: None,
                     media_role: crate::device::MediaRole::Music,
                     old_jellyfin_id: "old".to_string(),
                     new_jellyfin_id: "new".to_string(),
@@ -8473,6 +9032,7 @@ mod tests {
             let url = server.url();
             tokio::spawn(async move {
                 let delta = SyncDelta {
+                    provenance_updates: std::collections::HashMap::new(),
                     blocked: vec![],
                     adds: vec![add_item_with_provider_format(
                         "fixed-target",

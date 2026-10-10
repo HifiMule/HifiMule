@@ -742,6 +742,7 @@ async fn test_write_manifest_creates_files() {
         version: "1.1".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "item-1".to_string(),
             name: "Track".to_string(),
@@ -828,6 +829,7 @@ async fn test_write_manifest_overwrites_existing() {
         version: "1.1".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "new-item".to_string(),
             name: "New Track".to_string(),
@@ -883,6 +885,7 @@ async fn test_get_discrepancies_missing_file() {
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "item-1".to_string(),
             name: "Track One".to_string(),
@@ -997,6 +1000,7 @@ async fn test_get_discrepancies_no_issues() {
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "item-1".to_string(),
             name: "Track".to_string(),
@@ -1053,6 +1057,7 @@ async fn test_prune_items() {
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![
             SyncedItem {
+                is_auto_fill: false,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "item-1".to_string(),
                 name: "Track 1".to_string(),
@@ -1072,6 +1077,7 @@ async fn test_prune_items() {
                 server_id: None,
             },
             SyncedItem {
+                is_auto_fill: false,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "item-2".to_string(),
                 name: "Track 2".to_string(),
@@ -1136,6 +1142,7 @@ async fn test_relink_item() {
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "item-1".to_string(),
             name: "Track".to_string(),
@@ -2887,6 +2894,7 @@ fn test_synced_item_provider_metadata_defaults_for_old_manifests() {
 #[test]
 fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context() {
     let item = SyncedItem {
+        is_auto_fill: false,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: "song1".to_string(),
         name: "Track".to_string(),
@@ -2954,6 +2962,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
 fn reconcile_manifest_server_ids_maps_legacy_to_portable_idempotently() {
     fn synced(id: &str, server_id: Option<&str>) -> SyncedItem {
         SyncedItem {
+            is_auto_fill: false,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: id.to_string(),

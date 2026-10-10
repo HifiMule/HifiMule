@@ -1606,7 +1606,10 @@ fn push_auto_fill_items(
 }
 
 fn auto_sync_delta_has_work(delta: &sync::SyncDelta, total_files: usize) -> bool {
-    total_files > 0 || !delta.id_changes.is_empty() || !delta.playlists.is_empty()
+    total_files > 0
+        || !delta.id_changes.is_empty()
+        || !delta.playlists.is_empty()
+        || !delta.provenance_updates.is_empty()
 }
 
 const AUTO_SYNC_DESTRUCTIVE_CLEANUP_COOLDOWN_SECS: i64 = 24 * 60 * 60;
@@ -1753,6 +1756,7 @@ mod auto_sync_tests {
     #[test]
     fn auto_sync_delta_has_work_when_only_playlist_changes() {
         let delta = sync::SyncDelta {
+            provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![],
             deletes: vec![],
@@ -1770,6 +1774,16 @@ mod auto_sync_tests {
             pity_fired_servers: vec![],
         };
 
+        assert!(auto_sync_delta_has_work(&delta, 0));
+    }
+
+    #[test]
+    fn auto_sync_delta_has_work_for_only_provenance_changes() {
+        let delta: sync::SyncDelta = serde_json::from_value(serde_json::json!({
+            "adds": [], "deletes": [], "idChanges": [], "unchanged": 1,
+            "provenanceUpdates": { "fill": true }
+        }))
+        .unwrap();
         assert!(auto_sync_delta_has_work(&delta, 0));
     }
 }
@@ -1843,9 +1857,11 @@ async fn run_auto_sync_via_provider(
         playlist_sync_items = playlists;
     }
 
+    let mut auto_fill_ids = std::collections::HashSet::new();
     // Auto-fill: fill remaining space after basket items (or fill entirely when basket is empty).
     if manifest.auto_fill.enabled_for(server_id.as_deref()) {
-        let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+        let (selected_bytes, autofill_bytes) = manifest.synced_byte_totals();
+        let synced_bytes = selected_bytes.saturating_add(autofill_bytes);
         let total_budget = if let Some(mb) = manifest.auto_fill.max_bytes_for(server_id.as_deref())
         {
             mb
@@ -1891,11 +1907,17 @@ async fn run_auto_sync_via_provider(
                         "[AutoSync] Provider auto-fill resolved {} items",
                         items.len()
                     );
+                    let first_fill = desired_items.len();
                     push_auto_fill_items(
                         items,
                         device::MediaRole::from_library_role(provider.library_role()),
                         &mut desired_items,
                         &mut playlist_sync_items,
+                    );
+                    auto_fill_ids.extend(
+                        desired_items[first_fill..]
+                            .iter()
+                            .map(|item| item.jellyfin_id.clone()),
                     );
                 }
                 Err(e) => {
@@ -1921,6 +1943,7 @@ async fn run_auto_sync_via_provider(
     }
 
     let mut delta = sync::calculate_delta(&desired_items, manifest);
+    sync::classify_provenance(&mut delta, &desired_items, manifest, &auto_fill_ids);
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 

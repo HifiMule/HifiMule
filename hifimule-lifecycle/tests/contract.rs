@@ -179,8 +179,41 @@ fn malformed_or_oversized_ui_requests_are_rejected() {
 
 #[test]
 fn simultaneous_activation_requests_coalesce_to_a_valid_request() {
+    assert_simultaneous_activation_requests(true);
+}
+
+#[test]
+fn simultaneous_activation_requests_initialize_a_valid_runtime() {
+    assert_simultaneous_activation_requests(false);
+}
+
+#[cfg(windows)]
+#[test]
+fn activation_replacement_preserves_the_mailbox_on_permanent_access_denial() {
     let profile = tempfile::tempdir().unwrap();
-    let _winner = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let first_request = request_ui_activation(profile.path()).unwrap();
+    let path = profile.path().join("runtime/ui-activation.json");
+    let writable = std::fs::metadata(&path).unwrap().permissions();
+    let mut readonly = writable.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&path, readonly).unwrap();
+    let started = std::time::Instant::now();
+    let result = request_ui_activation(profile.path());
+    std::fs::set_permissions(&path, writable).unwrap();
+    assert_eq!(
+        result.unwrap_err().code(),
+        LifecycleErrorCode::LocalAccessDenied
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(
+        read_ui_activation_request(profile.path()).unwrap(),
+        Some(first_request)
+    );
+}
+
+fn assert_simultaneous_activation_requests(acquire_owner: bool) {
+    let profile = tempfile::tempdir().unwrap();
+    let _winner = acquire_owner.then(|| UiInstanceGuard::acquire(profile.path()).unwrap().unwrap());
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
     let workers: Vec<_> = (0..8)
         .map(|_| {
@@ -188,15 +221,17 @@ fn simultaneous_activation_requests_coalesce_to_a_valid_request() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                request_ui_activation(&path).unwrap()
+                request_ui_activation(&path)
             })
         })
         .collect();
     barrier.wait();
-    let issued: Vec<_> = workers
+    // Join every worker before propagating failures so the profile stays alive.
+    let results: Vec<_> = workers
         .into_iter()
         .map(|worker| worker.join().unwrap())
         .collect();
+    let issued: Vec<_> = results.into_iter().map(Result::unwrap).collect();
     let stored = read_ui_activation_request(profile.path()).unwrap().unwrap();
     assert!(issued.contains(&stored));
 }
