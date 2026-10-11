@@ -627,7 +627,7 @@ async fn handler(
         "save_credentials" => handle_save_credentials(payload.params).await,
         "get_credentials" => handle_get_credentials(&state).await,
         "set_device_profile" => handle_set_device_profile(&state, payload.params).await,
-        "get_daemon_state" => handle_get_daemon_state(&state).await,
+        "get_daemon_state" => handle_get_daemon_state_params(&state, payload.params).await,
         "jellyfin_get_views" => handle_jellyfin_get_views(&state, payload.params).await,
         "jellyfin_get_items" => handle_jellyfin_get_items(&state, payload.params).await,
         "jellyfin_get_item_details" => {
@@ -4296,10 +4296,59 @@ async fn handle_set_device_profile(
     }
 }
 
+#[cfg(test)]
 async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError> {
-    let device = state.device_manager.get_current_device().await;
+    handle_get_daemon_state_params(state, None).await
+}
+
+#[cfg(test)]
+pub(crate) async fn benchmark_polling_state(
+    manager: Arc<crate::device::DeviceManager>,
+    operations: Arc<crate::sync::SyncOperationManager>,
+) -> Arc<AppState> {
+    let mut state = tests::make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+    let app = Arc::get_mut(&mut state).unwrap();
+    app.device_manager = manager;
+    app.sync_operation_manager = operations;
+    state
+}
+
+#[cfg(test)]
+pub(crate) async fn benchmark_encode_state(state: &AppState, compact: bool) -> usize {
+    let response = JsonRpcResponse {
+        jsonrpc: "2.0".into(),
+        id: serde_json::json!(1),
+        result: Some(
+            handle_get_daemon_state_params(
+                state,
+                Some(serde_json::json!({"includeManifest":!compact})),
+            )
+            .await
+            .unwrap(),
+        ),
+        error: None,
+    };
+    serde_json::to_vec(&response).unwrap().len()
+}
+
+async fn handle_get_daemon_state_params(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let include_manifest = params
+        .as_ref()
+        .and_then(|p| p.get("includeManifest"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let (device, connected_devices_snapshot, selected_path_buf) = state
+        .device_manager
+        .get_polling_snapshot(include_manifest)
+        .await;
     let mapping = if let Some(ref d) = device {
-        state.db.get_device_mapping(&d.device_id).unwrap_or(None)
+        state
+            .db
+            .get_device_mapping(d["device_id"].as_str().unwrap_or_default())
+            .unwrap_or(None)
     } else {
         None
     };
@@ -4308,7 +4357,10 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let server_connected = check_server_connection_cached(state).await;
 
     // Capture dirty before device is moved into json!()
-    let dirty = device.as_ref().map(|d| d.dirty).unwrap_or(false);
+    let dirty = device
+        .as_ref()
+        .and_then(|d| d["dirty"].as_bool())
+        .unwrap_or(false);
 
     // Include pending device path and friendly name for unrecognized devices awaiting initialization
     let pending_device_snapshots = state.device_manager.get_pending_devices_snapshot().await;
@@ -4325,7 +4377,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
 
     let auto_sync_on_connect = device
         .as_ref()
-        .map(|d| d.auto_sync_on_connect)
+        .and_then(|d| d["auto_sync_on_connect"].as_bool())
         .or_else(|| mapping.as_ref().map(|m| m.auto_sync_on_connect))
         .unwrap_or(false);
 
@@ -4341,10 +4393,12 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .flatten()
         .and_then(|s| s.server_id);
     let auto_fill = device.as_ref().map(|d| {
+        let config: crate::device::AutoFillConfig =
+            serde_json::from_value(d["auto_fill"].clone()).unwrap_or_default();
         serde_json::json!({
-            "enabled": d.auto_fill.enabled_for(selected_portable_id.as_deref()),
-            "maxBytes": d.auto_fill.max_bytes_for(selected_portable_id.as_deref()),
-            "pipelines": &d.auto_fill.pipelines,
+            "enabled": config.enabled_for(selected_portable_id.as_deref()),
+            "maxBytes": config.max_bytes_for(selected_portable_id.as_deref()),
+            "pipelines": &config.pipelines,
         })
     });
 
@@ -4396,8 +4450,6 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         })
     });
 
-    let (connected_devices_snapshot, selected_path_buf) =
-        state.device_manager.get_multi_device_snapshot().await;
     let destination_snapshot = state.device_manager.get_destination_snapshot().await;
     let device_discovery_issues = state.device_manager.get_discovery_issues().await;
     let selected_device_path = selected_path_buf.map(|p| p.to_string_lossy().to_string());
@@ -5034,7 +5086,7 @@ async fn preview_media_profile(
             .device_manager
             .get_sync_target_for_device(&manifest.device_id)
             .await
-            .and_then(|(_, _, io)| io.preferred_audio_container())
+            .and_then(|(_, _, io, _)| io.preferred_audio_container())
     };
     Ok((profile, preferred))
 }
@@ -5502,7 +5554,7 @@ async fn provider_artist_albums_to_sync_items(
 }
 
 async fn free_bytes_for_sync_device(state: &AppState, device_id: &str) -> Option<u64> {
-    let (_, _, io) = state
+    let (_, _, io, _) = state
         .device_manager
         .get_sync_target_for_device(device_id)
         .await?;
@@ -5761,7 +5813,7 @@ async fn provider_calculate_delta(
         );
     }
 
-    if let Some((_, _, device_io)) = _state
+    if let Some((_, _, device_io, _)) = _state
         .device_manager
         .get_sync_target_for_device(&manifest.device_id)
         .await
@@ -7561,7 +7613,7 @@ async fn multi_provider_calculate_delta(
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
-    if let Some((_, _, device_io)) = state
+    if let Some((_, _, device_io, _)) = state
         .device_manager
         .get_sync_target_for_device(&manifest.device_id)
         .await
@@ -8079,7 +8131,7 @@ async fn handle_sync_calculate_delta(
         );
     }
 
-    if let Some((_, _, device_io)) = state
+    if let Some((_, _, device_io, _)) = state
         .device_manager
         .get_sync_target_for_device(&manifest.device_id)
         .await
@@ -8471,7 +8523,7 @@ async fn handle_sync_execute(
     // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
     if let Err(e) = state
         .device_manager
-        .update_manifest_for_device(&manifest.device_id, |m| {
+        .update_manifest_for_connection(&manifest.device_id, target.observation, &target.io, |m| {
             m.dirty = true;
             m.pending_item_ids = pending_item_ids;
         })
@@ -8580,13 +8632,19 @@ async fn handle_sync_execute(
             let (outcome, final_errors) = op_manager
                 .finalize_operation(&op_id, all_errors, || async {
                     device_manager
-                        .update_manifest_for_device(&sync_manifest.device_id, |m| {
-                            m.dirty = false;
-                            m.pending_item_ids.clear();
-                            m.last_sync_at = Some(now_unix_secs());
-                            m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
-                            m.transcoding_profile_dirty = false;
-                        })
+                        .update_manifest_for_connection(
+                            &sync_manifest.device_id,
+                            target.observation,
+                            &target.io,
+                            |m| {
+                                m.dirty = false;
+                                m.pending_item_ids.clear();
+                                m.last_sync_at = Some(now_unix_secs());
+                                m.last_synced_transcoding_profile_id =
+                                    m.transcoding_profile_id.clone();
+                                m.transcoding_profile_dirty = false;
+                            },
+                        )
                         .await
                 })
                 .await;
@@ -8657,14 +8715,19 @@ async fn handle_sync_execute(
                     let (outcome, final_errors) = op_manager
                         .finalize_operation(&op_id, errors, || async {
                             device_manager
-                                .update_manifest_for_device(&sync_manifest.device_id, |m| {
-                                    m.dirty = false;
-                                    m.pending_item_ids.clear();
-                                    m.last_sync_at = Some(now_unix_secs());
-                                    m.last_synced_transcoding_profile_id =
-                                        m.transcoding_profile_id.clone();
-                                    m.transcoding_profile_dirty = false;
-                                })
+                                .update_manifest_for_connection(
+                                    &sync_manifest.device_id,
+                                    target.observation,
+                                    &target.io,
+                                    |m| {
+                                        m.dirty = false;
+                                        m.pending_item_ids.clear();
+                                        m.last_sync_at = Some(now_unix_secs());
+                                        m.last_synced_transcoding_profile_id =
+                                            m.transcoding_profile_id.clone();
+                                        m.transcoding_profile_dirty = false;
+                                    },
+                                )
                                 .await
                         })
                         .await;

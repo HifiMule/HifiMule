@@ -83,6 +83,7 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 mockito = "1.5"
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-binding = "=2.30.1"

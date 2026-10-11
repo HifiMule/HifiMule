@@ -27,14 +27,33 @@ async fn benchmark_large_sync_retention() {
     let blocking = BlockingFirstWriteDeviceIo::new(io);
     blocking.block_at_write.store(committed, Ordering::SeqCst);
     let sync_io: Arc<dyn crate::device_io::DeviceIO> = blocking.clone();
+    manager
+        .set_test_sync_io(dir.path(), Arc::clone(&sync_io))
+        .await;
     let operations = Arc::new(SyncOperationManager::new());
     let id = unique_operation_id("memory-benchmark");
     operations.create_operation(id.clone(), count).await;
-    println!("SYNC_MEMORY_PHASE=idle count={count}");
+    let poll_state =
+        std::env::var("HIFIMULE_SYNC_BENCH_POLL_STATE").is_ok_and(|value| value == "1");
+    let compact =
+        std::env::var("HIFIMULE_DAEMON_STATE_BENCH_COMPACT").is_ok_and(|value| value == "1");
+    let polling_state = if poll_state {
+        Some(
+            crate::rpc::benchmark_polling_state(Arc::clone(&manager), Arc::clone(&operations))
+                .await,
+        )
+    } else {
+        None
+    };
+    println!(
+        "SYNC_MEMORY_PHASE=idle count={count} poll_state={poll_state} compact={compact} committed={committed}"
+    );
     tokio::time::sleep(Duration::from_secs(2)).await;
     println!("SYNC_MEMORY_PHASE=preparation count={count}");
     manager
         .update_manifest(|m| {
+            m.dirty = true;
+            m.pending_item_ids = (0..count).map(|i| format!("new-{i:08}")).collect();
             m.synced_items = (0..count)
                 .map(|i| {
                     let mut item = make_playlist_synced_item(
@@ -86,6 +105,7 @@ async fn benchmark_large_sync_retention() {
     let mut target = SyncTarget {
         path: dir.path().to_path_buf(),
         manifest: manager.get_current_device().await.unwrap(),
+        observation: manager.get_selected_sync_target().await.unwrap().3,
         io: sync_io,
     };
     let plan = crate::sync_plan::SyncPlan::from_delta(delta, &target.manifest).unwrap();
@@ -126,11 +146,30 @@ async fn benchmark_large_sync_retention() {
             .count(),
         committed
     );
+    println!(
+        "SYNC_MEMORY_CHECKPOINTS manifest_writes={} committed={committed}",
+        blocking.manifest_writes.load(Ordering::SeqCst)
+    );
+    if committed == 100 {
+        assert_eq!(
+            blocking.manifest_writes.load(Ordering::SeqCst),
+            2,
+            "initial dirty marker plus100trackcheckpoint before101st audio write"
+        );
+    }
     println!("SYNC_MEMORY_PHASE=transfer count={count}");
-    tokio::time::sleep(Duration::from_secs(hold)).await;
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(hold) {
+        if let Some(state) = &polling_state {
+            let bytes = crate::rpc::benchmark_encode_state(state, compact).await;
+            println!("SYNC_MEMORY_POLL phase=transfer compact={compact} encoded_bytes={bytes}");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     println!("SYNC_MEMORY_PHASE=cleanup count={count}");
     operations.request_cancel(&id).await;
     blocking.release_first_write();
     task.await.unwrap().unwrap();
+    drop(polling_state);
     println!("SYNC_MEMORY_PHASE=done count={count}");
 }

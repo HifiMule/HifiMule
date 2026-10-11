@@ -36,6 +36,66 @@ async fn sync_plan_test_state() -> (tempfile::TempDir, Arc<AppState>) {
     (dir, state)
 }
 
+#[tokio::test]
+async fn compact_daemon_state_preserves_metadata_and_capacity_without_track_records() {
+    let _guard = credential_test_lock();
+    let (_dir, state) = sync_plan_test_state().await;
+    state.device_manager.update_manifest(|manifest| {
+        manifest.synced_items=vec![serde_json::from_value(json!({"providerItemId":"manual","name":"Manual","localPath":"Music/manual.mp3","sizeBytes":123,"syncedAt":"fixture"})).unwrap(),serde_json::from_value(json!({"providerItemId":"auto","name":"Auto","localPath":"Music/auto.mp3","sizeBytes":456,"syncedAt":"fixture","isAutoFill":true})).unwrap()];
+        manifest.pending_item_ids=vec!["pending".into()];manifest.dirty=true;manifest.name=Some("Settings preserved".into());
+    }).await.unwrap();
+    let full = handle_get_daemon_state(&state).await.unwrap();
+    let compact = handle_get_daemon_state_params(&state, Some(json!({"includeManifest":false})))
+        .await
+        .unwrap();
+    for field in [
+        "deviceMapping",
+        "connectedDevices",
+        "selectedDevicePath",
+        "destinations",
+        "destinationRevision",
+        "dirtyManifest",
+        "autoSyncOnConnect",
+        "autoFill",
+    ] {
+        assert_eq!(compact[field], full[field], "{field}");
+    }
+    for (key, value) in full["currentDevice"].as_object().unwrap() {
+        if [
+            "synced_items",
+            "pending_item_ids",
+            "basket_items",
+            "playlists",
+            "folder_ids",
+        ]
+        .contains(&key.as_str())
+        {
+            assert!(compact["currentDevice"].get(key).is_none());
+        } else {
+            assert_eq!(&compact["currentDevice"][key], value, "{key}");
+        }
+    }
+    assert_eq!(compact["currentDevice"]["syncedItemCount"], 2);
+    assert_eq!(compact["currentDevice"]["pendingItemCount"], 1);
+    assert_eq!(
+        compact["currentDevice"]["syncedByteTotals"],
+        json!({"selectedBytes":123,"autofillBytes":456})
+    );
+    assert_eq!(
+        full["currentDevice"]["synced_items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        handle_get_daemon_state_params(&state, Some(json!({"includeManifest":true})))
+            .await
+            .unwrap()["currentDevice"],
+        full["currentDevice"]
+    );
+}
+
 async fn publish_test_plan(state: &AppState, delta: crate::sync::SyncDelta) -> Value {
     let manifest = state.device_manager.get_current_device().await.unwrap();
     finish_sync_delta(state, delta, &manifest, &json!({"prepared":true}))
@@ -699,4 +759,172 @@ async fn reviewed_cancel_after_publication_releases_plan_and_expiry() {
             .unwrap()
             .dirty
     );
+}
+
+#[tokio::test]
+#[ignore = "external process memory diagnostic for real daemon-state polling"]
+async fn benchmark_daemon_state_retention() {
+    let _guard = credential_test_lock();
+    let count: usize = std::env::var("HIFIMULE_SYNC_BENCH_COUNT")
+        .unwrap_or_else(|_| "40000".into())
+        .parse()
+        .unwrap();
+    let hold: u64 = std::env::var("HIFIMULE_SYNC_BENCH_HOLD_SECS")
+        .unwrap_or_else(|_| "20".into())
+        .parse()
+        .unwrap();
+    let prep_polls: usize = std::env::var("HIFIMULE_DAEMON_STATE_BENCH_POLLS")
+        .unwrap_or_else(|_| "10".into())
+        .parse()
+        .unwrap();
+    let (_dir, state) = sync_plan_test_state().await;
+    let compact =
+        std::env::var("HIFIMULE_DAEMON_STATE_BENCH_COMPACT").is_ok_and(|value| value == "1");
+    let params = compact.then(|| json!({"includeManifest":false}));
+    println!(
+        "SYNC_MEMORY_PHASE=idle count={count} preparation_polls={prep_polls} compact={compact}"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    println!("SYNC_MEMORY_PHASE=preparation count={count}");
+    state
+        .device_manager
+        .update_manifest(|manifest| {
+            manifest.dirty = true;
+            manifest.synced_items = (0..count)
+                .map(|index| crate::device::SyncedItem {
+                    is_auto_fill: index % 2 == 0,
+                    media_role: crate::device::MediaRole::Music,
+                    jellyfin_id: format!("old-{index:08}"),
+                    name: format!("Existing song {index:08} with representative music metadata"),
+                    album: Some(format!(
+                        "Album {:08} original edition and bonus tracks",
+                        index / 10
+                    )),
+                    artist: Some(format!("Artist {:08} and collaborators", index / 100)),
+                    local_path: format!(
+                        "Music/Artist {}/Album {}/Old track {index:08}.mp3",
+                        index / 100,
+                        index / 10
+                    ),
+                    size_bytes: 4_000_000 + index as u64,
+                    synced_at: "2026-10-10T10:00:00Z".into(),
+                    original_name: None,
+                    etag: Some(format!("etag-{index:08}-{}", "e".repeat(48))),
+                    provider_album_id: Some(format!("provider-album-{:08}", index / 10)),
+                    provider_content_type: Some("audio/mpeg".into()),
+                    provider_suffix: Some("mp3".into()),
+                    original_bitrate: Some(320_000),
+                    original_container: Some("mp3".into()),
+                    track_number: Some((index % 10 + 1) as u32),
+                    server_id: Some("controlled-fixture-server".into()),
+                })
+                .collect();
+            manifest.pending_item_ids = (0..count + 17)
+                .map(|index| format!("pending-{index:08}"))
+                .collect();
+            manifest.playlists = (0..56)
+                .map(|index| {
+                    let track_ids: Vec<_> = (index * count / 56..(index + 1) * count / 56)
+                        .map(|track| format!("old-{track:08}"))
+                        .collect();
+                    crate::device::PlaylistManifestEntry {
+                        jellyfin_id: format!("fixture-playlist-{index:02}"),
+                        filename: format!("Controlled playlist {index:02}.m3u"),
+                        track_count: track_ids.len() as u32,
+                        track_ids,
+                        last_modified: "2026-10-10T10:00:00Z".into(),
+                    }
+                })
+                .collect();
+        })
+        .await
+        .unwrap();
+
+    // Exercise the actual full legacy response and the HTTP envelope encoding.
+    // Each response/body is dropped before the next poll; only the authoritative
+    // DeviceManager manifest remains. No synthetic response collection is kept.
+    for index in 0..prep_polls {
+        let value = handle_get_daemon_state_params(&state, params.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            if compact {
+                value["currentDevice"]["syncedItemCount"].as_u64().unwrap() as usize
+            } else {
+                value["currentDevice"]["synced_items"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            },
+            count
+        );
+        assert_eq!(
+            if compact {
+                value["currentDevice"]["pendingItemCount"].as_u64().unwrap() as usize
+            } else {
+                value["currentDevice"]["pending_item_ids"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            },
+            count + 17
+        );
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: json!(index),
+            result: Some(value),
+            error: None,
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
+        println!(
+            "SYNC_MEMORY_POLL phase=preparation index={index} encoded_bytes={}",
+            encoded.len()
+        );
+        drop(encoded);
+        drop(response);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    println!("SYNC_MEMORY_PHASE=transfer count={count}");
+    let started = std::time::Instant::now();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut polls = 0;
+    while started.elapsed() < std::time::Duration::from_secs(hold) {
+        interval.tick().await;
+        if started.elapsed() >= std::time::Duration::from_secs(hold) {
+            break;
+        }
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: json!(polls),
+            result: Some(
+                handle_get_daemon_state_params(&state, params.clone())
+                    .await
+                    .unwrap(),
+            ),
+            error: None,
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
+        println!(
+            "SYNC_MEMORY_POLL phase=transfer index={polls} encoded_bytes={}",
+            encoded.len()
+        );
+        drop(encoded);
+        drop(response);
+        polls += 1;
+    }
+    println!("SYNC_MEMORY_PHASE=cleanup count={count} transfer_polls={polls}");
+    state
+        .device_manager
+        .update_manifest(|manifest| {
+            manifest.synced_items.clear();
+            manifest.pending_item_ids.clear();
+            manifest.playlists.clear();
+        })
+        .await
+        .unwrap();
+    drop(state);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    println!("SYNC_MEMORY_PHASE=done count={count}");
 }

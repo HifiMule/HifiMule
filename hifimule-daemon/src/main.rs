@@ -1996,7 +1996,7 @@ async fn run_auto_sync_via_provider(
 
 
     if let Err(error) = device_manager
-        .update_manifest_for_device(&manifest.device_id, |m| {
+        .update_manifest_for_connection(&manifest.device_id, target.observation, &target.io, |m| {
             m.dirty = true;
             m.pending_item_ids = pending_ids;
         })
@@ -2059,11 +2059,16 @@ async fn run_auto_sync_via_provider(
             let (outcome, final_errors) = sync_op_manager
                 .finalize_operation(&operation_id, errors, || async {
                     device_manager
-                        .update_manifest_for_device(&manifest.device_id, |m| {
-                            m.dirty = false;
-                            m.pending_item_ids.clear();
-                            m.last_sync_at = Some(rpc::now_unix_secs());
-                        })
+                        .update_manifest_for_connection(
+                            &manifest.device_id,
+                            target.observation,
+                            &target.io,
+                            |m| {
+                                m.dirty = false;
+                                m.pending_item_ids.clear();
+                                m.last_sync_at = Some(rpc::now_unix_secs());
+                            },
+                        )
                         .await
                 })
                 .await;

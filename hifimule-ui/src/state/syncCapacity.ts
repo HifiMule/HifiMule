@@ -9,11 +9,13 @@ export interface SyncedCapacityItem {
     isAutoFill?: boolean;
 }
 
+export interface SyncedCapacityTotals { selectedBytes: number; autofillBytes: number; }
+
 /** The full selected basket replaces managed files; autofill ceilings are never demand. */
-export function syncCapacity(storage: SyncStorage | null, selectedBytes: number, items: SyncedCapacityItem[] = []) {
+export function syncCapacity(storage: SyncStorage | null, selectedBytes: number, items: SyncedCapacityItem[] | SyncedCapacityTotals = []) {
     if (!storage) return null;
-    const syncedSelectedBytes = items.filter(item => !item.isAutoFill).reduce((sum, item) => sum + item.sizeBytes, 0);
-    const syncedAutofillBytes = items.filter(item => item.isAutoFill).reduce((sum, item) => sum + item.sizeBytes, 0);
+    const syncedSelectedBytes = Array.isArray(items) ? items.filter(item => !item.isAutoFill).reduce((sum, item) => sum + item.sizeBytes, 0) : items.selectedBytes;
+    const syncedAutofillBytes = Array.isArray(items) ? items.filter(item => item.isAutoFill).reduce((sum, item) => sum + item.sizeBytes, 0) : items.autofillBytes;
     const managedBytes = syncedSelectedBytes + syncedAutofillBytes;
     const availableBytes = storage.freeBytes + managedBytes;
     const remainingBytes = availableBytes - selectedBytes;

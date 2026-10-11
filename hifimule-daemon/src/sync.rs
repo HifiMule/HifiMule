@@ -2294,6 +2294,7 @@ pub struct SyncTarget {
     pub path: std::path::PathBuf,
     pub manifest: crate::device::DeviceManifest,
     pub io: Arc<dyn crate::device_io::DeviceIO>,
+    pub observation: u64,
 }
 
 impl
@@ -2301,16 +2302,23 @@ impl
         std::path::PathBuf,
         crate::device::DeviceManifest,
         Arc<dyn crate::device_io::DeviceIO>,
+        u64,
     )> for SyncTarget
 {
     fn from(
-        (path, manifest, io): (
+        (path, manifest, io, observation): (
             std::path::PathBuf,
             crate::device::DeviceManifest,
             Arc<dyn crate::device_io::DeviceIO>,
+            u64,
         ),
     ) -> Self {
-        Self { path, manifest, io }
+        Self {
+            path,
+            manifest,
+            io,
+            observation,
+        }
     }
 }
 
@@ -2464,10 +2472,10 @@ async fn delete_scheduled_managed_item(
     is_mtp: bool,
     owned_manifest_paths: &HashSet<String>,
     device_io: &Arc<dyn crate::device_io::DeviceIO>,
-    device_manager: &Arc<crate::device::DeviceManager>,
+    checkpoint: &crate::device::SyncManifestSession,
     operation_manager: &Arc<SyncOperationManager>,
     operation_id: &str,
-    device_id: &str,
+    _device_id: &str,
 ) -> Option<SyncFileError> {
     let error = |message| SyncFileError {
         jellyfin_id: item.jellyfin_id.clone(),
@@ -2494,8 +2502,8 @@ async fn delete_scheduled_managed_item(
             operation.files_completed += 1;
         })
         .await;
-    if let Err(e) = device_manager
-        .update_manifest_for_device(device_id, |m| {
+    if let Err(e) = checkpoint
+        .stage(1, |m| {
             m.synced_items.retain(|i| i.jellyfin_id != item.jellyfin_id);
         })
         .await
@@ -2633,6 +2641,58 @@ pub(crate) async fn execute_plan_sync_with_protection(
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
     protection_observer: Option<protection::Observer>,
+) -> Result<(usize, Vec<SyncFileError>)> {
+    delta.validate()?;
+    let checkpoint = crate::device::SyncManifestSession::for_target(
+        Arc::clone(&device_manager),
+        target,
+        Some((Arc::clone(&operation_manager), operation_id.clone())),
+    )
+    .await?;
+    let mut result = execute_plan_sync_buffered(
+        delta,
+        target,
+        source,
+        Arc::clone(&operation_manager),
+        operation_id.clone(),
+        device_manager,
+        protection_observer,
+        &checkpoint,
+    )
+    .await;
+    let outcome = if result.is_err() || result.as_ref().is_ok_and(|(_, errors)| !errors.is_empty())
+    {
+        "error"
+    } else if operation_manager.is_cancelled(&operation_id).await {
+        "cancel"
+    } else {
+        "completion"
+    };
+    if let Err(error) = checkpoint.finish(outcome).await {
+        let _ = operation_manager.request_cancel(&operation_id).await;
+        match &mut result {
+            Ok((_, errors)) => errors.push(SyncFileError {
+                jellyfin_id: String::new(),
+                filename: "manifest-checkpoint".into(),
+                error_message: error.to_string(),
+            }),
+            Err(original) => {
+                *original = anyhow::anyhow!("{original}; checkpoint finalization failed: {error}")
+            }
+        }
+    }
+    result
+}
+
+async fn execute_plan_sync_buffered(
+    delta: &crate::sync_plan::SyncPlan,
+    target: &SyncTarget,
+    source: ProviderSyncSource,
+    operation_manager: Arc<SyncOperationManager>,
+    operation_id: String,
+    device_manager: Arc<crate::device::DeviceManager>,
+    protection_observer: Option<protection::Observer>,
+    checkpoint: &crate::device::SyncManifestSession,
 ) -> Result<(usize, Vec<SyncFileError>)> {
     delta.validate()?;
     let device_path = target.path.as_path();
@@ -3687,8 +3747,8 @@ pub(crate) async fn execute_plan_sync_with_protection(
                     errors.push(error);
                 }
                 let id_to_replace = staged.add_item.jellyfin_id.clone();
-                if let Err(e) = device_manager
-                    .update_manifest_for_device(&operation_device_id, |m| {
+                if let Err(e) = checkpoint
+                    .stage(1, |m| {
                         m.synced_items.retain(|item| {
                             item.jellyfin_id != id_to_replace
                                 && force_id_changes
@@ -3719,8 +3779,24 @@ pub(crate) async fn execute_plan_sync_with_protection(
                         if let Some(delete_item) = pending_deletes.next() {
                             match delete_item {
                                 Ok(delete_item) => {
-                                    if let Some(error) = delete_scheduled_managed_item(&delete_item, device_path, &managed_path, managed_subfolder_for_delete.as_deref(), is_mtp, &owned_manifest_paths, &device_io, &device_manager, &operation_manager, &operation_id, &operation_device_id).await {errors.push(error);}
-                                },
+                                    if let Some(error) = delete_scheduled_managed_item(
+                                        &delete_item,
+                                        device_path,
+                                        &managed_path,
+                                        managed_subfolder_for_delete.as_deref(),
+                                        is_mtp,
+                                        &owned_manifest_paths,
+                                        &device_io,
+                                        checkpoint,
+                                        &operation_manager,
+                                        &operation_id,
+                                        &operation_device_id,
+                                    )
+                                    .await
+                                    {
+                                        errors.push(error);
+                                    }
+                                }
                                 Err(error) => {
                                     errors.push(plan_read_error(error));
                                     let _ = operation_manager.request_cancel(&operation_id).await;
@@ -3811,6 +3887,11 @@ pub(crate) async fn execute_plan_sync_with_protection(
         );
     }
 
+    crate::daemon_log!(
+        "[Sync] Post-transfer metadata begin deletes={} id_changes={}",
+        delta.deletes.len(),
+        delta.id_changes.len()
+    );
     for delete_item in pending_deletes {
         let delete_item = match delete_item {
             Ok(item) => item,
@@ -3827,7 +3908,7 @@ pub(crate) async fn execute_plan_sync_with_protection(
             is_mtp,
             &owned_manifest_paths,
             &device_io,
-            &device_manager,
+            checkpoint,
             &operation_manager,
             &operation_id,
             &operation_device_id,
@@ -3842,12 +3923,18 @@ pub(crate) async fn execute_plan_sync_with_protection(
         .strip_prefix(device_path)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
+    crate::daemon_log!("[Sync] Post-transfer directory cleanup begin");
     if !operation_manager.is_cancelled(&operation_id).await
         && let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await
     {
         eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
     }
+    crate::daemon_log!("[Sync] Post-transfer directory cleanup end");
 
+    crate::daemon_log!(
+        "[Sync] Post-transfer ID updates begin count={}",
+        delta.id_changes.len()
+    );
     let id_changes = match delta.id_changes.iter() {
         Ok(cursor) => Some(cursor),
         Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; None},
@@ -3889,8 +3976,8 @@ pub(crate) async fn execute_plan_sync_with_protection(
             server_id: id_change.source_server_id.clone(),
         };
         let id_to_remove = id_change.old_jellyfin_id.clone();
-        if let Err(e) = device_manager
-            .update_manifest_for_device(&operation_device_id, |m| {
+        if let Err(e) = checkpoint
+            .stage(1, |m| {
                 m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
                 m.synced_items.push(synced_item);
             })
@@ -3905,29 +3992,64 @@ pub(crate) async fn execute_plan_sync_with_protection(
         } else { synced_count += 1; }
     }
 
-    if !operation_manager.is_cancelled(&operation_id).await && !delta.provenance.is_empty()
-    {
-        let origins: HashMap<String, bool> = match delta.provenance.iter().and_then(|cursor|cursor.collect::<Result<_>>()) {
-            Ok(origins) => origins,
-            Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; HashMap::new()},
-        };
-        if let Err(e) = device_manager
-            .update_manifest_for_device(&operation_device_id, |m| {
-                for item in &mut m.synced_items {
-                    if let Some(&origin) = origins.get(&item.jellyfin_id) { item.is_auto_fill = origin; }
+    crate::daemon_log!(
+        "[Sync] Post-transfer ID updates end count={}",
+        delta.id_changes.len()
+    );
+    let provenance = if delta.provenance.len() == 0 {
+        delta.provenance.iter().map(|cursor| (cursor, None))
+    } else {
+        match checkpoint.provenance_index().await {
+            Ok(index) => delta.provenance.iter().map(|cursor| (cursor, Some(index))),
+            Err(error) => Err(error),
+        }
+    };
+    if !operation_manager.is_cancelled(&operation_id).await {
+        match provenance {
+            Ok((cursor, index)) => {
+                for entry in cursor {
+                    let (id, origin) = match entry {
+                        Ok(origin) => origin,
+                        Err(error) => {
+                            errors.push(plan_read_error(error));
+                            let _ = operation_manager.request_cancel(&operation_id).await;
+                            break;
+                        }
+                    };
+                    if operation_manager.is_cancelled(&operation_id).await {
+                        break;
+                    }
+                    let Some(index) = &index else {
+                        continue;
+                    };
+                    for position in index.positions(&id) {
+                        if let Err(error) = checkpoint.stage_provenance(position, &id, origin).await
+                        {
+                            errors.push(SyncFileError {
+                                jellyfin_id: String::new(),
+                                filename: "manifest".into(),
+                                error_message: format!("Provenance checkpoint failed: {error}"),
+                            });
+                            let _ = operation_manager.request_cancel(&operation_id).await;
+                            break;
+                        }
+                    }
+                    if operation_manager.is_cancelled(&operation_id).await {
+                        break;
+                    }
                 }
-            })
-            .await
-        {
-            errors.push(SyncFileError {
-                jellyfin_id: String::new(),
-                filename: "manifest".into(),
-                error_message: format!("Provenance manifest write failed: {e}"),
-            });
-            let _ = operation_manager.request_cancel(&operation_id).await;
+            }
+            Err(error) => {
+                errors.push(plan_read_error(error));
+                let _ = operation_manager.request_cancel(&operation_id).await;
+            }
         }
     }
 
+    crate::daemon_log!(
+        "[Sync] Post-transfer playlists begin count={}",
+        delta.playlists.len()
+    );
     if !operation_manager.is_cancelled(&operation_id).await
         && let Some(mut manifest_snapshot) = device_manager
             .get_manifest_for_device(&operation_device_id)
@@ -3947,8 +4069,8 @@ pub(crate) async fn execute_plan_sync_with_protection(
             eprintln!("{}", warning);
         }
         let updated_playlists = manifest_snapshot.playlists;
-        if let Err(e) = device_manager
-            .update_manifest_for_device(&operation_device_id, |m| {
+        if let Err(e) = checkpoint
+            .stage(0, |m| {
                 m.playlists = updated_playlists;
             })
             .await
@@ -3962,6 +4084,8 @@ pub(crate) async fn execute_plan_sync_with_protection(
         }
     }
 
+    crate::daemon_log!("[Sync] Post-transfer playlists end");
+    crate::daemon_log!("[Sync] Post-transfer metadata end");
     let mut device_warnings = sync_warnings;
     for warning in device_io.take_warnings().await {
         if let Err(error) = warning_journal.record(&warning) {
@@ -4657,9 +4781,11 @@ mod tests {
         devices: Arc<crate::device::DeviceManager>,
         io: Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+        devices.set_test_sync_io(path, Arc::clone(&io)).await;
         let target = SyncTarget {
             path: path.to_path_buf(),
             manifest: devices.get_current_device().await.unwrap(),
+            observation: devices.get_selected_sync_target().await.unwrap().3,
             io,
         };
         execute_provider_sync(delta, &target, source, operations, operation_id, devices).await
@@ -4676,9 +4802,11 @@ mod tests {
         io: Arc<dyn crate::device_io::DeviceIO>,
         observer: protection::Observer,
     ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+        devices.set_test_sync_io(path, Arc::clone(&io)).await;
         let target = SyncTarget {
             path: path.to_path_buf(),
             manifest: devices.get_current_device().await.unwrap(),
+            observation: devices.get_selected_sync_target().await.unwrap().3,
             io,
         };
         execute_provider_sync_with_protection(
@@ -4720,13 +4848,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reviewed_warning_append_handle_closes_at_execution_end_and_shutdown_removes_evidence() {
-        let dir=tempfile::tempdir().unwrap();
-        let (devices,io)=setup_provider_sync_device(dir.path()).await;
-        let target=SyncTarget {path:dir.path().into(),manifest:devices.get_current_device().await.unwrap(),io};
-        let operations=Arc::new(SyncOperationManager::new());
-        let plan=crate::sync_plan::SyncPlan::from_delta(calculate_delta(&[],&Default::default()),&target.manifest).unwrap();
-        execute_plan_sync_with_protection(&plan,&target,ProviderSyncSource {provider:subsonic_provider("http://127.0.0.1:9".into()),transcoding_profile:None,providers_by_server:HashMap::new()},operations.clone(),"empty".into(),devices,None).await.unwrap();
+    async fn reviewed_warning_append_handle_closes_at_execution_end_and_shutdown_removes_evidence()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(dir.path()).await;
+        let target = SyncTarget {
+            path: dir.path().into(),
+            manifest: devices.get_current_device().await.unwrap(),
+            observation: devices.get_selected_sync_target().await.unwrap().3,
+            io,
+        };
+        let operations = Arc::new(SyncOperationManager::new());
+        let plan = crate::sync_plan::SyncPlan::from_delta(
+            calculate_delta(&[], &Default::default()),
+            &target.manifest,
+        )
+        .unwrap();
+        execute_plan_sync_with_protection(
+            &plan,
+            &target,
+            ProviderSyncSource {
+                provider: subsonic_provider("http://127.0.0.1:9".into()),
+                transcoding_profile: None,
+                providers_by_server: HashMap::new(),
+            },
+            operations.clone(),
+            "empty".into(),
+            devices,
+            None,
+        )
+        .await
+        .unwrap();
         {
             let journal=operations.warning_journal("empty").unwrap();
             let state=journal.state.lock().unwrap();
@@ -5802,6 +5954,7 @@ mod tests {
         inner: Arc<dyn crate::device_io::DeviceIO>,
         trace: std::sync::Mutex<Vec<&'static str>>,
         writes: std::sync::atomic::AtomicUsize,
+        manifest_writes: std::sync::atomic::AtomicUsize,
         block_at_write: std::sync::atomic::AtomicUsize,
         fail_first: AtomicBool,
         fail_all: AtomicBool,
@@ -5822,6 +5975,7 @@ mod tests {
                 inner,
                 trace: std::sync::Mutex::new(Vec::new()),
                 writes: std::sync::atomic::AtomicUsize::new(0),
+                manifest_writes: std::sync::atomic::AtomicUsize::new(0),
                 block_at_write: std::sync::atomic::AtomicUsize::new(0),
                 fail_first: AtomicBool::new(false),
                 fail_all: AtomicBool::new(false),
@@ -5857,6 +6011,13 @@ mod tests {
         }
 
         async fn write_with_verify(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            if path == ".hifimule.json" {
+                let result = self.inner.write_with_verify(path, data).await;
+                if result.is_ok() {
+                    self.manifest_writes.fetch_add(1, Ordering::SeqCst);
+                }
+                return result;
+            }
             if self
                 .writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -5933,6 +6094,90 @@ mod tests {
         fn preferred_audio_container(&self) -> Option<&'static str> {
             self.inner.preferred_audio_container()
         }
+    }
+
+    #[tokio::test]
+    async fn sync_checkpoint_large_provenance_flip_preserves_tracks_and_batches_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(dir.path()).await;
+        let mut items: Vec<_> = (0..1201)
+            .rev()
+            .map(|i| {
+                make_synced_item(
+                    &format!("origin-{i}"),
+                    &format!("Track {i}"),
+                    Some("Album"),
+                    Some("Artist"),
+                )
+            })
+            .collect();
+        items.push(make_synced_item(
+            "origin-0",
+            "Imported duplicate",
+            None,
+            None,
+        ));
+        for i in 0..999 {
+            let mut unchanged =
+                make_synced_item(&format!("already-fill-{i}"), "Already fill", None, None);
+            unchanged.is_auto_fill = true;
+            items.push(unchanged);
+        }
+        manager
+            .update_manifest(|manifest| {
+                manifest.synced_items = items.clone();
+                manifest.dirty = true;
+            })
+            .await
+            .unwrap();
+        let tracing = BlockingFirstWriteDeviceIo::new(io);
+        let operations = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("provenance-flip");
+        operations.create_operation(operation_id.clone(), 0).await;
+        let delta = SyncDelta {
+            provenance_updates: items
+                .iter()
+                .map(|item| (item.jellyfin_id.clone(), true))
+                .collect(),
+            blocked: vec![],
+            adds: vec![],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: items.len(),
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let (_, errors) = execute_test_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider("http://127.0.0.1:9".into()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: HashMap::new(),
+            },
+            operations,
+            operation_id,
+            manager,
+            tracing.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let durable: DeviceManifest =
+            serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap())
+                .unwrap();
+        assert_eq!(durable.synced_items.len(), items.len());
+        for (actual, original) in durable.synced_items.iter().zip(items) {
+            assert!(actual.is_auto_fill);
+            assert_eq!(actual.jellyfin_id, original.jellyfin_id);
+            assert_eq!(actual.local_path, original.local_path);
+            assert_eq!(actual.size_bytes, original.size_bytes);
+        }
+        assert_eq!(
+            tracing.manifest_writes.load(Ordering::SeqCst),
+            2,
+            "1 count checkpoints and one final flush"
+        );
     }
 
     #[tokio::test]
@@ -9075,9 +9320,11 @@ mod tests {
             .unwrap();
         let a_manifest = manager.get_current_device().await.unwrap();
         let io = boundary_io(a.path(), true);
+        manager.set_test_sync_io(a.path(), io.clone()).await;
         let target = SyncTarget {
             path: a.path().into(),
             manifest: a_manifest.clone(),
+            observation: manager.get_selected_sync_target().await.unwrap().3,
             io: io.clone(),
         };
         let mut b_manifest = empty_manifest();

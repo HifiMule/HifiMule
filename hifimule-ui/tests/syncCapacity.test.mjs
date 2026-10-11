@@ -35,6 +35,19 @@ test('capacity distinguishes manual and autofill bytes and only credits managed 
     assert.equal(result.freeFraction, 0.3);
 });
 
+test('compact daemon byte totals preserve capacity and rendering without library records', () => {
+    const storage={ totalBytes:20,freeBytes:1,usedBytes:19 };
+    const records=[{sizeBytes:2},{sizeBytes:7,isAutoFill:true}];
+    const totals={selectedBytes:2,autofillBytes:7};
+    assert.deepEqual(syncCapacity(storage,4,totals),syncCapacity(storage,4,records));
+    assert.equal(renderCapacityBar(storage,4,totals),renderCapacityBar(storage,4,records));
+    const basket={getManualSizeBytes:()=>4};
+    const {BasketSidebar}=new Function('t','syncCapacity','basketStore',`${script}\nreturn {BasketSidebar};`)(()=>'',syncCapacity,basket);
+    const sidebar=Object.create(BasketSidebar.prototype);
+    sidebar.storageInfo=storage;sidebar.currentDevice={syncedItemCount:40000,syncedByteTotals:totals};
+    assert.deepEqual(sidebar.selectedCapacity(),syncCapacity(storage,4,records));
+});
+
 test('already selected tracks are credited once and true overflow is disabled', () => {
     const storage = { totalBytes: 20, freeBytes: 1, usedBytes: 19 };
     assert.equal(syncCapacity(storage, 4, [{ sizeBytes: 4 }]).remainingBytes, 1);

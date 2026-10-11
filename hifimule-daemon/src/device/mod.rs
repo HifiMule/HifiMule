@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 
 /// Stable basket representation policy. The hash deliberately excludes every
@@ -203,6 +204,29 @@ pub struct DeviceManifest {
 }
 
 impl DeviceManifest {
+    /// Polling metadata only: never clone library, basket, pending or playlist records.
+    pub fn polling_metadata(&self) -> Self {
+        Self {
+            device_id: self.device_id.clone(),
+            name: self.name.clone(),
+            icon: self.icon.clone(),
+            version: self.version.clone(),
+            managed_paths: self.managed_paths.clone(),
+            audiobook_path: self.audiobook_path.clone(),
+            podcast_path: self.podcast_path.clone(),
+            playlist_path: self.playlist_path.clone(),
+            dirty: self.dirty,
+            auto_sync_on_connect: self.auto_sync_on_connect,
+            last_sync_at: self.last_sync_at,
+            auto_fill: self.auto_fill.clone(),
+            transcoding_profile_id: self.transcoding_profile_id.clone(),
+            last_synced_transcoding_profile_id: self.last_synced_transcoding_profile_id.clone(),
+            transcoding_profile_dirty: self.transcoding_profile_dirty,
+            storage_id: self.storage_id.clone(),
+            ..Default::default()
+        }
+    }
+
     pub fn synced_byte_totals(&self) -> (u64, u64) {
         self.synced_items
             .iter()
@@ -780,6 +804,31 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
+    #[cfg(test)]
+    pub(crate) async fn set_test_sync_io(
+        &self,
+        path: &Path,
+        io: Arc<dyn crate::device_io::DeviceIO>,
+    ) {
+        self.state
+            .write()
+            .await
+            .connected_devices
+            .get_mut(path)
+            .expect("test device connected")
+            .device_io = io;
+    }
+    fn manifest_commit_lock(&self, device_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .manifest_commit_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            locks
+                .entry(device_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
     pub async fn admit_sync_operation(
         &self,
         operations: &crate::sync::SyncOperationManager,
@@ -862,6 +911,20 @@ impl DeviceManager {
         manifest: DeviceManifest,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<crate::DaemonState> {
+        let mut connection_ids = vec![manifest.device_id.clone()];
+        if let Some(existing) = self.get_device_id_for_path(&path).await {
+            connection_ids.push(existing);
+        }
+        connection_ids.sort();
+        connection_ids.dedup();
+        let connection_locks: Vec<_> = connection_ids
+            .iter()
+            .map(|id| self.manifest_commit_lock(id))
+            .collect();
+        let mut _connections = Vec::new();
+        for lock in &connection_locks {
+            _connections.push(lock.lock().await);
+        }
         {
             let state = self.state.read().await;
             if state.connected_devices.contains_key(&path) {
@@ -1045,6 +1108,20 @@ impl DeviceManager {
         friendly_name: Option<String>,
     ) -> crate::DaemonState {
         let path_str = path.to_string_lossy().to_string();
+        let observed = self
+            .state
+            .read()
+            .await
+            .connected_devices
+            .get(&path)
+            .map(|device| (device.manifest.device_id.clone(), device.observation_token));
+        let connection_lock = observed
+            .as_ref()
+            .map(|(id, _)| self.manifest_commit_lock(id));
+        let _connection = match &connection_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         // Unrecognized devices have no manifest — ensure they are not in connected_devices.
         // Do NOT change selected_device_path since other recognized devices may still be connected.
         // Both operations are performed under state.write() so no concurrent handle_device_detected
@@ -1052,6 +1129,17 @@ impl DeviceManager {
         // two live IO backends for the same physical device).
         {
             let mut state = self.state.write().await;
+            if state
+                .connected_devices
+                .get(&path)
+                .map(|device| (&device.manifest.device_id, device.observation_token))
+                != observed.as_ref().map(|(id, token)| (id, *token))
+                || observed
+                    .as_ref()
+                    .is_some_and(|(_, token)| *token > observation_token)
+            {
+                return crate::DaemonState::Idle;
+            }
             state.connected_devices.remove(&path);
             state.pending_devices.retain(|_, pending| {
                 if pending.path == path {
@@ -1195,7 +1283,62 @@ impl DeviceManager {
 
     pub async fn handle_device_removed(&self, removed_path: &PathBuf) {
         let token = self.begin_destination_mutation();
-        let mut state = self.state.write().await;
+        let observed = Self::removal_observation(&*self.state.read().await, removed_path);
+        self.remove_observed_device(removed_path, token, observed)
+            .await;
+    }
+
+    fn removal_observation(
+        state: &DeviceManagerState,
+        path: &PathBuf,
+    ) -> Option<(Option<String>, u64)> {
+        state
+            .connected_devices
+            .get(path)
+            .map(|device| {
+                (
+                    Some(device.manifest.device_id.clone()),
+                    device.observation_token,
+                )
+            })
+            .or_else(|| {
+                state
+                    .pending_devices
+                    .values()
+                    .find(|pending| &pending.path == path)
+                    .map(|pending| (None, pending.observation_token))
+            })
+    }
+
+    async fn remove_observed_device(
+        &self,
+        removed_path: &PathBuf,
+        token: u64,
+        observed: Option<(Option<String>, u64)>,
+    ) {
+        let mut locked_id = observed.as_ref().and_then(|(id, _)| id.clone());
+        loop {
+            let connection_lock = locked_id.as_ref().map(|id| self.manifest_commit_lock(id));
+            let _connection = match &connection_lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
+            let mut state = self.state.write().await;
+            let current = Self::removal_observation(&state, removed_path);
+            if current.as_ref().map(|(_, token)| token) != observed.as_ref().map(|(_, token)| token)
+            {
+                return;
+            }
+            // Pending initialization can publish the same physical observation while
+            // removal is queued. Acquire its newly recognized commit lock, then
+            // recheck the observation before removing anything.
+            let current_id = current.as_ref().and_then(|(id, _)| id.clone());
+            if current_id != locked_id {
+                drop(state);
+                drop(_connection);
+                locked_id = current_id;
+                continue;
+            }
         state.connected_devices.remove(removed_path);
         state
             .discovery_issues
@@ -1219,6 +1362,8 @@ impl DeviceManager {
             state.latest_selection_token = token;
         }
         state.destination_revision += 1;
+            break;
+        }
     }
 
     pub async fn get_current_device(&self) -> Option<DeviceManifest> {
@@ -1260,6 +1405,7 @@ impl DeviceManager {
         PathBuf,
         DeviceManifest,
         std::sync::Arc<dyn crate::device_io::DeviceIO>,
+        u64,
     )> {
         let state = self.state.read().await;
         let path = state.selected_device_path.as_ref()?;
@@ -1268,6 +1414,7 @@ impl DeviceManager {
             path.clone(),
             connected.manifest.clone(),
             std::sync::Arc::clone(&connected.device_io),
+            connected.observation_token,
         ))
     }
 
@@ -1278,6 +1425,7 @@ impl DeviceManager {
         PathBuf,
         DeviceManifest,
         std::sync::Arc<dyn crate::device_io::DeviceIO>,
+        u64,
     )> {
         let state = self.state.read().await;
         state
@@ -1289,6 +1437,7 @@ impl DeviceManager {
                         path.clone(),
                         connected.manifest.clone(),
                         std::sync::Arc::clone(&connected.device_io),
+                        connected.observation_token,
                     )
                 })
             })
@@ -1326,6 +1475,63 @@ impl DeviceManager {
             .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
             .collect();
         (device_list, state.selected_device_path.clone())
+    }
+
+    pub async fn get_polling_snapshot(
+        &self,
+        include_manifest: bool,
+    ) -> (
+        Option<serde_json::Value>,
+        Vec<(PathBuf, DeviceManifest, DeviceClass)>,
+        Option<PathBuf>,
+    ) {
+        let state = self.state.read().await;
+        let current = state
+            .selected_device_path
+            .as_ref()
+            .and_then(|path| state.connected_devices.get(path))
+            .map(|connected| {
+                if include_manifest {
+                    return serde_json::to_value(&connected.manifest)
+                        .expect("manifest serialization");
+                }
+                let manifest = &connected.manifest;
+                let (selected, autofill) = manifest.synced_byte_totals();
+                let mut metadata = serde_json::to_value(manifest.polling_metadata())
+                    .expect("metadata serialization");
+                let object = metadata.as_object_mut().unwrap();
+                for field in [
+                    "synced_items",
+                    "pending_item_ids",
+                    "basket_items",
+                    "playlists",
+                    "folder_ids",
+                ] {
+                    object.remove(field);
+                }
+                object.insert("syncedItemCount".into(), manifest.synced_items.len().into());
+                object.insert(
+                    "pendingItemCount".into(),
+                    manifest.pending_item_ids.len().into(),
+                );
+                object.insert(
+                    "syncedByteTotals".into(),
+                    serde_json::json!({"selectedBytes":selected,"autofillBytes":autofill}),
+                );
+                metadata
+            });
+        let connected = state
+            .connected_devices
+            .iter()
+            .map(|(path, device)| {
+                (
+                    path.clone(),
+                    device.manifest.polling_metadata(),
+                    device.device_class.clone(),
+                )
+            })
+            .collect();
+        (current, connected, state.selected_device_path.clone())
     }
 
     pub async fn get_destination_snapshot(&self) -> DestinationSnapshot {
@@ -1439,6 +1645,26 @@ impl DeviceManager {
         .await
     }
 
+    pub async fn update_manifest_for_connection<F>(
+        &self,
+        device_id: &str,
+        observation: u64,
+        io: &Arc<dyn crate::device_io::DeviceIO>,
+        mutation: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut DeviceManifest),
+    {
+        self.update_manifest_checked(
+            device_id,
+            Some((io, observation)),
+            mutation,
+            crate::paths::get_local_mtp_manifest_path,
+            sync_manifest_directory,
+        )
+        .await
+    }
+
     /// Result-bearing compare-and-mutate boundary used by snapshot basket
     /// export. Identity resolution, basket hash verification, mutation and
     /// persistence all happen under the same per-device commit lock.
@@ -1531,6 +1757,22 @@ impl DeviceManager {
         F: FnOnce(&mut DeviceManifest),
         P: FnOnce(&str) -> Result<PathBuf>,
     {
+        self.update_manifest_checked(device_id, None, mutation, cache_path, sync_directory)
+            .await
+    }
+
+    async fn update_manifest_checked<F, P>(
+        &self,
+        device_id: &str,
+        expected_io: Option<(&Arc<dyn crate::device_io::DeviceIO>, u64)>,
+        mutation: F,
+        cache_path: P,
+        sync_directory: fn(&Path) -> std::io::Result<()>,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut DeviceManifest),
+        P: FnOnce(&str) -> Result<PathBuf>,
+    {
         let commit_lock = {
             let mut locks = self
                 .manifest_commit_locks
@@ -1548,13 +1790,30 @@ impl DeviceManager {
             .connected_devices
             .iter()
             .find_map(|(path, connected)| {
-                (connected.manifest.device_id == device_id).then(|| path.clone())
+                (connected.manifest.device_id == device_id
+                    && expected_io.is_none_or(|(io, observation)| {
+                        Arc::ptr_eq(io, &connected.device_io)
+                            && observation == connected.observation_token
+                    }))
+                .then(|| path.clone())
             })
-            .ok_or_else(|| anyhow::anyhow!("Device is no longer connected: {device_id}"))?;
+            .ok_or_else(|| {
+                if expected_io.is_some() {
+                    anyhow::anyhow!("Sync connection changed")
+                } else {
+                    anyhow::anyhow!("Device is no longer connected: {device_id}")
+                }
+            })?;
         let connected = state
             .connected_devices
             .get_mut(&path)
             .ok_or_else(|| anyhow::anyhow!("Device not in connected map"))?;
+        if expected_io.is_some_and(|(io, observation)| {
+            !Arc::ptr_eq(io, &connected.device_io) || observation != connected.observation_token
+        }) {
+            anyhow::bail!("Sync connection changed");
+        }
+        let observation_token = connected.observation_token;
         let mut previous_manifest = connected.manifest.clone();
         mutation(&mut connected.manifest);
         // Clone Arc and manifest so we can drop the write guard before the async I/O.
@@ -1564,6 +1823,24 @@ impl DeviceManager {
         let manifest_snapshot = connected.manifest.clone();
         let is_mtp = connected.device_class == DeviceClass::Mtp;
         drop(state);
+        let commit_log = expected_io.map(|_| {
+            (
+                if manifest_snapshot.dirty {
+                    "initial"
+                } else {
+                    "clean"
+                },
+                std::time::Instant::now(),
+                serde_json::to_vec_pretty(&manifest_snapshot)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0),
+            )
+        });
+        if let Some((reason, _, bytes)) = &commit_log {
+            crate::daemon_log!(
+                "[Sync] Manifest checkpoint start reason={reason} updates=0 elapsed_ms=0 manifest_bytes={bytes}"
+            );
+        }
         let persist_result = if is_mtp {
             // For MTP devices the local cache is authoritative: on-device writes are
             // best-effort only. Do not publish a clean mirror before the recovery
@@ -1598,10 +1875,27 @@ impl DeviceManager {
         } else {
             crate::device::write_manifest(device_io, &manifest_snapshot).await
         };
+        if let Some((reason, started, bytes)) = &commit_log {
+            crate::daemon_log!(
+                "[Sync] Manifest checkpoint result reason={reason} updates=0 elapsed_ms=0 manifest_bytes={bytes} duration_ms={:.0} result={} error={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                if persist_result.is_ok() {
+                    "ok"
+                } else {
+                    "error"
+                },
+                persist_result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            );
+        }
         if let Err(error) = persist_result {
             let mut state = self.state.write().await;
             if let Some(connected) = state.connected_devices.get_mut(&path)
                 && connected.manifest.device_id == manifest_snapshot.device_id
+                && connected.observation_token == observation_token
             {
                 connected.manifest = previous_manifest;
             }
@@ -3235,3 +3529,6 @@ fn get_mounts() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests;
+
+mod checkpoint;
+pub(crate) use checkpoint::SyncManifestSession;

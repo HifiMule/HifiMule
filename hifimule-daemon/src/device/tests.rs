@@ -1,5 +1,589 @@
 use super::*;
 
+#[derive(Debug)]
+struct CheckpointGateIo {
+    inner: Arc<dyn crate::device_io::DeviceIO>,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    writes: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::device_io::DeviceIO for CheckpointGateIo {
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.read_file(path).await
+    }
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_file(path, data).await
+    }
+    async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.inner.write_with_verify(path, data).await?;
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        self.inner.delete_file(path).await
+    }
+    async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        self.inner.list_files(path).await
+    }
+    async fn free_space(&self) -> Result<u64> {
+        self.inner.free_space().await
+    }
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        self.inner.ensure_dir(path).await
+    }
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        self.inner.cleanup_empty_subdirs(path).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_checkpoint_delayed_timer_drains_before_shutdown_and_device_removal() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let gated = Arc::new(CheckpointGateIo {
+        inner: msc(dir.path()),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        writes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let io: Arc<dyn crate::device_io::DeviceIO> = gated.clone();
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("lease", "Original"),
+            Arc::clone(&io),
+        )
+        .await
+        .unwrap();
+    let session = SyncManifestSession::new(Arc::clone(&manager), "lease", &io, None)
+        .await
+        .unwrap();
+    session
+        .stage(1, |m| m.last_sync_at = Some(1))
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(599)).await;
+    assert_eq!(gated.writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!dir.path().join(".hifimule.json").exists());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    gated.started.notified().await;
+    let original_observation = manager.get_selected_sync_target().await.unwrap().3;
+    let finish = tokio::spawn(async move { session.finish("shutdown").await });
+    let removing = Arc::clone(&manager);
+    let path = dir.path().to_path_buf();
+    let removal = tokio::spawn(async move { removing.handle_device_removed(&path).await });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !finish.is_finished(),
+        "shutdown must drain the active checkpoint"
+    );
+    assert!(
+        !removal.is_finished(),
+        "connection removal must serialize behind active persistence"
+    );
+    assert!(manager.get_current_device().await.is_some());
+    gated.release.notify_one();
+    finish.await.unwrap().unwrap();
+    removal.await.unwrap();
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("lease", "Replacement"),
+            msc(dir.path()),
+        )
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(1800)).await;
+    assert_eq!(
+        gated.writes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "joined timer must never write later"
+    );
+    assert_eq!(
+        manager.get_current_device().await.unwrap().last_sync_at,
+        None
+    );
+    assert!(
+        manager
+            .update_manifest_for_connection("lease", original_observation, &io, |m| m.dirty = false)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn sync_checkpoint_stale_queued_removal_preserves_new_connection() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let gated = Arc::new(CheckpointGateIo {
+        inner: msc(dir.path()),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        writes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let io: Arc<dyn crate::device_io::DeviceIO> = gated.clone();
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("a-original", "Original"),
+            Arc::clone(&io),
+        )
+        .await
+        .unwrap();
+    let session = Arc::new(
+        SyncManifestSession::new(Arc::clone(&manager), "a-original", &io, None)
+            .await
+            .unwrap(),
+    );
+    let staging = Arc::clone(&session);
+    let checkpoint =
+        tokio::spawn(async move { staging.stage(1000, |m| m.last_sync_at = Some(1000)).await });
+    gated.started.notified().await;
+    let removing = Arc::clone(&manager);
+    let path = dir.path().to_path_buf();
+    let first = tokio::spawn(async move { removing.handle_device_removed(&path).await });
+    tokio::task::yield_now().await;
+    let detecting = Arc::clone(&manager);
+    let path = dir.path().to_path_buf();
+    let replacement = msc(dir.path());
+    let arrival = tokio::spawn(async move {
+        detecting
+            .handle_device_detected(
+                path,
+                make_manifest("b-replacement", "Replacement"),
+                replacement,
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    let removing = Arc::clone(&manager);
+    let path = dir.path().to_path_buf();
+    let stale = tokio::spawn(async move { removing.handle_device_removed(&path).await });
+    tokio::task::yield_now().await;
+    assert!(!first.is_finished());
+    assert!(!arrival.is_finished());
+    assert!(!stale.is_finished());
+    gated.release.notify_one();
+    checkpoint.await.unwrap().unwrap();
+    first.await.unwrap();
+    arrival.await.unwrap().unwrap();
+    stale.await.unwrap();
+    assert_eq!(
+        manager.get_current_device().await.unwrap().device_id,
+        "b-replacement",
+        "old queued removal must not remove newer arrival"
+    );
+    Arc::try_unwrap(session)
+        .ok()
+        .unwrap()
+        .finish("cancel")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_checkpoint_count_flush_resets_timer_deadline() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let gated = Arc::new(CheckpointGateIo {
+        inner: msc(dir.path()),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        writes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let io: Arc<dyn crate::device_io::DeviceIO> = gated.clone();
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("reset", "Reset"),
+            Arc::clone(&io),
+        )
+        .await
+        .unwrap();
+    let session = Arc::new(
+        SyncManifestSession::new(Arc::clone(&manager), "reset", &io, None)
+            .await
+            .unwrap(),
+    );
+    session
+        .stage(1, |m| m.last_sync_at = Some(1))
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(400)).await;
+    let staging = Arc::clone(&session);
+    let checkpoint =
+        tokio::spawn(async move { staging.stage(99, |m| m.last_sync_at = Some(100)).await });
+    gated.started.notified().await;
+    gated.release.notify_one();
+    checkpoint.await.unwrap().unwrap();
+    session
+        .stage(1, |m| m.last_sync_at = Some(101))
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(200)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(gated.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        tokio::time::timeout(Duration::ZERO, gated.started.notified())
+            .await
+            .is_err(),
+        "old timer deadline must not start a second write"
+    );
+    tokio::time::advance(Duration::from_secs(400)).await;
+    gated.started.notified().await;
+    gated.release.notify_one();
+    Arc::try_unwrap(session)
+        .ok()
+        .unwrap()
+        .finish("completion")
+        .await
+        .unwrap();
+    assert_eq!(gated.writes.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn sync_checkpoint_buffers_track_changes_until_threshold() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let mut manifest = make_manifest("checkpoint", "Checkpoint");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["pending".into()];
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+    let io = msc(dir.path());
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest, Arc::clone(&io))
+        .await
+        .unwrap();
+    let session = SyncManifestSession::new(Arc::clone(&manager), "checkpoint", &io, None)
+        .await
+        .unwrap();
+    for index in 1..1000 {
+        session
+            .stage(1, |m| m.last_sync_at = Some(index))
+            .await
+            .unwrap();
+    }
+    let durable: DeviceManifest =
+        serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap()).unwrap();
+    assert_eq!(
+        durable.last_sync_at, None,
+        "999 staged updates must not each write the full manifest"
+    );
+    assert_eq!(
+        manager.get_current_device().await.unwrap().last_sync_at,
+        Some(999)
+    );
+    session
+        .stage(1, |m| m.last_sync_at = Some(100))
+        .await
+        .unwrap();
+    let read = || {
+        serde_json::from_slice::<DeviceManifest>(
+            &std::fs::read(dir.path().join(".hifimule.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(read().last_sync_at, Some(100));
+    session
+        .stage(1, |m| m.last_sync_at = Some(101))
+        .await
+        .unwrap();
+    assert_eq!(read().last_sync_at, Some(100));
+    session.finish("completion").await.unwrap();
+    assert_eq!(read().last_sync_at, Some(101));
+    assert!(read().dirty);
+    assert_eq!(read().pending_item_ids, vec!["pending"]);
+}
+
+#[tokio::test]
+async fn sync_checkpoint_reconnect_with_copied_id_cannot_receive_delayed_state_or_clean_commit() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let io = msc(dir.path());
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("copied", "Original"),
+            Arc::clone(&io),
+        )
+        .await
+        .unwrap();
+    let session = SyncManifestSession::new(Arc::clone(&manager), "copied", &io, None)
+        .await
+        .unwrap();
+    session
+        .stage(1, |m| m.last_sync_at = Some(99))
+        .await
+        .unwrap();
+    let original_observation = manager.get_selected_sync_target().await.unwrap().3;
+    manager
+        .handle_device_removed(&dir.path().to_path_buf())
+        .await;
+    let replacement = msc(dir.path());
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("copied", "Replacement"),
+            replacement,
+        )
+        .await
+        .unwrap();
+    assert!(session.finish("cancel").await.is_err());
+    assert!(
+        manager
+            .update_manifest_for_connection("copied", original_observation, &io, |m| m.dirty =
+                false)
+            .await
+            .is_err()
+    );
+    let current = manager.get_current_device().await.unwrap();
+    assert_eq!(current.name.as_deref(), Some("Replacement"));
+    assert_eq!(current.last_sync_at, None);
+    assert!(!dir.path().join(".hifimule.json").exists());
+}
+
+#[tokio::test]
+async fn sync_checkpoint_final_clean_rejects_rediscovery_reusing_same_backend_arc() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let io = msc(dir.path());
+    manager
+        .handle_device_detected(
+            dir.path().to_path_buf(),
+            make_manifest("reused", "Original"),
+            Arc::clone(&io),
+        )
+        .await
+        .unwrap();
+    let (_, original_observation) = manager.get_basket_target("reused").await.unwrap();
+    manager
+        .handle_device_removed(&dir.path().to_path_buf())
+        .await;
+    let mut replacement = make_manifest("reused", "Replacement");
+    replacement.dirty = true;
+    replacement.pending_item_ids = vec!["new-arrival-pending".into()];
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), replacement, Arc::clone(&io))
+        .await
+        .unwrap();
+    assert_ne!(
+        manager.get_basket_target("reused").await.unwrap().1,
+        original_observation
+    );
+    assert!(
+        manager
+            .update_manifest_for_connection(
+                "reused",
+                original_observation.parse().unwrap(),
+                &io,
+                |m| {
+                    m.dirty = false;
+                    m.pending_item_ids.clear();
+                }
+            )
+            .await
+            .is_err(),
+        "a reused backend is not the original physical observation"
+    );
+    assert!(manager.get_current_device().await.unwrap().dirty);
+    assert_eq!(
+        manager.get_current_device().await.unwrap().pending_item_ids,
+        vec!["new-arrival-pending"]
+    );
+}
+
+#[tokio::test]
+async fn sync_checkpoint_duplicate_ids_commit_only_exact_captured_connection() {
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    for path in [a.path(), b.path()] {
+        let mut manifest = make_manifest("copied-id", "Copied");
+        manifest.dirty = true;
+        manifest.pending_item_ids = vec!["unfinished".into()];
+        let io = msc(path);
+        write_manifest(Arc::clone(&io), &manifest).await.unwrap();
+        manager
+            .handle_device_detected(path.to_path_buf(), manifest, io)
+            .await
+            .unwrap();
+    }
+    let first = manager
+        .state
+        .read()
+        .await
+        .connected_devices
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let selected = if first == a.path() {
+        b.path()
+    } else {
+        a.path()
+    };
+    assert!(manager.select_device(selected.to_path_buf()).await);
+    let (_, _, io, observation) = manager.get_selected_sync_target().await.unwrap();
+    let result = manager
+        .update_manifest_for_connection("copied-id", observation, &io, |m| {
+            m.dirty = false;
+            m.pending_item_ids.clear();
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "exact target behind duplicate ID must be found: {result:?}"
+    );
+    let read = |path: &Path| {
+        serde_json::from_slice::<DeviceManifest>(
+            &std::fs::read(path.join(".hifimule.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(!read(selected).dirty);
+    assert!(read(&first).dirty);
+    assert_eq!(read(&first).pending_item_ids, vec!["unfinished"]);
+}
+
+#[tokio::test]
+async fn sync_checkpoint_pending_publication_removal_waits_for_recognized_commit() {
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    manager
+        .handle_device_unrecognized(path.clone(), msc(dir.path()), None)
+        .await;
+    let pending = manager.get_unrecognized_device_snapshot().await.unwrap();
+    // Capture the removal event before initialization publishes the same arrival.
+    let observed = DeviceManager::removal_observation(&*manager.state.read().await, &path);
+    let token = manager.begin_destination_mutation();
+    let manifest = manager
+        .initialize_reserved_pending(pending, "", None, None, "Initialized".into(), None)
+        .await
+        .unwrap();
+    let lock = manager.manifest_commit_lock(&manifest.device_id);
+    let commit = lock.lock().await;
+    let removal = {
+        let manager = manager.clone();
+        let path = path.clone();
+        tokio::spawn(async move { manager.remove_observed_device(&path, token, observed).await })
+    };
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !removal.is_finished(),
+        "removal must acquire the initialized device's commit lock"
+    );
+    assert!(manager.get_current_device().await.is_some());
+    drop(commit);
+    removal.await.unwrap();
+    assert!(manager.get_current_device().await.is_none());
+    assert!(manager.state.read().await.connected_devices.is_empty());
+    assert!(manager.get_pending_devices_snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn sync_checkpoint_old_removal_preserves_new_pending_arrival() {
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    manager
+        .handle_device_unrecognized(path.clone(), msc(dir.path()), None)
+        .await;
+    let observed = DeviceManager::removal_observation(&*manager.state.read().await, &path);
+    let token = manager.begin_destination_mutation();
+    manager
+        .handle_device_unrecognized(path.clone(), msc(dir.path()), None)
+        .await;
+    let newer = manager.get_unrecognized_device_snapshot().await.unwrap();
+    manager.remove_observed_device(&path, token, observed).await;
+    assert_eq!(
+        manager
+            .get_unrecognized_device_snapshot()
+            .await
+            .unwrap()
+            .pending_id,
+        newer.pending_id
+    );
+    assert!(!*newer.cancelled.borrow());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn sync_checkpoint_failure_retains_staged_metadata_and_durable_recovery() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let io = msc(dir.path());
+    let mut manifest = make_manifest("denied", "Denied");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["copied-audio".into()];
+    write_manifest(Arc::clone(&io), &manifest).await.unwrap();
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest, Arc::clone(&io))
+        .await
+        .unwrap();
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(dir.path().join(".hifimule.json"))
+        .unwrap();
+    let session = SyncManifestSession::new(Arc::clone(&manager), "denied", &io, None)
+        .await
+        .unwrap();
+    assert!(
+        session
+            .stage(1000, |m| m.last_sync_at = Some(1000))
+            .await
+            .is_err()
+    );
+    let memory = manager.get_current_device().await.unwrap();
+    assert_eq!(memory.last_sync_at, Some(1000));
+    assert!(memory.dirty);
+    let durable: DeviceManifest =
+        serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap()).unwrap();
+    assert!(durable.dirty);
+    assert_eq!(durable.last_sync_at, None);
+    assert_eq!(durable.pending_item_ids, vec!["copied-audio"]);
+    drop(reader);
+    assert!(
+        session.finish("error").await.is_err(),
+        "successful recovery flush must not hide earlier checkpoint failure"
+    );
+    let durable: DeviceManifest =
+        serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap()).unwrap();
+    assert_eq!(durable.last_sync_at, Some(1000));
+    assert!(durable.dirty);
+}
+
 #[tokio::test]
 async fn mtp_cache_path_failure_rolls_back_memory() {
     let dir = tempdir().unwrap();

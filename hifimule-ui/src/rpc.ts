@@ -129,6 +129,9 @@ const activeServerMutations = new Set([
 ]);
 
 export async function rpcCall(method: string, params: any = {}): Promise<any> {
+    if (method === 'get_daemon_state' && params.includeManifest === undefined) {
+        params = { ...params, includeManifest: false };
+    }
     // Never log params: several RPCs carry passwords, tokens, opaque setup IDs,
     // or future credential fields. Method-only logging is safe and useful.
     console.log(`RPC Call: ${method}`);

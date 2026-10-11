@@ -11,7 +11,7 @@ import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 import { formatServerIdentity } from '../serverIdentity';
 import type { ServerSummary, PodcastShow } from '../rpc';
-import { syncCapacity, type SyncedCapacityItem } from '../state/syncCapacity';
+import { syncCapacity, type SyncedCapacityItem, type SyncedCapacityTotals } from '../state/syncCapacity';
 
 interface StorageInfo {
     totalBytes: number;
@@ -86,7 +86,7 @@ function formatSize(bytes: number): string {
     return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
-function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: number, syncedItems: SyncedCapacityItem[] = []): string {
+function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: number, syncedItems: SyncedCapacityItem[] | SyncedCapacityTotals = []): string {
     if (!storageInfo) {
         // No device state (AC #5)
         if (projectedBytes > 0) {
@@ -156,7 +156,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
 export class BasketSidebar {
 
     private selectedCapacity() {
-        return syncCapacity(this.storageInfo, basketStore.getManualSizeBytes(), this.currentDevice?.synced_items ?? []);
+        return syncCapacity(this.storageInfo, basketStore.getManualSizeBytes(), this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? []);
     }
     private container: HTMLElement;
     private updateListener: () => void;
@@ -1035,7 +1035,7 @@ export class BasketSidebar {
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.anyAutoFillEnabled() && !(this.currentDevice?.synced_items?.length > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.anyAutoFillEnabled() && !((this.currentDevice?.syncedItemCount ?? this.currentDevice?.synced_items?.length ?? 0) > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                         ${t('basket.actions.start_sync')}
                     </sl-button>
@@ -1085,7 +1085,7 @@ export class BasketSidebar {
                  <div class="basket-summary">
                     <span>${t('basket.summary.tracks_size', { count: totalTracks, size: formatSize(totalSizeBytes) })}</span>
                 </div>
-                ${renderCapacityBar(this.storageInfo, totalSizeBytes, this.currentDevice?.synced_items ?? [])}
+                ${renderCapacityBar(this.storageInfo, totalSizeBytes, this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? [])}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
                 ${this.renderDeviceFolders()}

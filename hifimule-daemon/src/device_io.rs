@@ -1,4 +1,23 @@
 use anyhow::Result;
+
+// Readers and scanners can briefly deny atomic replacement on Windows.
+// Never delete the previous canonical file to work around a sharing denial.
+async fn replace_verified_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut retries = 0;
+    loop {
+        match tokio::fs::rename(source, destination).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let transient = cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33));
+                if !transient || retries >= 20 {
+                    return Err(error);
+                }
+                retries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -220,7 +239,10 @@ impl DeviceIO for MscBackend {
             return write_result;
         }
 
-        tokio::fs::rename(&tmp_path, &full).await?;
+        if let Err(error) = replace_verified_file(&tmp_path, &full).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -735,6 +757,63 @@ pub mod tests {
             .await
             .unwrap();
         assert!(dir.path().join(".hifimule.json").exists());
+        assert!(!dir.path().join(".hifimule.json.tmp").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn msc_manifest_replacement_waits_for_transient_reader() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().join(".hifimule.json");
+        std::fs::write(&canonical, b"old recovery evidence").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&canonical)
+            .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            drop(reader);
+        });
+        let backend = MscBackend::new(dir.path().to_path_buf());
+        let result = backend
+            .write_with_verify(".hifimule.json", b"new checkpoint")
+            .await;
+        release.await.unwrap();
+        assert!(result.is_ok(), "transient replacement lock: {result:?}");
+        assert_eq!(std::fs::read(canonical).unwrap(), b"new checkpoint");
+        assert!(!dir.path().join(".hifimule.json.tmp").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn msc_manifest_replacement_exhaustion_preserves_canonical_and_removes_temp() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().join(".hifimule.json");
+        std::fs::write(&canonical, b"old recovery evidence").unwrap();
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&canonical)
+            .unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+        let started = std::time::Instant::now();
+        let error = backend
+            .write_with_verify(".hifimule.json", b"new checkpoint")
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let code = error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .raw_os_error();
+        assert!(
+            matches!(code, Some(5 | 32 | 33)),
+            "unexpected denial {code:?}"
+        );
+        assert_eq!(std::fs::read(canonical).unwrap(), b"old recovery evidence");
         assert!(!dir.path().join(".hifimule.json.tmp").exists());
     }
 

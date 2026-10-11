@@ -5,8 +5,10 @@ Measure preparation and retained transfer memory in fresh daemon test processes.
 Use test executables containing sync::tests::benchmark_large_sync_retention.
 The baseline fixture must match the current fixture: N existing manifest tracks,
 N pending additions, representative metadata, a local mock provider, and a
-blocked first device write. This measures the real executor, with no real device.
+blocked device write. This measures the real executor, with no real device.
 Use -CommittedBeforeHold to pause after successful transfers and manifest commits.
+Use -PollState to include real daemon state polling once per second during transfer.
+Use -CompactState to request compact polling for the current executable only.
 Build through scripts/build-daemon.mjs so the controlled FFmpeg runtime is verified.
 Executable SHA-256 hashes and every sample are retained with the measurements.
 Pass both executables for a comparison, or one for an individual measurement.
@@ -15,11 +17,20 @@ of total memory for a particular user's server, metadata, or release build.
 .EXAMPLE
 rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-sync-memory.ps1 `
   -BaselineExecutable target/sync-memory-baseline-build/debug/deps/hifimule_daemon-992c6a39a14163eb.exe `
-  -CurrentExecutable target/debug/deps/hifimule_daemon-992c6a39a14163eb.exe
+  -CurrentExecutable target/debug/deps/hifimule_daemon-422624aa74fc23a0.exe
 .EXAMPLE
 rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-sync-memory.ps1 `
-  -CurrentExecutable target/debug/deps/hifimule_daemon-992c6a39a14163eb.exe `
+  -CurrentExecutable target/debug/deps/hifimule_daemon-422624aa74fc23a0.exe `
   -Counts 40000 -HoldSeconds 120 -CommittedBeforeHold 5
+.EXAMPLE
+rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-sync-memory.ps1 `
+  -BaselineExecutable target/sync-state-baseline/hifimule_daemon.exe `
+  -CurrentExecutable target/debug/deps/hifimule_daemon-422624aa74fc23a0.exe `
+  -Counts 45522 -HoldSeconds 20 -TestName rpc::tests::benchmark_daemon_state_retention -CompactState
+.EXAMPLE
+rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-sync-memory.ps1 `
+  -CurrentExecutable target/debug/deps/hifimule_daemon-422624aa74fc23a0.exe `
+  -Counts 45522 -HoldSeconds 120 -CommittedBeforeHold 100 -PollState -CompactState
 #>
 [CmdletBinding()]
 param(
@@ -28,6 +39,8 @@ param(
     [ValidateRange(1, 1000000)][int[]]$Counts = @(5000, 40000, 80000),
     [ValidateRange(2, 3600)][int]$HoldSeconds = 20,
     [ValidateRange(0, 100)][int]$CommittedBeforeHold = 0,
+    [switch]$PollState,
+    [switch]$CompactState,
     [string]$OutputDirectory,
     [string]$RuntimeDirectory,
     [ValidatePattern('^[a-zA-Z0-9_:]+$')]
@@ -86,6 +99,9 @@ function Measure-Executor {
     $process.StartInfo.Environment['HIFIMULE_SYNC_BENCH_COUNT'] = [string]$Count
     $process.StartInfo.Environment['HIFIMULE_SYNC_BENCH_HOLD_SECS'] = [string]$HoldSeconds
     $process.StartInfo.Environment['HIFIMULE_SYNC_BENCH_COMMITTED'] = [string]$CommittedBeforeHold
+    $process.StartInfo.Environment['HIFIMULE_SYNC_BENCH_POLL_STATE'] = if ($PollState.IsPresent) { '1' } else { '0' }
+    $compactPolling = $CompactState.IsPresent -and $Label -eq 'current'
+    $process.StartInfo.Environment['HIFIMULE_DAEMON_STATE_BENCH_COMPACT'] = if ($compactPolling) { '1' } else { '0' }
     $process.StartInfo.Environment['PATH'] = "$runtimeBin;$env:PATH"
     $samples = [System.Collections.Generic.List[object]]::new()
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -167,6 +183,8 @@ function Measure-Executor {
         tracks = $Count
         holdSeconds = $HoldSeconds
         committedBeforeHold = $CommittedBeforeHold
+        pollState = $PollState.IsPresent
+        compactState = $compactPolling
         executable = $executablePath
         executableSha256 = $binaryHash
         exitCode = $exitCode
@@ -199,6 +217,8 @@ foreach ($count in $Counts) {
             tracks = $count
             holdSeconds = $HoldSeconds
             committedBeforeHold = $CommittedBeforeHold
+            pollState = $PollState.IsPresent
+            currentCompactState = $after.compactState
             baselinePrivateMiB = [Math]::Round($beforeBytes / 1MB, 2)
             currentPrivateMiB = [Math]::Round($afterBytes / 1MB, 2)
             reductionPercent = [Math]::Round(100 * (1 - $afterBytes / $beforeBytes), 2)
