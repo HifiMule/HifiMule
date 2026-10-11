@@ -1,0 +1,207 @@
+{
+  "device_id": "rust-fixture",
+  "name": "Été 🎵",
+  "icon": "🎧",
+  "version": "1.0",
+  "managed_paths": [],
+  "audiobookPath": "Books",
+  "podcastPath": "Podcasts",
+  "playlistPath": "Lists",
+  "synced_items": [
+    {
+      "isAutoFill": true,
+      "mediaRole": "audiobook",
+      "providerItemId": "same",
+      "name": "Été 🎵",
+      "album": "",
+      "artist": null,
+      "localPath": "Books/Été.mp3",
+      "sizeBytes": 18446744073709551615,
+      "syncedAt": "today",
+      "originalName": "original",
+      "etag": "etag",
+      "providerAlbumId": "album",
+      "providerContentType": "audio/mpeg",
+      "providerSuffix": "mp3",
+      "originalBitrate": 4294967295,
+      "originalContainer": "mp3",
+      "trackNumber": 4294967295,
+      "serverId": "server"
+    },
+    {
+      "isAutoFill": false,
+      "mediaRole": "podcast",
+      "providerItemId": "same",
+      "name": "Second occurrence",
+      "album": "",
+      "artist": null,
+      "localPath": "Books/Été.mp3",
+      "sizeBytes": 0,
+      "syncedAt": "today",
+      "originalName": null,
+      "etag": "etag",
+      "providerAlbumId": "album",
+      "providerContentType": "audio/mpeg",
+      "providerSuffix": "mp3",
+      "originalBitrate": 4294967295,
+      "originalContainer": "mp3",
+      "trackNumber": 4294967295,
+      "serverId": "server"
+    }
+  ],
+  "dirty": true,
+  "pending_item_ids": [
+    "same",
+    "same"
+  ],
+  "basket_items": [
+    {
+      "id": "same",
+      "name": "Basket",
+      "type": "MusicAlbum",
+      "serverId": "server",
+      "artist": "",
+      "childCount": 4294967295,
+      "sizeTicks": -9223372036854775808,
+      "sizeBytes": 18446744073709551615
+    }
+  ],
+  "auto_sync_on_connect": true,
+  "last_sync_at": -9223372036854775808,
+  "auto_fill": {
+    "server": {
+      "enabled": true,
+      "podcastRetention": {
+        "recentCount": 10,
+        "unplayedOnly": false,
+        "mode": "latest",
+        "showIds": []
+      },
+      "filter": {
+        "includeTags": [],
+        "excludeTags": [],
+        "includeGenres": [
+          "Jazz"
+        ],
+        "excludeGenres": [
+          "Metal"
+        ]
+      },
+      "sources": [
+        {
+          "kind": "playlist",
+          "ref": "pl-42",
+          "share": 0.7
+        },
+        {
+          "kind": "favorites",
+          "share": 0.3
+        }
+      ],
+      "unit": "album",
+      "ordering": [
+        "quality",
+        "playCount"
+      ],
+      "memory": {
+        "cooldownWeeks": 4,
+        "playedExclusion": true,
+        "stableCorePct": null,
+        "repeatTolerance": null
+      },
+      "budget": {
+        "maxBytes": 8000000000,
+        "targetDurationSecs": 3600,
+        "headroomBytes": 100,
+        "encodingFromGoals": true
+      },
+      "fallback": [
+        {
+          "kind": "library"
+        }
+      ],
+      "quality": {
+        "bestVersion": true,
+        "versionPreference": [
+          "live"
+        ]
+      },
+      "rarity": {
+        "enabled": true,
+        "legendaryWeight": 8.0,
+        "rareWeight": 3.0,
+        "commonWeight": 1.0,
+        "rareMaxPlays": 5
+      },
+      "pity": {
+        "enabled": true,
+        "thresholdSyncs": 3,
+        "guaranteedRatio": 0.25,
+        "discoveryMaxPlays": 0
+      },
+      "context": {
+        "enabled": true,
+        "rules": [
+          {
+            "window": {
+              "timeOfDay": {
+                "start_hour": 6,
+                "end_hour": 11
+              }
+            },
+            "sourceRefs": [
+              "pl-42"
+            ],
+            "weight": 2.0,
+            "includeTags": [],
+            "excludeTags": [],
+            "includeGenres": [],
+            "excludeGenres": []
+          },
+          {
+            "window": {
+              "months": {
+                "months": [
+                  12
+                ]
+              }
+            },
+            "sourceRefs": [],
+            "includeTags": [],
+            "excludeTags": [],
+            "includeGenres": [
+              "Christmas"
+            ],
+            "excludeGenres": []
+          }
+        ]
+      },
+      "promotion": {
+        "spotlight": true,
+        "spotlightShare": 0.5,
+        "albumTrackRatio": 0.3,
+        "promoteAlbumMinFavorites": 2,
+        "coherence": true
+      }
+    }
+  },
+  "transcoding_profile_id": "profile",
+  "last_synced_transcoding_profile_id": "old-profile",
+  "transcoding_profile_dirty": true,
+  "playlists": [
+    {
+      "jellyfinId": "playlist",
+      "filename": "Lists/all.m3u",
+      "trackCount": 2,
+      "trackIds": [
+        "same",
+        "same"
+      ],
+      "lastModified": "today"
+    }
+  ],
+  "storage_id": "storage",
+  "folder_ids": {
+    "Music/Été": 4294967295
+  }
+}

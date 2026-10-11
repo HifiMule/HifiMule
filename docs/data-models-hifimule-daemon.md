@@ -6,7 +6,31 @@
 
 ## DeviceManifest
 
-Stored at `<device-root>/.hifimule.json`. Source of truth for all sync state.
+Stored at `<device-root>/.hifimule.json.zst`; MTP uses the authoritative local
+`manifests/<device_id>.json.zst` cache and a best-effort device mirror. Legacy
+`.hifimule.json` / `<device_id>.json` are read only when the compressed file is
+absent and are removed after successful verified migration. Corrupt compressed
+storage never falls back to stale legacy data.
+
+Storage version 1 is one standard Zstd frame with a checksum, compressed at level 9.
+Its UTF-8 JSON wrapper has exactly `format: "hifimule-column-json"`,
+`storageVersion: 1`, `manifest` (ordinary manifest fields excluding `synced_items`),
+and `syncedItems: { count, columns }`. `columns` contains one array for every
+`SyncedItem` camelCase field: `isAutoFill`, `mediaRole`, `providerItemId`, `name`,
+`album`, `artist`, `localPath`, `sizeBytes`, `syncedAt`, `originalName`, `etag`,
+`providerAlbumId`, `providerContentType`, `providerSuffix`, `originalBitrate`,
+`originalContainer`, `trackNumber`, and `serverId`. All arrays must have `count`
+elements, including null values for absent optionals. Reconstruction preserves row
+order, duplicate IDs and exact integers. Metadata retains ordinary JSON numeric
+tokens, including fractional settings. Empty manifests include all columns as
+empty arrays. Storage version is independent of the manifest's `version` string.
+Input and decompressed JSON are limited to 512 MiB; encoding checks both limits
+before publication. Checksums, wrapper version,
+column types/counts, extra frames and truncation are validated before accepting
+state. The following model remains the ordinary JSON/RPC shape.
+
+Use the [read-only inspector](./development-guide.md#inspect-the-manifest) to display
+storage as ordinary JSON with Node.js 24+. Older builds cannot read migrated storage.
 
 ```rust
 pub struct DeviceManifest {
@@ -44,7 +68,7 @@ Represents a single file that has been successfully synced to the device.
 ```rust
 pub struct SyncedItem {
     pub media_role: MediaRole,       // music, audiobook, or podcast
-    pub jellyfin_id: String,       // provider item ID; serialized in .hifimule.json as providerItemId
+    pub jellyfin_id: String,       // provider item ID; stored as providerItemId
     pub name: String,              // track title
     pub album: Option<String>,
     pub artist: Option<String>,
@@ -60,7 +84,7 @@ pub struct SyncedItem {
 ```
 
 `local_path` is relative to the device root (e.g., `"Music/Artist/Album/01 - Track.mp3"`).
-The synced-item ID is written as `providerItemId` in `.hifimule.json`. The Rust field is still named `jellyfin_id` for compatibility, but its semantic meaning is now "active provider item ID."
+The synced-item ID is written as `providerItemId` in the compressed track columns and ordinary JSON/RPC shape. The Rust field is still named `jellyfin_id` for compatibility, but its semantic meaning is now "active provider item ID."
 
 ---
 

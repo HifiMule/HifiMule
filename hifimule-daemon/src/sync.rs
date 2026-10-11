@@ -1213,7 +1213,7 @@ impl SyncOperationManager {
         {
             errors.push(SyncFileError {
                 jellyfin_id: String::new(),
-                filename: ".hifimule.json".into(),
+                filename: ".hifimule.json.zst".into(),
                 error_message: format!("Failed to commit final manifest: {error}"),
             });
         }
@@ -5144,21 +5144,29 @@ mod tests {
         assert_eq!(manifest.synced_byte_totals(), (10_000_000, 20_000_000));
     }
 
-    #[derive(Debug)]
-    struct MissingDeleteDeviceIo;
+    #[derive(Debug, Default)]
+    struct MissingDeleteDeviceIo {
+        manifest_bytes: std::sync::Mutex<Vec<u8>>,
+    }
 
     #[async_trait::async_trait]
     impl crate::device_io::DeviceIO for MissingDeleteDeviceIo {
-        async fn read_file(&self, _path: &str) -> anyhow::Result<Vec<u8>> {
+        async fn read_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            if path == ".hifimule.json.zst" {
+                return Ok(self.manifest_bytes.lock().unwrap().clone());
+            }
             Ok(Vec::new())
         }
 
-        async fn write_file(&self, _path: &str, _data: &[u8]) -> anyhow::Result<()> {
+        async fn write_file(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            if path == ".hifimule.json.zst" {
+                *self.manifest_bytes.lock().unwrap() = data.to_vec();
+            }
             Ok(())
         }
 
-        async fn write_with_verify(&self, _path: &str, _data: &[u8]) -> anyhow::Result<()> {
-            Ok(())
+        async fn write_with_verify(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.write_file(path, data).await
         }
 
         async fn delete_file(&self, _path: &str) -> anyhow::Result<()> {
@@ -5256,7 +5264,7 @@ mod tests {
             "stale manifest entry must be removed after idempotent cleanup"
         );
 
-        let manifest_json = tokio::fs::read_to_string(root.join(".hifimule.json"))
+        let manifest_json = crate::device::manifest_codec::read_manifest_json(root.join(".hifimule.json.zst"))
             .await
             .unwrap();
         let persisted: crate::device::DeviceManifest =
@@ -5328,7 +5336,7 @@ mod tests {
             Arc::clone(&operation_manager),
             operation_id.clone(),
             Arc::clone(&manager),
-            Arc::new(MissingDeleteDeviceIo),
+            Arc::new(MissingDeleteDeviceIo::default()),
         )
         .await
         .unwrap();
@@ -6011,7 +6019,7 @@ mod tests {
         }
 
         async fn write_with_verify(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
-            if path == ".hifimule.json" {
+            if path == ".hifimule.json.zst" {
                 let result = self.inner.write_with_verify(path, data).await;
                 if result.is_ok() {
                     self.manifest_writes.fetch_add(1, Ordering::SeqCst);
@@ -6056,6 +6064,11 @@ mod tests {
         }
 
         async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+            // The trace models media transfer/deletion ordering. Manifest migration
+            // cleanup is persistence, just like the manifest writes above.
+            if path == ".hifimule.json" {
+                return self.inner.delete_file(path).await;
+            }
             self.trace.lock().unwrap().push("delete");
             if self.refused_delete.lock().unwrap().as_deref() == Some(path) {
                 return Err(std::io::Error::new(
@@ -6164,7 +6177,7 @@ mod tests {
         .unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         let durable: DeviceManifest =
-            serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap())
+            crate::device::manifest_codec::decode_test_manifest(&std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap())
                 .unwrap();
         assert_eq!(durable.synced_items.len(), items.len());
         for (actual, original) in durable.synced_items.iter().zip(items) {
@@ -6650,7 +6663,7 @@ mod tests {
             operation_manager,
             operation_id,
             Arc::clone(&manager),
-            Arc::new(MissingDeleteDeviceIo),
+            Arc::new(MissingDeleteDeviceIo::default()),
         )
         .await
         .unwrap();
@@ -6666,8 +6679,8 @@ mod tests {
                 .synced_items
                 .is_empty()
         );
-        let persisted: DeviceManifest = serde_json::from_slice(
-            &tokio::fs::read(dir.path().join(".hifimule.json"))
+        let persisted: DeviceManifest = crate::device::manifest_codec::decode_test_manifest(
+            &tokio::fs::read(dir.path().join(".hifimule.json.zst"))
                 .await
                 .unwrap(),
         )
@@ -6869,8 +6882,8 @@ mod tests {
             provider_staging_dirs_for_operation(&operation_id).is_empty(),
             "provider staging directory should be removed after cancellation"
         );
-        let persisted: DeviceManifest = serde_json::from_slice(
-            &tokio::fs::read(dir.path().join(".hifimule.json"))
+        let persisted: DeviceManifest = crate::device::manifest_codec::decode_test_manifest(
+            &tokio::fs::read(dir.path().join(".hifimule.json.zst"))
                 .await
                 .unwrap(),
         )
@@ -9246,7 +9259,7 @@ mod tests {
             self.inner.write_file(path, data).await
         }
         async fn write_with_verify(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
-            if path == ".hifimule.json" && self.reject_manifest.load(Ordering::Acquire) {
+            if path == ".hifimule.json.zst" && self.reject_manifest.load(Ordering::Acquire) {
                 anyhow::bail!("injected manifest persistence failure");
             }
             self.inner.write_with_verify(path, data).await
@@ -9289,7 +9302,7 @@ mod tests {
     }
 
     fn read_persisted_manifest(root: &Path) -> DeviceManifest {
-        serde_json::from_slice(&std::fs::read(root.join(".hifimule.json")).unwrap()).unwrap()
+        crate::device::manifest_codec::decode_test_manifest(&std::fs::read(root.join(".hifimule.json.zst")).unwrap()).unwrap()
     }
 
     #[tokio::test]
@@ -9340,7 +9353,7 @@ mod tests {
             .await
             .unwrap();
         assert!(manager.select_device(a.path().into()).await);
-        let b_before = std::fs::read(b.path().join(".hifimule.json")).unwrap();
+        let b_before = std::fs::read(b.path().join(".hifimule.json.zst")).unwrap();
         let operations = Arc::new(SyncOperationManager::new());
         let id = unique_operation_id("fixed-target");
         operations.create_operation(id.clone(), 1).await;
@@ -9410,7 +9423,7 @@ mod tests {
             vec![1, 2, 3, 4]
         );
         assert_eq!(
-            std::fs::read(b.path().join(".hifimule.json")).unwrap(),
+            std::fs::read(b.path().join(".hifimule.json.zst")).unwrap(),
             b_before
         );
         assert!(!b.path().join("OtherMusic").exists());

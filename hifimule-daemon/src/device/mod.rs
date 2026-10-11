@@ -1,3 +1,4 @@
+pub(crate) mod manifest_codec;
 pub mod mtp;
 
 use crate::auto_fill::AutoFillPipeline;
@@ -545,11 +546,95 @@ pub async fn write_manifest(
     device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     manifest: &DeviceManifest,
 ) -> Result<()> {
-    let json = serde_json::to_string_pretty(manifest)?;
-    device_io
-        .write_with_verify(".hifimule.json", json.as_bytes())
-        .await
+    let bytes = manifest_codec::encode_async(manifest.clone()).await?;
+    write_manifest_bytes(&device_io, &bytes).await
 }
+
+async fn write_manifest_bytes(
+    device_io: &Arc<dyn crate::device_io::DeviceIO>,
+    bytes: &[u8],
+) -> Result<()> {
+    publish_manifest_bytes(device_io, bytes).await?;
+    // A failed/partial compressed replacement must never remove the legacy copy.
+    let mut retries = 0;
+    loop {
+        match device_io
+            .delete_file(manifest_codec::LEGACY_FILE_NAME)
+            .await
+        {
+            Ok(()) => {
+                device_io
+                    .sync_manifest_parent(manifest_codec::LEGACY_FILE_NAME)
+                    .await
+                    .map_err(ManifestLegacyCleanupFailed)?;
+                break;
+            }
+            Err(error) if is_missing_manifest_error(&error) => break,
+            Err(error) => {
+                let transient = cfg!(windows)
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| matches!(io.raw_os_error(), Some(5 | 32 | 33)));
+                if transient && retries < 20 {
+                    retries += 1;
+                    sleep(Duration::from_millis(100)).await;
+                } else {
+                    return Err(ManifestLegacyCleanupFailed(error).into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Publish without legacy retirement, also used to restore recovery evidence
+/// after a postcommit failure. Every published manifest gets explicit readback.
+async fn publish_manifest_bytes(
+    device_io: &Arc<dyn crate::device_io::DeviceIO>,
+    bytes: &[u8],
+) -> Result<()> {
+    device_io
+        .write_with_verify(manifest_codec::FILE_NAME, bytes)
+        .await?;
+    let verified: Result<()> = async {
+        anyhow::ensure!(
+            device_io.read_file(manifest_codec::FILE_NAME).await? == bytes,
+            "Published manifest bytes differ from the encoded snapshot"
+        );
+        device_io
+            .sync_manifest_parent(manifest_codec::FILE_NAME)
+            .await?;
+        Ok(())
+    }
+    .await;
+    verified.map_err(|error| ManifestPublicationUncertain(error).into())
+}
+
+#[derive(Debug)]
+struct ManifestPublicationUncertain(anyhow::Error);
+impl std::fmt::Display for ManifestPublicationUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Manifest publication is uncertain after verification or durability failure: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for ManifestPublicationUncertain {}
+
+#[derive(Debug)]
+struct ManifestLegacyCleanupFailed(anyhow::Error);
+impl std::fmt::Display for ManifestLegacyCleanupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Compressed manifest committed but legacy cleanup failed: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for ManifestLegacyCleanupFailed {}
 
 async fn persist_local_manifest_atomic(path: &Path, manifest: &DeviceManifest) -> Result<()> {
     persist_local_manifest_atomic_with_sync(path, manifest, sync_manifest_directory).await
@@ -562,7 +647,7 @@ impl std::fmt::Display for ManifestCacheCommitUncertain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Manifest cache rename completed but directory sync failed: {}",
+            "Manifest cache committed but durability or legacy cleanup failed: {}",
             self.0
         )
     }
@@ -570,7 +655,7 @@ impl std::fmt::Display for ManifestCacheCommitUncertain {
 
 impl std::error::Error for ManifestCacheCommitUncertain {}
 
-fn sync_manifest_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_manifest_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
     // Windows does not support opening directories with std::fs::File for fsync.
@@ -584,6 +669,15 @@ async fn persist_local_manifest_atomic_with_sync(
     manifest: &DeviceManifest,
     sync_directory: fn(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
+    let bytes = manifest_codec::encode_async(manifest.clone()).await?;
+    persist_local_manifest_bytes_with_sync(path, &bytes, sync_directory).await
+}
+
+async fn persist_local_manifest_bytes_with_sync(
+    path: &Path,
+    bytes: &[u8],
+    sync_directory: fn(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let parent = path
@@ -595,18 +689,20 @@ async fn persist_local_manifest_atomic_with_sync(
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("Manifest cache path is invalid"))?;
     let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-    let bytes = serde_json::to_vec_pretty(manifest)?;
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&temporary)
         .await?;
     if let Err(error) = async {
-        file.write_all(&bytes).await?;
+        file.write_all(bytes).await?;
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
-        tokio::fs::rename(&temporary, path).await?;
+        if tokio::fs::read(&temporary).await? != bytes {
+            return Err(std::io::Error::other("Manifest cache verification failed"));
+        }
+        crate::device_io::replace_verified_file(&temporary, path).await?;
         Ok::<(), std::io::Error>(())
     }
     .await
@@ -621,6 +717,34 @@ async fn persist_local_manifest_atomic_with_sync(
         .await
         .map_err(|error| ManifestCacheCommitUncertain(std::io::Error::other(error)))?
         .map_err(ManifestCacheCommitUncertain)?;
+    if path.extension().is_some_and(|extension| extension == "zst") {
+        let legacy = path.with_extension("");
+        let mut retries = 0;
+        loop {
+            match tokio::fs::remove_file(&legacy).await {
+                Ok(()) => {
+                    let parent = path.parent().expect("validated parent").to_path_buf();
+                    tokio::task::spawn_blocking(move || sync_directory(&parent))
+                        .await
+                        .map_err(|error| {
+                            ManifestCacheCommitUncertain(std::io::Error::other(error))
+                        })?
+                        .map_err(ManifestCacheCommitUncertain)?;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error)
+                    if retries < 20
+                        && cfg!(windows)
+                        && matches!(error.raw_os_error(), Some(5 | 32 | 33)) =>
+                {
+                    retries += 1;
+                    sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(ManifestCacheCommitUncertain(error).into()),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -781,15 +905,35 @@ pub struct DeviceProber;
 
 impl DeviceProber {
     pub async fn probe(path: &Path) -> Result<Option<DeviceManifest>> {
-        let manifest_path = path.join(".hifimule.json");
-        if tokio::fs::metadata(&manifest_path).await.is_err() {
-            return Ok(None);
-        }
-
-        let content = tokio::fs::read_to_string(&manifest_path).await?;
-        let manifest: DeviceManifest = serde_json::from_str(&content)?;
-        Ok(Some(manifest))
+        read_local_manifest(&path.join(manifest_codec::FILE_NAME)).await
     }
+}
+
+/// Absence is distinct from invalid/unreadable authoritative storage. Legacy is
+/// considered only after a NotFound error, never after a compressed decode error.
+async fn read_local_manifest(path: &Path) -> Result<Option<DeviceManifest>> {
+    match read_local_manifest_file(path, true).await? {
+        Some(manifest) => Ok(Some(manifest)),
+        None => read_local_manifest_file(&path.with_extension(""), false).await,
+    }
+}
+
+async fn read_local_manifest_file(path: &Path, compressed: bool) -> Result<Option<DeviceManifest>> {
+    use tokio::io::AsyncReadExt;
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(manifest_codec::MAX_DECODED_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    anyhow::ensure!(
+        bytes.len() <= manifest_codec::MAX_DECODED_BYTES,
+        "Manifest input exceeds 512 MiB limit"
+    );
+    Ok(Some(manifest_codec::decode_async(bytes, compressed).await?))
 }
 
 pub struct DeviceManager {
@@ -940,28 +1084,34 @@ impl DeviceManager {
         // device load on a write failure).
         let mut manifest = manifest;
         let remap = self.db.server_id_remap();
-        if reconcile_manifest_server_ids(&mut manifest, &remap)
-            && let Err(e) = write_manifest(std::sync::Arc::clone(&device_io), &manifest).await
-        {
-            daemon_log!(
-                "[Device] Manifest server_id reconciliation persist failed (continuing): {}",
-                e
-            );
-        }
-
-        // Story 12.2: actively migrate a legacy `{ enabled, maxBytes }` auto-fill block onto the
-        // currently selected server's portable id (the only faithful target — the legacy block
-        // carried no serverId). Best-effort persistence, mirroring the reconcile path above; if
-        // no server is selected yet the legacy block stays parked and migrates on a later detect.
+        let mut manifest_changed = reconcile_manifest_server_ids(&mut manifest, &remap);
+        // Legacy auto-fill settings migrate onto the selected portable server.
         if let Ok(Some(sel)) = self.db.get_server_config()
             && let Some(portable) = sel.server_id
             && manifest.auto_fill.migrate_legacy_to(&portable)
-            && let Err(e) = write_manifest(std::sync::Arc::clone(&device_io), &manifest).await
         {
-            daemon_log!(
-                "[Device] Auto-fill legacy migration persist failed (continuing): {}",
-                e
-            );
+            manifest_changed = true;
+        }
+        if manifest_changed {
+            let result: Result<()> = async {
+                let bytes = manifest_codec::encode_async(manifest.clone()).await?;
+                if device_class == DeviceClass::Mtp {
+                    let path = (self.mtp_manifest_cache_path)(&manifest.device_id)?;
+                    persist_local_manifest_bytes_with_sync(&path, &bytes, sync_manifest_directory)
+                        .await?;
+                    let _ = write_manifest_bytes(&device_io, &bytes).await;
+                    Ok(())
+                } else {
+                    write_manifest_bytes(&device_io, &bytes).await
+                }
+            }
+            .await;
+            if let Err(error) = result {
+                daemon_log!(
+                    "[Device] Manifest reconciliation persist failed (continuing): {}",
+                    error
+                );
+            }
         }
 
         // T5.9: Scan for MTP-style dirty markers on reconnect.
@@ -1823,17 +1973,16 @@ impl DeviceManager {
         let manifest_snapshot = connected.manifest.clone();
         let is_mtp = connected.device_class == DeviceClass::Mtp;
         drop(state);
+        let commit_started = std::time::Instant::now();
+        let snapshot_id = manifest_snapshot.device_id.clone();
+        let snapshot_dirty = manifest_snapshot.dirty;
+        let snapshot_pending = manifest_snapshot.pending_item_ids.clone();
+        let encoded = manifest_codec::encode_async(manifest_snapshot).await;
         let commit_log = expected_io.map(|_| {
             (
-                if manifest_snapshot.dirty {
-                    "initial"
-                } else {
-                    "clean"
-                },
-                std::time::Instant::now(),
-                serde_json::to_vec_pretty(&manifest_snapshot)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0),
+                if snapshot_dirty { "initial" } else { "clean" },
+                commit_started,
+                encoded.as_ref().map(|bytes| bytes.len()).unwrap_or(0),
             )
         });
         if let Some((reason, _, bytes)) = &commit_log {
@@ -1841,40 +1990,42 @@ impl DeviceManager {
                 "[Sync] Manifest checkpoint start reason={reason} updates=0 elapsed_ms=0 manifest_bytes={bytes}"
             );
         }
-        let persist_result = if is_mtp {
-            // For MTP devices the local cache is authoritative: on-device writes are
-            // best-effort only. Do not publish a clean mirror before the recovery
-            // cache has committed: a failed cache path must leave the old mirror intact.
-            async {
-                let local_path = cache_path(&manifest_snapshot.device_id)?;
-                let result = persist_local_manifest_atomic_with_sync(
-                    &local_path,
-                    &manifest_snapshot,
-                    sync_directory,
-                )
-                .await;
-                if result
-                    .as_ref()
-                    .is_err_and(|error| error.is::<ManifestCacheCommitUncertain>())
-                {
-                    // The replacement is visible but durability is unknown. Restore
-                    // recovery evidence both in memory and, best-effort, on disk.
-                    previous_manifest.dirty = true;
-                    for item in &manifest_snapshot.pending_item_ids {
-                        if !previous_manifest.pending_item_ids.contains(item) {
-                            previous_manifest.pending_item_ids.push(item.clone());
+        let persist_result: Result<()> = async {
+            let bytes = encoded?;
+            if is_mtp {
+                // For MTP devices the local cache is authoritative: on-device writes are
+                // best-effort only. Do not publish a clean mirror before the recovery
+                // cache has committed: a failed cache path must leave the old mirror intact.
+                async {
+                    let local_path = cache_path(&snapshot_id)?;
+                    let result =
+                        persist_local_manifest_bytes_with_sync(&local_path, &bytes, sync_directory)
+                            .await;
+                    if result
+                        .as_ref()
+                        .is_err_and(|error| error.is::<ManifestCacheCommitUncertain>())
+                    {
+                        // The replacement is visible but durability is unknown. Restore
+                        // recovery evidence both in memory and, best-effort, on disk.
+                        previous_manifest.dirty = true;
+                        for item in &snapshot_pending {
+                            if !previous_manifest.pending_item_ids.contains(item) {
+                                previous_manifest.pending_item_ids.push(item.clone());
+                            }
                         }
+                        let _ =
+                            persist_local_manifest_atomic(&local_path, &previous_manifest).await;
                     }
-                    let _ = persist_local_manifest_atomic(&local_path, &previous_manifest).await;
+                    result?;
+                    let _ = write_manifest_bytes(&device_io, &bytes).await;
+                    Ok(())
                 }
-                result?;
-                let _ = crate::device::write_manifest(device_io, &manifest_snapshot).await;
-                Ok(())
+                .await
+            } else {
+                write_manifest_bytes(&device_io, &bytes).await
             }
-            .await
-        } else {
-            crate::device::write_manifest(device_io, &manifest_snapshot).await
-        };
+        }
+        .await;
         if let Some((reason, started, bytes)) = &commit_log {
             crate::daemon_log!(
                 "[Sync] Manifest checkpoint result reason={reason} updates=0 elapsed_ms=0 manifest_bytes={bytes} duration_ms={:.0} result={} error={}",
@@ -1892,9 +2043,25 @@ impl DeviceManager {
             );
         }
         if let Err(error) = persist_result {
+            if !is_mtp
+                && (error.is::<ManifestLegacyCleanupFailed>()
+                    || error.is::<ManifestPublicationUncertain>())
+            {
+                previous_manifest.dirty |= snapshot_dirty;
+                for item in &snapshot_pending {
+                    if !previous_manifest.pending_item_ids.contains(item) {
+                        previous_manifest.pending_item_ids.push(item.clone());
+                    }
+                }
+                // The replacement may already be visible. Restore the previous
+                // state and actual recovery evidence without retiring legacy.
+                if let Ok(bytes) = manifest_codec::encode_async(previous_manifest.clone()).await {
+                    let _ = publish_manifest_bytes(&device_io, &bytes).await;
+                }
+            }
             let mut state = self.state.write().await;
             if let Some(connected) = state.connected_devices.get_mut(&path)
-                && connected.manifest.device_id == manifest_snapshot.device_id
+                && connected.manifest.device_id == snapshot_id
                 && connected.observation_token == observation_token
             {
                 connected.manifest = previous_manifest;
@@ -2130,16 +2297,16 @@ impl DeviceManager {
             auto_sync_on_connect: false,
             last_sync_at: None,
             auto_fill: AutoFillConfig::default(),
-            transcoding_profile_id, // stored in .hifimule.json; read back on sync to apply transcoding
+            transcoding_profile_id, // stored in .hifimule.json.zst; read back on sync to apply transcoding
             last_synced_transcoding_profile_id: None,
             transcoding_profile_dirty: false,
             playlists: vec![],
             storage_id,
             folder_ids: std::collections::HashMap::new(),
         };
-        let manifest_bytes = serde_json::to_string_pretty(&manifest)?;
+        let manifest_bytes = manifest_codec::encode_async(manifest.clone()).await?;
         daemon_log!(
-            "[DeviceInit] Writing manifest path=.hifimule.json device_path={} class={:?} managed_paths={:?} storage_id={:?} bytes={}",
+            "[DeviceInit] Writing manifest path=.hifimule.json.zst device_path={} class={:?} managed_paths={:?} storage_id={:?} bytes={}",
             device_path,
             device_class,
             manifest.managed_paths,
@@ -2148,25 +2315,24 @@ impl DeviceManager {
         );
         if device_class == DeviceClass::Mtp {
             let cache_path = (self.mtp_manifest_cache_path)(&manifest.device_id)?;
-            persist_local_manifest_atomic(&cache_path, &manifest).await?;
-            if let Err(e) = device_io
-                .write_with_verify(".hifimule.json", manifest_bytes.as_bytes())
-                .await
-            {
+            persist_local_manifest_bytes_with_sync(
+                &cache_path,
+                &manifest_bytes,
+                sync_manifest_directory,
+            )
+            .await?;
+            if let Err(e) = write_manifest_bytes(&device_io, &manifest_bytes).await {
                 daemon_log!(
-                    "[DeviceInit] Manifest mirror failed after authoritative local cache commit path=.hifimule.json device_path={} class={:?} storage_id={:?} error={:#}",
+                    "[DeviceInit] Manifest mirror failed after authoritative local cache commit path=.hifimule.json.zst device_path={} class={:?} storage_id={:?} error={:#}",
                     device_path,
                     device_class,
                     manifest.storage_id,
                     e
                 );
             }
-        } else if let Err(e) = device_io
-            .write_with_verify(".hifimule.json", manifest_bytes.as_bytes())
-            .await
-        {
+        } else if let Err(e) = write_manifest_bytes(&device_io, &manifest_bytes).await {
             daemon_log!(
-                "[DeviceInit] Manifest write failed path=.hifimule.json device_path={} class={:?} managed_paths={:?} storage_id={:?} error={:#}",
+                "[DeviceInit] Manifest write failed path=.hifimule.json.zst device_path={} class={:?} managed_paths={:?} storage_id={:?} error={:#}",
                 device_path,
                 device_class,
                 manifest.managed_paths,
@@ -2175,7 +2341,7 @@ impl DeviceManager {
             );
             return Err(e).with_context(|| {
                 format!(
-                    "Failed to write .hifimule.json on device {} via {:?}",
+                    "Failed to write .hifimule.json.zst on device {} via {:?}",
                     device_path, device_class
                 )
             });
@@ -3280,134 +3446,154 @@ async fn emit_mtp_probe_event(
     friendly_name: String,
     backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO>,
 ) -> bool {
-    // Prefer the local manifest cache for MTP devices — it is the authoritative store
-    // (updated by update_manifest on every successful sync), so it survives device
-    // reconnects and daemon restarts without depending on an MTP write succeeding.
-    let local_manifest: Option<DeviceManifest> = crate::paths::get_local_mtp_manifest_path(dev_id)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(&p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok());
+    emit_mtp_probe_event_with_cache_path(
+        tx,
+        observation_token,
+        synthetic_path,
+        dev_id,
+        dev_info,
+        friendly_name,
+        backend_arc,
+        crate::paths::get_local_mtp_manifest_path,
+    )
+    .await
+}
 
-    if let Some(manifest) = local_manifest {
-        daemon_log!(
-            "[MTP] Using local manifest cache for device_id={} friendly_name={}",
-            dev_id,
-            friendly_name
-        );
-        let final_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
-            if let Some(storage_id) = manifest.storage_id.clone() {
-                match tokio::task::spawn_blocking(move || {
-                    mtp::create_mtp_backend(&dev_info, Some(storage_id))
-                })
-                .await
-                {
-                    Ok(Ok(storage_backend)) => std::sync::Arc::new(storage_backend),
-                    _ => backend_arc,
+fn is_addressable_manifest_cache_identity(id: &str) -> bool {
+    if id.is_empty()
+        || matches!(id, "." | "..")
+        || id.contains(['/', '\\'])
+        || id.chars().any(char::is_control)
+    {
+        return false;
+    }
+    // Unix bus:devnum cache identities remain readable. Raw Windows WPD IDs
+    // cannot be filenames; resolve their portable identity from the mirror.
+    if cfg!(windows) {
+        if id.contains(['<', '>', ':', '"', '|', '?', '*']) || id.ends_with(['.', ' ']) {
+            return false;
+        }
+        let stem = id.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && matches!(stem.as_bytes()[3], b'1'..=b'9')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+async fn read_canonical_mtp_cache<P>(
+    manifest: DeviceManifest,
+    cache_path: &P,
+) -> Result<DeviceManifest>
+where
+    P: Fn(&str) -> Result<PathBuf>,
+{
+    anyhow::ensure!(
+        is_addressable_manifest_cache_identity(&manifest.device_id),
+        "Invalid portable manifest cache identity"
+    );
+    let path = cache_path(&manifest.device_id)?;
+    Ok(read_local_manifest(&path).await?.unwrap_or(manifest))
+}
+
+async fn emit_mtp_probe_event_with_cache_path<P>(
+    tx: &tokio::sync::mpsc::Sender<DeviceEvent>,
+    observation_token: u64,
+    synthetic_path: PathBuf,
+    dev_id: &str,
+    dev_info: mtp::MtpDeviceInfo,
+    friendly_name: String,
+    backend_arc: Arc<dyn crate::device_io::DeviceIO>,
+    cache_path: P,
+) -> bool
+where
+    P: Fn(&str) -> Result<PathBuf>,
+{
+    // A present cache is authoritative even when corrupt. The portable identity
+    // may differ from the backend identity, so inspect it after reading a mirror.
+    let result: Result<Option<DeviceManifest>> = async {
+        if is_addressable_manifest_cache_identity(dev_id) {
+            let cache = cache_path(dev_id)?;
+            if let Some(manifest) = read_local_manifest(&cache).await? {
+                if manifest.device_id == dev_id {
+                    return Ok(Some(manifest));
                 }
-            } else {
-                backend_arc
-            };
-        return tx
-            .send(DeviceEvent::Detected {
+                // The physical cache establishes the portable identity. Updates
+                // always write that canonical cache, so its recovery data wins.
+                return Ok(Some(read_canonical_mtp_cache(manifest, &cache_path).await?));
+            }
+        }
+        let (bytes, compressed) = match backend_arc.read_file(manifest_codec::FILE_NAME).await {
+            Ok(bytes) => (bytes, true),
+            Err(error) if is_missing_manifest_error(&error) => {
+                match backend_arc
+                    .read_file(manifest_codec::LEGACY_FILE_NAME)
+                    .await
+                {
+                    Ok(bytes) => (bytes, false),
+                    Err(error) if is_missing_manifest_error(&error) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let mirror = manifest_codec::decode_async(bytes, compressed).await?;
+        Ok(Some(read_canonical_mtp_cache(mirror, &cache_path).await?))
+    }
+    .await;
+    match result {
+        Ok(Some(manifest)) => {
+            let final_io: Arc<dyn crate::device_io::DeviceIO> =
+                if let Some(storage_id) = manifest.storage_id.clone() {
+                    match tokio::task::spawn_blocking(move || {
+                        mtp::create_mtp_backend(&dev_info, Some(storage_id))
+                    })
+                    .await
+                    {
+                        Ok(Ok(backend)) => Arc::new(backend),
+                        _ => backend_arc,
+                    }
+                } else {
+                    backend_arc
+                };
+            tx.send(DeviceEvent::Detected {
                 observation_token,
                 path: synthetic_path,
                 manifest,
                 device_io: final_io,
             })
             .await
-            .is_ok();
-    }
-
-    match backend_arc.read_file(".hifimule.json").await {
-        Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
-            Ok(device_manifest) => {
-                // The backend probe identity can differ from the portable manifest
-                // identity. Once the on-device copy establishes that mapping, prefer
-                // the matching authoritative local cache so older clean mirror bytes
-                // cannot hide interrupted/dirty recovery evidence.
-                let manifest =
-                    crate::paths::get_local_mtp_manifest_path(&device_manifest.device_id)
-                        .ok()
-                        .and_then(|path| std::fs::read_to_string(path).ok())
-                        .and_then(|json| serde_json::from_str::<DeviceManifest>(&json).ok())
-                        .unwrap_or(device_manifest);
-                // If the manifest carries a cached storage_id, open a second backend that
-                // uses it directly — this makes free_space() and path lookups skip the
-                // first-child DEVICE enumeration on every call.
-                let final_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
-                    if let Some(storage_id) = manifest.storage_id.clone() {
-                        match tokio::task::spawn_blocking(move || {
-                            mtp::create_mtp_backend(&dev_info, Some(storage_id))
-                        })
-                        .await
-                        {
-                            Ok(Ok(storage_backend)) => std::sync::Arc::new(storage_backend),
-                            _ => backend_arc,
-                        }
-                    } else {
-                        backend_arc
-                    };
-                tx.send(DeviceEvent::Detected {
-                    observation_token,
+            .is_ok()
+        }
+        Ok(None) => tx
+            .send(DeviceEvent::Unrecognized {
+                observation_token,
+                path: synthetic_path,
+                device_io: backend_arc,
+                friendly_name: Some(friendly_name),
+            })
+            .await
+            .is_ok(),
+        Err(error) => {
+            daemon_log!(
+                "[MTP] Authoritative manifest read failed device_id={} friendly_name={} synthetic_path={} error={:#}; publishing sanitized read failure",
+                dev_id,
+                friendly_name,
+                synthetic_path.display(),
+                error
+            );
+            let _ = tx
+                .send(DeviceEvent::DiscoveryFailed {
                     path: synthetic_path,
-                    manifest,
-                    device_io: final_io,
+                    code: "DEVICE_READ_FAILED",
+                    display_name: Some(friendly_name),
                 })
-                .await
-                .is_ok()
-            }
-            Err(e) => {
-                daemon_log!(
-                    "[MTP] Manifest parse error during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; publishing sanitized read failure",
-                    dev_id,
-                    friendly_name,
-                    synthetic_path.display(),
-                    e
-                );
-                let _ = tx
-                    .send(DeviceEvent::DiscoveryFailed {
-                        path: synthetic_path,
-                        code: "DEVICE_READ_FAILED",
-                        display_name: Some(friendly_name),
-                    })
-                    .await;
-                false
-            }
-        },
-        Err(e) => {
-            if is_missing_manifest_error(&e) {
-                daemon_log!(
-                    "[MTP] Manifest missing during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; treating device as unrecognized",
-                    dev_id,
-                    friendly_name,
-                    synthetic_path.display(),
-                    e
-                );
-                tx.send(DeviceEvent::Unrecognized {
-                    observation_token,
-                    path: synthetic_path,
-                    device_io: backend_arc,
-                    friendly_name: Some(friendly_name),
-                })
-                .await
-                .is_ok()
-            } else {
-                daemon_log!(
-                    "[MTP] Manifest read failed during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; suppressing device event until next poll",
-                    dev_id,
-                    friendly_name,
-                    synthetic_path.display(),
-                    e
-                );
-                let _ = tx
-                    .send(DeviceEvent::DiscoveryFailed {
-                        path: synthetic_path,
-                        code: "DEVICE_READ_FAILED",
-                        display_name: Some(friendly_name),
-                    })
-                    .await;
-                false
-            }
+                .await;
+            false
         }
     }
 }

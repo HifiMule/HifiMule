@@ -13129,8 +13129,8 @@ mod tests {
             if operation.status != crate::sync::SyncStatus::Running {
                 assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
                 assert!(operation.errors.is_empty(), "{:?}", operation.errors);
-                let manifest: crate::device::DeviceManifest = serde_json::from_slice(
-                    &tokio::fs::read(dir.path().join(".hifimule.json"))
+                let manifest: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(
+                    &tokio::fs::read(dir.path().join(".hifimule.json.zst"))
                         .await
                         .unwrap(),
                 )
@@ -15490,8 +15490,8 @@ mod tests {
         );
 
         // Verify manifest was written to disk
-        let manifest_path = dir.path().join(".hifimule.json");
-        assert!(manifest_path.exists(), ".hifimule.json must exist");
+        let manifest_path = dir.path().join(".hifimule.json.zst");
+        assert!(manifest_path.exists(), ".hifimule.json.zst must exist");
 
         // Verify device is now recognized
         let current_device = device_manager.get_current_device().await;
@@ -15565,7 +15565,7 @@ mod tests {
         assert!(music_folder.exists(), "Music subfolder should be created");
 
         // Verify manifest on disk
-        let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
+        let content = crate::device::manifest_codec::read_manifest_json(dir.path().join(".hifimule.json.zst"))
             .await
             .unwrap();
         let manifest: crate::device::DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -15651,7 +15651,7 @@ mod tests {
         assert!(mapping.auto_sync_on_connect);
 
         // Verify manifest was updated on disk
-        let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
+        let content = crate::device::manifest_codec::read_manifest_json(dir.path().join(".hifimule.json.zst"))
             .await
             .unwrap();
         let on_disk: crate::device::DeviceManifest = serde_json::from_str(&content).unwrap();

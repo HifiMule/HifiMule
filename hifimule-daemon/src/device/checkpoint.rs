@@ -267,13 +267,14 @@ impl SessionState {
                 .get(&self.path)
                 .ok_or_else(|| anyhow::anyhow!("Sync connection removed"))?;
             self.validate(connected)?;
-            let bytes = serde_json::to_vec_pretty(&connected.manifest)?;
-            let cache_manifest =
-                (connected.device_class == DeviceClass::Mtp).then(|| connected.manifest.clone());
-            Ok((bytes, cache_manifest))
+            let snapshot = connected.manifest.clone();
+            let is_mtp = connected.device_class == DeviceClass::Mtp;
+            drop(state);
+            let bytes = manifest_codec::encode_async(snapshot).await?;
+            Ok((bytes, is_mtp))
         }
         .await;
-        let (bytes, cache_manifest) = match prepared {
+        let (bytes, is_mtp) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 crate::daemon_log!(
@@ -297,13 +298,14 @@ impl SessionState {
             bytes.len()
         );
         let result: Result<()> = async {
-            if let Some(manifest) = cache_manifest {
+            if is_mtp {
                 let path = (self.manager.mtp_manifest_cache_path)(&self.device_id)?;
-                persist_local_manifest_atomic(&path, &manifest).await?;
+                persist_local_manifest_bytes_with_sync(&path, &bytes, sync_manifest_directory)
+                    .await?;
                 // MTP's local cache is authoritative; retain the existing best-effort mirror.
-                let _ = self.io.write_with_verify(".hifimule.json", &bytes).await;
+                let _ = write_manifest_bytes(&self.io, &bytes).await;
             } else {
-                self.io.write_with_verify(".hifimule.json", &bytes).await?;
+                write_manifest_bytes(&self.io, &bytes).await?;
             }
             Ok(())
         }

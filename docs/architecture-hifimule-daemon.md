@@ -32,7 +32,27 @@ Capabilities decide the modes surfaced by the UI. The Audiobookshelf provider ke
 
 ## Device and sync
 
-`device/mod.rs` defines `DeviceManifest`, `BasketItem`, `SyncedItem`, `MediaRole`, and `DeviceManager`. The manifest at the device root (`.hifimule.json`) is authoritative for managed paths, basket, synced files, auto-fill settings, and repair state. `music`, `audiobook`, and `podcast` roles can use separate configured paths; absent role overrides fall back to the primary managed path. The manager tracks multiple connected MSC/MTP devices and a selected destination. Platform MTP implementations live in `device/mtp.rs`; `device_io.rs` abstracts MSC and MTP writes.
+`device/mod.rs` defines `DeviceManifest`, `BasketItem`, `SyncedItem`, `MediaRole`, and `DeviceManager`. The manifest at the device root (`.hifimule.json.zst`) is authoritative for managed paths, basket, synced files, auto-fill settings, and repair state on MSC. MTP uses the local `manifests/<device_id>.json.zst` cache as authority, with a best-effort device mirror. `music`, `audiobook`, and `podcast` roles can use separate configured paths; absent role overrides fall back to the primary managed path. The manager tracks multiple connected MSC/MTP devices and a selected destination. Platform MTP implementations live in `device/mtp.rs`; `device_io.rs` abstracts MSC and MTP writes.
+
+`device/manifest_codec.rs` streams typed track fields into named column arrays and
+compresses the versioned JSON wrapper in one checksummed Zstd level 9 frame. Encoding
+runs on blocking workers after releasing state guards while keeping per-device
+commit ownership. Each commit reuses its encoded bytes for cache and mirror.
+Initial admission, 1000-update/ten-minute checkpoints and finalization retain their
+durability and physical-connection fences. Reads prefer compressed storage; missing
+compressed files permit legacy JSON, whereas invalid/unreadable authoritative
+storage reports a read failure. MTP checks caches under both backend and portable
+manifest identities. Atomic verified writes precede legacy cleanup; failed writes
+preserve old files and recovery evidence. Decode checks version, column counts/types,
+checksum and a 512 MiB decoded ceiling. RPC and basket hashing keep ordinary JSON.
+Manifest publication reads back the exact compressed bytes before legacy retirement.
+MSC and local-cache commits sync the parent directory before retirement and after
+successful removal. The existing platform helper uses directory fsync on Unix and
+is a no-op on non-Unix platforms; Windows retains file sync/readback without an
+additional directory durability guarantee. Postcommit failures preserve existing
+dirty/pending recovery evidence, while ordinary clean updates remain clean.
+See [storage format](./data-models-hifimule-daemon.md#devicemanifest) and
+[inspection](./development-guide.md#inspect-the-manifest).
 
 `sync.rs` expands basket selections, computes a delta against manifest state, stages and transfers media, generates paths and playlists, and records durable results. Book parts and podcast episodes keep role and portable server identity in the plan. Non-music transfers ask the provider for a compatible direct media representation. Transfer staging uses bounded memory rather than holding a full downloaded file in RAM. Interrupted syncs mark the manifest dirty for repair. `auto_fill/` separates provider-bound candidate fetching from a pure pipeline engine; per-server configuration travels on the device, while rotation/history counters live in SQLite.
 

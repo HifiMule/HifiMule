@@ -88,7 +88,7 @@ The Tauri shell is responsible for:
 ### Multi-device
 - Multiple devices can be connected simultaneously (stored in a `HashMap` keyed by mount path)
 - The UI shows a "Device Hub" panel to switch between devices
-- Each device has its own `DeviceManifest` (`.hifimule.json` at device root), basket, and sync settings
+- Each device has its own `DeviceManifest` (`.hifimule.json.zst` at device root; authoritative local cache for MTP), basket, and sync settings
 
 ### Auto-fill
 - Auto-fill config is stored per `(device, portable serverId)` in the device manifest, with legacy `{ enabled, maxBytes }` blocks migrated when possible
@@ -135,7 +135,7 @@ The Tauri shell is responsible for:
 
 | Store | Location | Contents |
 |-------|----------|----------|
-| `DeviceManifest` | `<device-root>/.hifimule.json` | Sync state, basket, per-server auto-fill pipeline settings, dirty flag, MTP cache fields |
+| `DeviceManifest` | `<device-root>/.hifimule.json.zst`; authoritative `manifests/<device_id>.json.zst` cache for MTP | Lossless compressed sync state, basket, per-server auto-fill pipeline settings, dirty flag, MTP cache fields; legacy JSON migrates on successful writes |
 | `config.json` | `%APPDATA%/HifiMule/` (Win) / `~/Library/Application Support/HifiMule/` (macOS) / `~/.local/share/HifiMule/` (Linux) | Legacy Jellyfin URL and user ID |
 | OS keyring | System credential store | Access token or password-derived provider secret |
 | SQLite DB | Same app data dir as `config.json` | `devices`, `scrobble_history`, `server_config`, `autofill_history`, `autofill_rotation`, and `autofill_pity` tables |

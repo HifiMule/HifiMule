@@ -2,7 +2,10 @@ use anyhow::Result;
 
 // Readers and scanners can briefly deny atomic replacement on Windows.
 // Never delete the previous canonical file to work around a sharing denial.
-async fn replace_verified_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) async fn replace_verified_file(
+    source: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
     let mut retries = 0;
     loop {
         match tokio::fs::rename(source, destination).await {
@@ -39,6 +42,11 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()>;
+    /// Durability fence for manifest publication and legacy retirement only.
+    /// Object transports have no filesystem directory to sync.
+    async fn sync_manifest_parent(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
     /// Write a staged file without loading its contents into memory. Test doubles may
     /// use this default; production backends override it with streaming transfers.
     async fn write_with_verify_from_path(&self, path: &str, source: &Path) -> Result<()> {
@@ -197,6 +205,17 @@ fn is_missing_object_error(error: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl DeviceIO for MscBackend {
+    async fn sync_manifest_parent(&self, path: &str) -> Result<()> {
+        check_relative(path)?;
+        let full = self.root.join(path);
+        let parent = full
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Manifest has no parent directory"))?
+            .to_path_buf();
+        tokio::task::spawn_blocking(move || crate::device::sync_manifest_directory(&parent))
+            .await??;
+        Ok(())
+    }
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         check_relative(path)?;
         let full = self.root.join(path);

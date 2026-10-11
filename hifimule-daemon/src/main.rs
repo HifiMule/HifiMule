@@ -2006,7 +2006,7 @@ async fn run_auto_sync_via_provider(
             operation.status = sync::SyncStatus::Failed;
             operation.errors.push(sync::SyncFileError {
                 jellyfin_id: String::new(),
-                filename: ".hifimule.json".into(),
+                filename: ".hifimule.json.zst".into(),
                 error_message: format!("Failed to mark manifest dirty: {error}"),
             });
             sync_op_manager

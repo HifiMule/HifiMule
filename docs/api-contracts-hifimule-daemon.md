@@ -180,7 +180,7 @@ Note: `serverConnected` is cached for 5 seconds to avoid excessive media-server 
 
 ### `device_initialize`
 
-Initializes a newly detected device that has no `.hifimule.json` manifest.
+Initializes a newly detected device that has no supported manifest (`.hifimule.json.zst` or legacy `.hifimule.json`).
 
 **Params:**
 ```json

@@ -29,7 +29,7 @@ HifiMule is a desktop application that bridges self-hosted media servers and por
 - **Auto-sync** — Devices can sync automatically the moment they're connected.
 - **Broad device support** — Built-in profiles for Rockbox players, Garmin smartwatches, modern DAPs, Sony Walkman, generic MP3 players, car USB sticks, and audiobook/podcast devices, plus MTP phones. Transcoding profiles convert audio to a device-compatible format only when needed.
 - **Device management** — Initialize and edit devices, inspect storage, and configure name, icon, transcoding profile, music folder, and a separate playlist folder.
-- **Manifest tracking** — A `.hifimule.json` manifest on-device tracks synced files with repair, prune, and relink tools.
+- **Manifest tracking** — A lossless `.hifimule.json.zst` manifest tracks synced files with repair, prune, and relink tools. Legacy JSON migrates on successful writes. [Display manifest contents](docs/development-guide.md#inspect-the-manifest) with the read-only Node.js inspector.
 - **Scrobble bridge** — Reads Rockbox playback logs and reports listening history back to your media server.
 - **System tray daemon** — Runs in the background with status indicators (idle, scanning, syncing, error).
 - **Hardware-aware** — Validates path lengths and filename character sets for legacy devices.

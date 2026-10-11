@@ -1,5 +1,11 @@
 # Deferred Work
 
+## Deferred from: compressed manifest review (2026-10-11)
+
+- **MTP cache filename and embedded identity are not cross-validated** (`hifimule-daemon/src/device/mod.rs`, `read_canonical_mtp_cache`) — a manually swapped valid cache can carry another device's `device_id` and redirect later writes to that identity. The legacy cache reader at baseline `c36a7298a6a6260f98554bd51bd27b3b87c0ee34` already trusted the embedded identity. Add explicit filename/identity validation in focused cache hardening.
+- **Raw Windows WPD identity needs a mirror to discover its portable cache** (`hifimule-daemon/src/device/mod.rs`, `emit_mtp_probe_event_with_cache_path`) — if both device mirrors are absent and only a UUID-named authoritative cache remains, the physical WPD identifier cannot establish that UUID. This missing persistent mapping predates compression. Design and retain a physical-to-portable mapping for reconnect recovery separately.
+- **MTP reads allocate the complete file before validation** (`hifimule-daemon/src/device_io.rs`, `DeviceIO::read_file`) — the existing MTP handle returns `Vec<u8>` without a size-limited manifest read. The codec rejects oversized input, but allocation has already happened. A bounded transport read needs a backend-level change; this complete-file allocation predates compression.
+
 ## Deferred from: autofill-aware sync capacity verification (2026-10-10)
 
 - **Windows UI test entrypoint paths are invalid** (`hifimule-ui/tests/radioDefaults.test.mjs:6`, `hifimule-ui/tests/serverSwitchBrowse.test.mjs:6`) — existing tests pass URL `.pathname` values such as `/C:/Workspaces/...` to esbuild. The broader UI run passed 51 tests but these two files failed before executing. Use `fileURLToPath` in a focused test-harness fix; these files were unchanged by the sync work.

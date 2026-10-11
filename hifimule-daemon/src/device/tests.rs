@@ -1,5 +1,682 @@
 use super::*;
 
+#[tokio::test]
+async fn compressed_manifest_migrates_legacy_only_after_verified_write() {
+    let dir = tempdir().unwrap();
+    let mut manifest = make_manifest("compressed-migration", "Été 🎵");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["unfinished".into(), "unfinished".into()];
+    std::fs::write(
+        dir.path().join(".hifimule.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+    let bytes = std::fs::read(dir.path().join(".hifimule.json.zst"))
+        .expect("compressed manifest must be written");
+    assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd]);
+    assert!(!dir.path().join(".hifimule.json").exists());
+    let loaded = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(loaded).unwrap(),
+        serde_json::to_value(manifest).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn compressed_manifest_corruption_never_falls_back_to_legacy() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".hifimule.json"),
+        serde_json::to_vec(&make_manifest("stale", "Clean")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(".hifimule.json.zst"),
+        b"broken compressed data",
+    )
+    .unwrap();
+    assert!(
+        DeviceProber::probe(dir.path()).await.is_err(),
+        "corrupt compressed manifest must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn compressed_mtp_cache_authority_handles_both_physical_and_portable_identities() {
+    for identity in ["physical", "portable"] {
+        for compressed_cache in [false, true] {
+            let dir = tempdir().unwrap();
+            let cache_dir = tempdir().unwrap();
+            let mirror = make_manifest("portable", "Clean mirror");
+            write_manifest(msc(dir.path()), &mirror).await.unwrap();
+            let mut authoritative = mirror.clone();
+            authoritative.dirty = true;
+            authoritative.pending_item_ids = vec!["recovery".into()];
+            let path = cache_dir.path().join(format!("{identity}.json.zst"));
+            let actual_path = if compressed_cache {
+                path.clone()
+            } else {
+                path.with_extension("")
+            };
+            let data = if compressed_cache {
+                manifest_codec::encode(&authoritative).unwrap()
+            } else {
+                serde_json::to_vec(&authoritative).unwrap()
+            };
+            std::fs::write(&actual_path, data).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            assert!(
+                emit_mtp_probe_event_with_cache_path(
+                    &tx,
+                    1,
+                    PathBuf::from("mtp://physical"),
+                    "physical",
+                    dummy_mtp_device_info("physical"),
+                    "MTP".into(),
+                    msc(dir.path()),
+                    |id| Ok(cache_dir.path().join(format!("{id}.json.zst")))
+                )
+                .await
+            );
+            let DeviceEvent::Detected { manifest, .. } = rx.recv().await.unwrap() else {
+                panic!("expected detected device")
+            };
+            assert!(manifest.dirty);
+            assert_eq!(manifest.pending_item_ids, ["recovery"]);
+            // A corrupt authoritative compressed copy blocks both the mirror and
+            // the valid legacy copy, regardless of which identity maps to it.
+            std::fs::write(&path, b"corrupt").unwrap();
+            std::fs::write(
+                path.with_extension(""),
+                serde_json::to_vec(&mirror).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                !emit_mtp_probe_event_with_cache_path(
+                    &tx,
+                    2,
+                    PathBuf::from("mtp://physical"),
+                    "physical",
+                    dummy_mtp_device_info("physical"),
+                    "MTP".into(),
+                    msc(dir.path()),
+                    |id| Ok(cache_dir.path().join(format!("{id}.json.zst")))
+                )
+                .await
+            );
+            assert!(matches!(
+                rx.recv().await.unwrap(),
+                DeviceEvent::DiscoveryFailed {
+                    code: "DEVICE_READ_FAILED",
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn compressed_mtp_portable_cache_overrides_physical_identity_cache_and_fails_closed() {
+    for physical_compressed in [false, true] {
+        let dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let physical = cache_dir.path().join("physical.json.zst");
+        let portable = cache_dir.path().join("portable.json.zst");
+        let old = make_manifest("portable", "Old physical identity cache");
+        let path = if physical_compressed {
+            physical.clone()
+        } else {
+            physical.with_extension("")
+        };
+        let bytes = if physical_compressed {
+            manifest_codec::encode(&old).unwrap()
+        } else {
+            serde_json::to_vec(&old).unwrap()
+        };
+        std::fs::write(path, bytes).unwrap();
+        let mut latest = old.clone();
+        latest.dirty = true;
+        latest.pending_item_ids = vec!["unfinished".into()];
+        std::fs::write(&portable, manifest_codec::encode(&latest).unwrap()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        assert!(
+            emit_mtp_probe_event_with_cache_path(
+                &tx,
+                1,
+                PathBuf::from("mtp://physical"),
+                "physical",
+                dummy_mtp_device_info("physical"),
+                "MTP".into(),
+                msc(dir.path()),
+                |id| Ok(cache_dir.path().join(format!("{id}.json.zst")))
+            )
+            .await
+        );
+        let DeviceEvent::Detected { manifest, .. } = rx.recv().await.unwrap() else {
+            panic!("expected detected")
+        };
+        assert!(
+            manifest.dirty,
+            "portable identity is the cache used by all manifest updates"
+        );
+        assert_eq!(manifest.pending_item_ids, ["unfinished"]);
+        std::fs::write(&portable, b"corrupt authoritative portable cache").unwrap();
+        std::fs::write(
+            portable.with_extension(""),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !emit_mtp_probe_event_with_cache_path(
+                &tx,
+                2,
+                PathBuf::from("mtp://physical"),
+                "physical",
+                dummy_mtp_device_info("physical"),
+                "MTP".into(),
+                msc(dir.path()),
+                |id| Ok(cache_dir.path().join(format!("{id}.json.zst")))
+            )
+            .await
+        );
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DeviceEvent::DiscoveryFailed {
+                code: "DEVICE_READ_FAILED",
+                ..
+            }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn compressed_mtp_wpd_identity_uses_portable_cache_without_invalid_filename_lookup() {
+    let dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let physical = r"\\?\usb#vid_091e&pid_abcd#serial#{guid}";
+    let mirror = make_manifest("portable-wpd", "Mirror");
+    write_manifest(msc(dir.path()), &mirror).await.unwrap();
+    let mut latest = mirror.clone();
+    latest.dirty = true;
+    latest.pending_item_ids = vec!["recovery".into()];
+    std::fs::write(
+        cache_dir.path().join("portable-wpd.json.zst"),
+        manifest_codec::encode(&latest).unwrap(),
+    )
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    assert!(
+        emit_mtp_probe_event_with_cache_path(
+            &tx,
+            1,
+            PathBuf::from("mtp://wpd"),
+            physical,
+            dummy_mtp_device_info(physical),
+            "WPD".into(),
+            msc(dir.path()),
+            |id| {
+                if id == physical {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "WPD ID cannot be a cache filename",
+                    )
+                    .into());
+                }
+                Ok(cache_dir.path().join(format!("{id}.json.zst")))
+            }
+        )
+        .await,
+        "raw WPD identifiers require mirror-to-portable identity resolution"
+    );
+    let DeviceEvent::Detected { manifest, .. } = rx.recv().await.unwrap() else {
+        panic!("expected detected")
+    };
+    assert!(manifest.dirty);
+    assert_eq!(manifest.pending_item_ids, ["recovery"]);
+}
+
+#[test]
+fn manifest_cache_identity_validation_preserves_platform_names_and_rejects_traversal() {
+    assert!(is_addressable_manifest_cache_identity("portable-device"));
+    for id in [
+        "",
+        ".",
+        "..",
+        "../outside",
+        "folder/inside",
+        "folder\\inside",
+    ] {
+        assert!(!is_addressable_manifest_cache_identity(id));
+    }
+    assert_eq!(
+        is_addressable_manifest_cache_identity("1:2"),
+        !cfg!(windows)
+    );
+    assert_eq!(
+        is_addressable_manifest_cache_identity("CON"),
+        !cfg!(windows)
+    );
+}
+
+#[tokio::test]
+async fn compressed_manifest_failed_write_preserves_legacy_and_reports_cleanup_failure() {
+    let dir = tempdir().unwrap();
+    let legacy = dir.path().join(".hifimule.json");
+    let manifest = make_manifest("migration-failure", "Recovery");
+    let before = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(&legacy, &before).unwrap();
+    std::fs::create_dir(dir.path().join(".hifimule.json.zst")).unwrap();
+    assert!(write_manifest(msc(dir.path()), &manifest).await.is_err());
+    assert_eq!(std::fs::read(&legacy).unwrap(), before);
+    std::fs::remove_dir(dir.path().join(".hifimule.json.zst")).unwrap();
+    std::fs::remove_file(&legacy).unwrap();
+    std::fs::create_dir(&legacy).unwrap();
+    assert!(
+        write_manifest(msc(dir.path()), &manifest).await.is_err(),
+        "cleanup failures must be surfaced"
+    );
+    assert_eq!(
+        DeviceProber::probe(dir.path())
+            .await
+            .unwrap()
+            .unwrap()
+            .device_id,
+        manifest.device_id
+    );
+}
+
+#[tokio::test]
+async fn compressed_local_cache_migration_verifies_and_keeps_legacy_on_failed_commit() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cache.json.zst");
+    let legacy = path.with_extension("");
+    let manifest = make_manifest("cache-migration", "MTP");
+    let before = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(&legacy, &before).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(
+        persist_local_manifest_atomic(&path, &manifest)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&legacy).unwrap(), before);
+    std::fs::remove_dir(&path).unwrap();
+    persist_local_manifest_atomic(&path, &manifest)
+        .await
+        .unwrap();
+    assert!(!legacy.exists());
+    assert_eq!(
+        read_local_manifest(&path).await.unwrap().unwrap().device_id,
+        manifest.device_id
+    );
+}
+
+#[tokio::test]
+async fn compressed_cleanup_failure_keeps_clean_settings_and_basket_updates_clean() {
+    for basket in [false, true] {
+        let dir = tempdir().unwrap();
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        let manifest = make_manifest("cleanup-clean", "MSC");
+        write_manifest(msc(dir.path()), &manifest).await.unwrap();
+        manager
+            .handle_device_detected(dir.path().to_path_buf(), manifest, msc(dir.path()))
+            .await
+            .unwrap();
+        std::fs::create_dir(dir.path().join(".hifimule.json")).unwrap();
+        assert!(manager.update_manifest_for_device("cleanup-clean", |m| {
+            if basket {
+                m.basket_items = serde_json::from_str(r#"[{"id":"album","name":"Album","type":"MusicAlbum","childCount":1,"sizeTicks":0,"sizeBytes":1}]"#).unwrap();
+            } else {
+                m.icon = Some("headphones".into());
+            }
+        }).await.is_err());
+        let memory = manager.get_current_device().await.unwrap();
+        let durable = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+        assert!(
+            !memory.dirty,
+            "ordinary clean updates must not invent recovery state"
+        );
+        assert!(
+            !durable.dirty,
+            "rediscovery must remain clean after cleanup failure"
+        );
+        assert!(memory.pending_item_ids.is_empty() && durable.pending_item_ids.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn compressed_cleanup_failure_preserves_durable_dirty_recovery_after_clean_mutation() {
+    let dir = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let mut manifest = make_manifest("cleanup-recovery", "MSC");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["unfinished".into()];
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest, msc(dir.path()))
+        .await
+        .unwrap();
+    std::fs::create_dir(dir.path().join(".hifimule.json")).unwrap();
+    assert!(
+        manager
+            .update_manifest_for_device("cleanup-recovery", |m| {
+                m.dirty = false;
+                m.pending_item_ids.clear();
+            })
+            .await
+            .is_err()
+    );
+    let durable = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+    assert!(
+        durable.dirty,
+        "post-commit cleanup failure must retain recovery evidence on authoritative storage"
+    );
+    assert_eq!(durable.pending_item_ids, ["unfinished"]);
+}
+
+#[derive(Debug)]
+struct ManifestPublicationFaultIo {
+    inner: Arc<dyn crate::device_io::DeviceIO>,
+    corrupt_next_write: std::sync::atomic::AtomicBool,
+    fail_sync_call: Option<usize>,
+    sync_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::device_io::DeviceIO for ManifestPublicationFaultIo {
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.read_file(path).await
+    }
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_file(path, data).await
+    }
+    async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
+        if self
+            .corrupt_next_write
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let mut corrupt = data.to_vec();
+            *corrupt.last_mut().unwrap() ^= 1;
+            self.inner.write_with_verify(path, &corrupt).await
+        } else {
+            self.inner.write_with_verify(path, data).await
+        }
+    }
+    async fn sync_manifest_parent(&self, path: &str) -> Result<()> {
+        let call = self
+            .sync_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_sync_call == Some(call) {
+            anyhow::bail!("injected manifest directory durability failure");
+        }
+        self.inner.sync_manifest_parent(path).await
+    }
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        self.inner.delete_file(path).await
+    }
+    async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        self.inner.list_files(path).await
+    }
+    async fn free_space(&self) -> Result<u64> {
+        self.inner.free_space().await
+    }
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        self.inner.ensure_dir(path).await
+    }
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        self.inner.cleanup_empty_subdirs(path).await
+    }
+}
+
+#[tokio::test]
+async fn compressed_publication_verifies_bytes_and_durability_before_retiring_legacy() {
+    for corrupt in [true, false] {
+        let dir = tempdir().unwrap();
+        let manifest = make_manifest("verify-publication", "MSC");
+        let legacy = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(dir.path().join(".hifimule.json"), &legacy).unwrap();
+        let io = Arc::new(ManifestPublicationFaultIo {
+            inner: msc(dir.path()),
+            corrupt_next_write: corrupt.into(),
+            fail_sync_call: (!corrupt).then_some(0),
+            sync_calls: 0.into(),
+        });
+        let error = write_manifest(io.clone(), &manifest)
+            .await
+            .expect_err("reported write success must be verified before deleting legacy");
+        assert_eq!(
+            std::fs::read(dir.path().join(".hifimule.json")).unwrap(),
+            legacy
+        );
+        assert!(error.to_string().contains("publication"));
+        assert_eq!(
+            io.sync_calls.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(!corrupt)
+        );
+    }
+}
+
+#[tokio::test]
+async fn compressed_publication_uncertainty_preserves_dirty_recovery() {
+    for failure_call in [0, 1] {
+        let dir = tempdir().unwrap();
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        let mut manifest = make_manifest("durability-recovery", "MSC");
+        manifest.dirty = true;
+        manifest.pending_item_ids = vec!["unfinished".into()];
+        std::fs::write(
+            dir.path().join(".hifimule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let io: Arc<dyn crate::device_io::DeviceIO> = Arc::new(ManifestPublicationFaultIo {
+            inner: msc(dir.path()),
+            corrupt_next_write: false.into(),
+            fail_sync_call: Some(failure_call),
+            sync_calls: 0.into(),
+        });
+        manager
+            .handle_device_detected(dir.path().to_path_buf(), manifest, io)
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .update_manifest_for_device("durability-recovery", |m| {
+                    m.dirty = false;
+                    m.pending_item_ids.clear();
+                })
+                .await
+                .is_err()
+        );
+        let memory = manager.get_current_device().await.unwrap();
+        let durable = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+        assert!(memory.dirty && durable.dirty);
+        assert_eq!(durable.pending_item_ids, ["unfinished"]);
+        if failure_call == 0 {
+            assert!(dir.path().join(".hifimule.json").exists());
+        }
+    }
+}
+
+fn full_field_codec_manifest() -> DeviceManifest {
+    let mut manifest = make_manifest("rust-fixture", "Été 🎵");
+    manifest.icon = Some("🎧".into());
+    manifest.audiobook_path = Some("Books".into());
+    manifest.podcast_path = Some("Podcasts".into());
+    manifest.playlist_path = Some("Lists".into());
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["same".into(), "same".into()];
+    manifest.auto_sync_on_connect = true;
+    manifest.last_sync_at = Some(i64::MIN);
+    manifest
+        .auto_fill
+        .pipelines
+        .insert("server".into(), rich_pipeline());
+    manifest.transcoding_profile_id = Some("profile".into());
+    manifest.last_synced_transcoding_profile_id = Some("old-profile".into());
+    manifest.transcoding_profile_dirty = true;
+    manifest.storage_id = Some("storage".into());
+    manifest.folder_ids.insert("Music/Été".into(), u32::MAX);
+    manifest.basket_items = serde_json::from_str(r#"[{"id":"same","name":"Basket","type":"MusicAlbum","serverId":"server","artist":"","childCount":4294967295,"sizeTicks":-9223372036854775808,"sizeBytes":18446744073709551615}]"#).unwrap();
+    manifest.playlists = serde_json::from_str(r#"[{"jellyfinId":"playlist","filename":"Lists/all.m3u","trackCount":2,"trackIds":["same","same"],"lastModified":"today"}]"#).unwrap();
+    let item: SyncedItem = serde_json::from_str(r#"{"isAutoFill":true,"mediaRole":"audiobook","providerItemId":"same","name":"Été 🎵","album":"","artist":null,"localPath":"Books/Été.mp3","sizeBytes":18446744073709551615,"syncedAt":"today","originalName":"original","etag":"etag","providerAlbumId":"album","providerContentType":"audio/mpeg","providerSuffix":"mp3","originalBitrate":4294967295,"originalContainer":"mp3","trackNumber":4294967295,"serverId":"server"}"#).unwrap();
+    let mut second = item.clone();
+    second.name = "Second occurrence".into();
+    second.is_auto_fill = false;
+    second.media_role = MediaRole::Podcast;
+    second.size_bytes = 0;
+    second.original_name = None;
+    manifest.synced_items = vec![item, second];
+    manifest
+}
+
+#[test]
+fn compressed_codec_roundtrip_preserves_full_fields_order_duplicates_precision_and_defaults() {
+    for manifest in [DeviceManifest::default(), full_field_codec_manifest()] {
+        let bytes = manifest_codec::encode(&manifest).unwrap();
+        assert!(bytes[4] & 4 != 0, "standard frame must carry checksum");
+        let decoded = manifest_codec::decode(&bytes, true).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(manifest).unwrap()
+        );
+    }
+}
+
+#[test]
+fn compressed_codec_preserves_metadata_numeric_tokens_including_f32_settings() {
+    let manifest = full_field_codec_manifest();
+    let legacy = serde_json::to_vec(&manifest).unwrap();
+    let bytes = manifest_codec::encode(&manifest).unwrap();
+    let raw = zstd::stream::decode_all(bytes.as_slice()).unwrap();
+    let wrapper: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_slice(&raw).unwrap();
+    let stored: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_str(wrapper["manifest"].get()).unwrap();
+    let mut expected: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_slice(&legacy).unwrap();
+    expected.remove("synced_items");
+    assert_eq!(stored.len(), expected.len());
+    for (field, value) in expected {
+        assert_eq!(
+            stored[&field].get(),
+            value.get(),
+            "metadata value/token changed for {field}"
+        );
+    }
+}
+
+#[test]
+fn compressed_codec_rejects_bad_version_count_types_checksum_truncation_and_extra_frames() {
+    let bytes = manifest_codec::encode(&full_field_codec_manifest()).unwrap();
+    let raw = zstd::stream::decode_all(bytes.as_slice()).unwrap();
+    let mut wrapper: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let frame = |value: &serde_json::Value| {
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 9).unwrap();
+        encoder.include_checksum(true).unwrap();
+        serde_json::to_writer(&mut encoder, value).unwrap();
+        encoder.finish().unwrap()
+    };
+    wrapper["storageVersion"] = 2.into();
+    assert!(manifest_codec::decode(&frame(&wrapper), true).is_err());
+    wrapper["storageVersion"] = 1.into();
+    wrapper["syncedItems"]["count"] = 3.into();
+    assert!(manifest_codec::decode(&frame(&wrapper), true).is_err());
+    wrapper["syncedItems"]["count"] = 2.into();
+    wrapper["syncedItems"]["columns"]["sizeBytes"][0] = "invalid".into();
+    assert!(manifest_codec::decode(&frame(&wrapper), true).is_err());
+    let mut corrupt = bytes.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    assert!(manifest_codec::decode(&corrupt, true).is_err());
+    assert!(manifest_codec::decode(&bytes[..bytes.len() - 1], true).is_err());
+    assert!(manifest_codec::decode(&[bytes.clone(), bytes].concat(), true).is_err());
+    let unchecked = zstd::stream::encode_all(raw.as_slice(), 9).unwrap();
+    assert!(manifest_codec::decode(&unchecked, true).is_err());
+}
+
+#[test]
+#[ignore = "Explicit release-mode benchmark and regeneration of inspector fixtures"]
+fn manifest_codec_benchmark_and_rust_fixtures() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let fixture_dir = root.join("scripts/tests/fixtures");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    let fixture = full_field_codec_manifest();
+    std::fs::write(
+        fixture_dir.join("manifest-rust.json"),
+        serde_json::to_vec_pretty(&fixture).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture_dir.join("manifest-rust.json.zst"),
+        manifest_codec::encode(&fixture).unwrap(),
+    )
+    .unwrap();
+    use sha2::{Digest, Sha256};
+    let id =
+        |index: usize| format!("{:x}", Sha256::digest(format!("track-{index}")))[..32].to_string();
+    let mut manifest = make_manifest("synthetic-benchmark", "Benchmark");
+    manifest.dirty = true;
+    manifest.pending_item_ids = (0..45522).map(id).collect();
+    manifest.synced_items = (0..45522)
+        .map(|index| SyncedItem {
+            is_auto_fill: false,
+            media_role: MediaRole::Music,
+            jellyfin_id: id(index),
+            name: format!("Existing song {index} with representative music metadata"),
+            album: Some(format!(
+                "Album {} original edition and bonus tracks",
+                index / 10
+            )),
+            artist: Some(format!("Artist {} and collaborators", index / 100)),
+            local_path: format!(
+                "Music/Artist {}/Album {}/Old track {index}.mp3",
+                index / 100,
+                index / 10
+            ),
+            size_bytes: 5000000 + index as u64 * 53,
+            synced_at: "2026-10-11T10:00:00Z".into(),
+            original_name: None,
+            etag: Some(id(index + 45522)),
+            provider_album_id: Some(id(index / 10)),
+            provider_content_type: Some("audio/mpeg".into()),
+            provider_suffix: Some("mp3".into()),
+            original_bitrate: Some(320000),
+            original_container: Some("mp3".into()),
+            track_number: Some(index as u32 % 10 + 1),
+            server_id: Some("subsonic|https://server.example|user".into()),
+        })
+        .collect();
+    assert_eq!(manifest.synced_items.len(), 45522);
+    let start = std::time::Instant::now();
+    let pretty = serde_json::to_vec_pretty(&manifest).unwrap();
+    let pretty_encode_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let start = std::time::Instant::now();
+    let legacy: DeviceManifest = serde_json::from_slice(&pretty).unwrap();
+    let pretty_decode_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let start = std::time::Instant::now();
+    let compressed = manifest_codec::encode(&manifest).unwrap();
+    let compressed_encode_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let start = std::time::Instant::now();
+    let decoded = manifest_codec::decode(&compressed, true).unwrap();
+    let compressed_decode_ms = start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap(),
+        serde_json::to_value(legacy).unwrap()
+    );
+    std::fs::write(
+        root.join("target/manifest-compression-rust.json.zst"),
+        &compressed,
+    )
+    .unwrap();
+    println!(
+        "MANIFEST_BENCHMARK tracks=45522 pretty_bytes={} compressed_bytes={} pretty_encode_ms={pretty_encode_ms:.3} pretty_decode_ms={pretty_decode_ms:.3} compressed_encode_ms={compressed_encode_ms:.3} compressed_decode_ms={compressed_decode_ms:.3}",
+        pretty.len(),
+        compressed.len()
+    );
+}
+
 #[derive(Debug)]
 struct CheckpointGateIo {
     inner: Arc<dyn crate::device_io::DeviceIO>,
@@ -71,7 +748,7 @@ async fn sync_checkpoint_delayed_timer_drains_before_shutdown_and_device_removal
         .unwrap();
     tokio::time::advance(Duration::from_secs(599)).await;
     assert_eq!(gated.writes.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert!(!dir.path().join(".hifimule.json").exists());
+    assert!(!dir.path().join(".hifimule.json.zst").exists());
     tokio::time::advance(Duration::from_secs(1)).await;
     gated.started.notified().await;
     let original_observation = manager.get_selected_sync_target().await.unwrap().3;
@@ -280,8 +957,10 @@ async fn sync_checkpoint_buffers_track_changes_until_threshold() {
             .await
             .unwrap();
     }
-    let durable: DeviceManifest =
-        serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap()).unwrap();
+    let durable: DeviceManifest = manifest_codec::decode_test_manifest(
+        &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         durable.last_sync_at, None,
         "999 staged updates must not each write the full manifest"
@@ -295,8 +974,8 @@ async fn sync_checkpoint_buffers_track_changes_until_threshold() {
         .await
         .unwrap();
     let read = || {
-        serde_json::from_slice::<DeviceManifest>(
-            &std::fs::read(dir.path().join(".hifimule.json")).unwrap(),
+        manifest_codec::decode_test_manifest::<DeviceManifest>(
+            &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
         )
         .unwrap()
     };
@@ -358,7 +1037,7 @@ async fn sync_checkpoint_reconnect_with_copied_id_cannot_receive_delayed_state_o
     let current = manager.get_current_device().await.unwrap();
     assert_eq!(current.name.as_deref(), Some("Replacement"));
     assert_eq!(current.last_sync_at, None);
-    assert!(!dir.path().join(".hifimule.json").exists());
+    assert!(!dir.path().join(".hifimule.json.zst").exists());
 }
 
 #[tokio::test]
@@ -458,8 +1137,8 @@ async fn sync_checkpoint_duplicate_ids_commit_only_exact_captured_connection() {
         "exact target behind duplicate ID must be found: {result:?}"
     );
     let read = |path: &Path| {
-        serde_json::from_slice::<DeviceManifest>(
-            &std::fs::read(path.join(".hifimule.json")).unwrap(),
+        manifest_codec::decode_test_manifest::<DeviceManifest>(
+            &std::fs::read(path.join(".hifimule.json.zst")).unwrap(),
         )
         .unwrap()
     };
@@ -554,7 +1233,7 @@ async fn sync_checkpoint_failure_retains_staged_metadata_and_durable_recovery() 
     let reader = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(3)
-        .open(dir.path().join(".hifimule.json"))
+        .open(dir.path().join(".hifimule.json.zst"))
         .unwrap();
     let session = SyncManifestSession::new(Arc::clone(&manager), "denied", &io, None)
         .await
@@ -568,8 +1247,10 @@ async fn sync_checkpoint_failure_retains_staged_metadata_and_durable_recovery() 
     let memory = manager.get_current_device().await.unwrap();
     assert_eq!(memory.last_sync_at, Some(1000));
     assert!(memory.dirty);
-    let durable: DeviceManifest =
-        serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap()).unwrap();
+    let durable: DeviceManifest = manifest_codec::decode_test_manifest(
+        &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+    )
+    .unwrap();
     assert!(durable.dirty);
     assert_eq!(durable.last_sync_at, None);
     assert_eq!(durable.pending_item_ids, vec!["copied-audio"]);
@@ -578,8 +1259,10 @@ async fn sync_checkpoint_failure_retains_staged_metadata_and_durable_recovery() 
         session.finish("error").await.is_err(),
         "successful recovery flush must not hide earlier checkpoint failure"
     );
-    let durable: DeviceManifest =
-        serde_json::from_slice(&std::fs::read(dir.path().join(".hifimule.json")).unwrap()).unwrap();
+    let durable: DeviceManifest = manifest_codec::decode_test_manifest(
+        &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(durable.last_sync_at, Some(1000));
     assert!(durable.dirty);
 }
@@ -593,7 +1276,7 @@ async fn mtp_cache_path_failure_rolls_back_memory() {
     manifest.dirty = true;
     manifest.pending_item_ids = vec!["unfinished".into()];
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
-    let mirror_before = std::fs::read(dir.path().join(".hifimule.json")).unwrap();
+    let mirror_before = std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap();
     manager
         .handle_device_detected(path.clone(), manifest.clone(), msc(dir.path()))
         .await
@@ -624,7 +1307,7 @@ async fn mtp_cache_path_failure_rolls_back_memory() {
     assert!(restored.dirty);
     assert_eq!(restored.pending_item_ids, manifest.pending_item_ids);
     assert_eq!(
-        std::fs::read(dir.path().join(".hifimule.json")).unwrap(),
+        std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
         mirror_before,
         "failed authority must not publish a clean optional mirror"
     );
@@ -641,7 +1324,8 @@ async fn atomic_mtp_cache_replaces_complete_bytes_without_temporary_files() {
     persist_local_manifest_atomic(&path, &manifest)
         .await
         .unwrap();
-    let persisted: DeviceManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let persisted: DeviceManifest =
+        manifest_codec::decode_test_manifest(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted.device_id, manifest.device_id);
     assert!(persisted.dirty);
     assert_eq!(persisted.pending_item_ids, manifest.pending_item_ids);
@@ -660,7 +1344,8 @@ async fn atomic_mtp_cache_reports_post_rename_durability_uncertainty() {
     .unwrap_err();
     assert!(error.is::<ManifestCacheCommitUncertain>());
     // The failure must not be treated as a pre-rename failure: new bytes exist.
-    let persisted: DeviceManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let persisted: DeviceManifest =
+        manifest_codec::decode_test_manifest(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted.device_id, manifest.device_id);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
@@ -701,7 +1386,7 @@ async fn mtp_cache_directory_sync_failure_restores_dirty_recovery_evidence() {
         .await
         .unwrap();
     let persisted: DeviceManifest =
-        serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        manifest_codec::decode_test_manifest(&std::fs::read(&cache).unwrap()).unwrap();
     for recovered in [&restored, &persisted] {
         assert!(recovered.dirty);
         assert_eq!(recovered.pending_item_ids, manifest.pending_item_ids);
@@ -1026,7 +1711,7 @@ async fn test_dirty_manifest_roundtrip() {
         ..Default::default()
     };
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
-    let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
+    let content = manifest_codec::read_manifest_json(dir.path().join(".hifimule.json.zst"))
         .await
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -1359,13 +2044,13 @@ async fn test_write_manifest_creates_files() {
     write_manifest(msc(root), &manifest).await.unwrap();
 
     // Verify the manifest file exists (not the temp file)
-    let manifest_path = root.join(".hifimule.json");
-    let tmp_path = root.join(".hifimule.json.tmp");
+    let manifest_path = root.join(".hifimule.json.zst");
+    let tmp_path = root.join(".hifimule.json.zst.tmp");
     assert!(manifest_path.exists());
     assert!(!tmp_path.exists());
 
     // Verify content can be read back
-    let content = fs::read_to_string(&manifest_path).unwrap();
+    let content = manifest_codec::read_manifest_json_sync(&manifest_path).unwrap();
     assert!(
         content.contains("\"providerItemId\""),
         "new manifests must use provider-neutral item IDs"
@@ -1444,7 +2129,7 @@ async fn test_write_manifest_overwrites_existing() {
     };
     write_manifest(msc(root), &manifest2).await.unwrap();
 
-    let content = fs::read_to_string(root.join(".hifimule.json")).unwrap();
+    let content = manifest_codec::read_manifest_json_sync(root.join(".hifimule.json.zst")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.name, Some("Updated".to_string()));
     assert_eq!(loaded.synced_items.len(), 1);
@@ -1708,7 +2393,7 @@ async fn test_prune_items() {
     assert_eq!(device.synced_items[0].jellyfin_id, "item-2");
 
     // Verify persisted to disk
-    let content = fs::read_to_string(root.join(".hifimule.json")).unwrap();
+    let content = manifest_codec::read_manifest_json_sync(root.join(".hifimule.json.zst")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.synced_items.len(), 1);
 }
@@ -1855,7 +2540,7 @@ async fn test_clear_dirty_flag() {
     assert!(device.pending_item_ids.is_empty());
 
     // Verify persisted to disk
-    let content = fs::read_to_string(root.join(".hifimule.json")).unwrap();
+    let content = manifest_codec::read_manifest_json_sync(root.join(".hifimule.json.zst")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert!(!loaded.dirty);
     assert!(loaded.pending_item_ids.is_empty());
@@ -2079,8 +2764,8 @@ async fn test_initialize_device_root() {
     assert!(manifest.synced_items.is_empty());
 
     // Manifest file should exist on disk
-    let manifest_path = dir.path().join(".hifimule.json");
-    assert!(manifest_path.exists(), ".hifimule.json must be created");
+    let manifest_path = dir.path().join(".hifimule.json.zst");
+    assert!(manifest_path.exists(), ".hifimule.json.zst must be created");
 
     // Device should now be current (recognized)
     assert!(manager.get_current_device().await.is_some());
@@ -2116,7 +2801,8 @@ async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
     let cache = cache_dir
         .path()
         .join(format!("{}.json", manifest.device_id));
-    let cached: DeviceManifest = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    let cached: DeviceManifest =
+        manifest_codec::decode_test_manifest(&std::fs::read(&cache).unwrap()).unwrap();
     assert_eq!(cached.device_id, manifest.device_id);
 }
 
@@ -2183,7 +2869,7 @@ async fn test_initialize_device_subfolder() {
     assert!(music_folder.exists(), "Music subfolder should be created");
 
     // Manifest on disk should have managed_paths = ["Music"]
-    let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
+    let content = manifest_codec::read_manifest_json(dir.path().join(".hifimule.json.zst"))
         .await
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -2239,7 +2925,7 @@ async fn test_initialize_device_persists_storage_id_from_device_io() {
         .unwrap();
 
     assert_eq!(manifest.storage_id.as_deref(), Some("storage-123"));
-    let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
+    let content = manifest_codec::read_manifest_json(dir.path().join(".hifimule.json.zst"))
         .await
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -2465,8 +3151,8 @@ async fn pending_initialization_rejects_a_stale_dialog_without_redirecting() {
             .to_string()
             .contains("revision is stale")
     );
-    assert!(!first.path().join(".hifimule.json").exists());
-    assert!(!later.path().join(".hifimule.json").exists());
+    assert!(!first.path().join(".hifimule.json.zst").exists());
+    assert!(!later.path().join(".hifimule.json.zst").exists());
 }
 
 #[tokio::test]
@@ -2605,7 +3291,7 @@ async fn test_initialize_device_uses_stored_io_and_clears_it() {
     );
     // Manifest must have been written via the stored IO backend
     assert!(
-        dir.path().join(".hifimule.json").exists(),
+        dir.path().join(".hifimule.json.zst").exists(),
         "Manifest must be written to the device root"
     );
 }
@@ -2638,11 +3324,11 @@ async fn test_initialize_device_uses_coherent_pending_snapshot_not_stale_caller_
         .unwrap();
 
     assert!(
-        pending_dir.path().join(".hifimule.json").exists(),
+        pending_dir.path().join(".hifimule.json.zst").exists(),
         "manifest must be written through the pending snapshot IO"
     );
     assert!(
-        !stale_dir.path().join(".hifimule.json").exists(),
+        !stale_dir.path().join(".hifimule.json.zst").exists(),
         "stale caller IO must not be paired with the pending path"
     );
 }
@@ -2735,7 +3421,8 @@ async fn test_save_basket_roundtrip() {
     assert_eq!(memory_device.basket_items[0].id, "basket-1");
 
     // Verify disk state
-    let content = fs::read_to_string(dir.path().join(".hifimule.json")).unwrap();
+    let content =
+        manifest_codec::read_manifest_json_sync(dir.path().join(".hifimule.json.zst")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.basket_items.len(), 1);
     assert_eq!(loaded.basket_items[0].name, "Basket Playlist");
@@ -2823,7 +3510,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
     };
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
-    let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
+    let content = manifest_codec::read_manifest_json(dir.path().join(".hifimule.json.zst"))
         .await
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();

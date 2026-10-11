@@ -88,5 +88,5 @@ pub fn get_local_mtp_manifest_path(device_id: &str) -> Result<PathBuf> {
     let dir = get_app_data_dir()?.join("manifests");
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("Failed to create manifests directory: {}", e))?;
-    Ok(dir.join(format!("{}.json", device_id)))
+    Ok(dir.join(format!("{}.json.zst", device_id)))
 }

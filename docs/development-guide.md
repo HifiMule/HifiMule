@@ -316,9 +316,37 @@ In debug builds, all `daemon_log!` and `eprintln!` output goes to stdout/stderr.
 
 ### Inspect the Manifest
 
-```bash
-cat /Volumes/YourDevice/.hifimule.json | python3 -m json.tool
+From the repository root with **Node.js 24 or newer**, display either compressed
+storage or a legacy JSON manifest as ordinary readable JSON:
+
+```powershell
+rtk node scripts/inspect-manifest.mjs "E:/.hifimule.json.zst"
+rtk node scripts/inspect-manifest.mjs "E:/.hifimule.json"
 ```
+
+On macOS/Linux, use the mounted device path, for example
+`rtk node scripts/inspect-manifest.mjs "/Volumes/YourDevice/.hifimule.json.zst"`.
+The inspector runs without the daemon, preserves integer precision, and never
+modifies its input. Invalid/checksum-damaged/unsupported files produce a diagnostic
+on stderr and a nonzero exit status. Redirect stdout to a **separate** file when
+exporting JSON; never redirect onto the manifest itself:
+
+```powershell
+rtk node scripts/inspect-manifest.mjs "E:/.hifimule.json.zst" > "manifest-readable.json"
+```
+
+For MTP, copy the authoritative `<device_id>.json.zst` cache from the app-data
+`manifests/` directory (Windows: `%APPDATA%/HifiMule/manifests/`) and inspect that
+copy with the same command. Older caches use `<device_id>.json`. The cache can be
+newer than the optional device mirror. JSON returned by RPC remains unchanged.
+
+New writes use lossless column-based JSON inside a checksummed Zstd level 9 frame.
+Legacy JSON is read only when the compressed filename is absent; a corrupt compressed
+copy fails closed even if legacy JSON is present. Migration verifies the compressed
+write before removing legacy data. Local cleanup failures are reported; MTP mirror
+writes and device cleanup remain best effort after the authoritative cache commits.
+Older HifiMule builds cannot read the compressed files after migration. An exported
+JSON file is a diagnostic snapshot, not an automatically supported downgrade workflow.
 
 ### Inspect the Database
 
@@ -381,7 +409,9 @@ The current daemon selects an available loopback port. It checks `127.0.0.1:1914
 
 ### Manifest Dirty Flag
 
-If the daemon crashed during sync, `.hifimule.json` will have `"dirty": true`. Use the UI's Repair Modal (shown automatically when dirty is detected), or manually clear it:
-```bash
-# Edit .hifimule.json on the device, set "dirty": false, remove "pending_item_ids": []
-```
+If the daemon crashed during sync, the manifest (`.hifimule.json.zst`, or legacy
+`.hifimule.json`) can have `"dirty": true`. Use the UI's Repair Modal, shown
+automatically when dirty is detected, or the supported manifest repair RPC methods
+documented in [API Contracts](./api-contracts-hifimule-daemon.md). Preserve pending
+identities until repair completes. Do not manually edit compressed storage or clear
+recovery evidence in a JSON export.
