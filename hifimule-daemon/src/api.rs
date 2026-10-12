@@ -2972,7 +2972,7 @@ mod tests {
                 "long-overflow-token"
             );
             let settings = CredentialManager::sync_performance();
-            assert_eq!(settings.copy_buffer_bytes, 8192);
+            assert_eq!(settings.copy_buffer_bytes, 1048576);
             assert_eq!(settings.staging_max_tracks, 3);
             CredentialManager::set_config_selected_server("another").unwrap();
             CredentialManager::clear_credentials().unwrap();

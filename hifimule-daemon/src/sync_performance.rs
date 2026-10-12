@@ -15,7 +15,7 @@ pub(crate) struct SyncPerformance {
 impl Default for SyncPerformance {
     fn default() -> Self {
         Self {
-            copy_buffer_bytes: 8 * 1024,
+            copy_buffer_bytes: 1024 * 1024,
             staging_max_tracks: 2,
             staging_max_bytes: 2048 * 1024 * 1024,
             checkpoint_track_updates: 1000,
@@ -61,7 +61,7 @@ impl SyncPerformance {
                 }
             }
         };
-        let kib = field("copy_buffer_kib", 8, 16384, 8);
+        let kib = field("copy_buffer_kib", 8, 16384, 1024);
         let mib = field("staging_max_mib", 2048, 32768, 2048);
         Self {
             copy_buffer_bytes: kib
@@ -92,7 +92,7 @@ mod tests {
     fn unbounded_json_numbers_fall_back_independently() {
         let raw = RawValue::from_string(r#"{"copy_buffer_kib":1e400,"staging_max_tracks":3,"checkpoint_track_updates":184467440737095516160000}"#.into()).unwrap();
         let settings = SyncPerformance::from_raw(Some(&raw));
-        assert_eq!(settings.copy_buffer_bytes, 8192);
+        assert_eq!(settings.copy_buffer_bytes, 1048576);
         assert_eq!(settings.staging_max_tracks, 3);
         assert_eq!(settings.checkpoint_track_updates, 1000);
     }

@@ -31,7 +31,7 @@ All values are integers; KiB is 1,024 bytes and MiB is 1,048,576 bytes.
 
 | Field | Default | Inclusive range | Meaning |
 | --- | ---: | ---: | --- |
-| `copy_buffer_kib` | 8 | 8–16384 | Size of each bounded read/write chunk when copying a staged file to mass storage, including USB sticks. MTP/WPD keeps its native transfer behavior. |
+| `copy_buffer_kib` | 1024 | 8–16384 | Size of each bounded read/write chunk when copying a staged file to mass storage, including USB sticks. MTP/WPD keeps its native transfer behavior. |
 | `staging_max_tracks` | 2 | 1–32 | Maximum tracks admitted to disk staging, including the file being written to the device. |
 | `staging_max_mib` | 2048 | 2048–32768 | Aggregate temporary-file disk budget. This does **not** allocate that amount of RAM. Each file still has a 2 GiB limit. |
 | `checkpoint_track_updates` | 1000 | 1–5000 | Metadata mutations accumulated before a manifest checkpoint. |
