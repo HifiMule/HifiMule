@@ -205,6 +205,80 @@ pub struct DeviceManifest {
 }
 
 impl DeviceManifest {
+    /// Legacy explicit passthrough and the current null selection both copy source audio.
+    fn effective_profile_id(profile_id: Option<&str>) -> Option<&str> {
+        profile_id.filter(|id| *id != "passthrough")
+    }
+
+    fn has_proven_passthrough_alias_mismatch(&self) -> bool {
+        self.synced_items.is_empty()
+            && self.last_synced_transcoding_profile_id.as_deref() == Some("passthrough")
+            && Self::effective_profile_id(self.transcoding_profile_id.as_deref()).is_none()
+            && !self.has_interrupted_sync_evidence()
+    }
+
+    fn has_interrupted_sync_evidence(&self) -> bool {
+        self.dirty || !self.pending_item_ids.is_empty()
+    }
+
+    pub fn needs_transcoding_profile_rewrite(&self) -> bool {
+        self.transcoding_profile_dirty
+    }
+
+    /// Only an empty library permits automatic alias repair: older auto-sync history may be stale.
+    fn repair_passthrough_profile_dirty(&mut self) -> bool {
+        if self.transcoding_profile_dirty && self.has_proven_passthrough_alias_mismatch() {
+            self.transcoding_profile_dirty = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_transcoding_profile(&mut self, profile_id: Option<String>) {
+        let effective = Self::effective_profile_id(profile_id.as_deref());
+        if Self::effective_profile_id(self.transcoding_profile_id.as_deref()) != effective {
+            let changed_from_history = match self.last_synced_transcoding_profile_id.as_deref() {
+                Some(history) => Self::effective_profile_id(Some(history)) != effective,
+                None => !self.synced_items.is_empty(),
+            };
+            // Settings cannot prove recovery complete, even when no tracks were checkpointed.
+            self.transcoding_profile_dirty = changed_from_history || self.transcoding_profile_dirty;
+        }
+        self.transcoding_profile_id = profile_id;
+    }
+
+    pub fn record_completed_transcoding_profile(&mut self, completed_profile: Option<&str>) {
+        self.last_synced_transcoding_profile_id = completed_profile.map(str::to_string);
+        self.transcoding_profile_dirty =
+            Self::effective_profile_id(self.transcoding_profile_id.as_deref())
+                != Self::effective_profile_id(completed_profile);
+    }
+
+    pub fn recovery_scan_roots(&self) -> Vec<String> {
+        let mut roots: std::collections::BTreeSet<String> =
+            self.managed_paths.iter().cloned().collect();
+        roots.extend(self.audiobook_path.iter().cloned());
+        roots.extend(self.podcast_path.iter().cloned());
+        roots.extend(self.resolved_playlist_path().map(str::to_string));
+        for path in self
+            .synced_items
+            .iter()
+            .map(|item| item.local_path.as_str())
+            .chain(
+                self.playlists
+                    .iter()
+                    .map(|playlist| playlist.filename.as_str()),
+            )
+        {
+            let normalized = path.replace('\\', "/");
+            if let Some((parent, _)) = normalized.rsplit_once('/') {
+                roots.insert(parent.to_string());
+            }
+        }
+        roots.into_iter().collect()
+    }
+
     /// Polling metadata only: never clone library, basket, pending or playlist records.
     pub fn polling_metadata(&self) -> Self {
         Self {
@@ -1083,8 +1157,20 @@ impl DeviceManager {
         // spurious full resync. Idempotent; best-effort persistence (never blocks
         // device load on a write failure).
         let mut manifest = manifest;
+        // Marker recovery must precede alias repair: interrupted work may contain converted tracks.
+        let marker_scan = device_io.scan_recovery_markers(&manifest.recovery_scan_roots()).await;
+        let has_dirty_marker = marker_scan.as_ref().is_ok_and(|has_marker| *has_marker);
+        if has_dirty_marker {
+            manifest.dirty = true;
+        }
         let remap = self.db.server_id_remap();
         let mut manifest_changed = reconcile_manifest_server_ids(&mut manifest, &remap);
+        // Failed enumeration is unknown recovery; retain flags for persistence and preview.
+        if marker_scan.is_ok() {
+            manifest_changed |= manifest.repair_passthrough_profile_dirty();
+        } else if let Err(error) = marker_scan {
+            daemon_log!("[Device] Could not inspect recovery markers at {:?}: {:#}", path, error);
+        }
         // Legacy auto-fill settings migrate onto the selected portable server.
         if let Ok(Some(sel)) = self.db.get_server_config()
             && let Some(portable) = sel.server_id
@@ -1117,9 +1203,7 @@ impl DeviceManager {
         // T5.9: Scan for MTP-style dirty markers on reconnect.
         // For MSC devices, leftover `.dirty` markers indicate an interrupted MtpBackend write
         // from a previous session (e.g., the device was used with MTP before).
-        if let Ok(files) = device_io.list_files("").await
-            && files.iter().any(|f| f.name.ends_with(".dirty"))
-        {
+        if has_dirty_marker {
             daemon_log!(
                 "[Device] Dirty marker detected on reconnect at {:?} — firing on_device_dirty",
                 path
@@ -1815,6 +1899,41 @@ impl DeviceManager {
         .await
     }
 
+    /// Apply an explicit confirmation against the same connection and state validated at commit.
+    pub async fn confirm_passthrough_profile_for_connection(
+        &self,
+        device_id: &str,
+        observation: u64,
+        io: &Arc<dyn crate::device_io::DeviceIO>,
+        expected_recovery_roots: &[String],
+    ) -> Result<()> {
+        self.update_manifest_checked_result(
+            device_id,
+            Some((io, observation)),
+            |manifest| {
+                if manifest.recovery_scan_roots().as_slice() != expected_recovery_roots {
+                    anyhow::bail!("Device media folders changed; verify recovery state again");
+                }
+                if DeviceManifest::effective_profile_id(manifest.transcoding_profile_id.as_deref())
+                    .is_some()
+                {
+                    anyhow::bail!("Selected transcoding profile is no longer passthrough");
+                }
+                if manifest.has_interrupted_sync_evidence() {
+                    anyhow::bail!(
+                        "Resolve interrupted sync recovery before confirming the profile"
+                    );
+                }
+                let completed = manifest.transcoding_profile_id.clone();
+                manifest.record_completed_transcoding_profile(completed.as_deref());
+                Ok(())
+            },
+            crate::paths::get_local_mtp_manifest_path,
+            sync_manifest_directory,
+        )
+        .await
+    }
+
     /// Result-bearing compare-and-mutate boundary used by snapshot basket
     /// export. Identity resolution, basket hash verification, mutation and
     /// persistence all happen under the same per-device commit lock.
@@ -1923,6 +2042,31 @@ impl DeviceManager {
         F: FnOnce(&mut DeviceManifest),
         P: FnOnce(&str) -> Result<PathBuf>,
     {
+        self.update_manifest_checked_result(
+            device_id,
+            expected_io,
+            |manifest| {
+                mutation(manifest);
+                Ok(())
+            },
+            cache_path,
+            sync_directory,
+        )
+        .await
+    }
+
+    async fn update_manifest_checked_result<F, P>(
+        &self,
+        device_id: &str,
+        expected_io: Option<(&Arc<dyn crate::device_io::DeviceIO>, u64)>,
+        mutation: F,
+        cache_path: P,
+        sync_directory: fn(&Path) -> std::io::Result<()>,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut DeviceManifest) -> Result<()>,
+        P: FnOnce(&str) -> Result<PathBuf>,
+    {
         let commit_lock = {
             let mut locks = self
                 .manifest_commit_locks
@@ -1965,7 +2109,10 @@ impl DeviceManager {
         }
         let observation_token = connected.observation_token;
         let mut previous_manifest = connected.manifest.clone();
-        mutation(&mut connected.manifest);
+        if let Err(error) = mutation(&mut connected.manifest) {
+            connected.manifest = previous_manifest;
+            return Err(error);
+        }
         // Clone Arc and manifest so we can drop the write guard before the async I/O.
         // Serialization is still guaranteed: the in-memory state is mutated under the lock;
         // the snapshot written to disk is always consistent with the in-memory state.
@@ -3164,7 +3311,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                 .await;
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
                         known_mounts.remove(mount);
                         let attempt = retry_state
                             .get(mount)
@@ -3176,6 +3323,13 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                             4 => 16,
                             _ => 30,
                         };
+                        daemon_log!(
+                            "[Device] Manifest probe failed at {:?} (attempt {}, retry in {}s): {:#}",
+                            mount,
+                            attempt,
+                            seconds,
+                            error
+                        );
                         retry_state.insert(
                             mount.clone(),
                             (
@@ -3619,13 +3773,32 @@ fn is_boot_volume_device(candidate_dev: Option<u64>, root_dev: u64) -> bool {
 
 #[cfg(target_os = "windows")]
 fn get_mounts() -> Vec<PathBuf> {
-    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    windows_mounts_from_mask(unsafe { GetLogicalDrives() }, |path| {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // DRIVE_CDROM: exclude optical before probing; preserve every other drive type.
+        unsafe { GetDriveTypeW(wide.as_ptr()) == 5 }
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_mounts_from_mask(
+    drives: u32,
+    mut is_optical: impl FnMut(&Path) -> bool,
+) -> Vec<PathBuf> {
     let mut mounts = Vec::new();
-    let drives = unsafe { GetLogicalDrives() };
     for i in 0..26 {
         if (drives >> i) & 1 == 1 {
             let drive_letter = (b'A' + i) as char;
-            mounts.push(PathBuf::from(format!("{}:\\", drive_letter)));
+            let mount = PathBuf::from(format!("{}:\\", drive_letter));
+            if !is_optical(&mount) {
+                mounts.push(mount);
+            }
         }
     }
     mounts

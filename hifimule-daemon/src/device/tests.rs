@@ -381,6 +381,7 @@ struct ManifestPublicationFaultIo {
     corrupt_next_write: std::sync::atomic::AtomicBool,
     fail_sync_call: Option<usize>,
     sync_calls: std::sync::atomic::AtomicUsize,
+    fail_listing: bool,
 }
 
 #[async_trait::async_trait]
@@ -416,7 +417,16 @@ impl crate::device_io::DeviceIO for ManifestPublicationFaultIo {
         self.inner.delete_file(path).await
     }
     async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        if self.fail_listing {
+            anyhow::bail!("injected root enumeration failure");
+        }
         self.inner.list_files(path).await
+    }
+    async fn scan_recovery_markers(&self, roots: &[String]) -> Result<bool> {
+        if self.fail_listing {
+            anyhow::bail!("injected root enumeration failure");
+        }
+        self.inner.scan_recovery_markers(roots).await
     }
     async fn free_space(&self) -> Result<u64> {
         self.inner.free_space().await
@@ -441,6 +451,7 @@ async fn compressed_publication_verifies_bytes_and_durability_before_retiring_le
             corrupt_next_write: corrupt.into(),
             fail_sync_call: (!corrupt).then_some(0),
             sync_calls: 0.into(),
+            fail_listing: false,
         });
         let error = write_manifest(io.clone(), &manifest)
             .await
@@ -475,6 +486,7 @@ async fn compressed_publication_uncertainty_preserves_dirty_recovery() {
             corrupt_next_write: false.into(),
             fail_sync_call: Some(failure_call),
             sync_calls: 0.into(),
+            fail_listing: false,
         });
         manager
             .handle_device_detected(dir.path().to_path_buf(), manifest, io)
@@ -4913,4 +4925,342 @@ async fn removed_sync_target_cannot_admit_new_operations() {
             .is_err()
     );
     assert!(operations.get_operation("after-removal").await.is_none());
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_detection_persists_only_proven_alias_repair() {
+    for (history, dirty, pending, current, legacy) in [
+        (Some("passthrough"), false, false),
+        (Some("passthrough"), true, false),
+        (Some("passthrough"), false, true),
+        (Some("passthrough"), true, true),
+        (None, false, false),
+        (Some("rockbox-mp3-320"), false, false),
+    ]
+    .into_iter()
+    .flat_map(|(h, dirty, pending)| {
+        [
+            (h, dirty, pending, None, false),
+            (h, dirty, pending, None, true),
+            (h, dirty, pending, Some("passthrough"), false),
+            (h, dirty, pending, Some("passthrough"), true),
+        ]
+    }) {
+        let dir = tempdir().unwrap();
+        let mut manifest = make_manifest("profile-recovery", "MSC");
+        manifest.last_synced_transcoding_profile_id = history.map(str::to_string);
+        manifest.transcoding_profile_id = current.map(str::to_string);
+        manifest.transcoding_profile_dirty = true;
+        manifest.dirty = dirty;
+        if pending {
+            manifest.pending_item_ids = vec!["unfinished".into()];
+        }
+        manifest.synced_items = serde_json::from_str(
+            r#"[{"providerItemId":"track","name":"Track","localPath":"Music/Track.flac",
+                "sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        if legacy {
+            std::fs::write(
+                dir.path().join(".hifimule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        } else {
+            write_manifest(msc(dir.path()), &manifest).await.unwrap();
+        }
+        let probed = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        manager
+            .handle_device_detected(dir.path().to_path_buf(), probed, msc(dir.path()))
+            .await
+            .unwrap();
+        for loaded in [
+            manager.get_current_device().await.unwrap(),
+            DeviceProber::probe(dir.path()).await.unwrap().unwrap(),
+        ] {
+            assert!(
+                loaded.transcoding_profile_dirty,
+                "populated manifests have unknown historical provenance"
+            );
+            assert_eq!(loaded.dirty, manifest.dirty);
+            assert_eq!(loaded.pending_item_ids, manifest.pending_item_ids);
+            assert_eq!(
+                loaded.transcoding_profile_id,
+                manifest.transcoding_profile_id
+            );
+            assert_eq!(
+                loaded.last_synced_transcoding_profile_id,
+                manifest.last_synced_transcoding_profile_id
+            );
+            assert_eq!(
+                serde_json::to_value(loaded.synced_items).unwrap(),
+                serde_json::to_value(&manifest.synced_items).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn manifest_migration_regression_windows_discovery_excludes_only_optical_drives() {
+    // C fixed, D empty optical, G managed removable, N network, R RAM drive.
+    let mask = [2, 3, 6, 13, 17]
+        .into_iter()
+        .fold(0, |mask, bit| mask | (1 << bit));
+    let mounts = windows_mounts_from_mask(mask, |path| path == Path::new("D:\\"));
+    let expected: Vec<PathBuf> = ["C:\\", "G:\\", "N:\\", "R:\\"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(mounts, expected);
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_detection_marker_preserves_profile_recovery() {
+    let dir = tempdir().unwrap();
+    let mut manifest = make_manifest("marker-profile-recovery", "MSC");
+    manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+    manifest.transcoding_profile_dirty = true;
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+    std::fs::write(dir.path().join("interrupted.mp3.dirty"), b"unfinished").unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager
+        .handle_device_detected(dir.path().into(), manifest, msc(dir.path()))
+        .await
+        .unwrap();
+    let loaded = manager.get_current_device().await.unwrap();
+    assert!(loaded.dirty);
+    assert!(
+        loaded.needs_transcoding_profile_rewrite(),
+        "a physical interruption marker prevents alias repair"
+    );
+    assert!(
+        DeviceProber::probe(dir.path())
+            .await
+            .unwrap()
+            .unwrap()
+            .transcoding_profile_dirty
+    );
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_unknown_root_scan_keeps_profile_evidence() {
+    for populated in [false, true] {
+        let dir = tempdir().unwrap();
+        let mut manifest = make_manifest("scan-profile-recovery", "MSC");
+        manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+        manifest.transcoding_profile_dirty = true;
+        if populated {
+            manifest.synced_items = serde_json::from_str(r#"[{"providerItemId":"track","name":"Track","localPath":"Music/Track.mp3","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap();
+        }
+        write_manifest(msc(dir.path()), &manifest).await.unwrap();
+        let io = Arc::new(ManifestPublicationFaultIo {
+            inner: msc(dir.path()),
+            corrupt_next_write: false.into(),
+            fail_sync_call: None,
+            sync_calls: 0.into(),
+            fail_listing: true,
+        });
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        manager
+            .handle_device_detected(dir.path().into(), manifest, io)
+            .await
+            .unwrap();
+        let loaded = manager.get_current_device().await.unwrap();
+        assert!(
+            loaded.transcoding_profile_dirty && loaded.needs_transcoding_profile_rewrite(),
+            "failed enumeration means unknown recovery"
+        );
+        for profile in [None, Some("rockbox-mp3-320"), None] {
+            manager
+                .update_manifest(|m| m.set_transcoding_profile(profile.map(str::to_string)))
+                .await
+                .unwrap();
+            assert!(
+                manager
+                    .get_current_device()
+                    .await
+                    .unwrap()
+                    .needs_transcoding_profile_rewrite(),
+                "settings cannot establish clean enumeration"
+            );
+        }
+        assert!(
+            DeviceProber::probe(dir.path())
+                .await
+                .unwrap()
+                .unwrap()
+                .transcoding_profile_dirty
+        );
+    }
+}
+
+#[test]
+fn manifest_migration_regression_recovery_roots_include_configured_and_recorded_paths() {
+    let mut manifest = make_manifest("recovery-scope", "MSC");
+    manifest.managed_paths = vec!["Music".into()];
+    manifest.audiobook_path = Some("Books".into());
+    manifest.podcast_path = Some("Podcasts".into());
+    manifest.playlist_path = Some("Lists".into());
+    manifest.synced_items = serde_json::from_str(r#"[{"providerItemId":"track","name":"Track","localPath":"Archive/Track.flac","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap();
+    manifest.playlists = serde_json::from_str(r#"[{"jellyfinId":"playlist","filename":"OldLists/Old.m3u","trackCount":1,"trackIds":["track"],"lastModified":"2026-10-11T00:00:00Z"}]"#).unwrap();
+    let roots: std::collections::BTreeSet<_> = manifest.recovery_scan_roots().into_iter().collect();
+    let expected = ["Archive", "Books", "Lists", "Music", "OldLists", "Podcasts"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(roots, expected);
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_empty_alias_repair_requires_known_clean_scan() {
+    for current in [None, Some("passthrough")] {
+        let dir = tempdir().unwrap();
+        let mut manifest = make_manifest("empty-profile-recovery", "MSC");
+        manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+        manifest.transcoding_profile_id = current.map(str::to_string);
+        manifest.transcoding_profile_dirty = true;
+        write_manifest(msc(dir.path()), &manifest).await.unwrap();
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        manager
+            .handle_device_detected(dir.path().into(), manifest, msc(dir.path()))
+            .await
+            .unwrap();
+        assert!(
+            !DeviceProber::probe(dir.path())
+                .await
+                .unwrap()
+                .unwrap()
+                .transcoding_profile_dirty
+        );
+    }
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_older_auto_upgrade_keeps_uncertain_dirty() {
+    for current in [Some("rockbox-mp3-320"), None] {
+        let dir = tempdir().unwrap();
+        let mut manifest = make_manifest("older-auto-profile", "MSC");
+        manifest.transcoding_profile_id = current.map(str::to_string);
+        manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+        manifest.transcoding_profile_dirty = true;
+        manifest.last_sync_at = Some(1_775_000_000);
+        manifest.synced_items = serde_json::from_str(r#"[{"providerItemId":"track","name":"Converted Track","localPath":"Music/Track.mp3","sizeBytes":1234,"originalContainer":"flac","syncedAt":"2026-04-01T00:00:00Z"}]"#).unwrap();
+        write_manifest(msc(dir.path()), &manifest).await.unwrap();
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        manager
+            .handle_device_detected(dir.path().into(), manifest.clone(), msc(dir.path()))
+            .await
+            .unwrap();
+        manager
+            .update_manifest(|m| m.set_transcoding_profile(None))
+            .await
+            .unwrap();
+        let durable = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+        assert!(
+            durable.needs_transcoding_profile_rewrite(),
+            "older automatic completion history is untrustworthy"
+        );
+        assert_eq!(
+            serde_json::to_value(durable.synced_items).unwrap(),
+            serde_json::to_value(manifest.synced_items).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_explicit_confirmation_is_durable() {
+    let dir = tempdir().unwrap();
+    let mut manifest = make_manifest("confirm-profile", "MSC");
+    manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+    manifest.transcoding_profile_dirty = true;
+    manifest.synced_items = serde_json::from_str(r#"[{"providerItemId":"track","name":"Track","localPath":"Music/Track.flac","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap();
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager
+        .handle_device_detected(dir.path().into(), manifest.clone(), msc(dir.path()))
+        .await
+        .unwrap();
+    let (_, _, io, observation) = manager
+        .get_sync_target_for_device(&manifest.device_id)
+        .await
+        .unwrap();
+    manager
+        .confirm_passthrough_profile_for_connection(
+            &manifest.device_id,
+            observation,
+            &io,
+            &manifest.recovery_scan_roots(),
+        )
+        .await
+        .unwrap();
+    let durable = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
+    manifest.transcoding_profile_dirty = false;
+    manifest.last_synced_transcoding_profile_id = None;
+    assert_eq!(
+        serde_json::to_value(durable).unwrap(),
+        serde_json::to_value(manifest).unwrap()
+    );
+    assert!(
+        !manager
+            .get_current_device()
+            .await
+            .unwrap()
+            .needs_transcoding_profile_rewrite()
+    );
+}
+
+#[tokio::test]
+async fn manifest_migration_regression_explicit_confirmation_rejects_changed_state() {
+    for scenario in ["profile", "dirty", "pending", "connection", "roots"] {
+        let dir = tempdir().unwrap();
+        let mut manifest = make_manifest("reject-profile-confirm", "MSC");
+        manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+        manifest.transcoding_profile_dirty = true;
+        if scenario == "profile" {
+            manifest.transcoding_profile_id = Some("rockbox-mp3-320".into());
+        }
+        if scenario == "dirty" {
+            manifest.dirty = true;
+        }
+        if scenario == "pending" {
+            manifest.pending_item_ids = vec!["unfinished".into()];
+        }
+        write_manifest(msc(dir.path()), &manifest).await.unwrap();
+        let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+        manager
+            .handle_device_detected(dir.path().into(), manifest, msc(dir.path()))
+            .await
+            .unwrap();
+        let (_, mut before, io, observation) = manager
+            .get_sync_target_for_device("reject-profile-confirm")
+            .await
+            .unwrap();
+        let recovery_roots = before.recovery_scan_roots();
+        if scenario == "roots" {
+            manager
+                .update_manifest(|m| m.managed_paths = vec!["ChangedMusic".into()])
+                .await
+                .unwrap();
+            before = manager.get_current_device().await.unwrap();
+        }
+        let bytes = std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap();
+        let result = manager
+            .confirm_passthrough_profile_for_connection(
+                "reject-profile-confirm",
+                observation + u64::from(scenario == "connection"),
+                &io,
+                &recovery_roots,
+            )
+            .await;
+        assert!(result.is_err(), "reject {scenario}");
+        assert_eq!(
+            std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            serde_json::to_value(manager.get_current_device().await.unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
 }

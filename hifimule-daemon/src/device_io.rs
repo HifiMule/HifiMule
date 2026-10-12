@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 // Readers and scanners can briefly deny atomic replacement on Windows.
 // Never delete the previous canonical file to work around a sharing denial.
@@ -55,6 +55,21 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     }
     async fn delete_file(&self, path: &str) -> Result<()>;
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
+    /// A clean result requires complete enumeration of root entries and all supplied media roots.
+    /// Best-effort transports can establish a positive marker, but never prove its absence.
+    async fn scan_recovery_markers(&self, _roots: &[String]) -> Result<bool> {
+        if self
+            .list_files("")
+            .await?
+            .iter()
+            .any(|file| file.name.ends_with(".dirty"))
+        {
+            return Ok(true);
+        }
+        anyhow::bail!(
+            "Complete recovery-marker scanning is unavailable for this transport; use a mass-storage connection"
+        )
+    }
     async fn free_space(&self) -> Result<u64>;
     async fn storage_id(&self) -> Result<Option<String>> {
         Ok(None)
@@ -103,6 +118,12 @@ fn check_relative(path: &str) -> Result<()> {
         return Err(anyhow::anyhow!("DeviceIO path must be relative: {}", path));
     }
     for component in p.components() {
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            return Err(anyhow::anyhow!("DeviceIO path must be relative: {}", path));
+        }
         if matches!(component, std::path::Component::ParentDir) {
             return Err(anyhow::anyhow!(
                 "DeviceIO path must not traverse parent directories: {}",
@@ -122,7 +143,7 @@ fn check_relative(path: &str) -> Result<()> {
             ));
         }
         if index == 0
-            && component.len() == 2
+            && component.len() >= 2
             && component.as_bytes()[1] == b':'
             && component.as_bytes()[0].is_ascii_alphabetic()
         {
@@ -205,6 +226,105 @@ fn is_missing_object_error(error: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl DeviceIO for MscBackend {
+    async fn scan_recovery_markers(&self, roots: &[String]) -> Result<bool> {
+        let metadata = tokio::fs::symlink_metadata(&self.root)
+            .await
+            .with_context(|| format!("Cannot inspect device root {}", self.root.display()))?;
+        if metadata.is_symlink() || !metadata.is_dir() {
+            anyhow::bail!(
+                "Recovery scan root is not a real directory: {}",
+                self.root.display()
+            );
+        }
+        // Root names must be complete, but unrelated subtrees (including protected OS folders)
+        // are outside HifiMule's recovery scope and are not traversed.
+        let mut root_entries = tokio::fs::read_dir(&self.root).await?;
+        while let Some(entry) = root_entries.next_entry().await? {
+            if entry.file_name().to_string_lossy().ends_with(".dirty") {
+                return Ok(true);
+            }
+        }
+        let mut normalized = std::collections::BTreeSet::new();
+        for root in roots {
+            check_relative(root)?;
+            let root = root.replace('\\', "/").trim_end_matches('/').to_string();
+            if root.is_empty() {
+                anyhow::bail!("Managed recovery scan root must name a relative directory");
+            }
+            normalized.insert(root);
+        }
+        // Prune recorded descendants when their configured ancestor is already scanned.
+        let scopes: Vec<_> = normalized
+            .iter()
+            .filter(|root| {
+                let mut parent = Path::new(root).parent();
+                while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
+                    if normalized.contains(&path.to_string_lossy().replace('\\', "/")) {
+                        return false;
+                    }
+                    parent = path.parent();
+                }
+                true
+            })
+            .collect();
+        let mut dirs_to_visit = Vec::new();
+        for scope in scopes {
+            let mut path = self.root.clone();
+            let mut missing = false;
+            // Inspect each ancestor before entering it, so a managed path cannot escape via a link.
+            for component in Path::new(scope).components() {
+                // PathBuf::push reparses each component; a later C: would replace the root.
+                if component.as_os_str().to_string_lossy().contains(':') {
+                    anyhow::bail!("Managed recovery components cannot contain colons");
+                }
+                path.push(component);
+                let metadata = match tokio::fs::symlink_metadata(&path).await {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing = true;
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Cannot inspect recovery scope {}", path.display())
+                        });
+                    }
+                };
+                if metadata.is_symlink() || !metadata.is_dir() {
+                    anyhow::bail!(
+                        "Managed recovery scope is not a real directory: {}",
+                        path.display()
+                    );
+                }
+            }
+            // A never-created managed folder is clean only after complete root enumeration.
+            if !missing {
+                dirs_to_visit.push(path);
+            }
+        }
+        while let Some(directory) = dirs_to_visit.pop() {
+            let mut entries = tokio::fs::read_dir(&directory).await.with_context(|| {
+                format!("Cannot enumerate recovery scope {}", directory.display())
+            })?;
+            while let Some(entry) = entries.next_entry().await? {
+                let file_type = entry.file_type().await?;
+                if file_type.is_symlink() {
+                    anyhow::bail!(
+                        "Recovery scan cannot follow managed symlink: {}",
+                        entry.path().display()
+                    );
+                }
+                if entry.file_name().to_string_lossy().ends_with(".dirty") {
+                    return Ok(true);
+                }
+                if file_type.is_dir() {
+                    dirs_to_visit.push(entry.path());
+                }
+            }
+        }
+        Ok(false)
+    }
+
     async fn sync_manifest_parent(&self, path: &str) -> Result<()> {
         check_relative(path)?;
         let full = self.root.join(path);
@@ -619,6 +739,108 @@ pub mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn manifest_migration_regression_strict_scan_rejects_missing_and_non_directory_roots() {
+        let dir = tempdir().unwrap();
+        let missing = MscBackend::new(dir.path().join("missing"));
+        assert!(missing.scan_recovery_markers(&[]).await.is_err());
+        let file = dir.path().join("file");
+        tokio::fs::write(&file, b"not a directory").await.unwrap();
+        assert!(
+            MscBackend::new(file)
+                .scan_recovery_markers(&[])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_migration_regression_strict_scan_limits_roots_and_detects_nested_markers() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().into());
+        backend
+            .write_file("Unrelated/foreign.dirty", b"foreign")
+            .await
+            .unwrap();
+        let roots = vec!["Music".into(), "Music/Artist".into(), "MissingBooks".into()];
+        assert!(
+            !backend.scan_recovery_markers(&roots).await.unwrap(),
+            "unrelated subtrees are outside HifiMule recovery scope"
+        );
+        backend
+            .write_file("Music/Artist/Album/track.mp3.dirty", b"unfinished")
+            .await
+            .unwrap();
+        assert!(backend.scan_recovery_markers(&roots).await.unwrap());
+        backend
+            .delete_file("Music/Artist/Album/track.mp3.dirty")
+            .await
+            .unwrap();
+        backend
+            .write_file("root.dirty", b"unfinished")
+            .await
+            .unwrap();
+        assert!(backend.scan_recovery_markers(&roots).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn manifest_migration_regression_strict_scan_rejects_unsafe_or_non_directory_managed_scope() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().into());
+        backend
+            .write_file("Music/file", b"not a directory")
+            .await
+            .unwrap();
+        for root in [
+            "../outside",
+            "C:\\outside",
+            "C:Music",
+            "Music/C:",
+            "Music/file",
+        ] {
+            assert!(
+                backend.scan_recovery_markers(&[root.into()]).await.is_err(),
+                "{root}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_migration_regression_unverified_transport_never_claims_clean_scan() {
+        let handle = Arc::new(MockMtpHandle::new());
+        let backend = MtpBackend::new(handle.clone());
+        assert!(
+            backend
+                .scan_recovery_markers(&["Music".into()])
+                .await
+                .is_err()
+        );
+        handle
+            .files
+            .lock()
+            .unwrap()
+            .insert("root.dirty".into(), b"unfinished".to_vec());
+        assert!(
+            backend.scan_recovery_markers(&[]).await.unwrap(),
+            "positive markers remain observable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manifest_migration_regression_strict_scan_rejects_managed_symlinks() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("Music")).unwrap();
+        let backend = MscBackend::new(dir.path().into());
+        assert!(
+            backend
+                .scan_recovery_markers(&["Music".into()])
+                .await
+                .is_err()
+        );
+    }
 
     // ── MscBackend tests ───────────────────────────────────────────────────
 

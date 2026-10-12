@@ -1808,6 +1808,25 @@ fn scoped_favorite_target_id<'a>(basket_item: &'a device::BasketItem, prefix: &s
         .unwrap_or(&basket_item.id)
 }
 
+fn finish_auto_sync_manifest(
+    manifest: &mut device::DeviceManifest,
+    completed_profile: Option<&str>,
+) {
+    manifest.dirty = false;
+    manifest.pending_item_ids.clear();
+    manifest.last_sync_at = Some(rpc::now_unix_secs());
+    // Record what this operation applied; a later selection remains dirty until its own sync.
+    manifest.record_completed_transcoding_profile(completed_profile);
+}
+
+fn load_auto_sync_transcoding_profile(
+    profile_id: Option<&str>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    rpc::load_selected_transcoding_profile(profile_id).map_err(|error| {
+        anyhow::anyhow!("[AutoSync] Failed to load selected transcoding profile: {error}")
+    })
+}
+
 /// Provider-based auto-sync: resolves basket items via MediaProvider, runs auto-fill if needed,
 /// then executes sync via execute_provider_sync.
 async fn run_auto_sync_via_provider(
@@ -1833,6 +1852,17 @@ async fn run_auto_sync_via_provider(
         .ok_or_else(|| anyhow::anyhow!("Auto-sync device disconnected"))?
         .into();
     let manifest = &target.manifest;
+
+    // Reject missing/broken selected profiles before provider work or operation admission.
+    let transcoding_profile = match load_auto_sync_transcoding_profile(
+        manifest.transcoding_profile_id.as_deref(),
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            let _ = state_tx.send(DaemonState::Error);
+            return Err(error);
+        }
+    };
 
     let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
@@ -2016,24 +2046,6 @@ async fn run_auto_sync_via_provider(
         return Err(error);
     }
 
-    let transcoding_profile = if let Some(ref profile_id) = manifest.transcoding_profile_id {
-        match crate::paths::get_device_profiles_path()
-            .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
-        {
-            Ok(profile) => profile,
-            Err(e) => {
-                daemon_log!(
-                    "[AutoSync] Failed to load transcoding profile '{}': {}",
-                    profile_id,
-                    e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     drop(desired_items);
     drop(auto_fill_ids);
     drop(seen_ids);
@@ -2064,9 +2076,10 @@ async fn run_auto_sync_via_provider(
                             target.observation,
                             &target.io,
                             |m| {
-                                m.dirty = false;
-                                m.pending_item_ids.clear();
-                                m.last_sync_at = Some(rpc::now_unix_secs());
+                                finish_auto_sync_manifest(
+                                    m,
+                                    manifest.transcoding_profile_id.as_deref(),
+                                );
                             },
                         )
                         .await

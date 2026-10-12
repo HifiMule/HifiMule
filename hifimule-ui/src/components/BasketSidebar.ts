@@ -47,6 +47,7 @@ interface ConnectedDeviceSummary {
     audiobookPath?: string | null;
     podcastPath?: string | null;
     transcodingProfileId?: string | null;
+    deviceClass?: 'msc' | 'mtp';
 }
 
 interface DeviceProfileSummary {
@@ -580,6 +581,8 @@ export class BasketSidebar {
             .join('');
         const selectedProfile = profiles.find(profile => profile.id === selectedProfileId)
             ?? profiles.find(profile => profile.id === 'passthrough');
+        const canConfirmPassthrough = selected.deviceClass === 'msc' && selectedProfileId === 'passthrough'
+            && (current.transcoding_profile_dirty === true || current.transcodingProfileDirty === true);
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('basket.device.settings');
         dialog.className = 'device-settings-dialog';
@@ -604,6 +607,13 @@ export class BasketSidebar {
                 <div id="device-settings-transcoding-desc" class="device-settings-description">
                     ${this.escapeHtml(selectedProfile?.description ?? '')}
                 </div>
+                ${canConfirmPassthrough ? `
+                    <div id="device-settings-profile-recovery">
+                        <p class="device-settings-description">${t('basket.device.profile_recovery_description')}</p>
+                        <sl-checkbox id="device-settings-profile-confirm">${t('basket.device.profile_recovery_confirmation')}</sl-checkbox>
+                        <sl-button id="device-settings-profile-recover" disabled>${t('basket.device.profile_recovery_action')}</sl-button>
+                    </div>
+                ` : ''}
                 <sl-input id="device-settings-music" label="${t('basket.device.music_folder')}" value="${this.escapeHtml(musicFolder)}"></sl-input>
                 <sl-input id="device-settings-audiobook" label="${t('basket.device.audiobook_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(audiobookFolder)}"></sl-input>
                 <sl-input id="device-settings-podcast" label="${t('basket.device.podcast_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(podcastFolder)}"></sl-input>
@@ -629,6 +639,28 @@ export class BasketSidebar {
         });
         const profileSelect = dialog.querySelector('#device-settings-transcoding-profile') as any;
         const profileDesc = dialog.querySelector('#device-settings-transcoding-desc') as HTMLElement | null;
+        const profileRecovery = dialog.querySelector('#device-settings-profile-recovery') as HTMLElement | null;
+        const profileConfirmation = dialog.querySelector('#device-settings-profile-confirm') as any;
+        const profileRecoveryButton = dialog.querySelector('#device-settings-profile-recover') as any;
+        profileConfirmation?.addEventListener('sl-change', () => {
+            profileRecoveryButton.disabled = !profileConfirmation.checked;
+        });
+        profileRecoveryButton?.addEventListener('click', async () => {
+            if (profileRecoveryButton.loading || !profileConfirmation.checked) return;
+            const error = dialog.querySelector('#device-settings-error') as any;
+            profileRecoveryButton.loading = true;
+            try {
+                await rpcCall('device.confirm_passthrough_profile', { deviceId: selected.deviceId, confirmed: true });
+                dialog.hide();
+                await this.refreshAndRender();
+            } catch (err) {
+                error.textContent = err instanceof Error ? err.message : String(err);
+                error.style.display = '';
+                error.open = true;
+            } finally {
+                profileRecoveryButton.loading = false;
+            }
+        });
         const musicInput = dialog.querySelector('#device-settings-music') as any;
         const audiobookInput = dialog.querySelector('#device-settings-audiobook') as any;
         const podcastInput = dialog.querySelector('#device-settings-podcast') as any;
@@ -639,6 +671,11 @@ export class BasketSidebar {
         podcastInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         playlistInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         profileSelect?.addEventListener('sl-change', (event: any) => {
+            if (profileRecovery) profileRecovery.hidden = event.target.value !== 'passthrough';
+            if (profileConfirmation) {
+                profileConfirmation.checked = false;
+                profileRecoveryButton.disabled = true;
+            }
             const profile = profiles.find(p => p.id === event.target.value);
             if (profileDesc) profileDesc.textContent = profile?.description ?? '';
             if (!foldersEdited && profile) {

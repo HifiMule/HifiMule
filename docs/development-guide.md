@@ -256,6 +256,20 @@ Format:
 
 The `"passthrough"` profile (id: `"passthrough"`) means no transcoding; the original file is downloaded as-is.
 
+If an unchanged player reports every track as **transcoding profile changed**, open
+**Device Settings** on a mass-storage device with **No transcoding** selected. If you know its existing audio
+was copied without conversion, check **These files were copied without transcoding**
+and choose **Keep existing files**. This corrects the profile baseline through normal
+manifest persistence without copying audio or editing the manifest by hand. Recalculate
+the sync preview afterwards. The action rejects active or interrupted syncs and
+incomplete enumeration of the root or managed/recorded media folders. Unrelated
+folders are outside the recovery scan. MTP recovery confirmation is unavailable
+because its directory listings cannot establish that enumeration is complete.
+
+Older automatic syncs could leave stale profile history, so an already pending profile
+change is retained until explicitly confirmed or successfully synced. Do not use this
+action for previously converted audio; retain the pending replacement instead.
+
 ## Provider Development Notes
 
 The daemon supports Jellyfin, Subsonic, Navidrome, and OpenSubsonic through `MediaProvider`.

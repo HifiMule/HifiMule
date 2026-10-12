@@ -289,6 +289,26 @@ Updates the current device's transcoding profile.
 
 ---
 
+### `device.confirm_passthrough_profile`
+
+Corrects a pending profile change only when the user explicitly confirms the existing
+device audio was copied without transcoding. Uses normal verified manifest persistence;
+records the current passthrough selection as completed and retains every track record.
+
+**Params:** `{ "deviceId": string, "confirmed": true }`
+
+**Returns:** `true`
+
+Requires a connected device with a current `null` or `"passthrough"` profile. Rejects
+active sync pipelines/operations, general dirty or pending recovery, physical `.dirty`
+markers, incomplete root or managed/recorded-folder enumeration and changed connections.
+Strict recovery scanning is supported on MSC; MTP enumeration cannot establish
+completeness and rejects confirmation. Unrelated folders are outside the scan.
+Clears a prepared preview;
+calculate it again after success. Missing or false confirmation is invalid input.
+
+---
+
 ## Device Info
 
 ### `device_get_storage_info`

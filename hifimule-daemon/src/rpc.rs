@@ -668,6 +668,9 @@ async fn handler(
         "manifest_save_basket" => handle_manifest_save_basket(&state, payload.params).await,
         "device_initialize" => handle_device_initialize(&state, payload.params).await,
         "device.update_manifest" => handle_device_update_manifest(&state, payload.params).await,
+        "device.confirm_passthrough_profile" => {
+            handle_confirm_passthrough_profile(&state, payload.params).await
+        }
         "device_set_auto_sync_on_connect" => {
             handle_device_set_auto_sync_on_connect(&state, payload.params).await
         }
@@ -880,6 +883,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "manifest_save_basket"
             | "device_initialize"
             | "device.update_manifest"
+            | "device.confirm_passthrough_profile"
             | "device_set_auto_sync_on_connect"
             | "basket.autoFill"
             | "autoFill.setPipeline"
@@ -5232,7 +5236,9 @@ fn podcast_unknown_duration_reserves_capacity() {
     assert_eq!(podcast_estimated_size_bytes(Some(60)), 60 * 16_000);
 }
 
-fn load_selected_transcoding_profile(profile_id: Option<&str>) -> Result<Option<Value>, String> {
+pub(crate) fn load_selected_transcoding_profile(
+    profile_id: Option<&str>,
+) -> Result<Option<Value>, String> {
     let Some(profile_id) = profile_id else {
         return Ok(None);
     };
@@ -9314,16 +9320,7 @@ fn apply_manifest_settings_update(
         manifest.icon = icon.filter(|icon| !icon.is_empty());
     }
     if let Some(transcoding_profile_id) = transcoding_profile_id {
-        if manifest.transcoding_profile_id != transcoding_profile_id {
-            manifest.transcoding_profile_dirty = match &manifest.last_synced_transcoding_profile_id
-            {
-                Some(last_synced) => {
-                    transcoding_profile_id.as_deref() != Some(last_synced.as_str())
-                }
-                None => !manifest.synced_items.is_empty(),
-            };
-        }
-        manifest.transcoding_profile_id = transcoding_profile_id;
+        manifest.set_transcoding_profile(transcoding_profile_id);
     }
     if let Some(music_folder_path) = music_folder_path {
         if manifest.managed_paths.is_empty() {
@@ -10320,13 +10317,7 @@ async fn handle_set_transcoding_profile(
     state
         .device_manager
         .update_manifest(|m| {
-            if m.transcoding_profile_id != profile_id {
-                m.transcoding_profile_dirty = match &m.last_synced_transcoding_profile_id {
-                    Some(last_synced) => profile_id.as_deref() != Some(last_synced.as_str()),
-                    None => !m.synced_items.is_empty(),
-                };
-            }
-            m.transcoding_profile_id = profile_id.clone();
+            m.set_transcoding_profile(profile_id.clone());
         })
         .await
         .map_err(|e| JsonRpcError {
@@ -10335,6 +10326,94 @@ async fn handle_set_transcoding_profile(
             data: None,
         })?;
 
+    Ok(Value::Bool(true))
+}
+
+/// Explicit recovery for audio the user confirms was copied without transcoding.
+/// A stale historical profile alone cannot establish this on older manifests.
+async fn handle_confirm_passthrough_profile(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".into(),
+        data: None,
+    })?;
+    let device_id = params["deviceId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing deviceId".into(),
+        data: None,
+    })?;
+    if params["confirmed"] != Value::Bool(true) {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Confirm that the existing files were copied without transcoding".into(),
+            data: None,
+        });
+    }
+    let _pipeline = state
+        .sync_operation_manager
+        .try_start_pipeline()
+        .ok_or(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "Wait for the current sync to finish".into(),
+            data: None,
+        })?;
+    if state
+        .sync_operation_manager
+        .get_active_operation_id()
+        .await
+        .is_some()
+    {
+        return Err(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "Wait for the current sync to finish".into(),
+            data: None,
+        });
+    }
+    let (_, manifest, io, observation) = state
+        .device_manager
+        .get_sync_target_for_device(device_id)
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "Device is no longer connected".into(),
+            data: None,
+        })?;
+    let recovery_roots = manifest.recovery_scan_roots();
+    let has_dirty_marker = io
+        .scan_recovery_markers(&recovery_roots)
+        .await
+        .map_err(|error| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Could not verify device recovery state: {error}"),
+            data: None,
+        })?;
+    if has_dirty_marker {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Resume or resolve the interrupted sync first".into(),
+            data: None,
+        });
+    }
+    state
+        .device_manager
+        .confirm_passthrough_profile_for_connection(device_id, observation, &io, &recovery_roots)
+        .await
+        .map_err(|error| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?;
+    // A prepared preview must be recalculated after this explicit correction.
+    state
+        .sync_operation_manager
+        .pending_plan
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    broadcast_device_state(state).await;
     Ok(Value::Bool(true))
 }
 
@@ -11627,6 +11706,225 @@ mod tests {
             normalize_editable_folder_path("Music\\Rock").unwrap(),
             "Music/Rock"
         );
+    }
+
+    #[tokio::test]
+    async fn manifest_migration_regression_both_profile_rpcs_preserve_equivalent_selection() {
+        for settings_rpc in [false, true] {
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let dir = tempfile::tempdir().unwrap();
+            let mut manifest = manifest_for_update();
+            manifest.transcoding_profile_id = Some("passthrough".into());
+            manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+            manifest.transcoding_profile_dirty = false;
+            let io = Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf()));
+            crate::device::write_manifest(io.clone(), &manifest)
+                .await
+                .unwrap();
+            state
+                .device_manager
+                .handle_device_detected(dir.path().to_path_buf(), manifest, io)
+                .await
+                .unwrap();
+            if settings_rpc {
+                handle_device_update_manifest(
+                    &state,
+                    Some(json!({"deviceId":"dev-1", "transcodingProfileId":"passthrough"})),
+                )
+                .await
+                .unwrap();
+            } else {
+                handle_set_transcoding_profile(
+                    &state,
+                    Some(json!({"deviceId":"dev-1", "profileId":"passthrough"})),
+                )
+                .await
+                .unwrap();
+            }
+            let durable = crate::device::DeviceProber::probe(dir.path())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !durable.transcoding_profile_dirty,
+                "equivalent selection via settings_rpc={settings_rpc}"
+            );
+            assert_eq!(durable.transcoding_profile_id, None);
+            assert_eq!(
+                durable.last_synced_transcoding_profile_id.as_deref(),
+                Some("passthrough")
+            );
+            let memory = state.device_manager.get_current_device().await.unwrap();
+            assert_eq!(
+                memory.transcoding_profile_id,
+                durable.transcoding_profile_id
+            );
+            assert_eq!(
+                memory.last_synced_transcoding_profile_id,
+                durable.last_synced_transcoding_profile_id
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_migration_regression_partial_sync_profile_return_keeps_dirty() {
+        let mut manifest = manifest_for_update();
+        manifest.transcoding_profile_id = Some("rockbox-mp3-320".into());
+        manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+        manifest.transcoding_profile_dirty = true;
+        manifest.dirty = true;
+        manifest.pending_item_ids = vec!["unfinished".into()];
+        apply_manifest_settings_update(
+            &mut manifest,
+            None,
+            None,
+            Some(None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            manifest.transcoding_profile_dirty,
+            "partial converted tracks must still be replaced"
+        );
+        assert!(manifest.dirty);
+        assert_eq!(manifest.pending_item_ids, ["unfinished"]);
+    }
+
+    #[test]
+    fn manifest_migration_regression_settings_preserve_unknown_and_genuine_changes() {
+        for (history, current, dirty, expected) in [
+            (None, None, true, true),
+            (
+                Some("rockbox-mp3-320"),
+                Some("rockbox-mp3-320"),
+                false,
+                true,
+            ),
+            (Some("rockbox-mp3-320"), None, true, true),
+            (Some("passthrough"), None, true, true),
+            (Some("passthrough"), Some("rockbox-mp3-320"), true, true),
+        ] {
+            let mut manifest = manifest_for_update();
+            manifest.last_synced_transcoding_profile_id = history.map(str::to_string);
+            manifest.transcoding_profile_id = current.map(str::to_string);
+            manifest.transcoding_profile_dirty = dirty;
+            apply_manifest_settings_update(
+                &mut manifest,
+                None,
+                None,
+                Some(None),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                manifest.transcoding_profile_dirty, expected,
+                "history={history:?}, current={current:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_migration_regression_explicit_passthrough_confirmation_is_guarded() {
+        for scenario in [
+            "success",
+            "unconfirmed",
+            "pipeline",
+            "operation",
+            "dirty",
+            "pending",
+            "marker",
+            "profile",
+        ] {
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let dir = tempfile::tempdir().unwrap();
+            let mut manifest = manifest_for_update();
+            manifest.transcoding_profile_id = None;
+            manifest.last_synced_transcoding_profile_id = Some("passthrough".into());
+            manifest.transcoding_profile_dirty = true;
+            manifest.synced_items = serde_json::from_value(json!([{
+                "providerItemId":"track", "name":"Track", "localPath":"Music/Track.flac",
+                "sizeBytes":1234, "syncedAt":"2026-10-11T00:00:00Z"
+            }]))
+            .unwrap();
+            if scenario == "dirty" {
+                manifest.dirty = true;
+            }
+            if scenario == "pending" {
+                manifest.pending_item_ids = vec!["unfinished".into()];
+            }
+            if scenario == "profile" {
+                manifest.transcoding_profile_id = Some("rockbox-mp3-320".into());
+            }
+            let io = Arc::new(crate::device_io::MscBackend::new(dir.path().into()));
+            crate::device::write_manifest(io.clone(), &manifest)
+                .await
+                .unwrap();
+            state
+                .device_manager
+                .handle_device_detected(dir.path().into(), manifest.clone(), io)
+                .await
+                .unwrap();
+            if scenario == "marker" {
+                std::fs::write(dir.path().join("interrupted.dirty"), b"unfinished").unwrap();
+            }
+            let pipeline = if scenario == "pipeline" {
+                Some(state.sync_operation_manager.try_start_pipeline().unwrap())
+            } else {
+                None
+            };
+            if scenario == "operation" {
+                state
+                    .sync_operation_manager
+                    .create_operation("active".into(), 1)
+                    .await;
+            }
+            let before = std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap();
+            let result = handle_confirm_passthrough_profile(
+                &state,
+                Some(json!({
+                    "deviceId":"dev-1", "confirmed": scenario != "unconfirmed"
+                })),
+            )
+            .await;
+            if scenario == "success" {
+                assert_eq!(result.unwrap(), Value::Bool(true));
+                let durable = crate::device::DeviceProber::probe(dir.path())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!durable.transcoding_profile_dirty);
+                assert_eq!(durable.transcoding_profile_id, None);
+                assert_eq!(durable.last_synced_transcoding_profile_id, None);
+                assert_eq!(
+                    serde_json::to_value(durable.synced_items).unwrap(),
+                    serde_json::to_value(&manifest.synced_items).unwrap()
+                );
+                assert!(!durable.dirty);
+                assert!(durable.pending_item_ids.is_empty());
+            } else {
+                assert!(result.is_err(), "{scenario}");
+                assert_eq!(
+                    std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+                    before,
+                    "{scenario}"
+                );
+                assert!(
+                    state
+                        .device_manager
+                        .get_current_device()
+                        .await
+                        .unwrap()
+                        .transcoding_profile_dirty,
+                    "{scenario}"
+                );
+            }
+            drop(pipeline);
+            assert!(is_mutating_method("device.confirm_passthrough_profile"));
+        }
     }
 
     #[test]
