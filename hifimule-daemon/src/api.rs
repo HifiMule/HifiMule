@@ -1742,6 +1742,12 @@ impl JellyfinClient {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 struct Config {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_json_value"
+    )]
+    pub sync_performance: Option<Box<serde_json::value::RawValue>>,
     #[serde(default)]
     pub url: String,
     #[serde(default)]
@@ -1753,6 +1759,13 @@ struct Config {
     /// vault without a daemon handle.
     #[serde(default)]
     pub selected_server_id: Option<String>,
+}
+
+// Preserve explicit null as well as malformed fields without affecting credentials.
+fn present_json_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Box<serde_json::value::RawValue>>, D::Error> {
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// Per-server credential entry in the multi-server vault (Story 2.11, AC18).
@@ -1781,6 +1794,12 @@ struct LegacySecrets {
 pub struct CredentialManager;
 
 pub(crate) static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[cfg(test)]
+tokio::task_local! {
+    // Isolate real config-file fixtures from unrelated parallel sync tests.
+    pub(crate) static TEST_CONFIG_PATH: PathBuf;
+}
+
 #[cfg(test)]
 pub(crate) static CREDENTIAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
 #[cfg(test)]
@@ -1981,6 +2000,10 @@ impl CredentialManager {
     }
 
     fn get_config_path() -> Result<PathBuf> {
+        #[cfg(test)]
+        if let Ok(path) = TEST_CONFIG_PATH.try_with(Clone::clone) {
+            return Ok(path);
+        }
         let p = CONFIG_FILE_PATH.lock().unwrap();
         if let Some(ref path) = *p {
             return Ok(path.clone());
@@ -1997,6 +2020,29 @@ impl CredentialManager {
         let content =
             fs::read_to_string(&path).map_err(|e| anyhow!("Failed to read config file: {}", e))?;
         serde_json::from_str(&content).map_err(|e| anyhow!("Failed to parse config file: {}", e))
+    }
+
+    pub(crate) fn sync_performance() -> crate::sync_performance::SyncPerformance {
+        let value = (|| -> Result<Option<Box<serde_json::value::RawValue>>> {
+            let path = Self::get_config_path()?;
+            let content = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let mut value: std::collections::HashMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_str(&content)?;
+            Ok(value.remove("sync_performance"))
+        })();
+        match value {
+            Ok(value) => crate::sync_performance::SyncPerformance::from_raw(value.as_deref()),
+            Err(_) => {
+                crate::daemon_log!(
+                    "[Sync] Unable to read config.json performance settings; using defaults"
+                );
+                crate::sync_performance::SyncPerformance::default()
+            }
+        }
     }
 
     fn write_config(config: &Config) -> Result<()> {
@@ -2031,6 +2077,7 @@ impl CredentialManager {
         Self::validate_url(url)?;
         Self::validate_token(token)?;
         Self::write_config(&Config {
+            sync_performance: Self::read_config().ok().and_then(|c| c.sync_performance),
             url: url.to_string(),
             user_id: user_id.map(str::to_string),
             device_id: Self::get_device_id().ok(),
@@ -2119,7 +2166,16 @@ impl CredentialManager {
     pub fn clear_credentials() -> Result<()> {
         let path = Self::get_config_path()?;
         if path.exists() {
-            fs::remove_file(&path).map_err(|e| anyhow!("Failed to remove config file: {}", e))?;
+            let tuning = Self::read_config().ok().and_then(|c| c.sync_performance);
+            if tuning.is_some() {
+                Self::write_config(&Config {
+                    sync_performance: tuning,
+                    ..Config::default()
+                })?;
+            } else {
+                fs::remove_file(&path)
+                    .map_err(|e| anyhow!("Failed to remove config file: {}", e))?;
+            }
         }
 
         #[cfg(not(test))]
@@ -2177,10 +2233,12 @@ impl CredentialManager {
             return Ok(None);
         }
         let config = Self::read_config()?;
-        let id = config
-            .selected_server_id
-            .clone()
-            .ok_or_else(|| anyhow!("No selected server in config"))?;
+        let Some(id) = config.selected_server_id.clone() else {
+            if config.url.is_empty() {
+                return Ok(None);
+            }
+            return Err(anyhow!("No selected server in config"));
+        };
         let Some(creds) = Self::find_server_credential(&id)? else {
             return Ok(None);
         };
@@ -2892,6 +2950,120 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_tuning_number_preserves_credentials_neighbors_and_raw_config() {
+        let _guard = credential_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        TEST_CONFIG_PATH.sync_scope(path.clone(), || {
+            fs::write(
+                &path,
+                r#"{"sync_performance":{"copy_buffer_kib":1e400,"staging_max_tracks":3}}"#,
+            )
+            .unwrap();
+            CredentialManager::save_jellyfin_session(
+                "overflow",
+                "https://example.test",
+                "long-overflow-token",
+                Some("user"),
+            )
+            .unwrap();
+            assert_eq!(
+                CredentialManager::get_credentials().unwrap().1,
+                "long-overflow-token"
+            );
+            let settings = CredentialManager::sync_performance();
+            assert_eq!(settings.copy_buffer_bytes, 8192);
+            assert_eq!(settings.staging_max_tracks, 3);
+            CredentialManager::set_config_selected_server("another").unwrap();
+            CredentialManager::clear_credentials().unwrap();
+            assert!(fs::read_to_string(&path).unwrap().contains("1e400"));
+            assert_eq!(CredentialManager::sync_performance().staging_max_tracks, 3);
+            assert!(
+                CredentialManager::find_legacy_credentials()
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn tuning_survives_credentials_and_invalid_fields_do_not_break_login() {
+        let _guard = credential_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        TEST_CONFIG_PATH.sync_scope(path.clone(), || {
+            let tuning = serde_json::json!({"copy_buffer_kib":64,"staging_max_tracks":"invalid", "checkpoint_track_updates":1000});
+            fs::write(
+                &path,
+                serde_json::json!({"sync_performance": tuning}).to_string(),
+            )
+            .unwrap();
+            let device_id = CredentialManager::get_device_id().unwrap();
+            CredentialManager::save_jellyfin_session(
+                "first",
+                "https://example.test",
+                "long-test-token",
+                Some("user"),
+            )
+            .unwrap();
+            assert_eq!(CredentialManager::get_device_id().unwrap(), device_id);
+            assert_eq!(
+                CredentialManager::get_credentials().unwrap().1,
+                "long-test-token"
+            );
+            assert_eq!(
+                CredentialManager::sync_performance().copy_buffer_bytes,
+                64 * 1024
+            );
+            assert_eq!(CredentialManager::sync_performance().staging_max_tracks, 2);
+            CredentialManager::set_config_selected_server("second").unwrap();
+            assert_eq!(
+                CredentialManager::read_config().unwrap().sync_performance.map(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).unwrap()),
+                Some(tuning.clone())
+            );
+            CredentialManager::clear_credentials().unwrap();
+            assert_eq!(
+                CredentialManager::read_config().unwrap().sync_performance.map(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).unwrap()),
+                Some(tuning)
+            );
+            assert!(CredentialManager::get_credentials().is_err());
+            assert!(
+                CredentialManager::find_legacy_credentials()
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                CredentialManager::find_server_credential("first")
+                    .unwrap()
+                    .is_none()
+            );
+            CredentialManager::save_credentials("https://example.test", "another-long-token", None)
+                .unwrap();
+            assert_eq!(
+                CredentialManager::sync_performance().copy_buffer_bytes,
+                64 * 1024
+            );
+            let snapshot = CredentialManager::sync_performance();
+            for raw in [
+                r#"{"sync_performance":null}"#,
+                r#"{"sync_performance":"bad"}"#,
+                "{bad-json",
+            ] {
+                fs::write(&path, raw).unwrap();
+                assert_eq!(
+                    CredentialManager::sync_performance(),
+                    crate::sync_performance::SyncPerformance::default()
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+                assert_eq!(snapshot.copy_buffer_bytes, 64 * 1024);
+            }
+            TEST_CONFIG_PATH.sync_scope(dir.path().to_path_buf(), || {
+                assert_eq!(CredentialManager::sync_performance(), crate::sync_performance::SyncPerformance::default());
+            });
+            });
+    }
+
+    #[test]
     fn test_file_storage() {
         let _guard = credential_test_lock();
 
@@ -3073,6 +3245,7 @@ mod tests {
         CredentialManager::set_config_path(temp_dir.path().join("config.json"));
         // Pre-existing config with the legacy Jellyfin user_id but no selected id.
         CredentialManager::write_config(&Config {
+            sync_performance: None,
             url: "http://legacy.example".to_string(),
             user_id: Some("legacy-user".to_string()),
             device_id: None,

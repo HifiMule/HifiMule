@@ -53,6 +53,15 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
         let data = tokio::fs::read(source).await?;
         self.write_with_verify(path, &data).await
     }
+    /// MSC uses the bounded buffer; object transports retain their native behavior.
+    async fn write_with_verify_from_path_with_buffer(
+        &self,
+        path: &str,
+        source: &Path,
+        _buffer_bytes: usize,
+    ) -> Result<()> {
+        self.write_with_verify_from_path(path, source).await
+    }
     async fn delete_file(&self, path: &str) -> Result<()>;
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     /// A clean result requires complete enumeration of root entries and all supplied media roots.
@@ -386,6 +395,25 @@ impl DeviceIO for MscBackend {
     }
 
     async fn write_with_verify_from_path(&self, path: &str, source: &Path) -> Result<()> {
+        self.write_with_verify_from_path_with_buffer(
+            path,
+            source,
+            crate::sync_performance::SyncPerformance::default().copy_buffer_bytes,
+        )
+        .await
+    }
+
+    async fn write_with_verify_from_path_with_buffer(
+        &self,
+        path: &str,
+        source: &Path,
+        buffer_bytes: usize,
+    ) -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        anyhow::ensure!(
+            (8 * 1024..=16384 * 1024).contains(&buffer_bytes),
+            "Invalid MSC copy buffer size"
+        );
         check_relative(path)?;
         let full = self.root.join(path);
         if let Some(parent) = full.parent() {
@@ -399,7 +427,19 @@ impl DeviceIO for MscBackend {
         let mut input = tokio::fs::File::open(source).await?;
         let source_size = input.metadata().await?.len();
         let mut output = tokio::fs::File::create(&tmp_path).await?;
-        let copied = tokio::io::copy(&mut input, &mut output).await?;
+        input.set_max_buf_size(buffer_bytes);
+        output.set_max_buf_size(buffer_bytes);
+        let mut buffer = vec![0u8; buffer_bytes];
+        let mut copied = 0u64;
+        loop {
+            let count = input.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            output.write_all(&buffer[..count]).await?;
+            copied += count as u64;
+        }
+        output.flush().await?;
         output.sync_all().await?;
         if copied != source_size || input.metadata().await?.len() != source_size {
             anyhow::bail!("MSC source changed size during transfer");
@@ -865,6 +905,25 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn msc_custom_copy_buffers_preserve_bytes_and_empty_files() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().join("device"));
+        let source = dir.path().join("staged");
+        for size in [0, 1, 65537, 2_500_003] {
+            let bytes: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
+            tokio::fs::write(&source, &bytes).await.unwrap();
+            for buffer in [8192, 65536, 16 * 1024 * 1024] {
+                backend
+                    .write_with_verify_from_path_with_buffer("Music/test.flac", &source, buffer)
+                    .await
+                    .unwrap();
+                assert_eq!(backend.read_file("Music/test.flac").await.unwrap(), bytes);
+                assert!(!dir.path().join("device/Music/test.flac.tmp").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn msc_streamed_write_replaces_file_and_cleans_failed_temp() {
         let dir = tempdir().unwrap();
         let backend = MscBackend::new(dir.path().join("device"));
@@ -929,7 +988,7 @@ pub mod tests {
         });
         let transfer = tokio::spawn(async move {
             backend
-                .write_with_verify_from_path("Music/book.mp3", &source)
+                .write_with_verify_from_path_with_buffer("Music/book.mp3", &source, 64 * 1024)
                 .await
         });
         let partial_copy = tokio::time::timeout(Duration::from_secs(2), async {

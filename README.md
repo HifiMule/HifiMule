@@ -81,6 +81,8 @@ Rust daemon (playback, sync, providers, system tray)
 
 Two-process design: the daemon handles audio playback alongside sync, provider, and device operations while the UI is a detachable Tauri window. A pluggable provider layer abstracts Jellyfin, Subsonic-compatible servers, and Audiobookshelf. The shared lifecycle library coordinates one daemon and one UI per profile and publishes the daemon's available loopback port in a private owner descriptor. Portable server identities travel with your devices.
 
+For configurable USB copy buffers, staging limits and manifest checkpoint frequency, see [synchronization performance](docs/sync-performance.md).
+
 For code and feature maps, start with the [project documentation index](docs/index.md). The [Audiobookshelf implementation map](docs/audiobookshelf-implementation.md) covers Books and Podcasts behavior and boundaries.
 
 ## Tech Stack

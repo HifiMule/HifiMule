@@ -903,9 +903,18 @@ async fn sync_checkpoint_count_flush_resets_timer_deadline() {
         .await
         .unwrap();
     let session = Arc::new(
-        SyncManifestSession::new(Arc::clone(&manager), "reset", &io, None)
-            .await
-            .unwrap(),
+        SyncManifestSession::with_settings(
+            Arc::clone(&manager),
+            "reset",
+            &io,
+            None,
+            crate::sync_performance::SyncPerformance {
+                checkpoint_track_updates: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap(),
     );
     session
         .stage(1, |m| m.last_sync_at = Some(1))
@@ -943,6 +952,67 @@ async fn sync_checkpoint_count_flush_resets_timer_deadline() {
         .await
         .unwrap();
     assert_eq!(gated.writes.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_checkpoint_custom_threshold_and_timer_preserve_final_flush() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(DeviceManager::new(Arc::new(
+        crate::db::Database::memory().unwrap(),
+    )));
+    let io = msc(dir.path());
+    let manifest = make_manifest("custom", "Custom");
+    write_manifest(Arc::clone(&io), &manifest).await.unwrap();
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest, Arc::clone(&io))
+        .await
+        .unwrap();
+    let settings = crate::sync_performance::SyncPerformance {
+        checkpoint_track_updates: 5000,
+        checkpoint_interval: Duration::from_secs(900),
+        ..Default::default()
+    };
+    let session =
+        SyncManifestSession::with_settings(Arc::clone(&manager), "custom", &io, None, settings)
+            .await
+            .unwrap();
+    let read = || {
+        manifest_codec::decode_test_manifest::<DeviceManifest>(
+            &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+        )
+        .unwrap()
+    };
+    session
+        .stage(4999, |m| m.last_sync_at = Some(1))
+        .await
+        .unwrap();
+    assert_eq!(read().last_sync_at, None);
+    session
+        .stage(1, |m| m.last_sync_at = Some(2))
+        .await
+        .unwrap();
+    assert_eq!(read().last_sync_at, Some(2));
+    session
+        .stage(1, |m| m.last_sync_at = Some(3))
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(899)).await;
+    assert_eq!(read().last_sync_at, Some(2));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    // Wait for asynchronous filesystem publication without advancing the timer again.
+    for _ in 0..10000 {
+        if read().last_sync_at == Some(3) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(read().last_sync_at, Some(3));
+    session
+        .stage(1, |m| m.last_sync_at = Some(4))
+        .await
+        .unwrap();
+    session.finish("completion").await.unwrap();
+    assert_eq!(read().last_sync_at, Some(4));
 }
 
 #[tokio::test]

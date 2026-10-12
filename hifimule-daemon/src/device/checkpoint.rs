@@ -1,8 +1,5 @@
 use super::*;
-use tokio::time::{Duration, Instant};
-
-const TRACK_CHECKPOINT_UPDATES: usize = 1000;
-const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+use tokio::time::Instant;
 
 pub(crate) struct ProvenanceIndex {
     first: HashMap<String, usize>,
@@ -32,6 +29,7 @@ struct SessionState {
     path: PathBuf,
     observation: u64,
     io: Arc<dyn crate::device_io::DeviceIO>,
+    settings: crate::sync_performance::SyncPerformance,
     buffered: tokio::sync::Mutex<BufferedState>,
 }
 
@@ -48,18 +46,44 @@ impl SyncManifestSession {
         manager: Arc<DeviceManager>,
         target: &crate::sync::SyncTarget,
         operation: Option<(Arc<crate::sync::SyncOperationManager>, String)>,
+        settings: crate::sync_performance::SyncPerformance,
     ) -> Result<Self> {
-        let session = Self::new(manager, &target.manifest.device_id, &target.io, operation).await?;
+        let session = Self::with_settings(
+            manager,
+            &target.manifest.device_id,
+            &target.io,
+            operation,
+            settings,
+        )
+        .await?;
         if session.inner.path != target.path || session.inner.observation != target.observation {
             anyhow::bail!("Sync connection changed since admission");
         }
         Ok(session)
     }
+    #[cfg(test)]
     pub(crate) async fn new(
         manager: Arc<DeviceManager>,
         device_id: &str,
         io: &Arc<dyn crate::device_io::DeviceIO>,
         operation: Option<(Arc<crate::sync::SyncOperationManager>, String)>,
+    ) -> Result<Self> {
+        Self::with_settings(
+            manager,
+            device_id,
+            io,
+            operation,
+            crate::sync_performance::SyncPerformance::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn with_settings(
+        manager: Arc<DeviceManager>,
+        device_id: &str,
+        io: &Arc<dyn crate::device_io::DeviceIO>,
+        operation: Option<(Arc<crate::sync::SyncOperationManager>, String)>,
+        settings: crate::sync_performance::SyncPerformance,
     ) -> Result<Self> {
         let (path, observation) = {
             let state = manager.state.read().await;
@@ -78,6 +102,7 @@ impl SyncManifestSession {
             path,
             observation,
             io: Arc::clone(io),
+            settings,
             buffered: tokio::sync::Mutex::new(BufferedState {
                 updates: 0,
                 changed: false,
@@ -89,12 +114,13 @@ impl SyncManifestSession {
         let timer_state = Arc::clone(&inner);
         let timer = tokio::spawn(async move {
             loop {
-                let deadline = timer_state.buffered.lock().await.previous + CHECKPOINT_INTERVAL;
+                let deadline = timer_state.buffered.lock().await.previous
+                    + timer_state.settings.checkpoint_interval;
                 tokio::select! {
                     _ = &mut stopped => break,
                     _ = tokio::time::sleep_until(deadline) => {
                         let mut buffered = timer_state.buffered.lock().await;
-                        if buffered.previous.elapsed() < CHECKPOINT_INTERVAL { continue; }
+                        if buffered.previous.elapsed() < timer_state.settings.checkpoint_interval { continue; }
                         if let Err(error) = timer_state.flush(&mut buffered, "timer").await {
                             buffered.failure.get_or_insert_with(||error.to_string());
                             if let Some((manager, id)) = &operation { let _ = manager.request_cancel(id).await; }
@@ -200,10 +226,10 @@ impl SyncManifestSession {
         buffered.updates = buffered.updates.saturating_add(track_updates);
         drop(state);
         drop(commit);
-        if buffered.updates >= TRACK_CHECKPOINT_UPDATES
-            || buffered.previous.elapsed() >= CHECKPOINT_INTERVAL
+        if buffered.updates >= self.inner.settings.checkpoint_track_updates
+            || buffered.previous.elapsed() >= self.inner.settings.checkpoint_interval
         {
-            let reason = if buffered.updates >= TRACK_CHECKPOINT_UPDATES {
+            let reason = if buffered.updates >= self.inner.settings.checkpoint_track_updates {
                 "count"
             } else {
                 "timer"

@@ -90,6 +90,7 @@ mod rpc;
 mod scrobbler;
 mod server_manager;
 mod sync;
+mod sync_performance;
 mod sync_plan;
 mod transcoding;
 mod vault;

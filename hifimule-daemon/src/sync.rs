@@ -17,8 +17,8 @@ use crate::providers::{MediaProvider, TranscodeProfile};
 pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
 const MAX_FILE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB hard cap
 const MAX_PROVIDER_STAGING_COMPONENT_CHARS: usize = 80;
+#[cfg(test)]
 const PROVIDER_READY_QUEUE_MAX_TRACKS: usize = 2;
-const PROVIDER_READY_QUEUE_MAX_BYTES: u64 = MAX_FILE_BUFFER_BYTES;
 
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -2322,9 +2322,17 @@ impl
     }
 }
 
+#[derive(Default)]
+struct StagingBudget {
+    used: u64,
+    complete_bytes: u64,
+    partial_files: usize,
+    growth_waiters: usize,
+}
+
 struct StagedByteLimiter {
     max: u64,
-    used: Mutex<u64>,
+    budget: Mutex<StagingBudget>,
     notify: Notify,
 }
 
@@ -2332,16 +2340,13 @@ impl StagedByteLimiter {
     fn new(max: u64) -> Self {
         Self {
             max,
-            used: Mutex::new(0),
+            budget: Mutex::new(StagingBudget::default()),
             notify: Notify::new(),
         }
     }
 
     fn used(&self) -> u64 {
-        *self
-            .used
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.budget.lock().unwrap_or_else(|p| p.into_inner()).used
     }
 
     async fn acquire(
@@ -2350,74 +2355,64 @@ impl StagedByteLimiter {
         operation_manager: &SyncOperationManager,
         operation_id: &str,
     ) -> Result<(StagedBytePermit, Duration)> {
-        let blocked = self.reserve(bytes, operation_manager, operation_id).await?;
-        Ok((
-            StagedBytePermit {
-                limiter: Arc::clone(self),
-                bytes,
-            },
-            blocked,
-        ))
-    }
-
-    async fn reserve(
-        self: &Arc<Self>,
-        bytes: u64,
-        operation_manager: &SyncOperationManager,
-        operation_id: &str,
-    ) -> Result<Duration> {
-        if bytes > self.max {
-            return Err(anyhow::anyhow!(
-                "File too large to reserve for staging ({} bytes > {} byte queue limit)",
-                bytes,
-                self.max
-            ));
-        }
-
+        anyhow::ensure!(
+            bytes <= self.max,
+            "File too large to reserve for staging ({} bytes > {} byte queue limit)",
+            bytes,
+            self.max
+        );
         let started = std::time::Instant::now();
         loop {
             if operation_manager.is_cancelled(operation_id).await {
-                return Err(anyhow::anyhow!(
-                    "Cancelled while waiting for staging byte capacity"
-                ));
+                anyhow::bail!("Cancelled while waiting for staging byte capacity");
             }
-
             let notified = self.notify.notified();
             {
-                let mut used = self
-                    .used
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if self.max.saturating_sub(*used) >= bytes {
-                    *used += bytes;
-                    return Ok(started.elapsed());
+                let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+                if bytes <= self.max.saturating_sub(budget.used) {
+                    budget.used += bytes;
+                    budget.partial_files += 1;
+                    return Ok((
+                        StagedBytePermit {
+                            limiter: Arc::clone(self),
+                            bytes,
+                            complete: false,
+                        },
+                        started.elapsed(),
+                    ));
                 }
             }
-
             tokio::select! {
                 _ = notified => {}
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
         }
     }
+}
 
-    fn release(&self, bytes: u64) {
-        if bytes == 0 {
-            return;
+// A dropped/cancelled growth future must stop counting as a blocked producer.
+struct StagingGrowthWaiter<'a> {
+    limiter: &'a StagedByteLimiter,
+    registered: bool,
+}
+
+impl Drop for StagingGrowthWaiter<'_> {
+    fn drop(&mut self) {
+        if self.registered {
+            self.limiter
+                .budget
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .growth_waiters -= 1;
+            self.limiter.notify.notify_waiters();
         }
-        let mut used = self
-            .used
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *used = used.saturating_sub(bytes);
-        drop(used);
-        self.notify.notify_waiters();
     }
 }
 
 struct StagedBytePermit {
     limiter: Arc<StagedByteLimiter>,
     bytes: u64,
+    complete: bool,
 }
 
 impl StagedBytePermit {
@@ -2441,26 +2436,98 @@ impl StagedBytePermit {
         operation_manager: &SyncOperationManager,
         operation_id: &str,
     ) -> Result<Duration> {
-        let blocked = self
-            .limiter
-            .reserve(bytes, operation_manager, operation_id)
-            .await?;
-        self.bytes += bytes;
-        Ok(blocked)
+        const CAPACITY_ERROR: &str = "Staging byte capacity exhausted by an underestimated or unknown file size; increase sync_performance.staging_max_mib or reduce staging_max_tracks";
+        anyhow::ensure!(
+            bytes <= self.limiter.max.saturating_sub(self.bytes),
+            CAPACITY_ERROR
+        );
+        let started = std::time::Instant::now();
+        let mut waiter = StagingGrowthWaiter {
+            limiter: &self.limiter,
+            registered: false,
+        };
+        loop {
+            if operation_manager.is_cancelled(operation_id).await {
+                anyhow::bail!("Cancelled while growing staging reservation");
+            }
+            let notified = self.limiter.notify.notified();
+            {
+                let mut budget = self
+                    .limiter
+                    .budget
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if bytes <= self.limiter.max.saturating_sub(budget.used) {
+                    budget.used += bytes;
+                    self.bytes += bytes;
+                    return Ok(started.elapsed());
+                }
+                if !waiter.registered {
+                    budget.growth_waiters += 1;
+                    waiter.registered = true;
+                }
+                // Ready/writing files can release bytes; active partial producers can
+                // still finish. Only fail when every partial producer is blocked and
+                // no complete file can release capacity, preventing a circular wait.
+                if budget.complete_bytes == 0 && budget.growth_waiters == budget.partial_files {
+                    anyhow::bail!(CAPACITY_ERROR);
+                }
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
     }
 
     fn shrink_to(&mut self, bytes: u64) {
         if bytes < self.bytes {
-            let released = self.bytes - bytes;
+            let mut budget = self
+                .limiter
+                .budget
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            budget.used -= self.bytes - bytes;
+            if self.complete {
+                budget.complete_bytes -= self.bytes - bytes;
+            }
             self.bytes = bytes;
-            self.limiter.release(released);
+            drop(budget);
+            self.limiter.notify.notify_waiters();
+        }
+    }
+
+    fn mark_complete(&mut self) {
+        if !self.complete {
+            let mut budget = self
+                .limiter
+                .budget
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            budget.partial_files -= 1;
+            budget.complete_bytes += self.bytes;
+            self.complete = true;
+            drop(budget);
+            self.limiter.notify.notify_waiters();
         }
     }
 }
 
 impl Drop for StagedBytePermit {
     fn drop(&mut self) {
-        self.limiter.release(self.bytes);
+        let mut budget = self
+            .limiter
+            .budget
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        budget.used -= self.bytes;
+        if self.complete {
+            budget.complete_bytes -= self.bytes;
+        } else {
+            budget.partial_files -= 1;
+        }
+        drop(budget);
+        self.limiter.notify.notify_waiters();
     }
 }
 
@@ -2643,10 +2710,43 @@ pub(crate) async fn execute_plan_sync_with_protection(
     protection_observer: Option<protection::Observer>,
 ) -> Result<(usize, Vec<SyncFileError>)> {
     delta.validate()?;
+    let settings = crate::api::CredentialManager::sync_performance();
+    execute_plan_sync_with_settings(
+        delta,
+        target,
+        source,
+        operation_manager,
+        operation_id,
+        device_manager,
+        protection_observer,
+        settings,
+    )
+    .await
+}
+
+async fn execute_plan_sync_with_settings(
+    delta: &crate::sync_plan::SyncPlan,
+    target: &SyncTarget,
+    source: ProviderSyncSource,
+    operation_manager: Arc<SyncOperationManager>,
+    operation_id: String,
+    device_manager: Arc<crate::device::DeviceManager>,
+    protection_observer: Option<protection::Observer>,
+    settings: crate::sync_performance::SyncPerformance,
+) -> Result<(usize, Vec<SyncFileError>)> {
+    crate::daemon_log!(
+        "[Sync] Performance copy_buffer_kib={} staging_max_tracks={} staging_max_mib={} checkpoint_track_updates={} checkpoint_interval_seconds={}",
+        settings.copy_buffer_bytes / 1024,
+        settings.staging_max_tracks,
+        settings.staging_max_bytes / (1024 * 1024),
+        settings.checkpoint_track_updates,
+        settings.checkpoint_interval.as_secs()
+    );
     let checkpoint = crate::device::SyncManifestSession::for_target(
         Arc::clone(&device_manager),
         target,
         Some((Arc::clone(&operation_manager), operation_id.clone())),
+        settings,
     )
     .await?;
     let mut result = execute_plan_sync_buffered(
@@ -2658,6 +2758,7 @@ pub(crate) async fn execute_plan_sync_with_protection(
         device_manager,
         protection_observer,
         &checkpoint,
+        settings,
     )
     .await;
     let outcome = if result.is_err() || result.as_ref().is_ok_and(|(_, errors)| !errors.is_empty())
@@ -2693,6 +2794,7 @@ async fn execute_plan_sync_buffered(
     device_manager: Arc<crate::device::DeviceManager>,
     protection_observer: Option<protection::Observer>,
     checkpoint: &crate::device::SyncManifestSession,
+    settings: crate::sync_performance::SyncPerformance,
 ) -> Result<(usize, Vec<SyncFileError>)> {
     delta.validate()?;
     let device_path = target.path.as_path();
@@ -2765,9 +2867,9 @@ async fn execute_plan_sync_buffered(
         Ok(item) if !replaced_ids.contains(&item.jellyfin_id) => Some(Ok(item)),
         Ok(_) => None, Err(error) => Some(Err(error)),
     });
-    let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
-    let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
-    let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
+    let byte_limiter = Arc::new(StagedByteLimiter::new(settings.staging_max_bytes));
+    let count_limiter = Arc::new(Semaphore::new(settings.staging_max_tracks));
+    let (staged_tx, mut staged_rx) = mpsc::channel(settings.staging_max_tracks);
     let reader_started = Arc::new(std::time::Instant::now());
     let reader_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let producer_groups = delta.provider_groups()?;
@@ -3436,6 +3538,7 @@ async fn execute_plan_sync_buffered(
                 }
             };
             byte_permit.shrink_to(staged_size);
+            byte_permit.mark_complete();
             let staging_elapsed = t_staging.elapsed();
             let staging_timing = transfer_timing(staged_size, staging_elapsed);
             staging.record(staged_size, staging_elapsed);
@@ -3500,7 +3603,7 @@ async fn execute_plan_sync_buffered(
                             "[Sync] Provider queue enqueue index={} blocked_ms={:.2} queue_depth={} staged_bytes={}",
                             index,
                             send_wait.as_secs_f64() * 1000.0,
-                            PROVIDER_READY_QUEUE_MAX_TRACKS.saturating_sub(staged_tx.capacity()),
+                            settings.staging_max_tracks.saturating_sub(staged_tx.capacity()),
                             producer_byte_limiter.used()
                         );
                         break;
@@ -3630,7 +3733,11 @@ async fn execute_plan_sync_buffered(
             continue;
         }
         let write_result = match device_io
-            .write_with_verify_from_path(&staged.rel_path, &staged.staged_path)
+            .write_with_verify_from_path_with_buffer(
+                &staged.rel_path,
+                &staged.staged_path,
+                settings.copy_buffer_bytes,
+            )
             .await
         {
             Ok(result) => Ok(result),
@@ -3641,7 +3748,11 @@ async fn execute_plan_sync_buffered(
                     first_error
                 );
                 device_io
-                    .write_with_verify_from_path(&staged.rel_path, &staged.staged_path)
+                    .write_with_verify_from_path_with_buffer(
+                        &staged.rel_path,
+                        &staged.staged_path,
+                        settings.copy_buffer_bytes,
+                    )
                     .await
             }
         };
@@ -4996,6 +5107,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collective_unknown_staging_sizes_fail_promptly_and_release_capacity() {
+        let manager = SyncOperationManager::new();
+        manager.create_operation("capacity".into(), 3).await;
+        let limiter = Arc::new(StagedByteLimiter::new(12));
+        let (mut first, _) = limiter.acquire(0, &manager, "capacity").await.unwrap();
+        let (mut second, _) = limiter.acquire(2, &manager, "capacity").await.unwrap();
+        first.reserve_to(6, &manager, "capacity").await.unwrap();
+        second.reserve_to(6, &manager, "capacity").await.unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            first.reserve_to(13, &manager, "capacity"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("staging_max_mib"));
+        assert_eq!(limiter.used(), 12);
+        drop(first);
+        second.reserve_to(12, &manager, "capacity").await.unwrap();
+        drop(second);
+        assert_eq!(limiter.used(), 0);
+        let (held, _) = limiter.acquire(12, &manager, "capacity").await.unwrap();
+        assert!(manager.request_cancel("capacity").await);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                limiter.acquire(1, &manager, "capacity")
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        drop(held);
+        assert_eq!(limiter.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn staging_growth_waits_for_blocked_writer_capacity_and_can_cancel() {
+        let operations = Arc::new(SyncOperationManager::new());
+        operations
+            .create_operation("writer-capacity".into(), 2)
+            .await;
+        let limiter = Arc::new(StagedByteLimiter::new(12));
+        for cancel in [false, true] {
+            let (mut writing, _) = limiter
+                .acquire(6, &operations, "writer-capacity")
+                .await
+                .unwrap();
+            writing.mark_complete();
+            let (mut partial, _) = limiter
+                .acquire(6, &operations, "writer-capacity")
+                .await
+                .unwrap();
+            let task_operations = Arc::clone(&operations);
+            let grow = tokio::spawn(async move {
+                let result = partial
+                    .reserve_to(7, &task_operations, "writer-capacity")
+                    .await;
+                (result, partial)
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !grow.is_finished(),
+                "growth must wait for the complete writer file, not fail"
+            );
+            if cancel {
+                assert!(operations.request_cancel("writer-capacity").await);
+            } else {
+                drop(writing);
+                let (result, partial) = tokio::time::timeout(Duration::from_secs(1), grow)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                result.unwrap();
+                assert_eq!(limiter.used(), 7);
+                drop(partial);
+                assert_eq!(limiter.used(), 0);
+                continue;
+            }
+            let (result, partial) = tokio::time::timeout(Duration::from_secs(1), grow)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.unwrap_err().to_string().contains("Cancelled"));
+            drop(partial);
+            drop(writing);
+            assert_eq!(limiter.used(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_underestimated_producers_do_not_deadlock() {
+        let operations = Arc::new(SyncOperationManager::new());
+        operations
+            .create_operation("concurrent-capacity".into(), 4)
+            .await;
+        let limiter = Arc::new(StagedByteLimiter::new(12));
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let mut producers = Vec::new();
+        for estimate in [0, 1, 0, 2] {
+            let operations = Arc::clone(&operations);
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            producers.push(tokio::spawn(async move {
+                let (mut permit, _) = limiter
+                    .acquire(estimate, &operations, "concurrent-capacity")
+                    .await
+                    .unwrap();
+                permit
+                    .reserve_to(3, &operations, "concurrent-capacity")
+                    .await
+                    .unwrap();
+                barrier.wait().await;
+                // All four partial files hold the complete budget at this point.
+                permit
+                    .reserve_to(4, &operations, "concurrent-capacity")
+                    .await
+                    .is_err()
+            }));
+        }
+        let failures = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut failures = 0;
+            for producer in producers {
+                failures += usize::from(producer.await.unwrap());
+            }
+            failures
+        })
+        .await
+        .unwrap();
+        assert!(failures >= 1);
+        assert_eq!(limiter.used(), 0);
+    }
+
+    #[tokio::test]
     async fn staged_byte_permit_expands_to_actual_staged_size() {
         let limiter = Arc::new(StagedByteLimiter::new(4));
         let operation_manager = SyncOperationManager::new();
@@ -5963,6 +6208,7 @@ mod tests {
         trace: std::sync::Mutex<Vec<&'static str>>,
         writes: std::sync::atomic::AtomicUsize,
         manifest_writes: std::sync::atomic::AtomicUsize,
+        copy_buffer: std::sync::atomic::AtomicUsize,
         block_at_write: std::sync::atomic::AtomicUsize,
         fail_first: AtomicBool,
         fail_all: AtomicBool,
@@ -5984,6 +6230,7 @@ mod tests {
                 trace: std::sync::Mutex::new(Vec::new()),
                 writes: std::sync::atomic::AtomicUsize::new(0),
                 manifest_writes: std::sync::atomic::AtomicUsize::new(0),
+                copy_buffer: std::sync::atomic::AtomicUsize::new(0),
                 block_at_write: std::sync::atomic::AtomicUsize::new(0),
                 fail_first: AtomicBool::new(false),
                 fail_all: AtomicBool::new(false),
@@ -6061,6 +6308,16 @@ mod tests {
                 self.trace.lock().unwrap().push("write");
             }
             result
+        }
+
+        async fn write_with_verify_from_path_with_buffer(
+            &self,
+            path: &str,
+            source: &Path,
+            buffer: usize,
+        ) -> anyhow::Result<()> {
+            self.copy_buffer.store(buffer, Ordering::SeqCst);
+            self.write_with_verify_from_path(path, source).await
         }
 
         async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
@@ -7119,6 +7376,99 @@ mod tests {
             "warning should explain unconfirmed output: {:?}",
             operation.warnings
         );
+    }
+
+    #[tokio::test]
+    async fn configured_pipeline_caps_include_active_writer_and_use_buffer() {
+        let _guard = crate::api::credential_test_lock();
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("config.json");
+        for track_cap in [1, 3] {
+            std::fs::write(&config_path, serde_json::json!({"sync_performance": {"copy_buffer_kib":64,"staging_max_tracks":track_cap,"checkpoint_track_updates":5000,"checkpoint_interval_seconds":900}}).to_string()).unwrap();
+            let mut server = mockito::Server::new_async().await;
+            let _download = server
+                .mock("GET", "/rest/download.view")
+                .match_query(mockito::Matcher::Any)
+                .with_status(200)
+                .with_header("content-type", "application/octet-stream")
+                .with_body(vec![1u8, 2, 3, 4])
+                .expect(3)
+                .create_async()
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+            let blocked = BlockingFirstWriteDeviceIo::new(device_io);
+            let io: Arc<dyn crate::device_io::DeviceIO> = blocked.clone();
+            manager.set_test_sync_io(dir.path(), Arc::clone(&io)).await;
+            let target = SyncTarget {
+                path: dir.path().to_path_buf(),
+                manifest: manager.get_current_device().await.unwrap(),
+                observation: manager.get_selected_sync_target().await.unwrap().3,
+                io,
+            };
+            let delta = SyncDelta {
+                adds: ["song-a", "song-b", "song-c"]
+                    .iter()
+                    .map(|id| add_item_with_provider_format(id, "flac", "audio/flac", 4))
+                    .collect(),
+                deletes: vec![],
+                id_changes: vec![],
+                unchanged: 0,
+                playlists: vec![],
+                provenance_updates: Default::default(),
+                blocked: vec![],
+                pity_fired_servers: vec![],
+            };
+            let plan = crate::sync_plan::SyncPlan::from_delta(delta, &target.manifest).unwrap();
+            let operations = Arc::new(SyncOperationManager::new());
+            let id = unique_operation_id("custom-cap");
+            operations.create_operation(id.clone(), 3).await;
+            let task_id = id.clone();
+            let provider = subsonic_provider(server.url());
+            let task_config_path = config_path.clone();
+            let task = tokio::spawn(crate::api::TEST_CONFIG_PATH.scope(
+                task_config_path,
+                async move {
+                    execute_plan_sync_with_protection(
+                        &plan,
+                        &target,
+                        ProviderSyncSource {
+                            provider,
+                            transcoding_profile: Some(rockbox_direct_profile()),
+                            providers_by_server: Default::default(),
+                        },
+                        operations,
+                        task_id,
+                        manager,
+                        None,
+                    )
+                    .await
+                },
+            ));
+            assert!(blocked.wait_for_first_write().await);
+            // Edits during an active sync apply only to the next execution.
+            std::fs::write(
+                &config_path,
+                r#"{"sync_performance":{"copy_buffer_kib":256,"staging_max_tracks":32}}"#,
+            )
+            .unwrap();
+            let staged = wait_for_provider_staged_files(&id, track_cap).await;
+            assert_eq!(staged.len(), track_cap);
+            // The active writer owns one slot until publication and cleanup.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(provider_staged_files_for_operation(&id).len(), track_cap);
+            assert_eq!(blocked.copy_buffer.load(Ordering::SeqCst), 64 * 1024);
+            blocked.release_first_write();
+            let (count, errors) = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(count, 3);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(blocked.copy_buffer.load(Ordering::SeqCst), 64 * 1024);
+            assert!(provider_staging_dirs_for_operation(&id).is_empty());
+        }
     }
 
     #[tokio::test]
