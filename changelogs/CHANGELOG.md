@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.18.0 - 2026-10-12
+
+Large-library syncs now use less memory during transfers and save device metadata in batches, reducing repeated work as your collection grows. **Compressed device manifests** keep synced-file metadata smaller while preserving your device settings and recovery information; existing JSON manifests migrate when HifiMule successfully saves them. You can also tune copy buffers, temporary staging, and checkpoint frequency through the new **sync performance settings** in `config.json`, with changes taking effect on the next sync without restarting the app.
+
+Your basket's capacity estimate now includes space that can be reclaimed from files HifiMule already manages, and **Auto-Fill** budgets no longer count as extra selected files. This keeps capacity warnings and fill limits consistent when you refresh an existing device library. Automatic syncs can also carry out large managed-file cleanup once at least 24 hours have passed since your last successful sync.
+
+Saving an unchanged passthrough profile no longer creates an unnecessary full-library replacement. If an eligible mass-storage device still has a stale profile-change flag, you can explicitly confirm in Device Settings that its existing files match passthrough, without copying or deleting audio. This release also avoids misleading read failures from empty Windows optical drives and retries temporary locks when saving device metadata.
+
 ## v0.17.0 - 2026-10-05
 
 You can now start **Radio** from the playback bar or tray and let HifiMule choose music from your library, or start from an artist, genre, or playlist while browsing. You can combine sources from your music servers and choose selection priorities, then keep listening as the upcoming queue refills and follows available artist connections. Fresh starts bring more variety, confident copies of the same recording avoid unnecessary repeats across servers, and available loudness metadata helps keep Radio tracks at a consistent level.
