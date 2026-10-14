@@ -507,6 +507,11 @@ body {
   background: rgba(255, 255, 255, 0.25);
 }
 
+.capacity-autofill,
+.capacity-autofill-swatch {
+  background: rgba(var(--accent-rgb), 0.35);
+}
+
 .capacity-free {
   background: transparent;
 }
@@ -519,12 +524,37 @@ body {
   opacity: 0.4;
 }
 
-.capacity-status {
+.capacity-status,
+.capacity-autofill-status {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.4rem;
   font-size: 0.8rem;
   opacity: 0.85;
+}
+
+.capacity-status > span,
+.capacity-autofill-status > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.capacity-status > sl-icon {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.capacity-autofill-status {
+  margin-top: var(--space-xs);
+  color: var(--ink-dim);
+}
+
+.capacity-autofill-swatch {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin: 0.25rem 0.15rem 0;
+  border-radius: 2px;
 }
 
 .capacity-zone-amber .capacity-status {

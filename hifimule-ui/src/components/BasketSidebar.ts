@@ -117,11 +117,21 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     const projectedPct = capacity.selectedFraction * 100;
     const freePct = capacity.freeFraction * 100;
     const remaining = capacity.remainingBytes;
+    const hasAutofill = capacity.syncedAutofillBytes > 0;
+    // Recorded usage is display-only: it does not change reclaimable sync capacity.
+    const availableAfterAutofill = Math.max(remaining - capacity.syncedAutofillBytes, 0);
+    const autofillFraction = hasAutofill ? Math.min(capacity.syncedAutofillBytes / totalBytes, capacity.freeFraction) : 0;
+    const autofillStart = (usedPct + projectedPct) / 100;
+    const freeStart = Math.min(autofillStart + autofillFraction, 1);
+    const visibleFreeFraction = Math.max(capacity.freeFraction - autofillFraction, 0);
+    const autofillMessage = hasAutofill ? t('basket.capacity.autofill_used', { size: formatSize(capacity.syncedAutofillBytes) }) : '';
 
     let statusMessage = '';
     let statusIcon = '';
     if (zone === 'green') {
-        statusMessage = t('basket.capacity.remaining', { size: formatSize(remaining) });
+        statusMessage = hasAutofill
+            ? t('basket.capacity.available', { size: formatSize(availableAfterAutofill) })
+            : t('basket.capacity.remaining', { size: formatSize(remaining) });
         // Healthy state is neutral, not green: capacity carries no warning here, so
         // it stays off the amber/red signal scale. Reserve color for thresholds.
         statusIcon = '<sl-icon name="check-circle" style="color: var(--ink-dim);"></sl-icon>';
@@ -136,20 +146,27 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     const projectedColor = zone === 'green' ? 'var(--accent)'
         : zone === 'amber' ? 'var(--amber-warn)'
             : 'var(--sl-color-danger-500)';
+    const barDescription = [t('basket.capacity.selection', { size: formatSize(projectedBytes) }), autofillMessage, statusMessage]
+        .filter(Boolean).join('; ').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     return `
         <div class="capacity-section capacity-zone-${zone}">
             <div class="capacity-bar-container">
-                <div class="capacity-bar">
+                <div class="capacity-bar" role="img" aria-label="${barDescription}">
                     <div class="capacity-segment capacity-used" style="--seg-x: 0; --seg-w: ${usedPct / 100};"></div>
                     <div class="capacity-segment capacity-projected" style="--seg-x: ${usedPct / 100}; --seg-w: ${projectedPct / 100}; background: ${projectedColor};"></div>
-                    <div class="capacity-segment capacity-free" style="--seg-x: ${(usedPct + projectedPct) / 100}; --seg-w: ${freePct / 100};"></div>
+                    ${hasAutofill ? `<div class="capacity-segment capacity-autofill" style="--seg-x: ${autofillStart}; --seg-w: ${autofillFraction};"></div>` : ''}
+                    <div class="capacity-segment capacity-free" style="--seg-x: ${freeStart}; --seg-w: ${hasAutofill ? visibleFreeFraction : freePct / 100};"></div>
                 </div>
             </div>
             <div class="capacity-status">
                 ${statusIcon}
                 <span>${statusMessage}</span>
             </div>
+            ${hasAutofill ? `<div class="capacity-autofill-status">
+                <span class="capacity-autofill-swatch" aria-hidden="true"></span>
+                <span>${autofillMessage}</span>
+            </div>` : ''}
         </div>
     `;
 }

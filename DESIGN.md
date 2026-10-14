@@ -195,7 +195,9 @@ List items in the right sidebar.
 - **Special variants:** Auto-fill slot (dashed Signal Cyan border), Artist/Genre items (neutral border, icon placeholder)
 
 ### Capacity Bar (`.capacity-bar`)
-A horizontal 8px bar showing device storage state. Three segments: used (white 25%), pending selection (Signal Cyan), free (transparent). Amber and red color overrides on the status text when thresholds are crossed.
+A horizontal 8px bar showing device storage state. Segments: unmanaged used content (white 25%), reserved selection (solid Signal Cyan), recorded Auto-Fill usage (Signal Cyan at 35% opacity), and available space (transparent). Auto-Fill is shown only when recorded usage is positive; clip its segment to the width left after the reservation while retaining its full measured size in the text.
+
+The Compact layout keeps manual track/size totals above the bar. Below it, the primary row shows available space after the reservation and recorded Auto-Fill usage, followed by a secondary row with a translucent cyan swatch and “used by Auto-Fill.” Labels wrap in narrow sidebars, and the bar has a text description for assistive technology. With no recorded Auto-Fill, retain the existing remaining-space wording and omit the secondary row. Amber and red warnings keep priority and override the reserved-selection segment and primary status; measured Auto-Fill text remains secondary. These display values do not change sync admission or Auto-Fill budgets.
 
 ### Sync Progress Panel (`.sync-progress-panel`)
 Replaces the basket item list during an active sync. Shows current file (truncated), byte progress, file counter. Transitions to success or error state on completion.
