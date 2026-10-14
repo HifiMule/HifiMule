@@ -92,3 +92,19 @@ The series list did not expose `seriesSequence` on its member objects in this de
 The verified v2.36.1 direct delivery contract above covers book-part MP3 and AAC/MP4, and the podcast playback adapter accepts the same direct formats after an authenticated range probe. HifiMule now offers only those direct representations as seek candidates. The candidate remains unavailable until the existing player verifies the opened FFmpeg container and codec, reconciles positive item duration, and confirms the HTTP range representation. The player measures decoded landing within 50 ms before committing a seek. A rejected or changed range, duration mismatch, or unsupported format cannot turn into an advertised seek capability. HLS/transcode remains unsupported.
 
 Offline generated MP3 and AAC/MP4 fixtures exercise forward, backward, and repeated seeks with independent sample correlation. These tests establish decoder behavior for those formats; they do not establish an installed-app or controlled-server seek result for Audiobookshelf. The controlled deployment's authenticated range observations establish transport shape only. Installed playback and seek evidence remains to be collected separately.
+
+## Record 5 — direct playback compatibility follow-up (2026-10-14)
+
+The user supplied a controlled deployment beneath `/audiobookshelf/` and a disposable test account. Live book and podcast sessions reported `serverVersion: 2.37.1`. Credentials, tokens, upstream identities, and actual media URLs are omitted from this record.
+
+| Probe | Observed result | Consequence |
+| --- | --- | --- |
+| Book direct session | HTTP 200; `playMethod: 0`; one AAC track with `mimeType: audio/mp4`; matching selected library and item. | Qualify 2.37.1 for the existing direct AAC/MP4 admission contract. |
+| Podcast episode direct session | HTTP 200; `playMethod: 0`; one MP3 track with `mimeType: audio/mpeg`; matching selected library, item, episode, and audio-file identity. | Qualify 2.37.1 for the existing direct MP3 episode admission contract. |
+| Media URL under a deployment prefix | Both sessions returned an unprefixed `/api/items/{item}/file/{ino}` route. Authenticated requests to both the origin-root route and the configured-prefix route returned 206. | Validate the selected item/file route and construct transport URLs beneath the configured deployment prefix; an already-prefixed route must match that same item/file URL exactly. |
+| Authenticated `Range: bytes=0-0` | Both configured-prefix requests returned 206, the expected MIME type, `Accept-Ranges: bytes`, positive matching `Content-Range`, and one audio byte. | Retain the existing runtime range verification before publishing a representation. |
+| Session retirement | Both close requests returned HTTP 200. No progress update was submitted. | Retain cleanup on rejected admission and request retirement. |
+
+The adapter checks Audiobookshelf's major version and admits the 2.x line, assuming future minor and patch releases preserve the contract. Live observations cover 2.36.1 and 2.37.1; future 2.x support is a compatibility policy, not additional live evidence. Version admission does not bypass scoped identity, direct method, codec/MIME, URL, or authenticated range checks. This record establishes session and transport compatibility for the sampled items; it does not establish audible output or installed-player seeking on every platform.
+
+The final opt-in HifiMule provider smoke test passed against this deployment for both a book and a podcast episode. It exercised provider discovery, library scoping, catalog selection, direct-play admission, authenticated range validation, deployment-prefix preservation, and successful session retirement. It submitted no listening-progress writes. The test uses environment-supplied credentials and is ignored in ordinary offline runs.

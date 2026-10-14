@@ -1,6 +1,6 @@
 # Audiobookshelf implementation map
 
-**Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
+**Last Updated:** 2026-10-14 | **Scan depth:** Deep | **Workspace version:** 0.18.0
 
 This page describes the implementation in the current source tree. The [Audiobookshelf integration contract](./audiobookshelf-integration-contract.md) records dated, controlled upstream observations and earlier feature gates; its historical "later story" wording does not describe current feature availability.
 
@@ -43,7 +43,7 @@ Auto-fill remains per `(device, portable serverId)` in the manifest. Audiobooksh
 
 ## Evidence and limits
 
-The provider has offline DTO, authentication, identity, catalog, search, playback, and sync tests; the UI has Audiobookshelf browse and policy tests. The controlled [integration contract](./audiobookshelf-integration-contract.md) records Audiobookshelf v2.36.1 observations and distinguishes transport shape from installed-app playback evidence. Its direct-media seek qualification does not by itself prove installed playback on every platform or server version.
+The provider has offline DTO, authentication, identity, catalog, search, playback, and sync tests; the UI has Audiobookshelf browse and policy tests. The controlled [integration contract](./audiobookshelf-integration-contract.md) records Audiobookshelf v2.36.1 and v2.37.1 observations and distinguishes transport shape from installed-app playback evidence. Direct-play admission checks major version 2, allowing future minor and patch releases, and retains the configured deployment prefix when resolving validated item-file routes for books and podcast episodes. Other major versions remain unsupported. Scoped identity, format, and authenticated range checks still apply to every session. Its direct-media seek qualification does not by itself prove installed playback on every platform or server version.
 
 ## Useful starting points for changes
 

@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Deferred from: Audiobookshelf 2.37.1 playback review (2026-10-14)
+
+- **Reject dot-segment upstream identities before URL construction** (`hifimule-daemon/src/providers/audiobookshelf.rs:2186`) — pre-existing identity parsing accepts `.` and `..` as item/file identifiers, and the URL library omits these path segments. The earlier audiobook and podcast admission code also accepted the resulting collapsed route. Harden identity validation consistently across catalog, playback, and other endpoints in a focused follow-up; the current playback fix compares raw media paths and retains deployment scope.
+
 ## Deferred from: compressed manifest review (2026-10-11)
 
 - **MTP cache filename and embedded identity are not cross-validated** (`hifimule-daemon/src/device/mod.rs`, `read_canonical_mtp_cache`) — a manually swapped valid cache can carry another device's `device_id` and redirect later writes to that identity. The legacy cache reader at baseline `c36a7298a6a6260f98554bd51bd27b3b87c0ee34` already trusted the embedded identity. Add explicit filename/identity validation in focused cache hardening.

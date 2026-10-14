@@ -1,4 +1,4 @@
-//! Audiobookshelf v2.36.1 scoped catalogue and direct playback adapter.
+//! Audiobookshelf v2 scoped catalogue and direct playback adapter.
 //! Authentication, playback sessions, tokens, and upstream identifiers stay daemon-side.
 
 use super::{
@@ -1109,7 +1109,7 @@ impl AudiobookshelfProvider {
         let session: PlaySessionDto = serde_json::from_value(value).map_err(|_| {
             ProviderError::Deserialization("invalid Audiobookshelf episode playback session".into())
         })?;
-        if session.server_version != "2.36.1" || session.play_method != 0 {
+        if !supported_playback_version(&session.server_version) || session.play_method != 0 {
             return Err(ProviderError::UnsupportedCapability(
                 "Audiobookshelf episode playback method is unverified".into(),
             ));
@@ -1159,36 +1159,12 @@ impl AudiobookshelfProvider {
                 ));
             }
         };
-        if !track.content_url.starts_with('/') || track.content_url.starts_with("//") {
-            return Err(ProviderError::Deserialization(
-                "invalid Audiobookshelf episode media URL".into(),
-            ));
-        }
-        let base = reqwest::Url::parse(&self.base_url)
-            .map_err(|_| ProviderError::Deserialization("invalid Audiobookshelf origin".into()))?;
-        let url = base.join(&track.content_url).map_err(|_| {
-            ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
-        })?;
-        let item_url = item_endpoint(&self.base_url, &item_id)?;
-        let mut expected_file = reqwest::Url::parse(&item_url).map_err(|_| {
-            ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
-        })?;
-        expected_file
-            .path_segments_mut()
-            .map_err(|_| {
-                ProviderError::Deserialization("invalid Audiobookshelf episode media URL".into())
-            })?
-            .push("file")
-            .push(&audio_file.ino);
-        if url.origin() != base.origin()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url != expected_file
-        {
-            return Err(ProviderError::Deserialization(
-                "Audiobookshelf episode media URL left selected show".into(),
-            ));
-        }
+        let url = scoped_direct_file_url(
+            &self.base_url,
+            &track.content_url,
+            &item_id,
+            &audio_file.ino,
+        )?;
         let headers = self.verify_direct_media(&url, &track.mime_type).await?;
         Ok(PlaybackDescription {
             song: podcast_episode_song(&episode_public),
@@ -2201,6 +2177,48 @@ fn item_endpoint(base_url: &str, item_id: &str) -> Result<String, ProviderError>
         })?
         .push(item_id);
     Ok(url.into())
+}
+
+fn supported_playback_version(version: &str) -> bool {
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let mut parts = version.split('.');
+    parts.next() == Some("2")
+        && parts.next().is_some_and(numeric)
+        && parts.next().is_some_and(numeric)
+        && parts.next().is_none()
+}
+
+fn scoped_direct_file_url(
+    base_url: &str,
+    content_url: &str,
+    item_id: &str,
+    file_id: &str,
+) -> Result<reqwest::Url, ProviderError> {
+    let invalid = || {
+        ProviderError::Deserialization("Audiobookshelf media URL left selected item file".into())
+    };
+    let base = reqwest::Url::parse(base_url).map_err(|_| invalid())?;
+    if base.query().is_some() || base.fragment().is_some() {
+        return Err(invalid());
+    }
+    let file_url = |deployment: &str| -> Result<reqwest::Url, ProviderError> {
+        let mut url =
+            reqwest::Url::parse(&item_endpoint(deployment, item_id)?).map_err(|_| invalid())?;
+        url.path_segments_mut()
+            .map_err(|_| invalid())?
+            .push("file")
+            .push(file_id);
+        Ok(url)
+    };
+    let configured_file = file_url(base_url)?;
+    let service_file = file_url(&base.origin().ascii_serialization())?;
+    // Audiobookshelf may omit the reverse-proxy prefix from its service-relative
+    // path. Compare the raw path before URL normalization, then fetch only the
+    // URL constructed from the verified item/file and configured deployment.
+    if content_url != service_file.path() && content_url != configured_file.path() {
+        return Err(invalid());
+    }
+    Ok(configured_file)
 }
 
 fn check_status(response: &reqwest::Response) -> Result<(), ProviderError> {
@@ -3530,9 +3548,9 @@ impl MediaProvider for AudiobookshelfProvider {
         let playback: PlaySessionDto = serde_json::from_value(value).map_err(|_| {
             ProviderError::Deserialization("invalid Audiobookshelf playback session".into())
         })?;
-        if playback.server_version != "2.36.1" {
+        if !supported_playback_version(&playback.server_version) {
             return Err(ProviderError::UnsupportedCapability(
-                "Audiobookshelf playback server version is unverified".into(),
+                "Audiobookshelf playback server major version is unsupported".into(),
             ));
         }
         if playback.id != session_id
@@ -3571,26 +3589,7 @@ impl MediaProvider for AudiobookshelfProvider {
                 ));
             }
         };
-        if !track.content_url.starts_with('/') || track.content_url.starts_with("//") {
-            return Err(ProviderError::Deserialization(
-                "invalid Audiobookshelf media URL".into(),
-            ));
-        }
-        let base = reqwest::Url::parse(&self.base_url)
-            .map_err(|_| ProviderError::Deserialization("invalid Audiobookshelf origin".into()))?;
-        let url = base.join(&track.content_url).map_err(|_| {
-            ProviderError::Deserialization("invalid Audiobookshelf media URL".into())
-        })?;
-        let item_url = item_endpoint(&self.base_url, &item)?;
-        if url.origin() != base.origin()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || !url.as_str().starts_with(&format!("{item_url}/"))
-        {
-            return Err(ProviderError::Deserialization(
-                "Audiobookshelf media URL left selected item".into(),
-            ));
-        }
+        let url = scoped_direct_file_url(&self.base_url, &track.content_url, &item, &file)?;
         let headers = self.verify_direct_media(&url, &track.mime_type).await?;
         Ok(PlaybackDescription {
             song,
@@ -3930,6 +3929,349 @@ mod tests {
 
     fn playback_book() -> &'static str {
         r#"{"id":"item-1","libraryId":"book-id","mediaType":"book","media":{"id":"media-1","metadata":{"title":"Fixture"},"audioFiles":[{"ino":"ino-1","index":1,"duration":60}]}}"#
+    }
+
+    async fn check_direct_playback_admission(
+        role: ProviderLibraryRole,
+        prefix: &str,
+        version: &str,
+        content_url: &str,
+        accepted: bool,
+    ) {
+        let mut server = Server::new_async().await;
+        let base_url = format!("{}{prefix}", server.url());
+        server
+            .mock("POST", format!("{prefix}/login").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(login_body())
+            .create_async()
+            .await;
+        let (library, item, media_type, mime, codec, detail, play_suffix, id) = match role {
+            ProviderLibraryRole::Audiobook => (
+                "book-id",
+                "item-1",
+                "book",
+                "audio/mp4",
+                "aac",
+                playback_book(),
+                "play",
+                opaque_id("track", &["book-id", "item-1", "media-1", "ino-1"]),
+            ),
+            ProviderLibraryRole::Podcast => (
+                "pod-id",
+                "item-1",
+                "podcast",
+                "audio/mpeg",
+                "mp3",
+                r#"{"id":"item-1","libraryId":"pod-id","mediaType":"podcast","media":{"id":"media-1","metadata":{"title":"Talks"},"episodes":[{"id":"ep-1","title":"First","duration":20,"audioFile":{"ino":"ino-1"}}]}}"#,
+                "play/ep-1",
+                opaque_id("episode", &["pod-id", "item-1", "media-1", "ep-1"]),
+            ),
+        };
+        server
+            .mock("GET", format!("{prefix}/api/items/{item}").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(detail)
+            .create_async()
+            .await;
+        let play = server.mock("POST", format!("{prefix}/api/items/{item}/{play_suffix}").as_str())
+            .match_body(Matcher::PartialJson(serde_json::json!({"forceDirectPlay": true})))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(serde_json::json!({
+                "id": "session-fixture", "serverVersion": version, "libraryId": library,
+                "libraryItemId": item, "mediaType": media_type, "episodeId": "ep-1", "playMethod": 0,
+                "audioTracks": [{"ino": "ino-1", "contentUrl": content_url, "mimeType": mime, "codec": codec}]
+            }).to_string()).expect(1).create_async().await;
+        let media = server
+            .mock(
+                "GET",
+                format!("{prefix}/api/items/{item}/file/ino-1").as_str(),
+            )
+            .match_header("authorization", "Bearer access-fixture")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .with_header("content-type", mime)
+            .with_header("accept-ranges", "bytes")
+            .with_header("content-range", "bytes 0-0/100")
+            .with_body("x")
+            .expect(usize::from(accepted))
+            .create_async()
+            .await;
+        let close = server
+            .mock(
+                "POST",
+                format!("{prefix}/api/session/session-fixture/close").as_str(),
+            )
+            .match_header("authorization", "Bearer access-fixture")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let rejected_media = if accepted {
+            None
+        } else {
+            Some(
+                server
+                    .mock(
+                        "GET",
+                        Matcher::Regex(r"^(/audiobookshelf)?/api/items/.+/.+".into()),
+                    )
+                    .with_status(500)
+                    .expect(0)
+                    .create_async()
+                    .await,
+            )
+        };
+        let provider = AudiobookshelfProvider::login(&base_url, "fixture", "fixture")
+            .await
+            .unwrap()
+            .scope_to(library.into(), role)
+            .unwrap();
+        let result = provider.resolve_playback(&id).await;
+        if accepted {
+            let description = result.expect("observed direct playback must be admitted");
+            assert_eq!(description.song.id, id);
+            assert_eq!(description.representations.len(), 1);
+            let representation = &description.representations[0];
+            assert_eq!(representation.codec.as_deref(), Some(codec));
+            assert_eq!(representation.provenance, PlaybackProvenance::Original);
+            assert_eq!(
+                representation.request.url.as_str(),
+                format!("{base_url}/api/items/{item}/file/ino-1")
+            );
+            assert!(representation.request.range_supported);
+            drop(description);
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(ProviderError::Deserialization(_) | ProviderError::UnsupportedCapability(_))
+                ),
+                "unverified admission must be rejected before media transport"
+            );
+        }
+        for _ in 0..50 {
+            if close.matched_async().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        play.assert_async().await;
+        media.assert_async().await;
+        if let Some(rejected_media) = rejected_media {
+            rejected_media.assert_async().await;
+        }
+        close.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn version_2371_book_direct_playback_is_admitted() {
+        check_direct_playback_admission(
+            ProviderLibraryRole::Audiobook,
+            "",
+            "2.37.1",
+            "/api/items/item-1/file/ino-1",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn version_2371_podcast_direct_playback_is_admitted() {
+        check_direct_playback_admission(
+            ProviderLibraryRole::Podcast,
+            "",
+            "2.37.1",
+            "/api/items/item-1/file/ino-1",
+            true,
+        )
+        .await;
+    }
+
+    async fn check_observed_versions_under_base_path(role: ProviderLibraryRole) {
+        for version in ["2.36.1", "2.37.1"] {
+            for path in [
+                "/api/items/item-1/file/ino-1",
+                "/audiobookshelf/api/items/item-1/file/ino-1",
+            ] {
+                check_direct_playback_admission(role, "/audiobookshelf", version, path, true).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_book_versions_preserve_base_path_for_both_content_url_forms() {
+        check_observed_versions_under_base_path(ProviderLibraryRole::Audiobook).await;
+    }
+
+    #[tokio::test]
+    async fn observed_podcast_versions_preserve_base_path_for_both_content_url_forms() {
+        check_observed_versions_under_base_path(ProviderLibraryRole::Podcast).await;
+    }
+
+    #[tokio::test]
+    async fn major_version_two_admits_older_and_future_direct_playback_contracts() {
+        for role in [ProviderLibraryRole::Audiobook, ProviderLibraryRole::Podcast] {
+            for version in ["2.0.0", "2.36.0", "2.37.0", "2.37.2", "2.38.0", "2.99.0"] {
+                check_direct_playback_admission(
+                    role,
+                    "",
+                    version,
+                    "/api/items/item-1/file/ino-1",
+                    true,
+                )
+                .await;
+                for path in [
+                    "/api/items/item-1/file/ino-1",
+                    "/audiobookshelf/api/items/item-1/file/ino-1",
+                ] {
+                    check_direct_playback_admission(role, "/audiobookshelf", version, path, true)
+                        .await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_or_malformed_versions_close_sessions_before_media_read() {
+        for role in [ProviderLibraryRole::Audiobook, ProviderLibraryRole::Podcast] {
+            for version in [
+                "1.99.0", "3.0.0", "20.0.0", "", "2", "2..1", "2.37", "2.37.bad", "v2.37.1",
+            ] {
+                check_direct_playback_admission(
+                    role,
+                    "/audiobookshelf",
+                    version,
+                    "/api/items/item-1/file/ino-1",
+                    false,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unsafe_media_paths_close_book_and_podcast_sessions_before_media_read() {
+        for role in [ProviderLibraryRole::Audiobook, ProviderLibraryRole::Podcast] {
+            for prefix in ["", "/audiobookshelf"] {
+                for path in [
+                    "https://foreign.invalid/api/items/item-1/file/ino-1",
+                    "//foreign.invalid/api/items/item-1/file/ino-1",
+                    "/api/items/item-1/file/ino-1?token=fixture",
+                    "/api/items/item-1/file/ino-1#fragment",
+                    "/api/items/other-item/file/ino-1",
+                    "/api/items/item-1/file/other-ino",
+                    "/api/items/item-1/other/ino-1",
+                    "/api/items/item-1/file/../file/ino-1",
+                    "/api/items/item-1/file/%2e%2e/file/ino-1",
+                    "/api/items/item-1/file/ino-1/extra",
+                    "/audiobookshelf/audiobookshelf/api/items/item-1/file/ino-1",
+                ] {
+                    check_direct_playback_admission(role, prefix, "2.36.1", path, false).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly supplied disposable Audiobookshelf deployment"]
+    async fn live_direct_playback_admits_book_and_podcast_without_progress_writes() {
+        let url = std::env::var("HIFIMULE_ABS_TEST_URL").expect("test deployment URL required");
+        let username = std::env::var("HIFIMULE_ABS_TEST_USERNAME").expect("test username required");
+        let password = std::env::var("HIFIMULE_ABS_TEST_PASSWORD").expect("test password required");
+        let base = reqwest::Url::parse(url.trim().trim_end_matches('/'))
+            .ok()
+            .expect("test deployment URL must be valid");
+        let expected_path_prefix = format!("{}/api/items/", base.path().trim_end_matches('/'));
+        for role in [ProviderLibraryRole::Audiobook, ProviderLibraryRole::Podcast] {
+            let discovery = AudiobookshelfProvider::discover(&url, &username, &password)
+                .await
+                .ok()
+                .expect("test account discovery must succeed");
+            let library = discovery
+                .libraries
+                .iter()
+                .find(|library| library.role == role)
+                .expect("test deployment must contain both media roles");
+            let provider = discovery
+                .provider
+                .scope_to(library.id.clone(), role)
+                .ok()
+                .expect("test library scope must be valid");
+            let selected = match role {
+                ProviderLibraryRole::Audiobook => {
+                    let (albums, _) = provider
+                        .list_albums(None, None, 0, 50)
+                        .await
+                        .ok()
+                        .expect("test books must be browsable");
+                    let mut selected = None;
+                    for album in albums {
+                        let detail = provider
+                            .get_album(&album.id)
+                            .await
+                            .ok()
+                            .expect("test book detail must be readable");
+                        if let Some(track) = detail.tracks.first() {
+                            selected = Some(track.id.clone());
+                            break;
+                        }
+                    }
+                    selected
+                }
+                ProviderLibraryRole::Podcast => {
+                    let (shows, _) = provider
+                        .list_podcast_shows(0, 50)
+                        .await
+                        .ok()
+                        .expect("test podcasts must be browsable");
+                    let mut selected = None;
+                    for show in shows {
+                        let detail = provider
+                            .get_podcast_show(&show.id)
+                            .await
+                            .ok()
+                            .expect("test podcast detail must be readable");
+                        if let Some(episode) = detail.episodes.first() {
+                            selected = Some(episode.id.clone());
+                            break;
+                        }
+                    }
+                    selected
+                }
+            }
+            .expect("each test media role must have a playable item");
+            let description = provider
+                .resolve_playback(&selected)
+                .await
+                .ok()
+                .expect("test direct playback must pass provider admission");
+            let valid = description.representations.len() == 1
+                && description.representations.iter().all(|representation| {
+                    representation.provenance == PlaybackProvenance::Original
+                        && matches!(representation.codec.as_deref(), Some("mp3" | "aac"))
+                        && representation.request.range_supported
+                        && representation.request.url.origin() == base.origin()
+                        && representation
+                            .request
+                            .url
+                            .path()
+                            .starts_with(&expected_path_prefix)
+                        && representation.request.cleanup.is_some()
+                });
+            drop(description);
+            let cleanup_succeeded = crate::providers::drain_playback_cleanups().await;
+            assert!(
+                valid,
+                "test representation must preserve direct format, range and deployment scope"
+            );
+            assert!(
+                cleanup_succeeded,
+                "test playback session must close successfully"
+            );
+        }
     }
 
     #[test]
