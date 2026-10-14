@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.18.1 - 2026-10-14
+
+You can now listen to audiobooks and podcast episodes from **Audiobookshelf 2.37.1** without playback being rejected because of the server version. HifiMule accepts direct-play sessions across the 2.x version line while keeping its existing checks for supported audio formats and streaming behavior.
+
+If your Audiobookshelf server lives beneath a path such as `/audiobookshelf/`, playback now keeps that configured path when opening book parts and podcast episodes, even when the server returns a media link without it. Each link is also checked against the selected item and audio file before HifiMule requests the audio.
+
 ## v0.18.0 - 2026-10-12
 
 Large-library syncs now use less memory during transfers and save device metadata in batches, reducing repeated work as your collection grows. **Compressed device manifests** keep synced-file metadata smaller while preserving your device settings and recovery information; existing JSON manifests migrate when HifiMule successfully saves them. You can also tune copy buffers, temporary staging, and checkpoint frequency through the new **sync performance settings** in `config.json`, with changes taking effect on the next sync without restarting the app.
