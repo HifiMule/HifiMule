@@ -4,6 +4,7 @@
 
 import { rpcCall } from '../rpc';
 import { t } from '../i18n';
+import catalog from '@hifimule/i18n-catalog';
 import { basketStore } from '../state/basket';
 
 interface DeviceProfileSummary {
@@ -55,18 +56,18 @@ export class InitDeviceModal {
 
         const dialogEl = document.createElement('sl-dialog');
         dialogEl.id = 'init-device-dialog';
-        dialogEl.setAttribute('label', 'Initialize Device');
+        dialogEl.setAttribute('label', t('device.init.title'));
         dialogEl.innerHTML = `
             <div class="init-device-body">
                 <div class="init-device-loading">
                     <sl-spinner style="font-size: 2rem;"></sl-spinner>
-                    <p>Loading device info...</p>
+                    <p>${t('device.init.loading')}</p>
                 </div>
             </div>
-            <sl-button slot="footer" id="init-device-cancel-btn" variant="default">Cancel</sl-button>
+            <sl-button slot="footer" id="init-device-cancel-btn" variant="default">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" id="init-device-confirm-btn" variant="primary" disabled>
                 <sl-icon slot="prefix" name="check2-circle"></sl-icon>
-                Confirm
+                ${t('device.init.confirm')}
             </sl-button>
         `;
 
@@ -98,23 +99,24 @@ export class InitDeviceModal {
             const creds = credsResult.status === 'fulfilled' ? credsResult.value : null;
             const profiles = profilesResult.status === 'fulfilled'
                 ? profilesResult.value
-                : [{ id: 'passthrough', name: 'No Transcoding', description: 'Sync audio files as-is without transcoding.' }];
+                : [{ id: 'passthrough', name: t('basket.profile.no_transcoding'), description: t('basket.profile.no_transcoding_desc') }];
 
             const userId = creds?.userId || null;
             this.renderContent(body as HTMLElement, userId, profiles);
         } catch (err) {
             // Tauri invoke rejects with a plain string, not an Error object
             const message = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
-            this.renderError(body as HTMLElement, message || 'Unknown error');
+            this.renderError(body as HTMLElement, message || t('device.init.unknown_error'));
         }
     }
 
     private renderContent(body: HTMLElement, userId: string | null, profiles: DeviceProfileSummary[]) {
+        profiles = (profiles || []).map(profile => this.localizeProfile(profile));
         if (!userId) {
             body.innerHTML = `
                 <div class="init-device-no-login">
                     <sl-icon name="person-x" style="font-size: 2.5rem; opacity: 0.6;"></sl-icon>
-                    <p>Connect to a media server first before initializing a device.</p>
+                    <p>${t('device.init.login_required')}</p>
                 </div>
             `;
             return;
@@ -131,27 +133,26 @@ export class InitDeviceModal {
         body.innerHTML = `
             <div class="init-device-form">
                 <p style="margin-bottom: 1rem; opacity: 0.8;">
-                    A new device has been detected with no sync configuration.
-                    Choose a device profile, then adjust folders if needed.
+                    ${t('device.init.intro')}
                 </p>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-                        Device Name <span style="color: var(--sl-color-danger-500);">*</span>
+                        ${t('device.init.name')} <span style="color: var(--sl-color-danger-500);">*</span>
                     </label>
                     <sl-input
                         id="init-device-name-input"
-                        placeholder="My Device"
+                        placeholder="${this.escapeHtml(t('device.init.default_name'))}"
                         maxlength="40"
-                        value="${this.escapeHtml(this._defaultName ?? 'My Device')}"
+                        value="${this.escapeHtml(this._defaultName ?? t('device.init.default_name'))}"
                         clearable
                     ></sl-input>
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
-                        Max 40 characters. Shown in the device hub.
+                        ${t('device.init.name_hint')}
                     </div>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.5rem;">
-                        Device Icon
+                        ${t('device.init.icon')}
                     </label>
                     <div id="init-icon-picker" style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
                         ${['usb-drive', 'phone-fill', 'watch', 'sd-card', 'headphones', 'music-note-list'].map(icon => `
@@ -171,7 +172,7 @@ export class InitDeviceModal {
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-                        Transcoding Profile
+                        ${t('basket.device.transcoding_profile')}
                     </label>
                     <sl-select id="init-transcoding-profile" value="passthrough">
                         ${profileOptions}
@@ -182,25 +183,25 @@ export class InitDeviceModal {
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-                        Music Folder Name (optional)
+                        ${t('device.init.music_folder')}
                     </label>
                     <sl-input
                         id="init-folder-input"
-                        placeholder="Leave empty to sync to device root"
+                        placeholder="${this.escapeHtml(t('device.init.music_placeholder'))}"
                         value="${this.escapeHtml(defaultPassthrough?.defaultMusicFolder ?? '')}"
                         clearable
                     ></sl-input>
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
-                        Example: "Music" — leave empty to use the entire device
+                        ${t('device.init.music_hint')}
                     </div>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-                        Playlist Folder Name (optional)
+                        ${t('device.init.playlist_folder')}
                     </label>
                     <sl-input
                         id="init-playlist-folder-input"
-                        placeholder="Defaults to music folder"
+                        placeholder="${this.escapeHtml(t('device.init.playlist_placeholder'))}"
                         value="${this.escapeHtml(defaultPassthrough?.defaultPlaylistFolder ?? '')}"
                         clearable
                     ></sl-input>
@@ -214,7 +215,7 @@ export class InitDeviceModal {
                     <sl-input id="init-podcast-folder-input" placeholder="${t('basket.device.media_folder_inherit')}" clearable></sl-input>
                 </div>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
-                    <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">Linked Jellyfin Profile</div>
+                    <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">${t('device.init.linked_profile')}</div>
                     <div style="font-size: 0.85rem;">
                         <sl-icon name="person-fill" style="vertical-align: middle; margin-right: 0.3rem;"></sl-icon>
                         <span id="init-user-display">${this.escapeHtml(userId)}</span>
@@ -265,7 +266,7 @@ export class InitDeviceModal {
             // Clone to drop any stale listeners from previous renders, then wire fresh ones
             const freshBtn = confirmBtn.cloneNode(true) as any;
             confirmBtn.replaceWith(freshBtn);
-            freshBtn.disabled = !(nameInput?.value ?? this._defaultName ?? 'My Device').trim();
+            freshBtn.disabled = !(nameInput?.value ?? this._defaultName ?? t('device.init.default_name')).trim();
             freshBtn.addEventListener('click', () => this.handleConfirm(userId, selectedIcon, nameInput));
             nameInput?.addEventListener('sl-input', () => {
                 freshBtn.disabled = !nameInput.value?.trim();
@@ -277,8 +278,8 @@ export class InitDeviceModal {
         body.innerHTML = `
             <div class="init-device-error">
                 <sl-icon name="exclamation-triangle-fill" style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
-                <p>Failed to load device info: ${this.escapeHtml(message)}</p>
-                <sl-button id="init-retry-btn" variant="primary" size="small">Retry</sl-button>
+                <p>${this.escapeHtml(t('device.init.load_error', { message }))}</p>
+                <sl-button id="init-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
             </div>
         `;
         body.querySelector('#init-retry-btn')?.addEventListener('click', () => this.loadCredentials());
@@ -288,7 +289,7 @@ export class InitDeviceModal {
         body.innerHTML = `
             <div class="init-device-loading">
                 <sl-spinner style="font-size: 2rem;"></sl-spinner>
-                <p>Initializing device...</p>
+                <p>${t('device.init.submitting')}</p>
             </div>
         `;
     }
@@ -299,12 +300,12 @@ export class InitDeviceModal {
                 <sl-icon name="exclamation-triangle-fill" style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
                 <sl-alert variant="danger" open>
                     <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
-                    <strong>Initialization Failed</strong><br>
+                    <strong>${t('device.init.failed')}</strong><br>
                     ${this.escapeHtml(message)}
                 </sl-alert>
                 <div style="display: flex; gap: 0.5rem; margin-top: 1rem; justify-content: flex-end;">
-                    <sl-button id="init-retry-btn" variant="primary" size="small">Retry</sl-button>
-                    <sl-button id="init-dismiss-btn" variant="default" size="small">Dismiss</sl-button>
+                    <sl-button id="init-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
+                    <sl-button id="init-dismiss-btn" variant="default" size="small">${t('basket.actions.dismiss')}</sl-button>
                 </div>
             </div>
         `;
@@ -318,7 +319,7 @@ export class InitDeviceModal {
         const body = this.dialog?.querySelector('.init-device-body') as HTMLElement | null;
         if (!body) return;
 
-        const deviceName: string = nameInputEl?.value?.trim() ?? 'My Device';
+        const deviceName: string = nameInputEl?.value?.trim() ?? t('device.init.default_name');
 
         const folderInput = this.dialog?.querySelector('#init-folder-input') as any;
         const folderPath: string = folderInput?.value?.trim() ?? '';
@@ -367,6 +368,7 @@ export class InitDeviceModal {
     }
 
     private showMusicScan(body: HTMLElement, scanId: string, deviceId: string) {
+        this.dialog?.setAttribute('label', t('device.scan.title'));
         const finish = () => { if (this.dialog) (this.dialog as any).hide(); this.onComplete?.(); };
         // Remove obsolete initialization controls: component styles can override
         // the native hidden attribute, leaving their stale click handlers active.
@@ -425,14 +427,35 @@ export class InitDeviceModal {
         render();
     }
 
+    private localizeProfile(profile: DeviceProfileSummary): DeviceProfileSummary {
+        // Translate stock text only: saved profiles can contain customer overrides.
+        if (profile.id === 'passthrough') {
+            return {
+                ...profile,
+                name: profile.name === 'No Transcoding (Download Original)' || profile.name === catalog.en['basket.profile.no_transcoding']
+                    ? t('basket.profile.no_transcoding') : profile.name,
+                description: profile.description === 'Download files as-is from Jellyfin without transcoding.' || profile.description === catalog.en['basket.profile.no_transcoding_desc']
+                    ? t('basket.profile.no_transcoding_desc') : profile.description,
+            };
+        }
+        const nameKey = `device.profile.${profile.id}.name`;
+        const descriptionKey = `device.profile.${profile.id}.description`;
+        return {
+            ...profile,
+            name: catalog.en[nameKey] && profile.name === catalog.en[nameKey] ? t(nameKey) : profile.name,
+            description: catalog.en[descriptionKey] && profile.description === catalog.en[descriptionKey]
+                ? t(descriptionKey) : profile.description,
+        };
+    }
+
     private iconLabel(icon: string): string {
         const labels: Record<string, string> = {
-            'usb-drive': 'USB Drive',
-            'phone-fill': 'Phone',
-            'watch': 'Watch',
-            'sd-card': 'SD Card',
-            'headphones': 'Headphones',
-            'music-note-list': 'Music Player',
+            'usb-drive': t('basket.icon.usb_drive'),
+            'phone-fill': t('basket.icon.phone'),
+            'watch': t('basket.icon.watch'),
+            'sd-card': t('basket.icon.sd_card'),
+            'headphones': t('basket.icon.headphones'),
+            'music-note-list': t('basket.icon.music_player'),
         };
         return labels[icon] ?? icon;
     }
