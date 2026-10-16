@@ -4,6 +4,7 @@
 
 import { rpcCall } from '../rpc';
 import { t } from '../i18n';
+import { basketStore } from '../state/basket';
 
 interface DeviceProfileSummary {
     id: string;
@@ -350,14 +351,13 @@ export class InitDeviceModal {
 
             const scanWarning = initialized?.data?.musicScanWarning;
             if (scanWarning) {
-                const confirm = this.dialog?.querySelector('#init-device-confirm-btn') as any;
-                if (confirm) { confirm.loading = false; confirm.hidden = true; }
+                this.dialog?.querySelector('#init-device-confirm-btn')?.remove();
                 body.textContent = `${t('device.scan.discoveryWarning')} ${scanWarning}`;
                 this.onComplete?.();
                 return;
             }
             const scanId = initialized?.data?.musicScanId;
-            if (scanId) { this.showMusicScan(body, scanId); return; }
+            if (scanId) { this.showMusicScan(body, scanId, initialized.data.deviceId); return; }
             if (this.dialog) (this.dialog as any).hide();
             this.onComplete?.();
         } catch (err) {
@@ -366,12 +366,12 @@ export class InitDeviceModal {
         }
     }
 
-    private showMusicScan(body: HTMLElement, scanId: string) {
+    private showMusicScan(body: HTMLElement, scanId: string, deviceId: string) {
         const finish = () => { if (this.dialog) (this.dialog as any).hide(); this.onComplete?.(); };
-        const confirm = this.dialog?.querySelector('#init-device-confirm-btn') as any;
-        if (confirm) { confirm.loading = false; confirm.hidden = true; }
-        const cancel = this.dialog?.querySelector('#init-device-cancel-btn') as any;
-        if (cancel) cancel.hidden = true;
+        // Remove obsolete initialization controls: component styles can override
+        // the native hidden attribute, leaving their stale click handlers active.
+        this.dialog?.querySelector('#init-device-confirm-btn')?.remove();
+        this.dialog?.querySelector('#init-device-cancel-btn')?.remove();
         this.dialog?.addEventListener('sl-request-close', (event: Event) => event.preventDefault());
         const render = () => {
             body.innerHTML = `<p>${t('device.scan.prompt')}</p><p style="color:var(--ink-dim)">${t('device.scan.ownership')}</p>
@@ -390,7 +390,32 @@ export class InitDeviceModal {
                 try {
                     const result = await rpcCall('device.music_scan_start', {scanId});
                     body.innerHTML = `<p>${t('device.scan.result', { imported:result.imported, unmatched:result.unmatched, ambiguous:result.ambiguous, incompatible:result.incompatible })}</p><sl-button id="scan-done" variant="primary">${t('device.scan.done')}</sl-button>`;
-                    body.querySelector('#scan-done')?.addEventListener('click', finish);
+                    const done = body.querySelector('#scan-done') as any;
+                    done?.addEventListener('click', async () => {
+                        if (done.loading) return;
+                        done.loading = true;
+                        done.disabled = true;
+                        body.querySelector('#scan-refresh-error')?.remove();
+                        try {
+                            const basket = await rpcCall('manifest_get_basket');
+                            // A different destination may have been selected while
+                            // the modal was open. Never replace its basket with ours.
+                            if (basket?.targetDeviceId === deviceId) {
+                                basketStore.setDaemonContext(deviceId, basket.basketHash ?? null);
+                                basketStore.hydrateFromDaemon(basket.basketItems ?? []);
+                            }
+                            finish();
+                        } catch (error) {
+                            const message = document.createElement('p');
+                            message.id = 'scan-refresh-error';
+                            message.setAttribute('role', 'alert');
+                            message.textContent = String(error);
+                            body.prepend(message);
+                        } finally {
+                            done.loading = false;
+                            done.disabled = false;
+                        }
+                    });
                 } catch (error) {
                     if (cancellation) { try { const outcome = await cancellation; if (outcome?.cancelled === true) { finish(); return; } } catch {} }
                     render(); const message = document.createElement('p'); message.textContent = String(error); body.prepend(message);
