@@ -1879,6 +1879,16 @@ impl DeviceManager {
         .await
     }
 
+    /// Commit scan ownership and basket together only against the original snapshot.
+    pub async fn import_device_music(&self, expected: &DeviceManifest, observation: u64, io: &Arc<dyn crate::device_io::DeviceIO>, items: Vec<SyncedItem>, basket: Vec<BasketItem>) -> Result<()> {
+        self.update_manifest_checked_result(&expected.device_id, Some((io, observation)), |current| {
+            anyhow::ensure!(serde_json::to_value(&*current)? == serde_json::to_value(expected)?, "Device changed during music scan; retry");
+            current.synced_items.extend(items);
+            current.basket_items.extend(basket);
+            Ok(())
+        }, crate::paths::get_local_mtp_manifest_path, sync_manifest_directory).await
+    }
+
     pub async fn update_manifest_for_connection<F>(
         &self,
         device_id: &str,

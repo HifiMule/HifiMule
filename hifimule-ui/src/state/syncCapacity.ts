@@ -30,3 +30,11 @@ export function syncCapacity(storage: SyncStorage | null, selectedBytes: number,
         usedFraction, selectedFraction, freeFraction: Math.max(1 - usedFraction - selectedFraction, 0),
     } as const;
 }
+
+/** Coarse profile reservation until preparation resolves actual direct/reused files.
+ * Unknown duration reserves an hour per track; never substitute original bytes.
+ */
+export function plannedSelectionBytes(items: {sizeBytes:number;sizeTicks:number;childCount:number}[], targetKbps?:number|null): number {
+    return items.reduce((sum,item) => sum + (targetKbps == null ? item.sizeBytes :
+        Math.ceil((item.sizeTicks > 0 ? item.sizeTicks / 10_000_000 : 3600 * Math.max(item.childCount,1)) * targetKbps * 125 * 1.03) + 65_536 * Math.max(item.childCount,1)),0);
+}

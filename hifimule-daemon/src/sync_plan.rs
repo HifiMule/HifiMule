@@ -237,7 +237,7 @@ pub struct SyncPlan {
 impl SyncPlan {
     pub fn from_delta(delta: SyncDelta, manifest: &DeviceManifest) -> Result<Self> {
         let total_bytes = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
-            + delta.id_changes.iter().map(|a| a.size_bytes).sum::<u64>();
+            + delta.id_changes.iter().filter(|a|a.reason_code.as_deref()!=Some("device-file-reused")).map(|a| a.size_bytes).sum::<u64>();
         let destructive_cleanup_count = destructive_cleanup_count(&delta, manifest);
         let change_reasons = change_reason_summary(&delta);
         let path = Arc::new(

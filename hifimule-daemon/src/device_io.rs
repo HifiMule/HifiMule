@@ -79,6 +79,23 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
             "Complete recovery-marker scanning is unavailable for this transport; use a mass-storage connection"
         )
     }
+    /// Strict metadata query. Access errors must never become inferred absence.
+    async fn file_length(&self, path: &str) -> Result<Option<u64>> {
+        check_relative(path)?;
+        let parent = path.rsplit_once('/').map(|(p, _)|p).unwrap_or("");
+        Ok(self.list_files(parent).await?.into_iter().find(|f|f.path == path).map(|f|f.size))
+    }
+    /// A local path lets the metadata decoder seek without buffering audio.
+    async fn stage_metadata_file(&self, path: &str, destination: &Path, size: u64, progress: Arc<crate::device_music_scan::Progress>) -> Result<()> {
+        anyhow::ensure!(size <= 64 * 1024 * 1024, "Transport cannot stage large metadata files");
+        progress.check()?;
+        let data = self.read_file(path).await?;
+        progress.check()?;
+        anyhow::ensure!(data.len() as u64 == size, "Device file changed during scan");
+        tokio::fs::write(destination, data).await?;
+        Ok(())
+    }
+    async fn metadata_path(&self, _path: &str) -> Result<Option<PathBuf>> { Ok(None) }
     async fn free_space(&self) -> Result<u64>;
     async fn storage_id(&self) -> Result<Option<String>> {
         Ok(None)
@@ -235,6 +252,33 @@ fn is_missing_object_error(error: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl DeviceIO for MscBackend {
+    async fn metadata_path(&self, path: &str) -> Result<Option<PathBuf>> {
+        check_relative(path)?;
+        let root = tokio::fs::canonicalize(&self.root).await?;
+        let full = tokio::fs::canonicalize(self.root.join(path)).await?;
+        anyhow::ensure!(full.starts_with(&root), "Music path escapes the device");
+        Ok(Some(full))
+    }
+    async fn file_length(&self, path: &str) -> Result<Option<u64>> {
+        check_relative(path)?;
+        match tokio::fs::metadata(self.root.join(path)).await {
+            Ok(meta) if meta.is_file() => { self.metadata_path(path).await?; Ok(Some(meta.len())) },
+            Ok(_) => anyhow::bail!("Expected device file: {}", path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let root=tokio::fs::canonicalize(&self.root).await?;
+                let mut ancestor=self.root.join(path);
+                while ancestor.pop() {
+                    match tokio::fs::canonicalize(&ancestor).await {
+                        Ok(parent) => {anyhow::ensure!(parent.starts_with(&root),"Device destination escapes the device");return Ok(None)},
+                        Err(error) if error.kind()==std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                anyhow::bail!("Device destination has no accessible parent")
+            },
+            Err(error) => Err(error.into()),
+        }
+    }
     async fn scan_recovery_markers(&self, roots: &[String]) -> Result<bool> {
         let metadata = tokio::fs::symlink_metadata(&self.root)
             .await
@@ -471,33 +515,27 @@ impl DeviceIO for MscBackend {
 
         let mut entries = Vec::new();
 
-        if let Ok(meta) = tokio::fs::symlink_metadata(&base).await {
-            if !meta.is_dir() {
-                return Ok(entries);
-            }
-        } else {
-            return Ok(entries);
-        }
+        let meta = match tokio::fs::symlink_metadata(&base).await {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(meta.is_dir() && !meta.is_symlink(), "Music folder is not a real directory");
+        self.metadata_path(path).await?;
 
         let mut dirs_to_visit = vec![base.clone()];
         while let Some(dir) = dirs_to_visit.pop() {
-            let mut read_dir = match tokio::fs::read_dir(&dir).await {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            while let Some(entry) = read_dir.next_entry().await.unwrap_or(None) {
+            let mut read_dir = tokio::fs::read_dir(&dir).await?;
+            while let Some(entry) = read_dir.next_entry().await? {
                 let entry_path = entry.path();
-                let file_type = match entry.file_type().await {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
-                };
+                let file_type = entry.file_type().await?;
 
                 if file_type.is_symlink() {
                     continue;
                 } else if file_type.is_dir() {
                     dirs_to_visit.push(entry_path);
                 } else if file_type.is_file() {
-                    let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                    let size = entry.metadata().await?.len();
                     let name = entry.file_name().to_string_lossy().to_string();
                     let rel = entry_path
                         .strip_prefix(&self.root)
@@ -585,6 +623,10 @@ pub trait MtpHandle: Send + Sync {
         Ok(())
     }
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
+    fn read_file_to_path(&self, _path: &str, _destination: &Path, _progress: &crate::device_music_scan::Progress) -> Result<()> {
+        anyhow::bail!("Streaming metadata reads unavailable on this transport")
+    }
+
     fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     fn write_file_from_path(&self, path: &str, source: &Path) -> Result<()> {
         let data = std::fs::read(source)?;
@@ -617,6 +659,27 @@ pub trait MtpHandle: Send + Sync {
 
 #[async_trait]
 impl DeviceIO for MtpBackend {
+    async fn file_length(&self, path: &str) -> Result<Option<u64>> {
+        check_relative(path)?;
+        let parent=path.rsplit_once('/').map(|(p,_)|p).unwrap_or("");
+        match self.list_files(parent).await {
+            Ok(files)=>Ok(files.into_iter().find(|f|f.path==path).map(|f|f.size)),
+            Err(parent_error)=>{
+                // A missing parent is normal before the first write. A complete
+                // strict root walk can prove absence without masking access errors.
+                let files=self.list_files("").await?;
+                if files.iter().any(|f|f.path==path) {return Err(parent_error);}
+                Ok(None)
+            }
+        }
+    }
+    async fn stage_metadata_file(&self, path: &str, destination: &Path, size: u64, progress: Arc<crate::device_music_scan::Progress>) -> Result<()> {
+        check_relative(path)?;
+        let guard = self.operation_lock.clone().lock_owned().await;
+        let handle=self.handle.clone();let path=path.to_string();let destination=destination.to_path_buf();
+        tokio::task::spawn_blocking(move || { let _guard=guard;handle.read_file_to_path(&path,&destination,&progress)?;anyhow::ensure!(std::fs::metadata(&destination)?.len()==size,"Device file changed during scan");Ok(()) }).await?
+    }
+
     async fn begin_sync_job(&self) -> Result<()> {
         let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
@@ -1583,5 +1646,45 @@ pub mod tests {
 
         assert!(err.to_string().contains("must name a file"));
         assert!(mock.call_log.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scan_transport_regressions {
+    use super::*;
+    struct StrictTransport { root_error: bool }
+    impl MtpHandle for StrictTransport {
+        fn read_file(&self,_:&str)->Result<Vec<u8>> {anyhow::bail!("not buffered")}
+        fn read_file_to_path(&self,_:&str,_:&Path,progress:&crate::device_music_scan::Progress)->Result<()> {
+            for _ in 0..200 {progress.check()?;std::thread::sleep(std::time::Duration::from_millis(1));}
+            anyhow::bail!("cancel token not delivered")
+        }
+        fn write_file(&self,_:&str,_:&[u8])->Result<()> {Ok(())}
+        fn delete_file(&self,_:&str)->Result<()> {Ok(())}
+        fn list_files(&self,path:&str)->Result<Vec<FileEntry>> {
+            if self.root_error || !path.is_empty() {anyhow::bail!("folder unavailable");}
+            Ok(vec![])
+        }
+        fn free_space(&self)->Result<u64> {Ok(1000000)}
+    }
+    #[tokio::test]
+    async fn absent_mtp_parent_is_distinct_from_failed_root_enumeration() {
+        let io=MtpBackend::new(Arc::new(StrictTransport{root_error:false}));
+        assert_eq!(io.file_length("Music/New Artist/Album/new.mp3").await.unwrap(),None);
+        let io=MtpBackend::new(Arc::new(StrictTransport{root_error:true}));
+        assert!(io.file_length("Music/New Artist/Album/new.mp3").await.is_err());
+    }
+    #[tokio::test]
+    async fn mtp_staging_passes_live_cancellation_to_transport() {
+        let io=Arc::new(MtpBackend::new(Arc::new(StrictTransport{root_error:false})));
+        let progress=Arc::new(crate::device_music_scan::Progress::default());
+        let cancel=progress.clone();
+        let temp=tempfile::NamedTempFile::new().unwrap();
+        let path=temp.path().to_path_buf();
+        let read=tokio::spawn(async move {io.stage_metadata_file("Music/a.mp3",&path,1,progress).await});
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        cancel.cancelled.store(true,std::sync::atomic::Ordering::Relaxed);
+        let error=tokio::time::timeout(std::time::Duration::from_secs(1),read).await.unwrap().unwrap().unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
     }
 }

@@ -667,6 +667,7 @@ async fn handler(
         "manifest_get_basket" => handle_manifest_get_basket(&state).await,
         "manifest_save_basket" => handle_manifest_save_basket(&state, payload.params).await,
         "device_initialize" => handle_device_initialize(&state, payload.params).await,
+        "device.music_scan_start" | "device.music_scan_status" | "device.music_scan_cancel" => handle_music_setup_scan(&state, &payload.method, payload.params).await,
         "device.update_manifest" => handle_device_update_manifest(&state, payload.params).await,
         "device.confirm_passthrough_profile" => {
             handle_confirm_passthrough_profile(&state, payload.params).await
@@ -882,6 +883,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "manifest_clear_dirty"
             | "manifest_save_basket"
             | "device_initialize"
+            | "device.music_scan_start" | "device.music_scan_status" | "device.music_scan_cancel"
             | "device.update_manifest"
             | "device.confirm_passthrough_profile"
             | "device_set_auto_sync_on_connect"
@@ -4344,10 +4346,16 @@ async fn handle_get_daemon_state_params(
         .and_then(|p| p.get("includeManifest"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let (device, connected_devices_snapshot, selected_path_buf) = state
+    let (mut device, connected_devices_snapshot, selected_path_buf) = state
         .device_manager
         .get_polling_snapshot(include_manifest)
         .await;
+    if let Some(device)=device.as_mut() {
+        let profile_id=device["transcoding_profile_id"].as_str().or(device["transcodingProfileId"].as_str());
+        if let Ok(Some(profile))=load_selected_transcoding_profile(profile_id) {
+            device["plannedBitrateKbps"] = serde_json::json!(crate::sync::target_bitrate_kbps(&profile).unwrap_or(9216));
+        }
+    }
     let mapping = if let Some(ref d) = device {
         state
             .db
@@ -4965,7 +4973,8 @@ fn provider_track_size(track: &Song) -> u64 {
 }
 
 fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
-    crate::sync::DesiredItem {
+    crate::sync::DesiredItem {disc_number: song.disc_number,
+        duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
         name: song.title.clone(),
@@ -5171,7 +5180,8 @@ fn podcast_episode_to_desired(
 ) -> crate::sync::DesiredItem {
     // Episode catalog details do not expose a byte size. Reserve 128 kbit/s,
     // using one hour when duration is missing; transfer checks actual capacity.
-    crate::sync::DesiredItem {
+    crate::sync::DesiredItem {disc_number: None,
+        duration_seconds: 0,
         media_role: crate::device::MediaRole::Podcast,
         jellyfin_id: episode.id.clone(),
         name: episode.title.clone(),
@@ -5650,7 +5660,7 @@ async fn provider_calculate_delta(
             mb
         } else {
             let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
-            let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+            let basket_size: u64 = crate::sync::planned_selection_bytes(&desired_items,manifest,load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?.as_ref(),None);
             match free_bytes_for_sync_device(_state, &manifest.device_id).await {
                 Some(free_bytes) => {
                     crate::daemon_log!(
@@ -5704,6 +5714,7 @@ async fn provider_calculate_delta(
                 ),
             };
             let fill_params = crate::auto_fill::AutoFillParams {
+                output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: auto_fill_budget,
                 device_id: manifest.device_id.clone(),
@@ -5764,7 +5775,8 @@ async fn provider_calculate_delta(
                 if seen_ids.insert(item_id) {
                     af_item_ids.insert(item.id.clone());
                     autofill_playlist_tracks.push(autofill_playlist_track(&item));
-                    desired_items.push(crate::sync::DesiredItem {
+                    desired_items.push(crate::sync::DesiredItem {disc_number: item.disc_number,
+                        duration_seconds: item.duration_seconds,
                         media_role: crate::device::MediaRole::Music,
                         jellyfin_id: item.id,
                         name: item.name,
@@ -5775,7 +5787,7 @@ async fn provider_calculate_delta(
                         provider_album_id: item.provider_album_id,
                         provider_content_type: item.provider_content_type,
                         provider_suffix: item.provider_suffix,
-                        original_bitrate: None,
+                        original_bitrate: item.original_bitrate,
                         track_number: item.track_number,
                         server_id: None,
                     });
@@ -5834,7 +5846,7 @@ async fn provider_calculate_delta(
             manifest,
             device_io.as_ref(),
         )
-        .await;
+        .await.map_err(sync_plan_error)?;
         crate::daemon_log!(
             "[Delta] Provider existence check complete: adds={} deletes={} id_changes={} unchanged={} reasons={}",
             delta.adds.len(),
@@ -5883,11 +5895,20 @@ async fn sync_target_fingerprint(state: &AppState, target: &crate::sync::SyncTar
 }
 
 async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest, params: &Value) -> Result<Value, JsonRpcError> {
+    if music_setup_pending(&manifest.device_id).await { return Err(stale_plan_error("Finish the existing music scan before syncing")); }
+    let (profile, preferred)=preview_media_profile(state,manifest).await?;
+    let force=params.get("force").and_then(Value::as_bool).unwrap_or(false);
+    if !force {
+        if let Some((_,_,io,_))=state.device_manager.get_sync_target_for_device(&manifest.device_id).await {
+            crate::device_music_scan::reconcile(&mut delta,manifest,io.as_ref(),profile.as_ref(),Some(&state.sync_operation_manager)).await.map_err(sync_plan_error)?;
+        }
+    }
+    crate::sync::estimate_delta_outputs(&mut delta,profile.as_ref(),preferred);
     if params.get("prepared").and_then(Value::as_bool) != Some(true) {
         return Ok(delta_value_with_cleanup_metadata(&delta, manifest));
     }
     let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
-    if force { apply_force_sync(&mut delta, manifest); }
+    if force { apply_force_sync(&mut delta, manifest); crate::sync::estimate_delta_outputs(&mut delta,profile.as_ref(),preferred); }
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
     let target: crate::sync::SyncTarget = state.device_manager.get_selected_sync_target().await.ok_or_else(|| stale_plan_error("Sync destination disconnected during preparation"))?.into();
     if serde_json::to_string(&target.manifest).map_err(|e|sync_plan_error(e.into()))? != serde_json::to_string(manifest).map_err(|e|sync_plan_error(e.into()))? { return Err(stale_plan_error("Sync destination changed during preparation")); }
@@ -5895,10 +5916,17 @@ async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, 
     if params.get("preparationFingerprint").and_then(Value::as_str).is_some_and(|expected|expected != fingerprint) {
         return Err(stale_plan_error("Sync configuration changed during preparation; prepare sync again"));
     }
+    let transferred:HashSet<_>=delta.adds.iter().map(|a|a.jellyfin_id.as_str()).chain(delta.id_changes.iter().map(|a|a.old_jellyfin_id.as_str())).chain(delta.deletes.iter().map(|d|d.jellyfin_id.as_str())).collect();
+    let selected_bytes=delta.adds.iter().filter(|a|!a.is_auto_fill).map(|a|a.size_bytes)
+        .chain(delta.id_changes.iter().filter(|a|!a.is_auto_fill.unwrap_or(false)).map(|a|a.size_bytes))
+        .chain(manifest.synced_items.iter().filter(|i|!i.is_auto_fill && !transferred.contains(i.jellyfin_id.as_str())).map(|i|i.size_bytes)).fold(0,u64::saturating_add);
     let plan = crate::sync_plan::SyncPlan::from_delta(delta, manifest).map_err(sync_plan_error)?;
     plan.validate().map_err(sync_plan_error)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let summary = plan.summary(&id);
+    let mut summary = plan.summary(&id);
+    summary["selectedBytes"] = serde_json::json!(selected_bytes);
+    summary["availableBytes"] = serde_json::json!(target.io.free_space().await.ok());
+    summary["outputSizeEstimated"] = serde_json::json!(profile.is_some());
     let manager = Arc::downgrade(&state.sync_operation_manager);
     let expiry_id=id.clone();
     let expiry=crate::sync_plan::ExpiryGuard::new(tokio::spawn(async move {
@@ -6005,7 +6033,8 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
             })
         })
         .or(item.bitrate);
-    crate::sync::DesiredItem {
+    crate::sync::DesiredItem {disc_number: item.parent_index_number,
+        duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0) / 10_000_000) as u32,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: item.id,
         name: item.name,
@@ -6713,7 +6742,8 @@ fn push_fill_items_dedup(
         if seen_ids.insert(item.id.clone()) {
             let size = item.size_bytes;
             autofill_playlist_tracks.push(autofill_playlist_track(&item));
-            desired_items.push(crate::sync::DesiredItem {
+            desired_items.push(crate::sync::DesiredItem {disc_number: item.disc_number,
+                duration_seconds: item.duration_seconds,
                 media_role,
                 jellyfin_id: item.id,
                 name: item.name,
@@ -6724,7 +6754,7 @@ fn push_fill_items_dedup(
                 provider_album_id: item.provider_album_id,
                 provider_content_type: item.provider_content_type,
                 provider_suffix: item.provider_suffix,
-                original_bitrate: None,
+                original_bitrate: item.original_bitrate,
                 track_number: item.track_number,
                 server_id: Some(server_id.to_string()),
             });
@@ -6808,8 +6838,10 @@ async fn expand_audiobook_auto_fill(
                 continue;
             }
             for part in parts {
-                result.push(crate::auto_fill::AutoFillItem {
-                    id: part.id.clone(),
+                result.push(crate::auto_fill::AutoFillItem {disc_number: None,
+                    original_bitrate: None,
+                    duration_seconds: 0,
+        id: part.id.clone(),
                     name: part.title.clone(),
                     album: part.album_title.clone(),
                     artist: part.artist_name.clone(),
@@ -6900,8 +6932,10 @@ async fn expand_podcast_auto_fill(
             candidates.push((
                 podcast_published_at(&episode.published_at),
                 episode.id.clone(),
-                crate::auto_fill::AutoFillItem {
-                    id: episode.id,
+                crate::auto_fill::AutoFillItem {disc_number: None,
+                    original_bitrate: None,
+                    duration_seconds: 0,
+        id: episode.id,
                     name: episode.title,
                     album: Some(detail.show.title.clone()),
                     artist: None,
@@ -7453,7 +7487,7 @@ async fn multi_provider_calculate_delta(
         // rpc.rs:2599-2616). `None` when device storage is unavailable; that is
         // tolerated only for slots that supply their own `maxBytes` — matching the
         // pre-12.3 multi path, which used the UI `maxBytes` without querying storage.
-        let selected_bytes: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+        let selected_bytes: u64 = crate::sync::planned_selection_bytes(&desired_items,manifest,load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?.as_ref(),None);
         let mut remaining: Option<u64> =
             match free_bytes_for_sync_device(state, &manifest.device_id).await {
                 Some(free_bytes) => {
@@ -7529,6 +7563,7 @@ async fn multi_provider_calculate_delta(
             let (history, rotation_cursor, pity_streak) =
                 build_autofill_history(&state.db, &manifest.device_id, &af_server, now);
             let fill_params = crate::auto_fill::AutoFillParams {
+                output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: budget,
                 device_id: manifest.device_id.clone(),
@@ -7630,7 +7665,7 @@ async fn multi_provider_calculate_delta(
             manifest,
             device_io.as_ref(),
         )
-        .await;
+        .await.map_err(sync_plan_error)?;
     }
     crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
@@ -7760,7 +7795,8 @@ async fn handle_sync_calculate_delta(
                 })
             })
             .or(item.bitrate);
-        crate::sync::DesiredItem {
+        crate::sync::DesiredItem {disc_number: item.parent_index_number,
+            duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: item.id,
             name: item.name,
@@ -8056,6 +8092,7 @@ async fn handle_sync_calculate_delta(
         let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
         // Legacy Jellyfin fast path: Memory features don't apply (Story 13.1/13.4 fields are inert).
         let fill_params = crate::auto_fill::AutoFillParams {
+            output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
             exclude_item_ids: expanded_excludes,
             max_fill_bytes,
             device_id: String::new(),
@@ -8081,7 +8118,8 @@ async fn handle_sync_calculate_delta(
                     if seen_ids.insert(item_id) {
                         af_item_ids.insert(item.id.clone());
                         autofill_playlist_tracks.push(autofill_playlist_track(&item));
-                        desired_items.push(crate::sync::DesiredItem {
+                        desired_items.push(crate::sync::DesiredItem {disc_number: item.disc_number,
+                            duration_seconds: item.duration_seconds,
                             media_role: crate::device::MediaRole::Music,
                             jellyfin_id: item.id,
                             name: item.name,
@@ -8092,7 +8130,7 @@ async fn handle_sync_calculate_delta(
                             provider_album_id: None,
                             provider_content_type: item.provider_content_type,
                             provider_suffix: item.provider_suffix,
-                            original_bitrate: None,
+                            original_bitrate: item.original_bitrate,
                             track_number: item.track_number,
                             server_id: None,
                         });
@@ -8152,7 +8190,7 @@ async fn handle_sync_calculate_delta(
             &manifest,
             device_io.as_ref(),
         )
-        .await;
+        .await.map_err(sync_plan_error)?;
         crate::daemon_log!(
             "[Sync] Existence check complete: {} adds after recovery, reasons={}",
             delta.adds.len(),
@@ -8318,7 +8356,8 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
                 .synced_items
                 .iter()
                 .find(|item| item.jellyfin_id == change.old_jellyfin_id);
-            force_adds.push(crate::sync::SyncAddItem {
+            force_adds.push(crate::sync::SyncAddItem {disc_number: None,
+                duration_seconds: 0,
                 media_role: change.media_role,
                 jellyfin_id: change.new_jellyfin_id.clone(),
                 name: change.name.clone(),
@@ -8356,7 +8395,8 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
             {
                 continue;
             }
-            force_adds.push(crate::sync::SyncAddItem {
+            force_adds.push(crate::sync::SyncAddItem {disc_number: None,
+                duration_seconds: 0,
                 media_role: item.media_role,
                 jellyfin_id: item.jellyfin_id.clone(),
                 name: item.name.clone(),
@@ -8456,7 +8496,11 @@ async fn handle_sync_execute(
     } else {
         let mut delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
             .map_err(|e| JsonRpcError { code:ERR_INVALID_PARAMS, message:format!("Invalid delta parameter: {e}"), data:None })?;
+        if music_setup_pending(&target.manifest.device_id).await {return Err(stale_plan_error("Finish the existing music scan before syncing"));}
+        let (profile,preferred)=preview_media_profile(state,&target.manifest).await?;
         if force_sync { apply_force_sync(&mut delta, &target.manifest); }
+        else {crate::device_music_scan::reconcile(&mut delta,&target.manifest,target.io.as_ref(),profile.as_ref(),Some(&state.sync_operation_manager)).await.map_err(sync_plan_error)?;}
+        crate::sync::estimate_delta_outputs(&mut delta,profile.as_ref(),preferred);
         preflight_state_media_adds(state, &target.manifest, &mut delta, None).await?;
         crate::sync_plan::SyncPlan::from_delta(delta, &target.manifest).map_err(sync_plan_error)?
     };
@@ -9570,6 +9614,68 @@ async fn handle_device_update_manifest(
     }))
 }
 
+struct MusicSetupScan {
+    manifest: crate::device::DeviceManifest,
+    observation: u64,
+    io: Arc<dyn crate::device_io::DeviceIO>,
+    provider: Arc<dyn MediaProvider>,
+    server: String,
+    progress: Arc<crate::device_music_scan::Progress>,
+    running: bool,
+    expires_at: std::time::Instant,
+}
+fn music_setup_scans() -> &'static tokio::sync::Mutex<HashMap<String, MusicSetupScan>> {
+    static SCANS: OnceLock<tokio::sync::Mutex<HashMap<String,MusicSetupScan>>> = OnceLock::new();
+    SCANS.get_or_init(Default::default)
+}
+pub(crate) async fn music_setup_pending(device_id:&str)->bool {
+    let mut scans=music_setup_scans().lock().await;
+    scans.retain(|_,s| s.running || s.expires_at>std::time::Instant::now());
+    scans.values().any(|s|s.manifest.device_id==device_id)
+}
+async fn handle_music_setup_scan(state:&AppState,method:&str,params:Option<Value>)->Result<Value,JsonRpcError> {
+    use std::sync::atomic::Ordering;
+    let params=params.unwrap_or_default();let id=params["scanId"].as_str().ok_or_else(||stale_plan_error("Missing scanId"))?;
+    let mut scans=music_setup_scans().lock().await;
+    scans.retain(|_,s|s.running || s.expires_at>std::time::Instant::now());
+    let scan=scans.get_mut(id).ok_or_else(||stale_plan_error("Music scan expired; reconnect the device"))?;
+    if method=="device.music_scan_status" {return Ok(serde_json::json!({"scanned":scan.progress.scanned.load(Ordering::Relaxed),"total":scan.progress.total.load(Ordering::Relaxed),"running":scan.running}))}
+    if method=="device.music_scan_cancel" {
+        let progress=scan.progress.clone();let running=scan.running;
+        let _gate=progress.commit_gate.lock().await;
+        let committed=progress.committed.load(Ordering::Relaxed);
+        if !committed {progress.cancelled.store(true,Ordering::Relaxed);}
+        if !running {scans.remove(id);}
+        return Ok(serde_json::json!({"cancelled":!committed,"committed":committed}))
+    }
+    if scan.running {return Err(stale_plan_error("Music scan already running"))}
+    let _pipeline=state.sync_operation_manager.try_start_pipeline().ok_or_else(||stale_plan_error("A sync operation is already active"))?;
+    scan.running=true;
+    let manifest=scan.manifest.clone();let io=scan.io.clone();let observation=scan.observation;let provider=scan.provider.clone();let server=scan.server.clone();let progress=scan.progress.clone();
+    drop(scans);
+    let result=async {
+        let profile=load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(anyhow::Error::msg)?;
+        let folder=manifest.media_path(crate::device::MediaRole::Music).unwrap_or("");
+        let result=crate::device_music_scan::scan(io.as_ref(),folder,provider.as_ref(),profile.as_ref(),progress.clone()).await?;
+        let basket=crate::device_music_scan::group(&result,provider.as_ref(),&server,&progress).await?;
+        progress.check()?;
+        // Revalidate every adopted object immediately before publishing ownership.
+        for (_,file) in &result.matches {anyhow::ensure!(io.file_length(&file.path).await?==Some(file.size),"Device file changed during music scan");}
+        progress.check()?;
+        if !result.matches.is_empty() {
+            let items=result.matches.iter().map(|(s,f)|crate::device_music_scan::synced(s,f,&server)).collect();
+            let _gate=progress.commit_gate.lock().await;
+            progress.check()?;
+            state.device_manager.import_device_music(&manifest,observation,&io,items,basket).await?;
+            progress.committed.store(true,Ordering::Relaxed);
+        }
+        Ok::<_,anyhow::Error>(serde_json::json!({"imported":result.matches.len(),"unmatched":result.unmatched,"ambiguous":result.ambiguous,"incompatible":result.incompatible}))
+    }.await;
+    let mut scans=music_setup_scans().lock().await;
+    if result.is_ok() || progress.cancelled.load(Ordering::Relaxed) {scans.remove(id);} else if let Some(scan)=scans.get_mut(id) {scan.running=false;}
+    result.map_err(sync_plan_error)
+}
+
 async fn handle_device_initialize(
     state: &AppState,
     params: Option<Value>,
@@ -9781,10 +9887,32 @@ async fn handle_device_initialize(
         profile_id: profile_id.to_string(),
     });
 
+    let mut music_scan_id: Option<String> = None;
+    let discovery=async {
+    if let Some((_, _, io, _))=state.device_manager.get_sync_target_for_device(&manifest.device_id).await {
+        let folder=manifest.media_path(crate::device::MediaRole::Music).unwrap_or("");
+        let files=io.list_files(folder).await.map_err(sync_plan_error)?;
+        if files.iter().any(|f|crate::device_music_scan::audio_file(&f.path)) {
+            let provider=require_provider(state).await?;
+            let server=current_server_portable_id(state)?.ok_or_else(||stale_plan_error("No active server"))?;
+            let (_,observation)=state.device_manager.get_basket_target(&manifest.device_id).await.ok_or_else(||stale_plan_error("Device disconnected"))?;
+            let id=uuid::Uuid::new_v4().to_string();
+            let mut proposals=music_setup_scans().lock().await;
+            proposals.retain(|_,s|s.running || (s.expires_at>std::time::Instant::now() && s.manifest.device_id!=manifest.device_id));
+            if proposals.len()>=128 {return Err(stale_plan_error("Too many pending music scans"));}
+            proposals.insert(id.clone(),MusicSetupScan{manifest:manifest.clone(),observation:observation.parse().map_err(|_|stale_plan_error("Invalid device connection"))?,io,provider,server,progress:Arc::new(Default::default()),running:false,expires_at:std::time::Instant::now()+std::time::Duration::from_secs(300)});
+            music_scan_id=Some(id);
+        }
+    }
+    Ok::<(),JsonRpcError>(())
+    }.await;
+    let music_scan_warning=discovery.err().map(|e|e.message);
     Ok(serde_json::json!({
         "status": "success",
         "data": {
             "deviceId": manifest.device_id,
+            "musicScanId": music_scan_id,
+            "musicScanWarning":music_scan_warning,
             "version": manifest.version,
             "managedPaths": manifest.managed_paths,
             "audiobookPath": manifest.audiobook_path,
@@ -9955,6 +10083,7 @@ async fn handle_basket_auto_fill(
         let (history, rotation_cursor, pity_streak) =
             build_autofill_history(&state.db, &device_id, &server_id, now);
         let fill_params = crate::auto_fill::AutoFillParams {
+            output_profile: load_selected_transcoding_profile(state.device_manager.get_current_device().await.as_ref().and_then(|m|m.transcoding_profile_id.as_deref())).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
             exclude_item_ids,
             max_fill_bytes,
             device_id,
@@ -10005,6 +10134,7 @@ async fn handle_basket_auto_fill(
 
     // Legacy Jellyfin preview (no serverId): Memory features don't apply (13.1/13.4 fields inert).
     let fill_params = crate::auto_fill::AutoFillParams {
+        output_profile: load_selected_transcoding_profile(state.device_manager.get_current_device().await.as_ref().and_then(|m|m.transcoding_profile_id.as_deref())).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
         exclude_item_ids: expanded_exclude_ids,
         max_fill_bytes,
         device_id: String::new(),
@@ -10532,7 +10662,8 @@ mod tests {
     // ---- Story 13.5 #20: encoding-from-goals per-slot transcode override (RPC-level). ----
 
     fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
-        crate::sync::SyncAddItem {
+        crate::sync::SyncAddItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: id.to_string(),
@@ -13168,7 +13299,8 @@ mod tests {
                 .get_selected_sync_target()
                 .await
                 .unwrap();
-            let desired = vec![crate::sync::DesiredItem {
+            let desired = vec![crate::sync::DesiredItem {disc_number: None,
+                duration_seconds: 0,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song1".into(),
                 name: "Track One".into(),
@@ -14284,8 +14416,10 @@ mod tests {
             size: u64,
             track_number: Option<u32>,
         ) -> crate::auto_fill::AutoFillItem {
-            crate::auto_fill::AutoFillItem {
-                id: id.to_string(),
+            crate::auto_fill::AutoFillItem {disc_number: None,
+                original_bitrate: None,
+                duration_seconds: 0,
+        id: id.to_string(),
                 name: format!("name-{id}"),
                 album: None,
                 artist: None,
@@ -14300,7 +14434,8 @@ mod tests {
         }
 
         // Manual item "m1" (100 bytes) already resolved on server s1.
-        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {
+        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "m1".to_string(),
             name: "manual".to_string(),
@@ -17722,6 +17857,7 @@ mod tests {
         pipeline.podcast_retention.recent_count = 1;
         pipeline.podcast_retention.unplayed_only = true;
         let params = crate::auto_fill::AutoFillParams {
+            output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 1_000_000,
             device_id: "device".into(),
@@ -17749,6 +17885,7 @@ mod tests {
             FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
         Arc::get_mut(&mut provider).unwrap().podcast_complete = true;
         let params = || crate::auto_fill::AutoFillParams {
+            output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 1_000_000,
             device_id: "device".into(),
@@ -17812,6 +17949,7 @@ mod tests {
             },
         );
         let params = crate::auto_fill::AutoFillParams {
+            output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 1_000_000,
             device_id: "device".into(),
@@ -17833,6 +17971,7 @@ mod tests {
         );
 
         let tight = crate::auto_fill::AutoFillParams {
+            output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 700_000,
             device_id: "device".into(),

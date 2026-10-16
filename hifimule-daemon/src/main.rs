@@ -77,6 +77,7 @@ mod auto_fill;
 mod db;
 mod device;
 pub mod device_io;
+mod device_music_scan;
 // Provider catalog models are part of the multi-provider contract, even while
 // the current daemon binary only uses the sync-facing subset.
 #[allow(dead_code)]
@@ -1581,7 +1582,8 @@ fn push_auto_fill_items(
                     run_time_seconds: -1,
                 });
             }
-            desired_items.push(sync::DesiredItem {
+            desired_items.push(sync::DesiredItem {disc_number: item.disc_number,
+                duration_seconds: item.duration_seconds,
                 media_role,
                 jellyfin_id: item.id,
                 name: item.name,
@@ -1592,7 +1594,7 @@ fn push_auto_fill_items(
                 provider_album_id: item.provider_album_id,
                 provider_content_type: item.provider_content_type,
                 provider_suffix: item.provider_suffix,
-                original_bitrate: None,
+                original_bitrate: item.original_bitrate,
                 track_number: item.track_number,
                 server_id: None,
             });
@@ -1670,8 +1672,10 @@ mod auto_sync_tests {
     }
 
     fn fill_item(id: &str, track_number: Option<u32>) -> auto_fill::AutoFillItem {
-        auto_fill::AutoFillItem {
-            id: id.to_string(),
+        auto_fill::AutoFillItem {disc_number: None,
+            original_bitrate: None,
+            duration_seconds: 0,
+        id: id.to_string(),
             name: id.to_string(),
             album: None,
             artist: Some("artist".to_string()),
@@ -1687,7 +1691,8 @@ mod auto_sync_tests {
 
     #[test]
     fn push_auto_fill_items_dedups_and_writes_playlist() {
-        let mut desired_items = vec![sync::DesiredItem {
+        let mut desired_items = vec![sync::DesiredItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "manual".to_string(),
             name: "manual".to_string(),
@@ -1839,6 +1844,7 @@ async fn run_auto_sync_via_provider(
     device_id: String,
     protection_observer: sync::protection::Observer,
 ) -> anyhow::Result<()> {
+    if rpc::music_setup_pending(&device_id).await { return Ok(()); }
     let _ = state_tx.send(DaemonState::Syncing);
 
     // Claim the pipeline lock so concurrent manual syncs or a second auto-sync
@@ -1907,7 +1913,7 @@ async fn run_auto_sync_via_provider(
                 }
             }
         };
-        let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+        let basket_size: u64 = sync::planned_selection_bytes(&desired_items,manifest,transcoding_profile.as_ref(),target.io.preferred_audio_container());
         let auto_fill_budget = total_budget.saturating_sub(basket_size);
         if auto_fill_budget > 0 {
             let exclude_item_ids: Vec<String> = desired_items
@@ -1915,6 +1921,7 @@ async fn run_auto_sync_via_provider(
                 .map(|i| i.jellyfin_id.clone())
                 .collect();
             let fill_params = auto_fill::AutoFillParams {
+                output_profile: transcoding_profile.clone(),
                 exclude_item_ids,
                 max_fill_bytes: auto_fill_budget,
                 device_id: manifest.device_id.clone(),
@@ -2012,6 +2019,9 @@ async fn run_auto_sync_via_provider(
         delta.id_changes.len()
     );
 
+    sync::augment_delta_with_existence_check(&mut delta,&desired_items,manifest,target.io.as_ref()).await?;
+    device_music_scan::reconcile(&mut delta,manifest,target.io.as_ref(),transcoding_profile.as_ref(),Some(&sync_op_manager)).await?;
+    sync::estimate_delta_outputs(&mut delta,transcoding_profile.as_ref(),target.io.preferred_audio_container());
     let delta = sync_plan::SyncPlan::from_delta(delta, manifest)?;
     delta.validate()?;
     let pending_ids = delta.pending_ids()?;
@@ -2337,7 +2347,8 @@ fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::Desired
         .bitrate_kbps
         .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
         .unwrap_or(0);
-    sync::DesiredItem {
+    sync::DesiredItem {disc_number: song.disc_number,
+        duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
         name: song.title.clone(),

@@ -370,6 +370,12 @@ pub async fn expand_with_pipeline(
         }
     }
 
+    if let Some(profile)=params.output_profile.as_ref() {
+        let override_kbps=super::pipeline::target_bitrate_kbps(&normalized.budget);
+        for candidates in pools.values_mut() { for candidate in candidates {candidate.song.size_bytes=Some(crate::sync::planned_song_bytes(&candidate.song,Some(profile),override_kbps));} }
+        // Size metadata now describes the planned transfer. Do not shrink twice.
+        normalized.budget.encoding_from_goals=false;
+    }
     let input = PipelineInput {
         pools,
         history,
@@ -828,6 +834,7 @@ mod tests {
 
     fn params(max_fill_bytes: u64) -> AutoFillParams {
         AutoFillParams {
+            output_profile: None,
             exclude_item_ids: Vec::new(),
             max_fill_bytes,
             device_id: String::new(),
@@ -849,6 +856,7 @@ mod tests {
         rotation_cursor: i64,
     ) -> AutoFillParams {
         AutoFillParams {
+            output_profile: None,
             exclude_item_ids: Vec::new(),
             max_fill_bytes,
             device_id: "dev".to_string(),

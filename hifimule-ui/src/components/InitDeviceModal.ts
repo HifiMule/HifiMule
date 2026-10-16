@@ -335,7 +335,7 @@ export class InitDeviceModal {
         this.renderSubmitting(body);
 
         try {
-            await rpcCall('device_initialize', {
+            const initialized = await rpcCall('device_initialize', {
                 pendingId: this.pendingId,
                 observedDestinationRevision: this.observedDestinationRevision,
                 folderPath,
@@ -348,13 +348,56 @@ export class InitDeviceModal {
                 icon: selectedIcon || null,
             });
 
+            const scanWarning = initialized?.data?.musicScanWarning;
+            if (scanWarning) {
+                const confirm = this.dialog?.querySelector('#init-device-confirm-btn') as any;
+                if (confirm) { confirm.loading = false; confirm.hidden = true; }
+                body.textContent = `${t('device.scan.discoveryWarning')} ${scanWarning}`;
+                this.onComplete?.();
+                return;
+            }
+            const scanId = initialized?.data?.musicScanId;
+            if (scanId) { this.showMusicScan(body, scanId); return; }
             if (this.dialog) (this.dialog as any).hide();
-
             this.onComplete?.();
         } catch (err) {
             const message = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
             this.renderInitError(body, message);
         }
+    }
+
+    private showMusicScan(body: HTMLElement, scanId: string) {
+        const finish = () => { if (this.dialog) (this.dialog as any).hide(); this.onComplete?.(); };
+        const confirm = this.dialog?.querySelector('#init-device-confirm-btn') as any;
+        if (confirm) { confirm.loading = false; confirm.hidden = true; }
+        const cancel = this.dialog?.querySelector('#init-device-cancel-btn') as any;
+        if (cancel) cancel.hidden = true;
+        this.dialog?.addEventListener('sl-request-close', (event: Event) => event.preventDefault());
+        const render = () => {
+            body.innerHTML = `<p>${t('device.scan.prompt')}</p><p style="color:var(--ink-dim)">${t('device.scan.ownership')}</p>
+                <div style="display:flex;gap:var(--spacing-sm,8px);justify-content:flex-end">
+                <sl-button id="scan-no">${t('device.scan.skip')}</sl-button><sl-button id="scan-yes" variant="primary">${t('device.scan.start')}</sl-button></div>`;
+            body.querySelector('#scan-no')?.addEventListener('click', async () => { try { await rpcCall('device.music_scan_cancel', { scanId }); } catch {} finally { finish(); } });
+            body.querySelector('#scan-yes')?.addEventListener('click', async () => {
+                body.innerHTML = `<sl-spinner></sl-spinner><p id="scan-progress">${t('device.scan.scanning')}</p><sl-button id="scan-cancel">${t('device.scan.cancel')}</sl-button>`;
+                let cancellation: Promise<any> | undefined;
+                body.querySelector('#scan-cancel')?.addEventListener('click', async () => { try { cancellation = rpcCall('device.music_scan_cancel', {scanId}); await cancellation; } catch {} });
+                let polling = false;
+                const timer = window.setInterval(async () => {
+                    if (polling) return; polling = true;
+                    try { const status = await rpcCall('device.music_scan_status', {scanId}); const label = body.querySelector('#scan-progress'); if (label) label.textContent = t('device.scan.progress', {count:status.scanned,total:status.total}); } catch {} finally { polling = false; }
+                }, 1000);
+                try {
+                    const result = await rpcCall('device.music_scan_start', {scanId});
+                    body.innerHTML = `<p>${t('device.scan.result', { imported:result.imported, unmatched:result.unmatched, ambiguous:result.ambiguous, incompatible:result.incompatible })}</p><sl-button id="scan-done" variant="primary">${t('device.scan.done')}</sl-button>`;
+                    body.querySelector('#scan-done')?.addEventListener('click', finish);
+                } catch (error) {
+                    if (cancellation) { try { const outcome = await cancellation; if (outcome?.cancelled === true) { finish(); return; } } catch {} }
+                    render(); const message = document.createElement('p'); message.textContent = String(error); body.prepend(message);
+                } finally { window.clearInterval(timer); }
+            });
+        };
+        render();
     }
 
     private iconLabel(icon: string): string {

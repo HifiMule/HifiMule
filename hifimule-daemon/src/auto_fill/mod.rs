@@ -32,6 +32,12 @@ pub use fetch::*;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFillItem {
+    #[serde(default)]
+    pub disc_number: Option<u32>,
+    #[serde(default)]
+    pub original_bitrate: Option<u32>,
+    #[serde(default)]
+    pub duration_seconds: u32,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -56,6 +62,7 @@ pub struct AutoFillItem {
 
 #[derive(Debug)]
 pub struct AutoFillParams {
+    pub output_profile: Option<serde_json::Value>,
     /// IDs of manually selected items — these are excluded from auto-fill results.
     pub exclude_item_ids: Vec<String>,
     /// Maximum bytes available for auto-fill items (device free bytes minus manual selection size).
@@ -117,6 +124,7 @@ pub async fn run_auto_fill(
     let AutoFillParams {
         exclude_item_ids,
         max_fill_bytes,
+        output_profile,
         ..
     } = params;
     let exclude_count = exclude_item_ids.len();
@@ -225,7 +233,7 @@ pub async fn run_auto_fill(
             .filter(|item| !exclude_set.contains(&item.id))
             .collect();
         let remaining_budget = max_fill_bytes.saturating_sub(cumulative_bytes);
-        let (new_items, capacity_reached) = rank_and_truncate(page_items, remaining_budget);
+        let (new_items, capacity_reached) = rank_and_truncate_with_profile(page_items, remaining_budget, output_profile.as_ref());
         cumulative_bytes += new_items.iter().map(|i| i.size_bytes).sum::<u64>();
         result.extend(new_items);
 
@@ -254,19 +262,20 @@ pub fn rank_and_truncate(
     tracks: Vec<JellyfinItem>,
     max_fill_bytes: u64,
 ) -> (Vec<AutoFillItem>, bool) {
+    rank_and_truncate_with_profile(tracks, max_fill_bytes, None)
+}
+
+fn rank_and_truncate_with_profile(
+    tracks: Vec<JellyfinItem>,
+    max_fill_bytes: u64,
+    profile: Option<&serde_json::Value>,
+) -> (Vec<AutoFillItem>, bool) {
     let mut result = Vec::new();
     let mut cumulative_bytes: u64 = 0;
 
     for track in tracks {
-        // Treat missing, zero, or negative sizes as unsyncable — skip them rather than
-        // adding zero-byte items that would inflate the fill set without consuming budget.
-        let size_bytes = track
-            .media_sources
-            .as_ref()
-            .and_then(|ms| ms.first())
-            .and_then(|ms| ms.size)
-            .and_then(|s| if s > 0 { Some(s as u64) } else { None })
-            .unwrap_or(0);
+        let song = crate::providers::jellyfin::song_from_item(track.clone());
+        let size_bytes = crate::sync::planned_song_bytes(&song, profile, None);
 
         if size_bytes == 0 {
             continue;
@@ -292,8 +301,10 @@ pub fn rank_and_truncate(
         };
 
         cumulative_bytes += size_bytes;
-        result.push(AutoFillItem {
-            id: track.id,
+        result.push(AutoFillItem {disc_number: track.parent_index_number,
+            original_bitrate: song.bitrate_kbps.map(|b| b.saturating_mul(1000)),
+            duration_seconds: (track.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
+        id: track.id,
             name: track.name,
             album: track.album,
             artist: track
@@ -325,6 +336,7 @@ pub fn rank_and_truncate(
 
 /// Accumulates auto-fill items for the provider path, tracking budget and dedup state.
 struct ProviderFillState {
+    output_profile: Option<serde_json::Value>,
     exclude_set: HashSet<String>,
     seen_ids: HashSet<String>,
     result: Vec<AutoFillItem>,
@@ -335,6 +347,7 @@ struct ProviderFillState {
 impl ProviderFillState {
     fn new(exclude_set: HashSet<String>, max_fill_bytes: u64) -> Self {
         Self {
+            output_profile: None,
             exclude_set,
             seen_ids: HashSet::new(),
             result: Vec::new(),
@@ -348,10 +361,7 @@ impl ProviderFillState {
         if self.exclude_set.contains(&song.id) || !self.seen_ids.insert(song.id.clone()) {
             return true; // skip duplicate/excluded, budget still open
         }
-        let size_bytes = song
-            .bitrate_kbps
-            .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
-            .unwrap_or(0);
+        let size_bytes = crate::sync::planned_song_bytes(&song,self.output_profile.as_ref(),None);
         if size_bytes == 0 {
             return true; // skip unknown-size song
         }
@@ -359,8 +369,10 @@ impl ProviderFillState {
             return false; // budget full
         }
         self.cumulative_bytes += size_bytes;
-        self.result.push(AutoFillItem {
-            id: song.id,
+        self.result.push(AutoFillItem {disc_number: song.disc_number,
+            original_bitrate: song.bitrate_kbps.map(|b|b.saturating_mul(1000)),
+            duration_seconds: song.duration_seconds,
+        id: song.id,
             name: song.title,
             album: song.album_title,
             artist: song.artist_name,
@@ -407,6 +419,7 @@ pub async fn run_auto_fill_provider(
     } = params;
     let exclude_set: HashSet<String> = exclude_item_ids.into_iter().collect();
     let mut state = ProviderFillState::new(exclude_set, max_fill_bytes);
+    state.output_profile = params.output_profile;
 
     // Phase 1: Priority lists (favorites → frequently played → recently played).
     // These are small targeted lists; fetch them all at once then consume in order.
@@ -550,6 +563,7 @@ mod tests {
         let result = run_auto_fill(
             &JellyfinClient::new(),
             AutoFillParams {
+                output_profile: None,
                 exclude_item_ids: vec![],
                 max_fill_bytes: 1000,
                 device_id: String::new(),
@@ -710,5 +724,25 @@ mod tests {
         );
         assert_eq!(result[0].id, "a");
         assert!(capacity_reached);
+    }
+}
+
+#[cfg(test)]
+mod output_capacity_tests {
+    #[test]
+    fn legacy_jellyfin_capacity_reserves_encoded_output_and_preserves_direct_sizes() {
+        let track: crate::api::JellyfinItem = serde_json::from_value(serde_json::json!({
+            "Id":"one", "Name":"Track", "Type":"Audio", "RunTimeTicks":2400000000_i64,
+            "Container":"flac", "MediaSources":[{"Size":50000000,"Container":"flac","Bitrate":1600000}]
+        })).unwrap();
+        let profile = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],"MusicStreamingTranscodingBitrate":192000});
+        let (encoded, full) = super::rank_and_truncate_with_profile(vec![track.clone()], 7000000, Some(&profile));
+        assert!(!full);
+        assert_eq!(encoded.len(), 1);
+        assert!(encoded[0].size_bytes < 7000000);
+        assert_eq!(encoded[0].original_bitrate, Some(1600000));
+        let (direct, full) = super::rank_and_truncate(vec![track], 7000000);
+        assert!(full);
+        assert!(direct.is_empty());
     }
 }

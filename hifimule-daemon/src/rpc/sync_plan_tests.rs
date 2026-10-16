@@ -928,3 +928,118 @@ async fn benchmark_daemon_state_retention() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     println!("SYNC_MEMORY_PHASE=done count={count}");
 }
+
+async fn setup_music_scan_fixture() -> (tempfile::TempDir, Arc<AppState>, String) {
+    let (root,state)=sync_plan_test_state().await;
+    let (tagged,_io,file)=crate::device_music_scan::tests::fixture().await;
+    tokio::fs::create_dir_all(root.path().join("Music")).await.unwrap();
+    tokio::fs::copy(tagged.path().join(file.path),root.path().join("Music/existing.mp3")).await.unwrap();
+    let (manifest,observation)=state.device_manager.get_basket_target("prepared-plan-device").await.unwrap();
+    let (_,_,io,_)=state.device_manager.get_sync_target_for_device(&manifest.device_id).await.unwrap();
+    let mut song=crate::device_music_scan::tests::song();song.duration_seconds=2;
+    let provider=Arc::new(crate::device_music_scan::tests::FixtureProvider{songs:vec![song],truncated:false});
+    let id=uuid::Uuid::new_v4().to_string();
+    music_setup_scans().lock().await.insert(id.clone(),MusicSetupScan{manifest,observation:observation.parse().unwrap(),io,provider,server:"captured-server".into(),progress:Arc::new(Default::default()),running:false,expires_at:std::time::Instant::now()+std::time::Duration::from_secs(300)});
+    (root,state,id)
+}
+
+#[tokio::test]
+async fn setup_music_scan_publishes_manifest_and_basket_atomically_for_captured_server() {
+    let _guard=credential_test_lock();
+    let (_root,state,id)=setup_music_scan_fixture().await;
+    let result=handle_music_setup_scan(&state,"device.music_scan_start",Some(json!({"scanId":id}))).await.unwrap();
+    assert_eq!(result["imported"],1);
+    let manifest=state.device_manager.get_current_device().await.unwrap();
+    assert_eq!(manifest.synced_items.len(),1);assert_eq!(manifest.basket_items.len(),1);
+    assert_eq!(manifest.synced_items[0].server_id.as_deref(),Some("captured-server"));
+    assert_eq!(manifest.basket_items[0].item_type,"MusicArtist");
+    assert!(manifest.synced_items[0].size_bytes<50_000_000);
+    assert!(!music_setup_pending(&manifest.device_id).await);
+}
+
+#[tokio::test]
+async fn setup_music_scan_cancel_or_changed_destination_never_publishes_partial_import() {
+    let _guard=credential_test_lock();
+    let (_root,state,id)=setup_music_scan_fixture().await;
+    handle_music_setup_scan(&state,"device.music_scan_cancel",Some(json!({"scanId":id}))).await.unwrap();
+    assert!(handle_music_setup_scan(&state,"device.music_scan_start",Some(json!({"scanId":id}))).await.is_err());
+    assert!(state.device_manager.get_current_device().await.unwrap().synced_items.is_empty());
+    let (_root,state,id)=setup_music_scan_fixture().await;
+    state.device_manager.update_manifest(|m|m.name=Some("changed while dialog was open".into())).await.unwrap();
+    assert!(handle_music_setup_scan(&state,"device.music_scan_start",Some(json!({"scanId":id}))).await.is_err());
+    let manifest=state.device_manager.get_current_device().await.unwrap();assert!(manifest.synced_items.is_empty());assert!(manifest.basket_items.is_empty());
+    handle_music_setup_scan(&state,"device.music_scan_cancel",Some(json!({"scanId":id}))).await.unwrap();
+}
+
+#[tokio::test]
+async fn normal_existing_audio_is_reused_but_force_schedules_replacement() {
+    let _guard = credential_test_lock();
+    let (root, state, id) = setup_music_scan_fixture().await;
+    handle_music_setup_scan(&state, "device.music_scan_cancel", Some(json!({"scanId":id}))).await.unwrap();
+    let before = tokio::fs::read(root.path().join("Music/existing.mp3")).await.unwrap();
+    let manifest = state.device_manager.get_current_device().await.unwrap();
+    let delta: crate::sync::SyncDelta = serde_json::from_value(json!({"adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":50000000,"providerSuffix":"flac"}],"deletes":[],"idChanges":[],"unchanged":0,"playlists":[]})).unwrap();
+    let preview = finish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
+    assert!(preview["adds"].as_array().unwrap().is_empty());
+    assert_eq!(preview["idChanges"][0]["sizeBytes"], before.len() as u64);
+    assert!(state.device_manager.get_current_device().await.unwrap().synced_items.is_empty());
+    let forced = finish_sync_delta(&state, delta.clone(), &manifest, &json!({"force":true})).await.unwrap();
+    assert_eq!(forced["adds"].as_array().unwrap().len(), 1);
+    assert!(forced["idChanges"].as_array().unwrap().is_empty());
+    assert_eq!(tokio::fs::read(root.path().join("Music/existing.mp3")).await.unwrap(), before);
+    let summary = finish_sync_delta(&state, delta, &manifest, &json!({"prepared":true})).await.unwrap();
+    assert_eq!(summary["selectedBytes"], before.len() as u64);
+    let started = handle_sync_execute(&state, Some(json!({"planId":summary["planId"]}))).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.sync_operation_manager.has_active_operation().await {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let operation = state.sync_operation_manager.get_operation(started["operationId"].as_str().unwrap()).await.unwrap();
+    assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
+    assert_eq!(tokio::fs::read(root.path().join("Music/existing.mp3")).await.unwrap(), before);
+    let adopted = state.device_manager.get_current_device().await.unwrap();
+    assert_eq!(adopted.synced_items.len(), 1);
+    assert_eq!(adopted.synced_items[0].local_path, "Music/existing.mp3");
+    let mut replacement: crate::sync::SyncDelta = serde_json::from_value(json!({"adds":[],"deletes":[],"idChanges":[],"unchanged":1,"playlists":[]})).unwrap();
+    apply_force_sync(&mut replacement, &adopted);
+    assert_eq!(replacement.adds.len(), 1);
+    assert_eq!(replacement.deletes.len(), 1);
+    assert_eq!(replacement.deletes[0].local_path, "Music/existing.mp3");
+}
+
+#[tokio::test]
+async fn abandoned_setup_proposal_expires_and_does_not_block_sync_after_reload() {
+    let _guard=credential_test_lock();
+    let (_root,state,id)=setup_music_scan_fixture().await;
+    assert!(music_setup_pending("prepared-plan-device").await);
+    music_setup_scans().lock().await.get_mut(&id).unwrap().expires_at=std::time::Instant::now();
+    assert!(!music_setup_pending("prepared-plan-device").await);
+    assert!(handle_music_setup_scan(&state,"device.music_scan_start",Some(json!({"scanId":id}))).await.is_err());
+}
+#[tokio::test]
+async fn cancellation_after_commit_decision_reports_committed() {
+    let _guard=credential_test_lock();
+    let (_root,state,id)=setup_music_scan_fixture().await;
+    let progress={let mut scans=music_setup_scans().lock().await;let scan=scans.get_mut(&id).unwrap();scan.running=true;scan.progress.clone()};
+    let gate=progress.commit_gate.lock().await;
+    let request=handle_music_setup_scan(&state,"device.music_scan_cancel",Some(json!({"scanId":id})));
+    tokio::pin!(request);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(10),&mut request).await.is_err());
+    progress.committed.store(true,std::sync::atomic::Ordering::Relaxed);
+    drop(gate);
+    let result=request.await.unwrap();
+    assert_eq!(result["committed"],true);assert_eq!(result["cancelled"],false);
+    assert!(!progress.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    music_setup_scans().lock().await.remove(&id);
+}
+#[test]
+fn disc_metadata_survives_provider_jellyfin_and_delta_mapping() {
+    let mut song=crate::device_music_scan::tests::song();song.disc_number=Some(2);
+    let desired=provider_song_to_desired_item(&song);
+    assert_eq!(desired.disc_number,Some(2));
+    let delta=crate::sync::calculate_delta(&[desired],&crate::device::DeviceManifest::default());
+    assert_eq!(delta.adds[0].disc_number,Some(2));
+    let item:crate::api::JellyfinItem=serde_json::from_value(json!({"Id":"one","Name":"Track","Type":"Audio","ParentIndexNumber":2})).unwrap();
+    assert_eq!(jellyfin_item_to_desired_item(item).disc_number,Some(2));
+}

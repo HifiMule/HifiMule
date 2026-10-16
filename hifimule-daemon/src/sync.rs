@@ -68,6 +68,8 @@ fn provider_source_label(server_id: Option<String>) -> String {
 /// An item desired for sync (from the UI basket / Jellyfin API).
 #[derive(Debug, Clone)]
 pub struct DesiredItem {
+    pub disc_number: Option<u32>,
+    pub duration_seconds: u32,
     pub media_role: crate::device::MediaRole,
     pub jellyfin_id: String,
     pub name: String,
@@ -89,6 +91,10 @@ pub struct DesiredItem {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncAddItem {
+    #[serde(default)]
+    pub disc_number: Option<u32>,
+    #[serde(default)]
+    pub duration_seconds: u32,
     #[serde(default)]
     pub media_role: crate::device::MediaRole,
     pub jellyfin_id: String,
@@ -1619,6 +1625,54 @@ fn audio_compatibility_profile(
     AudioCompatibilityProfile::default()
 }
 
+/// A bitrate ceiling applies to direct formats too: MP3 320 -> MP3 192 is a transcode.
+fn direct_for_bitrate(compatibility: &AudioCompatibilityProfile, format: &AudioFormat, source_bps: Option<u32>, override_kbps: Option<u32>) -> bool {
+    compatibility.source_is_direct_compatible(format)
+        && compatibility.transcode_profile.as_ref().and_then(|p| override_kbps.or(p.max_bitrate_kbps))
+            .is_none_or(|ceiling| source_bps.is_none_or(|bps| bps <= ceiling.saturating_mul(1000)))
+}
+
+/// Conservative output reservation: 3% mux/tag allowance plus 64 KiB. Unknown
+/// durations reserve one hour; unconstrained variable/lossless output reserves
+/// 24-bit/192 kHz stereo PCM. Source bytes are used only for direct copies.
+pub fn planned_audio_bytes(item: &SyncAddItem, profile: Option<&serde_json::Value>, preferred: Option<&str>) -> u64 {
+    if item.media_role != crate::device::MediaRole::Music { return item.size_bytes; }
+    let compatibility = audio_compatibility_profile(profile, preferred);
+    let format = provider_audio_format(item.provider_suffix.as_deref(), item.provider_content_type.as_deref());
+    if direct_for_bitrate(&compatibility, &format, item.original_bitrate, item.max_bitrate_override_kbps) { return item.size_bytes; }
+    let duration = if item.duration_seconds > 0 { u64::from(item.duration_seconds) } else { 3600 };
+    let bitrate = item.max_bitrate_override_kbps.or_else(|| compatibility.transcode_profile.as_ref().and_then(|p| p.max_bitrate_kbps)).unwrap_or(9216);
+    duration.saturating_mul(u64::from(bitrate)).saturating_mul(125).saturating_mul(103) / 100 + 65_536
+}
+
+pub fn planned_song_bytes(song:&crate::domain::models::Song,profile:Option<&serde_json::Value>,override_kbps:Option<u32>)->u64 {
+    let item=SyncAddItem {disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:song.bitrate_kbps.map(|b|b.saturating_mul(1000)),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
+    planned_audio_bytes(&item,profile,None)
+}
+
+pub fn planned_selection_bytes(items:&[DesiredItem],manifest:&DeviceManifest,profile:Option<&serde_json::Value>,preferred:Option<&str>)->u64 {
+    let resident:std::collections::HashMap<_,_>=manifest.synced_items.iter().map(|s|((s.jellyfin_id.as_str(),s.server_id.as_deref()),s.size_bytes)).collect();
+    calculate_delta(items,&DeviceManifest::default()).adds.iter().map(|a| {
+        if !manifest.needs_transcoding_profile_rewrite() {
+            if let Some(size)=resident.get(&(a.jellyfin_id.as_str(),a.server_id.as_deref())) {return *size;}
+        }
+        planned_audio_bytes(a,profile,preferred)
+    }).fold(0,u64::saturating_add)
+}
+
+pub fn estimate_delta_outputs(delta: &mut SyncDelta, profile: Option<&serde_json::Value>, preferred: Option<&str>) {
+    for item in &mut delta.adds { item.size_bytes = planned_audio_bytes(item, profile, preferred); }
+}
+
+pub fn scanned_audio_compatible(profile: Option<&serde_json::Value>, preferred: Option<&str>, extension: &str, codec: &str, bitrate: Option<u32>) -> bool {
+    let compatibility = audio_compatibility_profile(profile, preferred);
+    let mut format = provider_audio_format(Some(extension), None);
+    format.codecs = [codec.to_ascii_lowercase()].into_iter().collect();
+    compatibility.output_is_compatible(&format)
+        && compatibility.transcode_profile.as_ref().and_then(|p|p.max_bitrate_kbps)
+            .is_none_or(|ceiling|bitrate.is_some_and(|bps|bps <= ceiling.saturating_mul(1050)))
+}
+
 fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<TranscodeProfile> {
     let transcode = profile["TranscodingProfiles"]
         .as_array()?
@@ -1638,11 +1692,11 @@ fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<
     Some(TranscodeProfile {
         container,
         audio_codec,
-        max_bitrate_kbps: profile_bitrate_kbps(profile),
+        max_bitrate_kbps: target_bitrate_kbps(profile),
     })
 }
 
-fn profile_bitrate_kbps(profile: &serde_json::Value) -> Option<u32> {
+pub fn target_bitrate_kbps(profile: &serde_json::Value) -> Option<u32> {
     let bitrate = profile["MusicStreamingTranscodingBitrate"]
         .as_u64()
         .or_else(|| profile["MaxStreamingBitrate"].as_u64())?;
@@ -2998,7 +3052,7 @@ async fn execute_plan_sync_buffered(
                 )
             };
             let source_direct_compatible =
-                producer_compatibility.source_is_direct_compatible(&source_format);
+                direct_for_bitrate(&producer_compatibility, &source_format, add_item.original_bitrate, add_item.max_bitrate_override_kbps);
             if direct_media.is_some() && !source_direct_compatible {
                 warnings.push(format!(
                     "[Sync] Skipped '{}' ({}): direct format is incompatible and no verified file transcode is available",
@@ -3732,6 +3786,27 @@ async fn execute_plan_sync_buffered(
             writer_failed = true;
             continue;
         }
+        // New destinations are never allowed to overwrite unmanaged collisions,
+        // including Force Sync. Recheck immediately before the atomic write.
+        if let Ok(free)=device_io.free_space().await {
+            if staged.staged_size>free {
+                errors.push(SyncFileError {jellyfin_id:staged.add_item.jellyfin_id.clone(),filename:staged.rel_path.clone(),error_message:"Insufficient device space for the actual output file".into()});
+                let _=operation_manager.request_cancel(&operation_id).await;
+                let _=tokio::fs::remove_file(&staged.staged_path).await;
+                writer_failed=true;continue;
+            }
+        }
+        let destination_check = async {
+            if let Some((parent,_))=staged.rel_path.rsplit_once('/') { device_io.ensure_dir(parent).await?; }
+            device_io.file_length(&staged.rel_path).await
+        }.await;
+        if destination_check.is_err() || (destination_check.as_ref().ok().copied().flatten().is_some()
+            && !owned_manifest_paths.contains(&normalized_device_folder(&staged.rel_path))) {
+            errors.push(SyncFileError {jellyfin_id:staged.add_item.jellyfin_id.clone(),filename:staged.rel_path.clone(),error_message:"Destination exists outside managed music or could not be inspected; file preserved".into()});
+            let _=operation_manager.request_cancel(&operation_id).await;
+            let _=tokio::fs::remove_file(&staged.staged_path).await;
+            writer_failed=true;continue;
+        }
         let write_result = match device_io
             .write_with_verify_from_path_with_buffer(
                 &staged.rel_path,
@@ -4060,6 +4135,12 @@ async fn execute_plan_sync_buffered(
         }
         if operation_manager.is_cancelled(&operation_id).await {
             break;
+        }
+        if id_change.reason_code.as_deref()==Some("device-file-reused") {
+            match device_io.file_length(&id_change.old_local_path).await {
+                Ok(Some(size)) if size==id_change.size_bytes => {},
+                _ => { errors.push(SyncFileError {jellyfin_id:id_change.new_jellyfin_id.clone(),filename:id_change.old_local_path.clone(),error_message:"Existing device file changed after preparation; prepare sync again".into()});continue; }
+            }
         }
         let old_origin = match delta.get::<crate::sync_plan::ResidentIdentity>("resident", &id_change.old_jellyfin_id) {
             Ok(item) => item.is_some_and(|item|item.is_auto_fill),
@@ -4406,7 +4487,7 @@ pub async fn augment_delta_with_existence_check(
     desired_items: &[DesiredItem],
     manifest: &crate::device::DeviceManifest,
     device_io: &dyn crate::device_io::DeviceIO,
-) {
+) -> anyhow::Result<()> {
     let already_in_delta: HashSet<String> = delta
         .adds
         .iter()
@@ -4428,9 +4509,10 @@ pub async fn augment_delta_with_existence_check(
         let Some(desired) = desired_by_id.get(item.jellyfin_id.as_str()).copied() else {
             continue;
         };
-        if !device_file_exists(device_io, &item.local_path).await {
+        if device_io.file_length(&item.local_path).await?.is_none() {
             to_add.push(annotate_add(
-                SyncAddItem {
+                SyncAddItem {disc_number: None,
+                    duration_seconds: desired.duration_seconds,
                     media_role: desired.media_role,
                     jellyfin_id: desired.jellyfin_id.clone(),
                     name: desired.name.clone(),
@@ -4457,6 +4539,7 @@ pub async fn augment_delta_with_existence_check(
     let recovered = to_add.len();
     delta.adds.extend(to_add);
     delta.unchanged = delta.unchanged.saturating_sub(recovered);
+    Ok(())
 }
 
 /// Generates, regenerates, or cleans up .m3u files for playlists in the sync basket.
@@ -4645,7 +4728,8 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 })
                 .unwrap_or("new-selection");
             annotate_add(
-                SyncAddItem {
+                SyncAddItem {disc_number: i.disc_number,
+                    duration_seconds: i.duration_seconds,
                     media_role: i.media_role,
                     jellyfin_id: i.jellyfin_id.clone(),
                     name: i.name.clone(),
@@ -5426,7 +5510,7 @@ mod tests {
         }
 
         async fn free_space(&self) -> anyhow::Result<u64> {
-            Ok(1)
+            Ok(1_000_000_000)
         }
 
         async fn ensure_dir(&self, _path: &str) -> anyhow::Result<()> {
@@ -5760,7 +5844,8 @@ mod tests {
         album: Option<&str>,
         artist: Option<&str>,
     ) -> DesiredItem {
-        DesiredItem {
+        DesiredItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: name.to_string(),
@@ -6097,7 +6182,8 @@ mod tests {
         content_type: &str,
         size_bytes: u64,
     ) -> SyncAddItem {
-        SyncAddItem {
+        SyncAddItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
             name: format!("Track {id}"),
@@ -8714,7 +8800,8 @@ mod tests {
 
     #[test]
     fn test_calculate_delta_cleans_up_tracks_outside_current_music_folder() {
-        let desired = vec![DesiredItem {
+        let desired = vec![DesiredItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "t1".to_string(),
             name: "Song".to_string(),
@@ -8777,7 +8864,8 @@ mod tests {
 
     #[test]
     fn test_calculate_delta_does_not_convert_relocation_to_id_change() {
-        let desired = vec![DesiredItem {
+        let desired = vec![DesiredItem {disc_number: None,
+            duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "new-id".to_string(),
             name: "Song".to_string(),
@@ -9162,7 +9250,8 @@ mod tests {
             provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![annotate_add(
-                SyncAddItem {
+                SyncAddItem {disc_number: None,
+                    duration_seconds: 0,
                     media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "track-1".to_string(),
                     name: "Track".to_string(),

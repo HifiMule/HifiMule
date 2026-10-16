@@ -11,7 +11,7 @@ import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 import { formatServerIdentity } from '../serverIdentity';
 import type { ServerSummary, PodcastShow } from '../rpc';
-import { syncCapacity, type SyncedCapacityItem, type SyncedCapacityTotals } from '../state/syncCapacity';
+import { plannedSelectionBytes, syncCapacity, type SyncedCapacityItem, type SyncedCapacityTotals } from '../state/syncCapacity';
 
 interface StorageInfo {
     totalBytes: number;
@@ -173,8 +173,16 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
 
 export class BasketSidebar {
 
+    private preparedCapacity: { key: string; bytes: number } | null = null;
+    private capacityRevision(): string {
+        return JSON.stringify([this.currentDevice?.device_id, this.currentDevice?.transcoding_profile_id, this.currentDevice?.transcodingProfileId, basketStore.getItems()]);
+    }
+    private plannedManualBytes() {
+        if (this.preparedCapacity?.key === this.capacityRevision()) return this.preparedCapacity.bytes;
+        return plannedSelectionBytes(basketStore.getItems().filter(item => !isAutoFillSlotId(item.id)), this.currentDevice?.plannedBitrateKbps);
+    }
     private selectedCapacity() {
-        return syncCapacity(this.storageInfo, basketStore.getManualSizeBytes(), this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? []);
+        return syncCapacity(this.storageInfo, this.plannedManualBytes(), this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? []);
     }
     private container: HTMLElement;
     private updateListener: () => void;
@@ -1110,10 +1118,9 @@ export class BasketSidebar {
         }
 
         const totalTracks = items.reduce((sum, item) => sum + item.childCount, 0);
-        const totalSizeBytes = basketStore.getManualSizeBytes();
+        const totalSizeBytes = this.plannedManualBytes();
         const capacity = this.selectedCapacity();
-        const zone = capacity?.zone ?? null;
-        const isOverLimit = zone === 'red';
+        const isOverLimit = false; // Preparation resolves reusable files and exact transfer policy before admission.
         const overAmount = capacity?.overBytes ?? 0;
 
         this.container.innerHTML = `
@@ -1139,6 +1146,7 @@ export class BasketSidebar {
                  <div class="basket-summary">
                     <span>${t('basket.summary.tracks_size', { count: totalTracks, size: formatSize(totalSizeBytes) })}</span>
                 </div>
+                ${this.currentDevice?.plannedBitrateKbps ? `<p style="font-size:0.75rem;color:var(--ink-dim)">${t('device.scan.estimate')}</p>` : ''}
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes, this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? [])}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
@@ -1331,6 +1339,18 @@ export class BasketSidebar {
         try {
             const delta = await rpcCall('sync_prepare', deltaParams);
             pendingPlanId = (delta as any).planId as string;
+            if (typeof delta.selectedBytes === 'number') {
+                this.preparedCapacity = { key: this.capacityRevision(), bytes: delta.selectedBytes };
+                this.render();
+            }
+            if (typeof delta.availableBytes === 'number' && delta.totalBytes > delta.availableBytes
+                && !await this.confirmEstimatedCapacity(delta.totalBytes, delta.availableBytes)) {
+                await rpcCall('sync_plan_discard', { planId: pendingPlanId });
+                pendingPlanId = null;
+                this.isSyncing = false;
+                this.render();
+                return;
+            }
             if ((delta as any).blockedCount > 0 && !await this.confirmBlockedPlan(pendingPlanId, (delta as any).blockedCount)) {
                 this.stopPolling();
                 this.isSyncing = false;
@@ -1416,6 +1436,21 @@ export class BasketSidebar {
                 count: typeof entry?.count === 'number' ? entry.count : 0,
             }))
             .filter((entry) => entry.reason && entry.count > 0);
+    }
+
+    private confirmEstimatedCapacity(required: number, available: number): Promise<boolean> {
+        return new Promise(resolve => {
+            const dialog = document.createElement('sl-dialog') as any;
+            dialog.label = t('device.scan.capacityTitle');
+            dialog.innerHTML = `<p>${t('device.scan.capacityWarning', { required: formatSize(required), available: formatSize(available) })}</p>
+                <sl-button slot="footer" id="capacity-cancel">${t('device.scan.cancel')}</sl-button>
+                <sl-button slot="footer" id="capacity-continue" variant="primary">${t('basket.actions.start_sync')}</sl-button>`;
+            let accepted = false;
+            dialog.querySelector('#capacity-cancel')?.addEventListener('click', () => dialog.hide());
+            dialog.querySelector('#capacity-continue')?.addEventListener('click', () => { accepted = true; dialog.hide(); });
+            dialog.addEventListener('sl-after-hide', () => { dialog.remove(); resolve(accepted); });
+            document.body.appendChild(dialog); dialog.show();
+        });
     }
 
     private confirmDestructiveCleanup(
@@ -1951,7 +1986,7 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
+                        ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: formatSize(plannedSelectionBytes([item], this.currentDevice?.plannedBitrateKbps)) })}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}
@@ -1968,7 +2003,7 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
+                        ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: formatSize(plannedSelectionBytes([item], this.currentDevice?.plannedBitrateKbps)) })}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}
@@ -2034,7 +2069,7 @@ export class BasketSidebar {
                         ${this.escapeHtml(item.name)}
                     </div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
+                        ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: formatSize(plannedSelectionBytes([item], this.currentDevice?.plannedBitrateKbps)) })}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}

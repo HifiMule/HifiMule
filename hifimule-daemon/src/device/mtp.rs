@@ -942,7 +942,7 @@ pub mod windows_wpd {
             let mut batch: Vec<PWSTR> = vec![PWSTR::null(); 64];
             loop {
                 let mut fetched = 0u32;
-                let _ = child_enum.Next(batch.as_mut_slice(), &mut fetched);
+                child_enum.Next(batch.as_mut_slice(), &mut fetched).ok()?;
                 if fetched == 0 {
                     break;
                 }
@@ -964,13 +964,13 @@ pub mod windows_wpd {
                     let obj_hstr = HSTRING::from(&obj_id);
                     let values = match props.GetValues(PCWSTR(obj_hstr.as_ptr()), None) {
                         Ok(v) => v,
-                        Err(_) => continue,
+                        Err(error) => return Err(error.into()),
                     };
 
                     // Read filename — skip entry if missing.
                     let name_pwstr = match values.GetStringValue(&WPD_OBJECT_ORIGINAL_FILE_NAME) {
                         Ok(p) if !p.is_null() => p,
-                        _ => continue,
+                        _ => values.GetStringValue(&WPD_OBJECT_NAME)?,
                     };
                     let name = name_pwstr.to_string().unwrap_or_default();
                     CoTaskMemFree(Some(name_pwstr.0 as *const _));
@@ -1004,12 +1004,11 @@ pub mod windows_wpd {
                             );
                             crate::daemon_log!("{}", warning);
                             warnings.push(warning);
+                            return Err(e);
                         }
                     } else {
                         // File: read size and push entry.
-                        let size = values
-                            .GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE)
-                            .unwrap_or(0);
+                        let size = values.GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE)?;
                         let entry_path = if prefix.is_empty() {
                             name.clone()
                         } else {
@@ -1323,6 +1322,44 @@ pub mod windows_wpd {
             }
         }
 
+        fn read_file_to_path(&self, path: &str, destination: &std::path::Path, progress: &crate::device_music_scan::Progress) -> Result<()> {
+            let (_com, device) = self.session()?;
+            unsafe {
+                // T1: single Content() handle shared between path lookup and Transfer.
+                let content = device.Content()?;
+                let obj_id = path_to_object_id(&content, path, self.storage_id.as_deref())?;
+                let resources: IPortableDeviceResources = content.Transfer()?;
+                let mut optimal_buf = 0u32;
+                let mut stream_opt: Option<windows::Win32::System::Com::IStream> = None;
+                resources.GetStream(
+                    PCWSTR(obj_id.as_ptr()),
+                    &WPD_RESOURCE_DEFAULT,
+                    0u32, // STGM_READ
+                    &mut optimal_buf,
+                    &mut stream_opt,
+                )?;
+                let stream = stream_opt
+                    .ok_or_else(|| anyhow::anyhow!("WPD: GetStream returned no stream"))?;
+                let chunk = (optimal_buf as usize).clamp(4096, 1024 * 1024);
+                let mut result = std::fs::File::create(destination)?;
+                let mut buf = vec![0u8; chunk];
+                loop {
+                    progress.check()?;
+                    let mut bytes_read = 0u32;
+                    stream.Read(
+                        buf.as_mut_ptr() as *mut _,
+                        chunk as u32,
+                        Some(&mut bytes_read),
+                    ).ok()?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    std::io::Write::write_all(&mut result, &buf[..bytes_read as usize])?;
+                }
+                Ok(())
+            }
+        }
+
         fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
             self.write_input(path, WpdWriteInput::Bytes(data))
         }
@@ -1359,7 +1396,7 @@ pub mod windows_wpd {
                     &content,
                     &props,
                     &root_id_str,
-                    "",
+                    path,
                     &mut acc,
                     &mut warnings,
                 )?;
@@ -1595,6 +1632,8 @@ pub mod libmtp {
             parent_id: u32,
         ) -> *mut LIBMTP_File_t;
         fn LIBMTP_destroy_file_t(file: *mut LIBMTP_File_t);
+        fn LIBMTP_Clear_Errorstack(device: *mut LIBMTP_MtpDevice_t);
+        fn LIBMTP_Get_Errorstack(device: *mut LIBMTP_MtpDevice_t) -> *mut std::ffi::c_void;
         fn LIBMTP_Get_File_To_File(
             device: *mut LIBMTP_MtpDevice_t,
             id: u32,
@@ -2299,6 +2338,22 @@ pub mod libmtp {
             data.map_err(anyhow::Error::from)
         }
 
+        fn read_file_to_path(&self, path: &str, destination: &std::path::Path, progress: &crate::device_music_scan::Progress) -> Result<()> {
+            let guard = self.device.lock().unwrap();
+            let dev = *guard;
+            let obj_id = unsafe { Self::path_to_object_id_raw(dev, path)? };
+            let destination = std::ffi::CString::new(destination.to_string_lossy().as_bytes())?;
+            unsafe extern "C" fn cancelled(_sent:u64,_total:u64,data:*const libc::c_void)->c_int {
+                let progress=unsafe { &*(data as *const crate::device_music_scan::Progress) };
+                i32::from(progress.cancelled.load(std::sync::atomic::Ordering::Relaxed))
+            }
+            progress.check()?;
+            let rc = unsafe { LIBMTP_Get_File_To_File(dev,obj_id,destination.as_ptr(),cancelled as *const libc::c_void,progress as *const _ as *const libc::c_void) };
+            progress.check()?;
+            anyhow::ensure!(rc == LIBMTP_ERROR_NONE, "libmtp metadata staging failed: rc={}",rc);
+            Ok(())
+        }
+
         fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
             let tmp = temp_path();
             let result = (|| {
@@ -2475,36 +2530,26 @@ pub mod libmtp {
         }
 
         fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
-            let guard = self.device.lock().unwrap();
-            let dev = *guard;
-            let parent_id = unsafe { Self::path_to_object_id_raw(dev, path)? };
-            let mut entries = Vec::new();
-            unsafe {
-                // libmtp documents storage 0 as searching the parent across all available storages.
-                // Debian mtp_files(3) and libmtp source map 0 to PTP_GOH_ALL_STORAGE.
-                let files = LIBMTP_Get_Files_And_Folders(dev, 0, parent_id);
-                let mut cur = files;
-                while !cur.is_null() {
-                    let name = std::ffi::CStr::from_ptr((*cur).filename)
-                        .to_string_lossy()
-                        .into_owned();
-                    let size = (*cur).filesize;
-                    let entry_path = if path.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{}/{}", path, name)
-                    };
-                    entries.push(FileEntry {
-                        path: entry_path,
-                        name,
-                        size,
-                    });
-                    let next = (*cur).next;
-                    LIBMTP_destroy_file_t(cur);
-                    cur = next;
+            let guard = self.device.lock().unwrap(); let dev = *guard;
+            let parent = unsafe { Self::path_to_object_id_raw(dev,path)? };
+            let mut pending=vec![(parent,path.to_string())];let mut seen=std::collections::HashSet::new();let mut entries=Vec::new();
+            while let Some((id,prefix))=pending.pop() {
+                anyhow::ensure!(seen.insert(id),"MTP directory cycle");
+                unsafe {
+                    LIBMTP_Clear_Errorstack(dev);
+                    let mut current=LIBMTP_Get_Files_And_Folders(dev,0,id);
+                    if current.is_null() && !LIBMTP_Get_Errorstack(dev).is_null() { anyhow::bail!("MTP directory enumeration failed"); }
+                    while !current.is_null() {
+                        let next=(*current).next;
+                        if (*current).filename.is_null() {LIBMTP_destroy_file_t(current);anyhow::bail!("MTP entry has no filename");}
+                        let name=std::ffi::CStr::from_ptr((*current).filename).to_string_lossy().into_owned();
+                        let file_path=if prefix.is_empty(){name.clone()}else{format!("{prefix}/{name}")};
+                        if (*current).filetype==LIBMTP_FILETYPE_FOLDER {pending.push(((*current).item_id,file_path));}
+                        else {entries.push(FileEntry {path:file_path,name,size:(*current).filesize});}
+                        LIBMTP_destroy_file_t(current);current=next;
+                    }
                 }
             }
-            drop(guard);
             Ok(entries)
         }
 

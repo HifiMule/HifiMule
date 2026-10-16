@@ -5,7 +5,7 @@ import ts from 'typescript';
 
 const sidebarSource = readFileSync(new URL('../src/components/BasketSidebar.ts', import.meta.url), 'utf8');
 const helperScript = ts.transpile(readFileSync(new URL('../src/state/syncCapacity.ts', import.meta.url), 'utf8').replace(/export /g, ''), { target: ts.ScriptTarget.ES2022 });
-const { syncCapacity } = new Function(`${helperScript}\nreturn { syncCapacity };`)();
+const { syncCapacity, plannedSelectionBytes } = new Function(`${helperScript}\nreturn { syncCapacity, plannedSelectionBytes };`)();
 const basketSource = readFileSync(new URL('../src/state/basket.ts', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '')
     .replace('const basketStore = new BasketStore();', '');
@@ -124,8 +124,8 @@ test('compact daemon byte totals preserve capacity and rendering without library
     const totals={selectedBytes:2,autofillBytes:7};
     assert.deepEqual(syncCapacity(storage,4,totals),syncCapacity(storage,4,records));
     assert.equal(renderCapacityBar(storage,4,totals),renderCapacityBar(storage,4,records));
-    const basket={getManualSizeBytes:()=>4};
-    const {BasketSidebar}=new Function('t','syncCapacity','basketStore',`${script}\nreturn {BasketSidebar};`)(()=>'',syncCapacity,basket);
+    const basket={getManualSizeBytes:()=>4,getItems:()=>[{id:'track',sizeBytes:4,sizeTicks:1,childCount:1}]};
+    const {BasketSidebar}=new Function('plannedSelectionBytes','isAutoFillSlotId','t','syncCapacity','basketStore',`${script}\nreturn {BasketSidebar};`)(plannedSelectionBytes, id => id.startsWith('__auto_fill_slot__'),()=>'',syncCapacity,basket);
     const sidebar=Object.create(BasketSidebar.prototype);
     sidebar.storageInfo=storage;sidebar.currentDevice={syncedItemCount:40000,syncedByteTotals:totals};
     assert.deepEqual(sidebar.selectedCapacity(),syncCapacity(storage,4,records));
@@ -164,11 +164,19 @@ test('multiple autofill ceilings and other-server selections share manual admiss
         ['slot-b', { id: '__auto_fill_slot__:b', sizeBytes: 100 }],
     ]);
     assert.equal(basket.getManualSizeBytes(), 4);
-    const { BasketSidebar } = new Function('t', 'syncCapacity', 'basketStore', `${script}\nreturn { BasketSidebar };`)(() => '', syncCapacity, basket);
+    const { BasketSidebar } = new Function('plannedSelectionBytes', 'isAutoFillSlotId', 't', 'syncCapacity', 'basketStore', `${script}\nreturn { BasketSidebar };`)(plannedSelectionBytes, id => id.startsWith('__auto_fill_slot__'), () => '', syncCapacity, basket);
     const sidebar = Object.create(BasketSidebar.prototype);
     sidebar.storageInfo = { totalBytes: 20, freeBytes: 1, usedBytes: 19 };
     sidebar.currentDevice = { synced_items: [{ sizeBytes: 2 }, { sizeBytes: 7, isAutoFill: true }] };
     assert.notEqual(sidebar.selectedCapacity().zone, 'red');
     assert.equal(sidebar.slotSizeBytes({ budget: { maxBytes: 100 } }), 6);
     assert.equal(sidebar.slotSizeBytes({ budget: { maxBytes: 3 } }), 3);
+});
+
+ test('profile estimates depend on duration and output bitrate, never original bytes',()=> {
+    const item={sizeBytes:50_000_000,sizeTicks:240*10_000_000,childCount:1};
+    assert.equal(plannedSelectionBytes([item],192),5_998_336);
+    assert.equal(plannedSelectionBytes([{...item,sizeBytes:100}],192),5_998_336);
+    assert.equal(plannedSelectionBytes([item]),50_000_000);
+    assert.ok(plannedSelectionBytes([{...item,sizeTicks:0}],192)>80_000_000);
 });

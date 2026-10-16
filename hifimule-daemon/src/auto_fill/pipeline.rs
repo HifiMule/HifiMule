@@ -2169,7 +2169,9 @@ fn exceeds(current: u64, add: u64, ceiling: u64) -> bool {
 }
 
 fn make_item(song: &Song, size_bytes: u64, reason: String) -> AutoFillItem {
-    AutoFillItem {
+    AutoFillItem {disc_number: song.disc_number,
+        original_bitrate: song.bitrate_kbps.map(|b|b.saturating_mul(1000)),
+        duration_seconds: song.duration_seconds,
         id: song.id.clone(),
         name: song.title.clone(),
         album: song.album_title.clone(),
