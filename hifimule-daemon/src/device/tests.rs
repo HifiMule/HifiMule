@@ -2856,6 +2856,71 @@ async fn test_initialize_device_root() {
 }
 
 #[tokio::test]
+async fn initialize_rejects_removed_root_without_recreating_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("removed-device");
+    std::fs::create_dir(&root).unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager.handle_device_unrecognized(root.clone(), msc(&root), None).await;
+    std::fs::remove_dir(&root).unwrap();
+    let error = manager.initialize_device("Music", None, None, "Device".into(), None, msc(&root))
+        .await.unwrap_err().to_string();
+    assert!(error.contains("Cannot access device root"));
+    assert!(error.contains(root.to_str().unwrap()));
+    assert!(error.contains("os error"), "RPC message must preserve underlying cause: {error}");
+    assert!(!root.exists(), "later writes must not recreate an unavailable mount");
+    assert!(manager.get_current_device().await.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_succeeds_with_protected_child() {
+    let dir = tempdir().unwrap();
+    let child = dir.path().join(".Spotlight-V100");
+    std::fs::create_dir(&child).unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager.handle_device_unrecognized(dir.path().into(), msc(dir.path()), None).await;
+    let denied = crate::device_io::tests::DeniedDirectory::new(&child);
+    let denial = std::fs::read_dir(&child);
+    let result = manager.initialize_device("Music", None, None, "Device".into(), None, msc(dir.path())).await;
+    drop(denied);
+    match denial {
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        Ok(_) => eprintln!("protected-child denial not reproduced: this user can read mode-000 directories"),
+    }
+    let manifest = result.unwrap();
+    assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
+    assert!(dir.path().join("Music").is_dir());
+    assert!(dir.path().join(".hifimule.json.zst").is_file());
+    assert!(manager.get_current_device().await.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_rejects_unreadable_root_before_writing() {
+    let dir = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    manager.handle_device_unrecognized(dir.path().into(), msc(dir.path()), None).await;
+    let denied = crate::device_io::tests::DeniedDirectory::new(dir.path());
+    let denial = std::fs::read_dir(dir.path());
+    if denial.is_ok() {
+        drop(denied);
+        eprintln!("unreadable-root test skipped: this user can read mode-000 directories");
+        return;
+    }
+    let result = manager.initialize_device("Music", None, None, "Device".into(), None, msc(dir.path())).await;
+    drop(denied);
+    assert_eq!(denial.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("Cannot access device root"));
+    assert!(error.contains(dir.path().to_str().unwrap()));
+    assert!(error.contains("Permission denied"));
+    assert!(manager.get_current_device().await.is_none());
+    assert!(!dir.path().join("Music").exists());
+    assert!(!dir.path().join(".hifimule.json.zst").exists());
+}
+
+#[tokio::test]
 async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
     let dir = tempdir().unwrap();
     let cache_dir = tempdir().unwrap();

@@ -44,18 +44,20 @@ type PendingEvents = Arc<Mutex<VecDeque<(u64, u64, String, PlaybackEvent)>>>;
 
 /// A selection request must still be current when the owner applies Play.
 /// The gate makes cancellation and the owner commit one ordered operation.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct ApplyFence {
-    pub gate: &'static Mutex<()>,
-    pub epoch: &'static AtomicU64,
+    pub order: Arc<crate::rpc::playback_selection::SelectionOrder>,
     pub expected: u64,
 }
 
-// Call only while START_GATE is held. Successful owner commands, rather than
-// merely parsed or queued requests, supersede a pending Radio selection.
-fn supersede_selection_after_commit<T>(result: &PResult<T>) {
+// Call only while this session's selection gate is held. Successful owner
+// commands, rather than queued requests, supersede a pending Radio selection.
+fn supersede_selection_after_commit<T>(
+    order: &crate::rpc::playback_selection::SelectionOrder,
+    result: &PResult<T>,
+) {
     if result.is_ok() {
-        crate::rpc::playback_selection::START_EPOCH.fetch_add(1, Ordering::AcqRel);
+        order.epoch.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -65,6 +67,7 @@ type ApplyGate = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
 
 #[derive(Clone)]
 pub struct PlaybackSession {
+    selection_order: Arc<crate::rpc::playback_selection::SelectionOrder>,
     snapshot_save_gate: Arc<AtomicBool>,
     feedback_verification: Arc<Mutex<Option<feedback::Verification>>>,
     instance_id: String,
@@ -297,6 +300,7 @@ struct ProgressIngress {
 }
 
 struct OwnerResources {
+    selection_order: Arc<crate::rpc::playback_selection::SelectionOrder>,
     events: PendingEvents,
     inner: Arc<Mutex<Inner>>,
     executing: Arc<AtomicBool>,
@@ -748,7 +752,9 @@ impl PlaybackSession {
         let worker_health = health.clone();
         #[cfg(test)]
         let before_apply: ApplyGate = Arc::new(Mutex::new(None));
+        let selection_order = Arc::new(crate::rpc::playback_selection::SelectionOrder::default());
         let resources = OwnerResources {
+            selection_order: selection_order.clone(),
             events: events.clone(),
             inner: worker_inner,
             executing: worker_executing,
@@ -764,6 +770,7 @@ impl PlaybackSession {
             .spawn(move || owner_loop(resources, command_rx, control_rx))
             .expect("playback owner thread must start");
         Self {
+            selection_order,
             instance_id: owner_id,
             snapshot_save_gate: Arc::new(AtomicBool::new(false)),
             feedback_verification: Arc::new(Mutex::new(None)),
@@ -783,6 +790,10 @@ impl PlaybackSession {
             sync_protection,
             worker: Arc::new(Mutex::new(Some(worker))),
         }
+    }
+
+    pub(crate) fn selection_order(&self) -> &Arc<crate::rpc::playback_selection::SelectionOrder> {
+        &self.selection_order
     }
 
     pub fn snapshot(&self) -> PResult<SessionSnapshot> {
@@ -1273,6 +1284,7 @@ fn owner_loop(
     control_rx: mpsc::Receiver<OwnerControl>,
 ) {
     let OwnerResources {
+        selection_order,
         events,
         inner,
         executing,
@@ -1690,7 +1702,8 @@ fn owner_loop(
                 let _ = reply.send(with_metadata(result, &i));
             }
             Ok(OwnerCommand::CommitAlbum(reservation, sources, policy, representations, reply)) => {
-                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                let _selection_guard = selection_order
+                    .gate
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1709,7 +1722,7 @@ fn owner_loop(
                 if result.is_ok() {
                     reset_ingress(&i, &ingress);
                 }
-                supersede_selection_after_commit(&result);
+                supersede_selection_after_commit(&selection_order, &result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
             }
@@ -1808,15 +1821,17 @@ fn owner_loop(
                     }
                 }
                 let _selection_guard = if let Some(fence) = selection_fence.as_ref() {
-                    fence.gate.lock().unwrap_or_else(|error| error.into_inner())
+                    fence.order.gate.lock().unwrap_or_else(|error| error.into_inner())
                 } else {
-                    crate::rpc::playback_selection::START_GATE
+                    selection_order
+                        .gate
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                 };
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if selection_fence
-                    .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+                    .as_ref()
+                    .is_some_and(|fence| fence.order.epoch.load(Ordering::Acquire) != fence.expected)
                 {
                     Err(PlaybackError::conflict(
                         "PLAYBACK_SELECTION_CANCELLED",
@@ -1864,7 +1879,7 @@ fn owner_loop(
                     }
                 };
                 if selection_fence.is_none() {
-                    supersede_selection_after_commit(&result);
+                    supersede_selection_after_commit(&selection_order, &result);
                 }
                 let result = with_metadata(result, &i).map(|mut result| {
                     result.current_metadata = metadata(&i);
@@ -1876,7 +1891,8 @@ fn owner_loop(
             }
             Ok(OwnerCommand::Preview(params, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
-                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                let _selection_guard = selection_order
+                    .gate
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1927,14 +1943,15 @@ fn owner_loop(
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
                 }
-                supersede_selection_after_commit(&result);
+                supersede_selection_after_commit(&selection_order, &result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
             }
             Ok(OwnerCommand::Control(params, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
-                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                let _selection_guard = selection_order
+                    .gate
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1981,7 +1998,7 @@ fn owner_loop(
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
                 }
-                supersede_selection_after_commit(&result);
+                supersede_selection_after_commit(&selection_order, &result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
@@ -2036,7 +2053,8 @@ fn owner_loop(
             }
             Ok(OwnerCommand::NativeControl(intent, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
-                let _selection_guard = crate::rpc::playback_selection::START_GATE
+                let _selection_guard = selection_order
+                    .gate
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2049,7 +2067,7 @@ fn owner_loop(
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
                 }
-                supersede_selection_after_commit(&result);
+                supersede_selection_after_commit(&selection_order, &result);
                 publish_health(&i, &health);
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
@@ -7052,8 +7070,9 @@ mod tests {
 
     #[test]
     fn superseded_selection_is_rejected_at_owner_commit() {
-        static GATE: Mutex<()> = Mutex::new(());
-        static EPOCH: AtomicU64 = AtomicU64::new(1);
+        let order = Arc::new(crate::rpc::playback_selection::SelectionOrder::default());
+        let expected = order.begin_start();
+        let fence_order = order.clone();
         let playback =
             PlaybackSession::restore(Arc::new(Database::memory().unwrap()), "owner".into());
         let _cleanup = OwnerThreadCleanup(playback.clone());
@@ -7068,14 +7087,13 @@ mod tests {
                 command,
                 None,
                 ApplyFence {
-                    gate: &GATE,
-                    epoch: &EPOCH,
-                    expected: 1,
+                    order: fence_order,
+                    expected,
                 },
             )
         });
         started_rx.recv().unwrap();
-        EPOCH.store(2, Ordering::Release);
+        order.supersede();
         resume_tx.send(()).unwrap();
         assert_eq!(
             handle.join().unwrap().unwrap_err().code,

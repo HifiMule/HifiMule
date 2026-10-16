@@ -690,7 +690,7 @@ async fn handler(
             Ok(daemon_health_result(&state.sync_operation_manager, &state.playback).await)
         }
         "daemon.quit" => {
-            playback_selection::supersede_pending_start();
+            state.playback.selection_order().supersede();
             state.sync_operation_manager.request_quit();
             Ok(serde_json::json!({ "data": { "accepted": true } }))
         }
@@ -743,7 +743,7 @@ async fn handler(
         "playback.startSelection" => {
             playback_selection::start(&state, payload.params, mutation_guard.take()).await
         }
-        "playback.cancelSelectionStart" => playback_selection::cancel(payload.params).await,
+        "playback.cancelSelectionStart" => playback_selection::cancel(&state, payload.params).await,
         "playback.listOccurrences" => {
             handle_playback_list_occurrences(&state, payload.params).await
         }
@@ -18870,7 +18870,7 @@ mod tests {
         let empty = playback_selection::start_with_config(
             &state,
             PlaybackSelectionConfig::default(),
-            playback_selection::test_ticket().await,
+            state.playback.selection_order().begin_start(),
             None,
         )
         .await
@@ -18887,8 +18887,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let old_ticket = playback_selection::test_ticket().await;
-        let _new_ticket = playback_selection::test_ticket().await;
+        let old_ticket = state.playback.selection_order().begin_start();
+        let _new_ticket = state.playback.selection_order().begin_start();
         let cancelled =
             playback_selection::start_with_config(&state, config.clone(), old_ticket, None)
                 .await
@@ -18900,7 +18900,7 @@ mod tests {
         let unavailable = playback_selection::start_with_config(
             &state,
             config,
-            playback_selection::test_ticket().await,
+            state.playback.selection_order().begin_start(),
             None,
         )
         .await
@@ -18918,7 +18918,7 @@ mod tests {
     #[tokio::test]
     async fn native_stop_supersedes_pending_selection_before_owner_dispatch() {
         let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
-        let ticket = playback_selection::begin_start();
+        let ticket = state.playback.selection_order().begin_start();
         let service = crate::playback::commands::PlaybackCommandService::new(
             state.playback.clone(),
             state.server_manager.clone(),
@@ -18947,9 +18947,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn separate_playback_sessions_do_not_cancel_pending_selection() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let other = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let ticket = state.playback.selection_order().begin_start();
+        let _other_ticket = other.playback.selection_order().begin_start();
+        let service = crate::playback::commands::PlaybackCommandService::new(
+            other.playback.clone(), other.server_manager.clone(), other.db.clone(),
+            other.sync_operation_manager.clone(),
+        );
+        let _ = service.native_control(crate::playback::NativeControlIntent::Stop).await;
+        let outcome = playback_selection::start_with_config(
+            &state,
+            crate::playback::selection::PlaybackSelectionConfig {
+                sources: vec![crate::playback::selection::SelectionSource {
+                    server_id: "offline".into(),
+                    kind: crate::playback::selection::SelectionKind::Playlist,
+                    ref_id: "list".into(),
+                }],
+                ..Default::default()
+            }, ticket, None,
+        ).await.unwrap_err();
+        assert_eq!(outcome.data.unwrap()["code"], "PLAYBACK_SELECTION_SOURCE_UNAVAILABLE");
+    }
+
+    #[tokio::test]
     async fn rejected_control_does_not_supersede_pending_selection() {
         let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
-        let ticket = playback_selection::begin_start();
+        let ticket = state.playback.selection_order().begin_start();
         let rejected =
             handle_playback_control(&state, Some(serde_json::json!({"action":"stop"})), None).await;
         assert!(rejected.is_err());

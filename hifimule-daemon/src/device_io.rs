@@ -64,6 +64,11 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     }
     async fn delete_file(&self, path: &str) -> Result<()>;
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
+    /// Check root accessibility before initialization. Backends should override this
+    /// with a shallow probe; the fallback retains existing enumeration checks.
+    async fn probe_root(&self) -> Result<()> {
+        self.list_files("").await.map(|_| ())
+    }
     /// A clean result requires complete enumeration of root entries and all supplied media roots.
     /// Best-effort transports can establish a positive marker, but never prove its absence.
     async fn scan_recovery_markers(&self, _roots: &[String]) -> Result<bool> {
@@ -503,6 +508,23 @@ impl DeviceIO for MscBackend {
         }
     }
 
+    async fn probe_root(&self) -> Result<()> {
+        let context = || format!("Cannot access device root '{}'", self.root.display());
+        let metadata = tokio::fs::symlink_metadata(&self.root)
+            .await
+            .with_context(context)?;
+        anyhow::ensure!(
+            metadata.is_dir() && !metadata.is_symlink(),
+            "Device root '{}' is not a real directory",
+            self.root.display()
+        );
+        let mut entries = tokio::fs::read_dir(&self.root).await.with_context(context)?;
+        // Consume root entries to surface enumeration errors, without querying
+        // child metadata or entering protected system directories.
+        while entries.next_entry().await.with_context(context)?.is_some() {}
+        Ok(())
+    }
+
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
         if !path.is_empty() {
             check_relative(path)?;
@@ -842,6 +864,87 @@ pub mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    pub(crate) struct DeniedDirectory {
+        path: PathBuf,
+        permissions: std::fs::Permissions,
+    }
+
+    #[cfg(unix)]
+    impl DeniedDirectory {
+        pub(crate) fn new(path: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(path).unwrap().permissions();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0)).unwrap();
+            Self { path: path.into(), permissions }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DeniedDirectory {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.path, self.permissions.clone())
+                .expect("restore temporary directory permissions");
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_root_accepts_empty_and_populated_roots() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().into());
+        backend.probe_root().await.unwrap();
+        backend.write_file("Music/track.mp3", b"music").await.unwrap();
+        backend.probe_root().await.unwrap();
+        let files = backend.list_files("").await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Music/track.mp3");
+    }
+
+    #[tokio::test]
+    async fn probe_root_rejects_missing_and_file_roots() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let error = MscBackend::new(missing.clone()).probe_root().await.unwrap_err();
+        assert!(error.to_string().contains(missing.to_str().unwrap()));
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::NotFound);
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        let error = MscBackend::new(file.clone()).probe_root().await.unwrap_err();
+        assert!(error.to_string().contains(file.to_str().unwrap()));
+        assert!(error.to_string().contains("not a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_root_rejects_symlink_root() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        assert!(MscBackend::new(link).probe_root().await.unwrap_err().to_string().contains("not a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_root_ignores_protected_children_but_listing_still_fails() {
+        let dir = tempdir().unwrap();
+        let child = dir.path().join(".Spotlight-V100");
+        std::fs::create_dir(&child).unwrap();
+        let denied = DeniedDirectory::new(&child);
+        let denial = std::fs::read_dir(&child);
+        let backend = MscBackend::new(dir.path().into());
+        let probe = backend.probe_root().await;
+        let listing = backend.list_files("").await;
+        drop(denied);
+        probe.unwrap();
+        match denial {
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                assert!(listing.is_err(), "recursive media listing must retain access failures");
+            }
+            Ok(_) => eprintln!("permission-denial assertions skipped: this user can read mode-000 directories"),
+        }
+    }
 
     #[tokio::test]
     async fn manifest_migration_regression_strict_scan_rejects_missing_and_non_directory_roots() {

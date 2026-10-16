@@ -1364,7 +1364,8 @@ impl AudioEngine {
     ) -> Result<(), PlaybackPipelineError> {
         require_preparation_epoch(&session, expected_epoch)?;
         if selection_fence
-            .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+            .as_ref()
+            .is_some_and(|fence| fence.order.epoch.load(Ordering::Acquire) != fence.expected)
         {
             return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
                 "playback selection was superseded"
@@ -1387,7 +1388,8 @@ impl AudioEngine {
         let _start_guard = self.starts.lock().await;
         require_preparation_epoch(&session, expected_epoch)?;
         if selection_fence
-            .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+            .as_ref()
+            .is_some_and(|fence| fence.order.epoch.load(Ordering::Acquire) != fence.expected)
         {
             return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
                 "playback selection was superseded"
@@ -1659,13 +1661,14 @@ impl AudioEngine {
         });
         let _selection_guard = selection_fence
             .as_ref()
-            .map(|fence| fence.gate.lock().unwrap_or_else(|error| error.into_inner()));
+            .map(|fence| fence.order.gate.lock().unwrap_or_else(|error| error.into_inner()));
         let installed = install_session.with_current_generation(&install_generation, || {
             if install_session.control_epoch() != expected_epoch {
                 return false;
             }
             if selection_fence
-                .is_some_and(|fence| fence.epoch.load(Ordering::Acquire) != fence.expected)
+                .as_ref()
+                .is_some_and(|fence| fence.order.epoch.load(Ordering::Acquire) != fence.expected)
             {
                 return false;
             }

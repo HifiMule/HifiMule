@@ -125,6 +125,7 @@ pub struct DaemonCoreHandle {
     sync_operation_manager: Arc<sync::SyncOperationManager>,
     native_bridge: playback::native::NativeBridge,
     menu_start_tx: tokio::sync::mpsc::UnboundedSender<rpc::MenuStartRequest>,
+    selection_order: Arc<std::sync::OnceLock<Arc<rpc::playback_selection::SelectionOrder>>>,
 }
 
 async fn finish_shutdown_with_playback(
@@ -357,6 +358,8 @@ pub fn start_daemon_core(
     let native_bridge = playback::native::NativeBridge::default();
     let (menu_start_tx, menu_start_rx) = tokio::sync::mpsc::unbounded_channel();
     let core_native_bridge = native_bridge.clone();
+    let selection_order = Arc::new(std::sync::OnceLock::new());
+    let core_selection_order = selection_order.clone();
 
     // Start Tokio runtime in a background thread
     // REQUIRED for macOS: main thread MUST handle the event loop
@@ -457,6 +460,7 @@ pub fn start_daemon_core(
             let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);
             let state_tx_rpc = state_tx.clone();
             let som_rpc = Arc::clone(&sync_operation_manager);
+            let _ = core_selection_order.set(playback.selection_order().clone());
             let playback_rpc = playback.clone();
             let rpc_shutdown = Arc::new(AtomicBool::new(false));
             let rpc_shutdown_server = Arc::clone(&rpc_shutdown);
@@ -651,7 +655,7 @@ pub fn start_daemon_core(
                 while let Ok(command) = command_rx.try_recv() {
                     match command {
                         CoreCommand::BeginShutdown(reply) => {
-                            rpc::playback_selection::supersede_pending_start();
+                            playback.selection_order().supersede();
                             let _ = reply.send(sync_operation_manager.begin_shutdown_fence());
                         }
                         CoreCommand::FenceFailed => sync_operation_manager.fail_shutdown_fence(),
@@ -685,6 +689,7 @@ pub fn start_daemon_core(
         sync_operation_manager,
         native_bridge,
         menu_start_tx,
+        selection_order,
     })
 }
 
@@ -966,6 +971,7 @@ fn run_candidate(
     let shutdown_operations = core.sync_operation_manager;
     let native_bridge = core.native_bridge;
     let menu_start_tx = core.menu_start_tx;
+    let selection_order = core.selection_order;
     let mut lifecycle_owner = Some(lifecycle_owner);
     let mut quit_reply: Option<mpsc::Receiver<sync::ShutdownSnapshot>> = None;
     let mut fence_reply: Option<mpsc::Receiver<Result<u64, String>>> = None;
@@ -1433,7 +1439,10 @@ fn run_candidate(
                 && menu_start_pending.is_none()
             {
                 let (reply, receipt) = tokio::sync::oneshot::channel();
-                let ticket = rpc::playback_selection::begin_start();
+                let Some(order) = selection_order.get() else {
+                    return;
+                };
+                let ticket = order.begin_start();
                 if menu_start_tx
                     .send(rpc::MenuStartRequest { ticket, reply })
                     .is_ok()

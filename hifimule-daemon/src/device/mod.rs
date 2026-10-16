@@ -2359,7 +2359,7 @@ impl DeviceManager {
 
         // Liveness probe: detect stale IO from a device that disconnected and reconnected
         // between the Unrecognized event and the user completing initialization. For MTP,
-        // avoid list_files("") because WPD recursively walks the whole phone storage.
+        // use storage IDs; MSC checks only root entries, never protected descendants.
         let probed_storage_id = match device_class {
             DeviceClass::Mtp => match device_io.storage_id().await {
                 Ok(id) => id,
@@ -2376,7 +2376,7 @@ impl DeviceManager {
                 }
             },
             DeviceClass::Msc => {
-                if let Err(e) = device_io.list_files("").await {
+                if let Err(e) = device_io.probe_root().await {
                     daemon_log!(
                         "[DeviceInit] Root liveness probe failed device_path={} class={:?} error={:#}",
                         device_path,
@@ -2384,7 +2384,9 @@ impl DeviceManager {
                         e
                     );
                     return Err(anyhow::anyhow!(
-                        "Device no longer accessible — reconnect the device and try again"
+                        "Cannot access device root '{}': {:#}. Check that the device is connected and HifiMule has permission to access it",
+                        device_path,
+                        e
                     ));
                 }
                 None

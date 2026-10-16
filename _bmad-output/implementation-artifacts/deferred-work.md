@@ -13,7 +13,7 @@
 ## Deferred from: autofill-aware sync capacity verification (2026-10-10)
 
 - **Windows UI test entrypoint paths are invalid** (`hifimule-ui/tests/radioDefaults.test.mjs:6`, `hifimule-ui/tests/serverSwitchBrowse.test.mjs:6`) — existing tests pass URL `.pathname` values such as `/C:/Workspaces/...` to esbuild. The broader UI run passed 51 tests but these two files failed before executing. Use `fileURLToPath` in a focused test-harness fix; these files were unchanged by the sync work.
-- **Playback selection rejection test fails in parallel suite** (`rpc::tests::rejected_control_does_not_supersede_pending_selection`) — parallel daemon runs observed `PLAYBACK_SELECTION_CANCELLED` instead of `PLAYBACK_SELECTION_SOURCE_UNAVAILABLE`; the isolated test and full serial suite passed. Investigate shared test state or scheduling separately; playback code was unchanged.
+- **Resolved 2026-10-16: playback selection rejection race** (`rpc::tests::rejected_control_does_not_supersede_pending_selection`) — independent playback owners shared a process-global selection epoch. Selection ordering is now owned by each playback session and shared with its RPC, native/menu ingress and owner/audio fences. Added deterministic cross-session cancellation coverage. Full parallel daemon suite: 1,504 passed, 12 ignored; 5 provider contracts passed.
 
 ## Deferred from: library radio actions review (2026-09-30)
 

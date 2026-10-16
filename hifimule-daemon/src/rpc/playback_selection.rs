@@ -15,25 +15,25 @@ use crate::playback::{
     selection::{self, PlaybackSelectionConfig, SelectionError, SelectionKind, SelectionPool},
 };
 
-pub(crate) static START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-pub(crate) static START_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Shared by one playback owner and its command ingress, never unrelated sessions.
+#[derive(Default)]
+pub(crate) struct SelectionOrder {
+    pub gate: std::sync::Mutex<()>,
+    pub epoch: AtomicU64,
+}
+impl SelectionOrder {
+    pub fn begin_start(&self) -> u64 {
+        let _guard = self.gate.lock().unwrap_or_else(|error| error.into_inner());
+        self.epoch.fetch_add(1, Ordering::AcqRel) + 1
+    }
+    pub fn supersede(&self) {
+        self.begin_start();
+    }
+}
 const DEADLINE: Duration = Duration::from_secs(15);
 // Full-library startup ranking streams bounded pages; allow larger catalogues
 // more retrieval time without lengthening preparation or refill deadlines.
 const LIBRARY_START_DEADLINE: Duration = Duration::from_secs(60);
-
-/// A later accepted session command wins over any selection still fetching or
-/// preparing. The same gate orders invalidation against the owner's final
-/// StartRadio commit. Repeated starts supersede instead of coalescing.
-pub(crate) fn supersede_pending_start() {
-    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
-    START_EPOCH.fetch_add(1, Ordering::AcqRel);
-}
-
-pub(crate) fn begin_start() -> u64 {
-    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
-    START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1
-}
 
 #[cfg(test)]
 mod ordering_tests {
@@ -238,9 +238,10 @@ mod ordering_tests {
 
     #[test]
     fn later_session_command_invalidates_pending_start() {
-        let ticket = START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
-        supersede_pending_start();
-        assert_ne!(START_EPOCH.load(Ordering::Acquire), ticket);
+        let order = SelectionOrder::default();
+        let ticket = order.begin_start();
+        order.supersede();
+        assert_ne!(order.epoch.load(Ordering::Acquire), ticket);
     }
 
     #[test]
@@ -273,12 +274,6 @@ fn selected_output_ready(output: &crate::playback::model::OutputState) -> bool {
         .as_ref()
         .is_some_and(|selected| selected.available)
         && output.pending.is_none()
-}
-
-#[cfg(test)]
-pub(super) async fn test_ticket() -> u64 {
-    let _guard = START_GATE.lock().unwrap_or_else(|error| error.into_inner());
-    START_EPOCH.fetch_add(1, Ordering::AcqRel) + 1
 }
 
 fn error(kind: SelectionError) -> JsonRpcError {
@@ -466,9 +461,9 @@ pub async fn save_config(state: &AppState, params: Option<Value>) -> Result<Valu
     Ok(json!({"data": {"saved": true}}))
 }
 
-pub async fn cancel(params: Option<Value>) -> Result<Value, JsonRpcError> {
+pub async fn cancel(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
     version(params)?;
-    supersede_pending_start();
+    state.playback.selection_order().supersede();
     Ok(json!({"data": {"cancelled": true}}))
 }
 
@@ -478,7 +473,7 @@ pub async fn start(
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
     version(params)?;
-    let ticket = begin_start();
+    let ticket = state.playback.selection_order().begin_start();
     start_with_ticket(state, ticket, mutation_guard).await
 }
 
@@ -491,7 +486,7 @@ pub(crate) async fn start_with_ticket(
     let loaded = tokio::task::spawn_blocking(move || selection::load(&path))
         .await
         .map_err(|_| error(SelectionError::Save))?;
-    if START_EPOCH.load(Ordering::Acquire) != ticket {
+    if state.playback.selection_order().epoch.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
     let config = loaded.map_err(error)?;
@@ -573,7 +568,7 @@ pub(super) async fn start_with_config(
     ticket: u64,
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
-    if START_EPOCH.load(Ordering::Acquire) != ticket {
+    if state.playback.selection_order().epoch.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
     config.validate().map_err(error)?;
@@ -624,7 +619,7 @@ pub(super) async fn start_with_config(
     let fetch = async {
         let mut pools: Vec<SelectionPool> = Vec::with_capacity(config.sources.len());
         for source in &config.sources {
-            if START_EPOCH.load(Ordering::Acquire) != ticket {
+            if state.playback.selection_order().epoch.load(Ordering::Acquire) != ticket {
                 return Err(error(SelectionError::Cancelled));
             }
             let Ok(provider) = provider(state, &source.server_id).await else {
@@ -637,7 +632,7 @@ pub(super) async fn start_with_config(
                 continue;
             };
             match selection::fetch_radio_start_source(provider.as_ref(), source, &config, || {
-                START_EPOCH.load(Ordering::Acquire) == ticket
+                state.playback.selection_order().epoch.load(Ordering::Acquire) == ticket
             })
             .await
             {
@@ -685,7 +680,7 @@ pub(super) async fn start_with_config(
             error(SelectionError::SourceUnavailable)
         })??;
     selection::clear_conflicting_recordings(&mut pools);
-    if START_EPOCH.load(Ordering::Acquire) != ticket {
+    if state.playback.selection_order().epoch.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
     let mut start_ranking = config.clone();
@@ -734,7 +729,7 @@ pub(super) async fn start_with_config(
                 ) {
                     continue;
                 }
-                if START_EPOCH.load(Ordering::Acquire) != ticket {
+                if state.playback.selection_order().epoch.load(Ordering::Acquire) != ticket {
                     return Err(error(SelectionError::Cancelled));
                 }
                 if failures >= crate::playback::radio::MAX_PREPARATION_FAILURES {
@@ -777,7 +772,7 @@ pub(super) async fn start_with_config(
     let (first, center, prepared) = tokio::time::timeout(DEADLINE, preflight)
         .await
         .map_err(|_| error(SelectionError::PreparationFailed))??;
-    if START_EPOCH.load(Ordering::Acquire) != ticket {
+    if state.playback.selection_order().epoch.load(Ordering::Acquire) != ticket {
         return Err(error(SelectionError::Cancelled));
     }
     let snapshot = state.playback.snapshot().map_err(super::playback_error)?;
@@ -813,8 +808,7 @@ pub(super) async fn start_with_config(
         false,
         Some(prepared),
         Some(crate::playback::session::ApplyFence {
-            gate: &START_GATE,
-            epoch: &START_EPOCH,
+            order: state.playback.selection_order().clone(),
             expected: ticket,
         }),
     )

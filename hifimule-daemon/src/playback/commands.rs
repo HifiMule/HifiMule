@@ -67,7 +67,7 @@ impl PlaybackCommandService {
         };
         // A native Stop/Resume is an explicit user supersession even when
         // there is no current session for the transport command to change.
-        crate::rpc::playback_selection::supersede_pending_start();
+        self.playback.selection_order().supersede();
         let playback = self.playback.clone();
         let snapshot =
             tokio::task::spawn_blocking(move || playback.native_control(intent, Some(guard)))
