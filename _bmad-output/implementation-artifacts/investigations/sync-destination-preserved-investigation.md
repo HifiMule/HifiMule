@@ -80,3 +80,27 @@ Verification: scanner suite 9 passed; RPC suite (including preparation/execution
 The original source-line references above describe baseline `9ab9dc34e62daa58973c0d67ee1f14d5bc097ba4`; the current implementation is `inspect_sync_destination` and the writer call in `hifimule-daemon/src/sync.rs`.
 
 Review also added operation-local collision protection: a later selected track cannot overwrite the first selected track at the same generated path. Backend atomicity was not expanded: deterministic MSC sibling staging and MTP delete-before-upload behavior remain preexisting limitations. Preservation tests cover source failure and injected pre-write failure, not all transport failures.
+
+
+## Runtime follow-up: two selected catalog records (2026-10-17)
+
+Read-only local diagnostics now confirm a second cause: two distinct selected source IDs generate the same Music destination. These are not proven identical recordings.
+
+| Field | First source | Second source |
+| --- | --- | --- |
+| Track ID | `558mY8oZtpZyqR7qeuJqP1` | `3MPvUNc43yMrRVPjTst6nl` |
+| Duration from `browse.getAlbum` | 253 seconds (4:13) | 210 seconds (3:30) |
+| Source RPC size | 4,119,166 bytes | 3,435,105 bytes |
+| Disc / track | 1 / 1 | 1 / 1 |
+| Encoding | MP3, 128 kbps | MP3, 128 kbps |
+
+Both returned records have title `The Sign (radio edit)`, artist `Ace of Base`, album `The Sign`, album ID `5bD5A1OynmntPslBvpFIBg`, artist ID `5RXNBBcAaumlTg6WCTiNcB`, and server ID `c896f5112ba9ce720a19ce76688cdedac185fe08c190c521288d2a48d535c4af`. The authenticated local `browse.getAlbum` read was successful; its token was kept internal. The API exposes no source filesystem path in these song records. The different durations establish different timed source entries, but do not establish which label/version is correct or whether either underlying file is damaged.
+
+Evidence:
+
+- `/Users/akartmann/Library/Application Support/HifiMule/daemon.log:1527` and `:1537` show both IDs selected in one operation. Lines 1535 and 1546 report corresponding staged sizes above; line 1542 records the first write succeeding.
+- `/Volumes/FLASHDISK/.hifimule.json.zst`, decoded read-only, now assigns `Music/Ace of Base/The Sign/01 - The Sign (radio edit).mp3` to the first ID, with `isAutoFill=true` and timestamp `2026-10-17T09:03:12Z`.
+- The read-only pending plan `/private/var/folders/n6/wxs4x7ns5s37fj2cjz_l57km0000gn/T/hifimule-sync-plan-fvImIn.sqlite` contains the first ID as a resident, the second as a `new-selection` addition with `isAutoFill=true`, and both in playlist track rows. This confirms that a writer-only skip would not fix subsequent sync planning.
+- `rpc.rs:7434–7462` deduplicates expanded selections by source ID. `sync.rs:1394–1443` derives the destination from artist/album/track/title/extension, omitting source identity and duration. `sync.rs:4759–4800` calculates additions by source ID. These source references describe the current investigation snapshot and may shift during implementation.
+
+Conclusion: the provider supplies two differently timed entries with identical destination metadata. Existing ID-based selection deduplication retains both, while destination construction collapses both to one pathname. Neither multi-server routing, separate album IDs, nor differing disc numbers explains this specific collision. The requested one-file policy needs stable destination-level ownership and playlist alias resolution across later syncs and deletion, rather than merely ignoring the second write. Prefer an existing selected resident, otherwise a deterministic representative; retain the duration distinction in diagnostics.

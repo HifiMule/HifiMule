@@ -210,6 +210,8 @@ impl<T: DeserializeOwned> Iterator for PlanCursor<T> {
 #[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResidentIdentity {
+    #[serde(default)]
+    pub media_role: crate::device::MediaRole,
     pub jellyfin_id: String,
     pub server_id: Option<String>,
     pub local_path: String,
@@ -377,6 +379,7 @@ impl SyncPlan {
                 value.server_id.as_deref(),
                 value.is_auto_fill,
                 &ResidentIdentity {
+                    media_role: value.media_role,
                     jellyfin_id: value.jellyfin_id.clone(),
                     server_id: value.server_id.clone(),
                     local_path: value.local_path.clone(),
