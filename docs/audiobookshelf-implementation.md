@@ -47,6 +47,8 @@ New audiobook transfers update embedded tags from the authenticated Audiobookshe
 
 Editing happens locally before device transfer, without re-encoding or replacement cover downloads. Existing ID3 versions are retained; untagged MP3 gets ID3v2.3. MP4 chapter lists and chapter tracks are retained. Ambiguous part order, malformed metadata, fragmented MP4 layouts or ID3 chapters using absolute byte offsets or an unsafe tag rewrite fail the item under the existing explicit-selection/auto-fill policy. Compressed ID3 frames and extended-header/footer layouts are rejected before decoding because they cannot meet the bounded rewrite guarantees. Metadata is bounded to 16 MiB; staging reserves a second file and metadata workspace before rewriting. For MP4, a bounded copy of the movie metadata is appended and its previous slot becomes free space; audio and chapter media keep their original offsets. The native editor then changes only metadata. Device capacity and manifest size use the final tagged byte count.
 
+After each successful local tag rewrite, the daemon logs the book/part and each changed field as `old -> new` (or `no tag values changed`). These messages describe the staged file; normal transfer logs confirm the subsequent device write. Long values are truncated and control characters escaped.
+
 Ordinary sync keeps existing copies unchanged. Use forced sync to refresh their tags after correcting server metadata. Music and podcasts retain their existing transfer behavior; no listening-progress operations are involved.
 
 ## Evidence and limits

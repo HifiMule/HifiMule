@@ -90,6 +90,7 @@ fn write_mp3(path: &Path, tags: &SyncBookTags, cancel: &AtomicBool) -> Result<()
             .all(|c| c.start_offset == u32::MAX && c.end_offset == u32::MAX),
         "ID3 chapters with absolute byte offsets cannot be safely rewritten"
     );
+    let before = id3_log_snapshot(&tag);
     let version = tag.version();
     if let Some(v) = &tags.album {
         tag.set_album(v);
@@ -138,6 +139,7 @@ fn write_mp3(path: &Path, tags: &SyncBookTags, cancel: &AtomicBool) -> Result<()
     check_cancel(cancel)?;
     drop(source);
     output.persist(path).map_err(|e| e.error)?;
+    log_tag_changes(path, tags, before, id3_log_snapshot(&reopened));
     Ok(())
 }
 
@@ -278,6 +280,102 @@ fn validate_mp3_frame(source: &mut File, start: u64) -> Result<()> {
     Ok(())
 }
 
+type TagLogSnapshot = Vec<(&'static str, Option<String>)>;
+
+fn id3_log_snapshot(tag: &id3::Tag) -> TagLogSnapshot {
+    vec![
+        ("album", tag.album().map(str::to_owned)),
+        ("artist", tag.artist().map(str::to_owned)),
+        ("album_artist", tag.album_artist().map(str::to_owned)),
+        ("title", tag.title().map(str::to_owned)),
+        ("track", tag.track().map(|v| v.to_string())),
+        ("track_total", tag.total_tracks().map(|v| v.to_string())),
+        ("disc", tag.disc().map(|v| v.to_string())),
+        ("disc_total", tag.total_discs().map(|v| v.to_string())),
+        ("year", tag.year().map(|v| v.to_string())),
+        (
+            "recording_time",
+            tag.get("TDRC")
+                .and_then(|frame| frame.content().text())
+                .map(str::to_owned),
+        ),
+    ]
+}
+
+fn mp4_log_snapshot(tag: &mp4ameta::Tag) -> TagLogSnapshot {
+    // Preserve value boundaries so removing additional values remains visible.
+    let strings = |ident: mp4ameta::Fourcc| {
+        let values: Vec<&str> = tag.strings_of(&ident).collect();
+        match values.as_slice() {
+            [] => None,
+            [value] => Some((*value).to_owned()),
+            _ => Some(format!("{values:?}")),
+        }
+    };
+    vec![
+        ("album", strings(mp4ameta::ident::ALBUM)),
+        ("artist", strings(mp4ameta::ident::ARTIST)),
+        ("album_artist", strings(mp4ameta::ident::ALBUM_ARTIST)),
+        ("title", strings(mp4ameta::ident::TITLE)),
+        ("track", tag.track().0.map(|v| v.to_string())),
+        ("track_total", tag.track().1.map(|v| v.to_string())),
+        ("disc", tag.disc().0.map(|v| v.to_string())),
+        ("disc_total", tag.disc().1.map(|v| v.to_string())),
+        ("year", strings(mp4ameta::ident::YEAR)),
+    ]
+}
+
+// Quote control characters and bound display length, while comparing full values.
+fn log_tag_value(value: Option<&str>) -> String {
+    match value {
+        None => "<unset>".into(),
+        Some(value) => {
+            let mut chars = value.chars();
+            let preview: String = chars.by_ref().take(256).collect();
+            let suffix = if chars.next().is_some() {
+                " (truncated)"
+            } else {
+                ""
+            };
+            format!("{preview:?}{suffix}")
+        }
+    }
+}
+
+fn log_tag_changes(
+    path: &Path,
+    tags: &SyncBookTags,
+    before: TagLogSnapshot,
+    after: TagLogSnapshot,
+) {
+    let changes: Vec<String> = before
+        .iter()
+        .zip(after.iter())
+        .filter_map(|((name, old), (_, new))| {
+            (old != new).then(|| {
+                format!(
+                    "{name}: {} -> {}",
+                    log_tag_value(old.as_deref()),
+                    log_tag_value(new.as_deref())
+                )
+            })
+        })
+        .collect();
+    // Emit only after a successful local rewrite; this is not a device-transfer acknowledgement.
+    crate::daemon_log!(
+        "[Sync] Staged audiobook tags book={} part={}/{} file={:?}: {}",
+        log_tag_value(tags.album.as_deref()),
+        tags.track,
+        tags.total,
+        path.file_name(),
+        if changes.is_empty() {
+            "no tag values changed".into()
+        } else {
+            changes.join("; ")
+        }
+    );
+}
+
 #[derive(Clone, Copy)]
 struct Atom {
     start: u64,
@@ -389,6 +487,7 @@ fn write_mp4(path: &Path, tags: &SyncBookTags, cancel: &AtomicBool) -> Result<()
         ..mp4ameta::ReadConfig::NONE
     };
     let mut tag = mp4ameta::Tag::read_with_path(path, &read_config)?;
+    let before = mp4_log_snapshot(&tag);
     if let Some(v) = &tags.album {
         tag.set_album(v);
     }
@@ -427,6 +526,7 @@ fn write_mp4(path: &Path, tags: &SyncBookTags, cancel: &AtomicBool) -> Result<()
         reopened.userdata == tag.userdata,
         "MP4 metadata cannot be rewritten without loss"
     );
+    log_tag_changes(path, tags, before, mp4_log_snapshot(&reopened));
     Ok(())
 }
 struct BoundedFile<'a> {
@@ -472,6 +572,30 @@ impl mp4ameta::StorageFile for BoundedFile<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_snapshot_detects_recording_date_changes_with_unchanged_legacy_year() {
+        let mut tag = id3::Tag::new();
+        tag.set_year(2024);
+        tag.add_frame(id3::Frame::text("TDRC", "1998"));
+        let before = id3_log_snapshot(&tag);
+        tag.add_frame(id3::Frame::text("TDRC", "2024"));
+        let after = id3_log_snapshot(&tag);
+        assert_ne!(before, after);
+        assert_eq!(before.last().unwrap().1.as_deref(), Some("1998"));
+    }
+
+    #[test]
+    fn log_snapshot_detects_removal_of_additional_mp4_artists() {
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_artist("Alice");
+        tag.add_artist("Bob");
+        let before = mp4_log_snapshot(&tag);
+        tag.set_artist("Alice");
+        assert_ne!(before, mp4_log_snapshot(&tag));
+        assert!(before[1].1.as_deref().unwrap().contains("Bob"));
+    }
+
     fn artwork() -> Vec<u8> {
         let mut encoded = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgb8(1, 1)
