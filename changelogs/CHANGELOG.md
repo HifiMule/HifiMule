@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.19.0 - 2026-10-17
+
+You can now **recognize music already on your device** when configuring a populated music folder. An optional scan matches compatible files against your active server and adds them to your basket without copying the audio again, grouping complete artists and albums where possible. Imported matches become managed music and follow the usual removal rules. Normal sync also recognizes compatible selected music added later, while **Force Sync** replaces managed selected copies.
+
+Your basket and Auto-Fill capacity estimates now account for the device's output profile when transcoding, and the capacity bar shows space occupied by synced Auto-Fill music. Newly transferred **Audiobookshelf audiobooks** receive current book titles, authors, and part ordering in their embedded tags while preserving audio, artwork, and chapters. You can use Force Sync to refresh tags on existing copies after correcting metadata on the server.
+
+Keyboard navigation, screen-reader feedback, focus handling, and layouts for compact windows and enlarged text improve throughout the interface. Your basket keeps its scroll position when items are removed or refreshed, and device setup refreshes imported selections correctly. Music sync can now replace an untracked file at a selected track's exact destination; when multiple selected tracks resolve to the same filename, it keeps one file and continues, preserving playlist references. Mass-storage setup also avoids descending into protected system folders during its initial accessibility check.
+
 ## v0.18.1 - 2026-10-14
 
 You can now listen to audiobooks and podcast episodes from **Audiobookshelf 2.37.1** without playback being rejected because of the server version. HifiMule accepts direct-play sessions across the 2.x version line while keeping its existing checks for supported audio formats and streaming behavior.
