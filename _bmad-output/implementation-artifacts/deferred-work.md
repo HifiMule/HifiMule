@@ -360,3 +360,8 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: Windows NSIS Restart Manager compatibility review (2026-10-05)
 
 - **Uninstall cancellation removes startup registration before uninstall completes.** `hifimule-ui/src-tauri/nsis/hooks.nsh:25–26` deletes the Run and InstallDir registry entries in PREUNINSTALL, before the UI running-app check in the installer. Canceling that later close prompt leaves the app installed without login startup. This predates the Restart Manager compatibility fix; move cleanup after the uninstall passes its cancellation points and cover that path separately.
+
+## Deferred from: untracked music destination replacement review (2026-10-17)
+
+- **MSC deterministic sibling staging can encounter symlinks or races.** Existing `MscBackend` verified writes use a deterministic `.tmp` sibling. Harden temporary creation and canonical containment against concurrent filesystem changes separately; this replacement policy preserves the existing backend behavior.
+- **MTP replacement does not preserve old bytes across every failed upload.** Existing MTP backends can remove an old object before uploading its replacement. Design transport-appropriate staging/commit semantics separately; this change does not add an atomic replacement guarantee to MTP.

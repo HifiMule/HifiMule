@@ -459,7 +459,10 @@ pub async fn reconcile(
         }
         let tags = match probe(io, &file, progress.clone()).await {
             Ok(tags) => tags,
-            Err(error) if error.downcast_ref::<ffmpeg_next::Error>().is_some() => continue,
+            Err(error) if error.downcast_ref::<ffmpeg_next::Error>().is_some() => {
+                crate::daemon_log!("[Sync] Cannot reuse '{}': audio metadata probe failed: {}", file.path, error);
+                continue;
+            },
             Err(error) => return Err(error),
         };
         if !crate::sync::scanned_audio_compatible(
@@ -469,6 +472,7 @@ pub async fn reconcile(
             &tags.codec,
             tags.bitrate,
         ) {
+            crate::daemon_log!("[Sync] Cannot reuse '{}': encoding is incompatible with selected profile", file.path);
             continue;
         }
         let candidates: Vec<_> = delta
@@ -501,6 +505,9 @@ pub async fn reconcile(
             })
             .map(|(i, _)| i)
             .collect();
+        if candidates.len() != 1 {
+            crate::daemon_log!("[Sync] Cannot reuse '{}': {} selected tracks match its metadata (need exactly one)", file.path, candidates.len());
+        }
         if candidates.len() == 1 {
             let i = candidates[0];
             if found.contains_key(&i) {
@@ -869,6 +876,28 @@ pub(crate) mod tests {
         progress.cancelled.store(true, Ordering::Relaxed);
         assert!(probe(&io, &file, progress).await.is_err());
     }
+    #[tokio::test]
+    async fn incompatible_and_mismatched_existing_files_remain_pending() {
+        let (root, io, file) = fixture().await;
+        let manifest = crate::device::DeviceManifest { managed_paths: vec!["Music".into()], ..Default::default() };
+        let original: crate::sync::SyncDelta = serde_json::from_value(serde_json::json!({
+            "adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":100,"providerSuffix":"mp3"}],
+            "deletes":[],"idChanges":[],"unchanged":0,"playlists":[]
+        })).unwrap();
+        let before = tokio::fs::read(root.path().join(&file.path)).await.unwrap();
+        let mut mismatch = original.clone();
+        mismatch.adds[0].name = "Different Track".into();
+        reconcile(&mut mismatch, &manifest, &io, Some(&profile()), None).await.unwrap();
+        assert_eq!(mismatch.adds.len(), 1);
+        assert!(mismatch.id_changes.is_empty());
+        let mut incompatible = original;
+        incompatible.adds[0].max_bitrate_override_kbps = Some(1);
+        reconcile(&mut incompatible, &manifest, &io, Some(&profile()), None).await.unwrap();
+        assert_eq!(incompatible.adds.len(), 1);
+        assert!(incompatible.id_changes.is_empty());
+        assert_eq!(tokio::fs::read(root.path().join(&file.path)).await.unwrap(), before);
+    }
+
     #[tokio::test]
     async fn later_file_becomes_read_only_adoption_and_duplicates_stay_unmanaged() {
         let (root, io, file) = fixture().await;

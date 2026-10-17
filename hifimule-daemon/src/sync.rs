@@ -2176,6 +2176,62 @@ fn validate_owned_manifest_delete_path(
     Ok(())
 }
 
+/// Validate before creating parents, then inspect immediately before the verified write.
+/// Ownership is required for other media; selected music may replace its exact output path.
+async fn inspect_sync_destination(
+    io: &dyn crate::device_io::DeviceIO,
+    device_path: &Path,
+    music_folder: Option<&str>,
+    media_role: crate::device::MediaRole,
+    rel_path: &str,
+    is_mtp: bool,
+    owned: &HashSet<String>,
+) -> Result<bool> {
+    validate_device_relative_path(rel_path).map_err(anyhow::Error::msg)?;
+    let is_music = media_role == crate::device::MediaRole::Music;
+    if is_music {
+        let folder = music_folder.context("Cannot resolve configured music folder")?;
+        anyhow::ensure!(relative_path_is_in_managed_subfolder(rel_path, folder),
+            "Destination is outside configured music folder; file preserved");
+        if !is_mtp {
+            let root = tokio::fs::canonicalize(device_path).await
+                .context("Failed to resolve device root")?;
+            let managed = device_path.join(folder);
+            // Inspect existing ancestors before ensure_dir can follow a symlink.
+            let mut ancestor = device_path.join(rel_path);
+            loop {
+                match tokio::fs::canonicalize(&ancestor).await {
+                    Ok(resolved) => {
+                        anyhow::ensure!(resolved.starts_with(&root),
+                            "Destination escapes the device; file preserved");
+                        if ancestor.starts_with(&managed) {
+                            let resolved_music = tokio::fs::canonicalize(&managed).await
+                                .context("Failed to resolve configured music folder")?;
+                            anyhow::ensure!(resolved.starts_with(&resolved_music),
+                                "Destination escapes configured music folder; file preserved");
+                        }
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        anyhow::ensure!(ancestor.pop(), "Destination has no accessible parent");
+                    }
+                    Err(error) => return Err(error).context("Failed to resolve destination path"),
+                }
+            }
+        }
+    }
+    if let Some((parent, _)) = rel_path.rsplit_once('/') {
+        io.ensure_dir(parent).await
+            .with_context(|| format!("Failed to create destination parent '{parent}'"))?;
+    }
+    let exists = io.file_length(rel_path).await
+        .with_context(|| format!("Failed to inspect destination '{rel_path}'"))?.is_some();
+    let untracked = exists && !owned.contains(&normalized_device_folder(rel_path));
+    anyhow::ensure!(!untracked || is_music,
+        "Destination exists outside manifest ownership for this media type; file preserved");
+    Ok(untracked)
+}
+
 fn normalized_device_folder(path: &str) -> String {
     path.replace('\\', "/").trim_matches('/').to_string()
 }
@@ -3730,6 +3786,7 @@ async fn execute_plan_sync_buffered(
     let mut writer_idle = Duration::ZERO;
     let mut writer_timing = TransferTotals::default();
     let mut writer_failed = false;
+    let mut selected_destinations: HashMap<String, String> = HashMap::new();
     loop {
         let wait_started = std::time::Instant::now();
         let next = tokio::select! {
@@ -3786,8 +3843,25 @@ async fn execute_plan_sync_buffered(
             writer_failed = true;
             continue;
         }
-        // New destinations are never allowed to overwrite unmanaged collisions,
-        // including Force Sync. Recheck immediately before the atomic write.
+        // Preexisting untracked music is replaceable, but one selected transfer must
+        // never overwrite another selected transfer in the same operation.
+        let destination_key = normalized_device_folder(&staged.rel_path);
+        if let Some(first_id) = selected_destinations.get(&destination_key) {
+            errors.push(SyncFileError {
+                jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                filename: staged.rel_path.clone(),
+                error_message: format!(
+                    "Selected tracks '{}' and '{}' resolve to the same destination; earlier output preserved",
+                    first_id, staged.add_item.jellyfin_id
+                ),
+            });
+            let _ = operation_manager.request_cancel(&operation_id).await;
+            let _ = tokio::fs::remove_file(&staged.staged_path).await;
+            writer_failed = true;
+            continue;
+        }
+        selected_destinations.insert(destination_key, staged.add_item.jellyfin_id.clone());
+        // Recheck destination safety after staging and immediately before the atomic write.
         if let Ok(free)=device_io.free_space().await {
             if staged.staged_size>free {
                 errors.push(SyncFileError {jellyfin_id:staged.add_item.jellyfin_id.clone(),filename:staged.rel_path.clone(),error_message:"Insufficient device space for the actual output file".into()});
@@ -3796,16 +3870,30 @@ async fn execute_plan_sync_buffered(
                 writer_failed=true;continue;
             }
         }
-        let destination_check = async {
-            if let Some((parent,_))=staged.rel_path.rsplit_once('/') { device_io.ensure_dir(parent).await?; }
-            device_io.file_length(&staged.rel_path).await
-        }.await;
-        if destination_check.is_err() || (destination_check.as_ref().ok().copied().flatten().is_some()
-            && !owned_manifest_paths.contains(&normalized_device_folder(&staged.rel_path))) {
-            errors.push(SyncFileError {jellyfin_id:staged.add_item.jellyfin_id.clone(),filename:staged.rel_path.clone(),error_message:"Destination exists outside managed music or could not be inspected; file preserved".into()});
-            let _=operation_manager.request_cancel(&operation_id).await;
-            let _=tokio::fs::remove_file(&staged.staged_path).await;
-            writer_failed=true;continue;
+        match inspect_sync_destination(
+            device_io.as_ref(),
+            device_path,
+            target.manifest.media_path(crate::device::MediaRole::Music),
+            staged.add_item.media_role,
+            &staged.rel_path,
+            is_mtp,
+            &owned_manifest_paths,
+        ).await {
+            Ok(true) => crate::daemon_log!(
+                "[Sync] Replacing untracked music destination '{}'", staged.rel_path
+            ),
+            Ok(false) => {},
+            Err(error) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                    filename: staged.rel_path.clone(),
+                    error_message: format!("{error:#}"),
+                });
+                let _ = operation_manager.request_cancel(&operation_id).await;
+                let _ = tokio::fs::remove_file(&staged.staged_path).await;
+                writer_failed = true;
+                continue;
+            }
         }
         let write_result = match device_io
             .write_with_verify_from_path_with_buffer(
@@ -9786,6 +9874,141 @@ mod tests {
         waiting.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn music_destination_policy_preserves_other_media_and_inspection_errors() {
+        use crate::device::MediaRole;
+        let root = tempfile::tempdir().unwrap();
+        let io = crate::device_io::MscBackend::new(root.path().into());
+        std::fs::create_dir_all(root.path().join("Custom/Library")).unwrap();
+        std::fs::write(root.path().join("Custom/Library/song.mp3"), b"old").unwrap();
+        let empty = HashSet::new();
+        assert!(inspect_sync_destination(&io, root.path(), Some(""), MediaRole::Music,
+            "Custom/Library/song.mp3", false, &empty).await.unwrap());
+        assert!(inspect_sync_destination(&io, root.path(), Some("Custom/Library"), MediaRole::Music,
+            "Custom/Library/song.mp3", false, &empty).await.unwrap());
+        for role in [MediaRole::Podcast, MediaRole::Audiobook] {
+            let error = inspect_sync_destination(&io, root.path(), Some("Custom/Library"), role,
+                "Custom/Library/song.mp3", false, &empty).await.unwrap_err();
+            assert!(error.to_string().contains("manifest ownership"));
+        }
+        for path in ["Other/song.mp3", "Custom/Library/../song.mp3", "/Custom/Library/song.mp3"] {
+            assert!(inspect_sync_destination(&io, root.path(), Some("Custom/Library"), MediaRole::Music,
+                path, false, &empty).await.is_err());
+        }
+        // Directory collision is an inspection failure, not an ownership claim.
+        let error = inspect_sync_destination(&io, root.path(), Some("Custom"), MediaRole::Music,
+            "Custom/Library", false, &empty).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("Failed to inspect destination") && message.contains("Expected device file"), "{message}");
+        let error = inspect_sync_destination(&io, root.path(), Some("Custom/Library"), MediaRole::Music,
+            "Custom/Library/song.mp3/child.mp3", false, &empty).await.unwrap_err();
+        assert!(format!("{error:#}").contains("Failed to resolve destination path"));
+        // Exercise backend parent creation failure independently of MSC canonical checks.
+        let error = inspect_sync_destination(&io, root.path(), Some("Custom/Library"), MediaRole::Music,
+            "Custom/Library/song.mp3/child.mp3", true, &empty).await.unwrap_err();
+        assert!(format!("{error:#}").contains("Failed to create destination parent"));
+        assert_eq!(std::fs::read(root.path().join("Custom/Library/song.mp3")).unwrap(), b"old");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn music_destination_policy_rejects_symlink_escape_before_parent_creation() {
+        use crate::device::MediaRole;
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Music")).unwrap();
+        std::fs::create_dir_all(root.path().join("Other")).unwrap();
+        std::fs::write(root.path().join("Other/song.mp3"), b"unrelated").unwrap();
+        symlink(root.path().join("Other"), root.path().join("Music/link")).unwrap();
+        symlink(outside.path(), root.path().join("Music/external")).unwrap();
+        let io = crate::device_io::MscBackend::new(root.path().into());
+        for path in ["Music/link/song.mp3", "Music/link/new/song.mp3", "Music/external/new/song.mp3"] {
+            let error = inspect_sync_destination(&io, root.path(), Some("Music"), MediaRole::Music,
+                path, false, &HashSet::new()).await.unwrap_err();
+            assert!(error.to_string().contains("escapes"), "{error:#}");
+        }
+        assert!(!outside.path().join("new").exists());
+        assert!(!root.path().join("Other/new").exists());
+        assert_eq!(std::fs::read(root.path().join("Other/song.mp3")).unwrap(), b"unrelated");
+    }
+
+    #[tokio::test]
+    async fn selected_destination_collision_preserves_first_output_and_ownership() {
+        let mut server = mockito::Server::new_async().await;
+        let first_audio = vec![1_u8, 2, 3, 4];
+        let second_audio = vec![5_u8, 6, 7, 8];
+        let first_download = server.mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "first".into()))
+            .with_status(200).with_header("content-type", "audio/flac")
+            .with_body(first_audio.clone()).expect(1).create_async().await;
+        let second_download = server.mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "second".into()))
+            .with_status(200).with_header("content-type", "audio/flac")
+            .with_body(second_audio).expect(1).create_async().await;
+        let root = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(root.path()).await;
+        let first = add_item_with_provider_format("first", "flac", "audio/flac", 4);
+        let mut second = first.clone();
+        second.jellyfin_id = "second".into();
+        let path = construct_desired_file_path(&root.path().join("Music"), &first, None).unwrap().path;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"untracked original").unwrap();
+        let delta = SyncDelta { adds: vec![first, second], deletes: vec![], id_changes: vec![], unchanged: 0,
+            playlists: vec![], provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
+        let operations = Arc::new(SyncOperationManager::new());
+        let id = unique_operation_id("selected-collision");
+        operations.create_operation(id.clone(), 2).await;
+        let (synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+            provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
+        }, operations, id, manager.clone(), io).await.unwrap();
+        assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].jellyfin_id, "first");
+        assert!(errors.iter().any(|error| error.jellyfin_id == "second" && error.error_message.contains("same destination")), "{errors:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), first_audio);
+        let durable = read_persisted_manifest(root.path());
+        assert_eq!(durable.synced_items.len(), 1);
+        assert_eq!(durable.synced_items[0].jellyfin_id, "first");
+        assert_eq!(durable.synced_items[0].size_bytes, 4);
+        first_download.assert_async().await;
+        second_download.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn failed_untracked_replacement_preserves_old_file_and_manifest() {
+        for fail_write in [false, true] {
+            let mut server = mockito::Server::new_async().await;
+            let _download = server.mock("GET", "/rest/download.view")
+                .match_query(mockito::Matcher::Any)
+                .with_status(if fail_write { 200 } else { 404 })
+                .with_header("content-type", "audio/flac").with_body(vec![1, 2, 3, 4])
+                .create_async().await;
+            let root = tempfile::tempdir().unwrap();
+            let (manager, _) = setup_provider_sync_device(root.path()).await;
+            let io = boundary_io(root.path(), false);
+            io.reject_audio.store(fail_write, Ordering::Release);
+            manager.set_test_sync_io(root.path(), io.clone()).await;
+            let item = add_item_with_provider_format("collision", "flac", "audio/flac", 4);
+            let path = construct_desired_file_path(&root.path().join("Music"), &item, None).unwrap().path;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"previous bytes").unwrap();
+            let delta = SyncDelta { adds: vec![item], deletes: vec![], id_changes: vec![], unchanged: 0,
+                playlists: vec![], provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
+            let operations = Arc::new(SyncOperationManager::new());
+            let id = unique_operation_id("failed-replacement");
+            operations.create_operation(id.clone(), 1).await;
+            let (synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
+            }, operations, id, manager.clone(), io).await.unwrap();
+            assert!(synced.is_empty());
+            assert!(!errors.is_empty());
+            if fail_write { assert!(errors.iter().any(|e| e.error_message.contains("injected audio write failure"))); }
+            assert_eq!(std::fs::read(&path).unwrap(), b"previous bytes");
+            assert!(manager.get_current_device().await.unwrap().synced_items.is_empty());
+            assert!(read_persisted_manifest(root.path()).synced_items.is_empty());
+        }
+    }
+
     #[derive(Debug)]
     struct BoundaryDeviceIo {
         inner: Arc<dyn crate::device_io::DeviceIO>,
@@ -9793,6 +10016,7 @@ mod tests {
         begin_release: Notify,
         block_begin: bool,
         reject_manifest: AtomicBool,
+        reject_audio: AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -9821,6 +10045,9 @@ mod tests {
             path: &str,
             source: &std::path::Path,
         ) -> anyhow::Result<()> {
+            if self.reject_audio.load(Ordering::Acquire) {
+                anyhow::bail!("injected audio write failure");
+            }
             self.inner.write_with_verify_from_path(path, source).await
         }
         async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
@@ -9850,6 +10077,7 @@ mod tests {
             begin_release: Notify::new(),
             block_begin,
             reject_manifest: AtomicBool::new(false),
+            reject_audio: AtomicBool::new(false),
         })
     }
 
