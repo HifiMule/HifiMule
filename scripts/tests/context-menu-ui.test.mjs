@@ -7,11 +7,12 @@ import ts from '../../hifimule-ui/node_modules/typescript/lib/typescript.js';
 function harness() {
   class Element extends EventTarget {
     children = []; style = {}; attributes = {}; classes = new Set();
+    get isConnected() { return this === document.body || !!this.parent?.isConnected; }
     offsetWidth = 180; offsetHeight = 40;
     classList = { add: name => this.classes.add(name) };
     setAttribute(name, value) { this.attributes[name] = value; }
     appendChild(child) { this.children.push(child); child.parent = this; }
-    remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); this.parent = null; }
     contains(target) { return target === this || this.children.some(child => child.contains(target)); }
     focus() { document.activeElement = this; }
     click() { this.dispatchEvent(new Event('click')); }

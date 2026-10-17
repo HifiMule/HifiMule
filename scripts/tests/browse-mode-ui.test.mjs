@@ -45,6 +45,7 @@ function harness(locale = 'en') {
     get innerHTML() { return ''; }
     setAttribute(k,v) { this.attributes[k] = String(v); }
     getAttribute(k) { return this.attributes[k] ?? null; }
+    before(node) { this.parentElement?.insertBefore(node, this); }
     append(...nodes) { for (const n of nodes) this.appendChild(n); }
     appendChild(n) { this.insertBefore(n, null); return n; }
     insertBefore(n, ref) { n.remove(); n.parentElement = this; const i = ref ? this.children.indexOf(ref) : this.children.length; this.children.splice(i,0,n); }
@@ -69,6 +70,17 @@ function harness(locale = 'en') {
   class StaleBrowseResponse extends Error {}
   const input = readFileSync(new URL('../../hifimule-ui/src/library.ts', import.meta.url), 'utf8') + '\nexport const probe = { state, renderModeBar, switchMode, setViewMode, initLibraryView, mapAlbums, mapAlbumTracks, loadPodcastView, openPodcastShow, renderPodcastError, podcastDescription, podcastEpisodeRow, podcastShowRow };';
   const source = ts.transpileModule(input, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+  const moduleCache = new Map();
+  const localRequire = name => {
+    if (name === '../i18n') return { t: (key, params = {}) => (catalog[locale][key] ?? key).replace(/\{(\w+)\}/g, (_, name) => String(params[name] ?? '')) };
+    if (!moduleCache.has(name)) {
+      const exports = {};
+      const source = ts.transpileModule(readFileSync(new URL(`../../hifimule-ui/src/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+      vm.runInNewContext(source, { exports, document, require: localRequire, requestAnimationFrame: f => f() });
+      moduleCache.set(name, exports);
+    }
+    return moduleCache.get(name);
+  };
   vm.runInNewContext(source, { exports, document, console, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
     DOMParser: class { parseFromString() { return { body: { childNodes: parsedDescription?.children ?? [] } }; } },
     requestAnimationFrame: f => f(),
@@ -78,7 +90,8 @@ function harness(locale = 'en') {
         fetchPodcastShows: async()=>{if(podcastShowsError)throw podcastShowsError;return {shows:[{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:1}],total:51};},
         fetchPodcastShow: async()=>{podcastShowFetches++;if(podcastEpisodesError)throw podcastEpisodesError;return {show:{id:'show-opaque',title:'Talks',description:null,coverArtId:null,episodeCount:60},episodes:Array.from({length:60},(_,i)=>({id:i===0?'episode-opaque':`episode-${i}`,showId:'show-opaque',title:i===0?'First':`Episode ${i}`,description:null,durationSeconds:60,publishedAt:'2026-01-01',coverArtId:null})),total:60,possiblyTruncated:true};},
         playbackPlayEpisode: async(serverId,episodeId)=>played.push([serverId,episodeId])}
-      : name === './state/basket' ? {basketStore} : {},
+      : name === './state/basket' ? {basketStore}
+      : ['./state/libraryCache', './components/libraryLoadStatus'].includes(name) ? localRequire(name) : {},
     setTimeout, clearTimeout, window: {} });
   const {probe} = exports;
   probe.state.availableModes = [...allModes];

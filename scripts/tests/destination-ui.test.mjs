@@ -41,6 +41,8 @@ class Element {
     const all = this.querySelectorAll('*');
     const occurrence = selector.match(/data-occurrence-id="([^"]+)"/)?.[1];
     const action = selector.match(/data-queue-action="([^"]+)"/)?.[1];
+    if (/^[a-z][a-z-]*$/.test(selector)) return all.find(node => node !== this && node.tagName === selector) ?? null;
+    if (selector.startsWith('.')) return all.find(node => node !== this && node.classList.contains(selector.slice(1))) ?? null;
     return all.find(node => (!occurrence || node.dataset.occurrenceId === occurrence)
       && (!action || node.dataset.queueAction === action)) ?? null;
   }
@@ -350,7 +352,7 @@ test('destination CSS makes hidden siblings authoritative and bounds Playback sc
   assert.ok(playbackHost, 'Playback host sizing rule must exist');
   assert.match(playbackHost[1], /flex:\s*1\s+1\s+0/);
   assert.match(playbackHost[1], /min-width:\s*0/);
-  assert.match(playbackHost[1], /min-height:\s*0/);
+  assert.match(playbackHost[1], /min-height:\s*min\(8rem,\s*25vh\)/);
   assert.match(playbackHost[1], /overflow-y:\s*auto/);
   assert.match(playbackHost[1], /overflow-x:\s*hidden/);
   assert.match(playbackHost[1], /overscroll-behavior:\s*contain/);

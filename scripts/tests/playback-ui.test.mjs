@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+import { getEventListeners } from 'node:events';
 import ts from '../../hifimule-ui/node_modules/typescript/lib/typescript.js';
 
 // Exercise the real component; replace only the native RPC, clock and browser
 // boundary. Removing a DOM node also removes its focus in this test boundary.
 function harness(initial, control = async () => {}, outputRpc = {}) {
-  const document = { activeElement: null };
+  const document = Object.assign(new EventTarget(), { activeElement: null, hidden: false });
   class Element {
     children = []; dataset = {}; attributes = {}; listeners = new Map();
     textContent = ''; value = ''; hidden = false; disabled = false; isConnected = true;
@@ -103,6 +104,22 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
   };
 }
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
+
+test('document visibility changes refresh playback until controls are destroyed', () => {
+  const h = harness(snapshot('paused'));
+  let repaints = 0;
+  h.component.renderTimeline = () => { repaints++; };
+  h.document.hidden = true;
+  h.document.dispatchEvent(new Event('visibilitychange'));
+  h.document.hidden = false;
+  h.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(repaints, 2);
+  assert.equal(getEventListeners(h.document, 'visibilitychange').length, 1);
+  h.component.destroy();
+  assert.equal(getEventListeners(h.document, 'visibilitychange').length, 0);
+  h.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(repaints, 2);
+});
 
 function feedbackView(observed, preference = 'neutral', capabilities = { like: true, dislike: true, clear: true }) {
   return { schemaVersion: 1, target: { sessionId: observed.sessionId, logicalSessionId: observed.radio?.logicalId ?? observed.sessionId, occurrenceId: observed.current?.occurrenceId, source: observed.current?.source }, capabilities,
@@ -475,6 +492,7 @@ function albumButtonHarness() {
   class Element {
     listeners = new Map(); disabled = false; name = ''; label = '';
     children = []; dataset = {}; attributes = {};
+    append(...children) { for (const child of children) this.appendChild(child); }
     appendChild(child) { child.parent = this; this.children.push(child); return child; }
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
@@ -528,6 +546,7 @@ function previewButtonHarness() {
     attributes = {};
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
+    append(...children) { for (const child of children) this.appendChild(child); }
     appendChild(child) { child.parent = this; this.children.push(child); return child; }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     focus() { document.activeElement = this; }
@@ -563,6 +582,7 @@ function queueButtonHarness() {
     attributes = new Map();
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     removeAttribute(name) { this.attributes.delete(name); }
+    append(...children) { for (const child of children) this.appendChild(child); }
     appendChild(child) { child.parent = this; this.children.push(child); return child; }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     focus() { document.activeElement = this; }
@@ -588,10 +608,12 @@ function queueButtonHarness() {
   return { ...exports, calls, toasts, document, Element };
 }
 
-test('mounted album row leaves nested keyboard activation to its play button', async () => {
+test('mounted album row keeps selection and playback as independent keyboard controls', async () => {
   const h = albumButtonHarness();
   const row = h.mountRow({ id: 'album', serverId: 'portable-server', name: 'Album' });
-  const button = row.children[0];
+  const [select, button] = row.children;
+  assert.equal(select.type, 'button');
+  assert.equal(select.attributes['aria-pressed'], 'false');
   for (const key of [' ', 'Enter']) {
     const event = await button.dispatchEvent('keydown', { key });
     assert.equal(event.defaultPrevented, false, `${key} must retain button activation`);
@@ -605,7 +627,8 @@ test('mounted album row leaves nested keyboard activation to its play button', a
   ]);
   assert.deepEqual(h.selections, []);
   for (const key of [' ', 'Enter']) {
-    assert.equal((await row.dispatchEvent('keydown', { key })).defaultPrevented, true);
+    assert.equal((await select.dispatchEvent('keydown', { key })).defaultPrevented, false);
+    await select.dispatch('click');
   }
   assert.deepEqual(h.selections, ['album', 'album']);
   assert.equal(h.calls.length, 2);
@@ -823,12 +846,13 @@ test('Shoelace cannot override hidden transport actions', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.playback-controls sl-button\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
 });
-test('transport messages overlay the content without changing bar height', () => {
+test('transport guidance stays in layout while hidden live regions remain mounted', () => {
   const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.playback-controls\s*\{[\s\S]*?flex-wrap:\s*wrap;/);
   assert.match(styles, /\.playback-controls\s*\{[\s\S]*?z-index:\s*1;/);
   assert.match(styles, /\.playback-controls__messages\s*\{[^}]*position:\s*absolute;/);
-  assert.match(styles, /inset-block-end:\s*calc\(100% \+ var\(--space-xs\)\)/);
+  assert.match(styles, /\.playback-controls__messages\.is-visible\s*\{[^}]*position:\s*static;/);
+  assert.match(styles, /\.playback-controls__messages\.is-visible\s*\{[^}]*overflow-wrap:\s*anywhere;/);
 });
 test('album actions capture portable source identity and preserve parent navigation', async () => {
   const h = albumButtonHarness();
