@@ -1,3 +1,5 @@
+import { createTrackPlayButton } from './components/TrackPlayButton';
+import { libraryLoadStatus } from './components/libraryLoadStatus';
 import type SlButton from '@shoelace-style/shoelace/dist/components/button/button.js';
 import {
     BrowseMode,
@@ -35,7 +37,6 @@ import {
     getBrowseGeneration,
     rpcCall,
     StaleBrowseResponse,
-    playbackPlayTrack,
 } from './rpc';
 import { appendTracksToQueueFromLibrary } from './state/queue';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
@@ -52,17 +53,15 @@ import { acceptRecentEpisodePage } from './podcastRecents';
 import { t } from './i18n';
 import { showToast, ERROR_TOAST_DURATION } from './toast';
 
-let _supportsPlaylistWrite = false;
-export function setPlaylistWriteCapability(v: boolean): void {
-    _supportsPlaylistWrite = v;
-}
+import { libraryPageCache, supportsPlaylistWrite as _supportsPlaylistWrite, invalidatePlaylistsCache } from './state/libraryCache';
+export { setPlaylistWriteCapability, invalidatePlaylistsCache } from './state/libraryCache';
 
 function modeLabel(mode: BrowseMode): string {
     if (mode === 'albums' && state.isBookLibrary) return t('library.books.mode');
     return t(`library.mode.${mode}`);
 }
 
-const VIRTUAL_ROW_HEIGHT = 56;
+let virtualRowHeight = 56;
 const OVERSCAN = 3;
 
 interface AppState {
@@ -112,7 +111,7 @@ let state: AppState = {
     loading: false,
     listLoading: false,
     scrollCache: new Map(),
-    pageCache: new Map(),
+    pageCache: libraryPageCache,
     artistViewTotal: 0,
     albumViewTotal: 0,
     activeLetter: null,
@@ -139,15 +138,6 @@ function cacheKey(parentId?: string): string {
     return `${state.browseMode}:${parentId ?? 'root'}`;
 }
 
-// Drop cached playlist pages so a newly created playlist appears on next navigation.
-export function invalidatePlaylistsCache(): void {
-    for (const key of Array.from(state.pageCache.keys())) {
-        if (key.startsWith('playlists:')) {
-            state.pageCache.delete(key);
-        }
-    }
-}
-
 function updatePlaylistNameInCache(playlistId: string, name: string): void {
     for (const cached of state.pageCache.values()) {
         for (const item of cached.items) {
@@ -168,7 +158,7 @@ export function clearNavigationCache() {
     ++musicSearchRequest;
     state.loading = false;
     state.scrollCache = new Map();
-    state.pageCache = new Map();
+    state.pageCache.clear();
     state.breadcrumbStack = [];
     state.items = [];
     state.pagination = { startIndex: 0, limit: 50, total: 0 };
@@ -217,6 +207,7 @@ async function yieldTick(): Promise<void> {
 }
 
 function showSpinner(container: HTMLElement) {
+    libraryLoadStatus(container).start();
     if (!container.querySelector('.is-navigating')) {
         container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
     }
@@ -851,6 +842,8 @@ function teardownListScrollHandler() {
             basketStore.removeEventListener('update', (c as any).__gridBasketHandler);
             delete (c as any).__gridBasketHandler;
         }
+        (c as any).__listRowObserver?.disconnect();
+        delete (c as any).__listRowObserver;
         delete (c as any).__listScroller;
         delete (c as any).__listPaint;
         delete (c as any).__listSpinner;
@@ -858,13 +851,14 @@ function teardownListScrollHandler() {
 }
 
 function showListSpinner(content: HTMLElement, loadedCount: number) {
+    libraryLoadStatus(content).start();
     const scroller = (content as any).__listScroller as HTMLElement | undefined;
     if (!scroller) return;
     const existing = (content as any).__listSpinner as HTMLElement | undefined;
     if (existing) return;
     const loader = document.createElement('div');
     loader.className = 'media-list-loader';
-    loader.style.top = `${loadedCount * VIRTUAL_ROW_HEIGHT}px`;
+    loader.style.top = `${loadedCount * virtualRowHeight}px`;
     loader.innerHTML = '<sl-spinner></sl-spinner>';
     scroller.appendChild(loader);
     (content as any).__listSpinner = loader;
@@ -938,16 +932,17 @@ function isSelectableListItem(item: BrowseDisplayItem): boolean {
     return resolved === 'MusicArtist' || resolved === 'BookAuthor' || resolved === 'MusicAlbum' || resolved === 'Audio' || resolved === 'Book' || resolved === 'BookPart';
 }
 
-// Repaint mounted rows (selection is app state — remounted rows re-read it)
-// and refresh the bulk bar. Same wipe-and-paint mechanism as basket updates.
+// Patch mounted rows so selection changes preserve focus and pending actions.
 function syncSelectionUi(): void {
     const content = document.getElementById('library-content');
     if (!content) return;
     const scroller = (content as any).__listScroller as HTMLElement | undefined;
     if (scroller) {
         scroller.classList.toggle('has-selection', state.selectedIds.size > 0);
-        scroller.querySelectorAll('.media-list-row').forEach(r => r.remove());
-        (content as any).__listPaint?.();
+        scroller.querySelectorAll<HTMLElement>('.media-list-row').forEach(row => {
+            const item = state.items[Number(row.dataset.idx)];
+            if (item) refreshListRow(row, item);
+        });
     }
     updateBulkBar(content);
 }
@@ -1245,6 +1240,21 @@ function bulkAddSelectionToPlaylist(): void {
     );
 }
 
+function refreshListRow(row: HTMLElement, item: BrowseDisplayItem): void {
+    const itemId = item.basketId ?? item.id;
+    const selected = basketStore.has(itemId);
+    const checked = isSelectableListItem(item) && state.selectedIds.has(itemId);
+    row.classList.toggle('is-selected', selected);
+    row.classList.toggle('is-checked', checked);
+    const check = row.querySelector<HTMLInputElement>('.media-list-row__check');
+    if (check) check.checked = checked;
+    const toggle = row.querySelector('.basket-toggle-btn') as any;
+    if (toggle) {
+        toggle.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
+        toggle.label = `${t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${item.name}`;
+    }
+}
+
 function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: string, name: string) => void): HTMLElement {
     const itemId = item.basketId ?? item.id;
     const isSelected = basketStore.has(itemId);
@@ -1254,7 +1264,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     if (isSelected) row.classList.add('is-selected');
     if (selectable && state.selectedIds.has(itemId)) row.classList.add('is-checked');
     row.dataset.idx = String(index);
-    row.style.top = `${index * VIRTUAL_ROW_HEIGHT}px`;
+    row.style.top = `${index * virtualRowHeight}px`;
     const thumb = document.createElement('div');
     thumb.className = 'media-list-row__thumb';
     getImageUrl(item.coverArtId ?? item.id, 64, 90).then(url => {
@@ -1262,9 +1272,11 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     }).catch(() => {});
     const info = document.createElement('div');
     info.className = 'media-list-row__info';
-    const nameEl = document.createElement('div');
-    nameEl.className = 'media-list-row__name';
+    const nameEl = document.createElement('button');
+    nameEl.type = 'button';
+    nameEl.className = 'media-list-row__name media-list-row__open';
     nameEl.textContent = item.name;
+    nameEl.title = item.name;
     info.appendChild(nameEl);
     if (item.subtitle) {
         const subtitleEl = document.createElement('div');
@@ -1274,25 +1286,32 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     }
     const toggleBtn = document.createElement('sl-icon-button') as any;
     toggleBtn.name = isSelected ? 'dash-circle-fill' : 'plus-circle-fill';
-    toggleBtn.label = isSelected ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
+    toggleBtn.label = `${t(isSelected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${item.name}`;
     toggleBtn.style.fontSize = '1.25rem';
     // device-locked CSS rule (#library-content.device-locked .basket-toggle-btn)
     // disables this button when no device is selected, same as grid cards.
     toggleBtn.classList.add('basket-toggle-btn');
     toggleBtn.addEventListener('click', async (e: Event) => {
         e.stopPropagation();
+        if (toggleBtn.getAttribute('aria-disabled') === 'true') return;
         if (!basketStore.admitPhysicalTargetMutation()) return;
         if (basketStore.has(itemId)) {
             basketStore.remove(itemId);
             return;
         }
-        toggleBtn.loading = true;
+        // sl-icon-button has no loading API. Keep it focused while guarding
+        // repeated activation, and expose the pending state to assistive tech.
+        toggleBtn.setAttribute('aria-disabled', 'true');
+        toggleBtn.setAttribute('aria-busy', 'true');
+        toggleBtn.shadowRoot?.querySelector('button')?.setAttribute('aria-disabled', 'true');
         try {
             await addBrowseItemsToBasket([item]);
-        } catch (err) {
-            console.error('Failed to fetch item count:', err);
+        } catch {
+            showToast(t('library.selection.add_failed', { name: item.name }), 'danger', ERROR_TOAST_DURATION);
         } finally {
-            toggleBtn.loading = false;
+            toggleBtn.removeAttribute('aria-disabled');
+            toggleBtn.removeAttribute('aria-busy');
+            toggleBtn.shadowRoot?.querySelector('button')?.removeAttribute('aria-disabled');
         }
     });
     row.addEventListener('click', async (e) => {
@@ -1326,9 +1345,10 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     });
     // Context menu for artist/album/track rows
     if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum' || item.type === 'Audio')) {
+        MediaCard.bindPlaylistMenuKeyboard(nameEl, item.id, item.name);
         row.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            MediaCard.showItemContextMenu(e.clientX, e.clientY, item.id, item.name);
+            MediaCard.showItemContextMenu(e.clientX, e.clientY, item.id, item.name, nameEl);
         });
     }
     if (selectable) {
@@ -1341,26 +1361,20 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
             e.stopPropagation();
             toggleRowSelection(item, index, row);
         });
-        row.appendChild(check);
+        const target = document.createElement('label');
+        target.className = 'media-list-row__check-target';
+        target.addEventListener('click', event => event.stopPropagation());
+        target.appendChild(check);
+        row.appendChild(target);
     }
     row.appendChild(thumb);
     row.appendChild(info);
+    if (_supportsPlaylistWrite && ['MusicArtist', 'MusicAlbum', 'Audio'].includes(item.type)) {
+        row.appendChild(MediaCard.createPlaylistAction(item.id, item.name));
+    }
     if (item.type === 'Audio' || item.type === 'BookPart') {
         const isPart = item.type === 'BookPart';
-        const play = document.createElement('sl-icon-button') as any;
-        play.name = 'play-fill';
-        play.label = t(isPart ? 'library.books.play_part' : 'playback.play_track', { title: item.name });
-        play.disabled = !item.serverId;
-        const playbackSource = item.serverId
-            ? { serverId: item.serverId, trackId: item.id }
-            : null;
-        play.addEventListener('mousedown', (event: Event) => event.stopPropagation());
-        play.addEventListener('click', async (event: Event) => {
-            event.stopPropagation();
-            if (!playbackSource) return;
-            try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
-            catch (error) { showToast((error as Error).message, 'danger'); }
-        });
+        const play = createTrackPlayButton(item.serverId, item.id, item.name, isPart ? 'part' : 'track');
         row.appendChild(play);
         if (!isPart) {
             row.appendChild(createTrackPreviewButton(item.serverId, item.id, item.name));
@@ -1437,7 +1451,13 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     const expectedTotal = state.pagination.total > 0 ? state.pagination.total : items.length;
     const scroller = document.createElement('div');
     scroller.className = 'media-list';
-    scroller.style.height = `${expectedTotal * VIRTUAL_ROW_HEIGHT}px`;
+    const measure = document.createElement('div');
+    measure.className = 'media-list-row-measure';
+    measure.setAttribute('aria-hidden', 'true');
+    scroller.appendChild(measure);
+    content.appendChild(scroller);
+    virtualRowHeight = measure.getBoundingClientRect().height || 56;
+    scroller.style.height = `${expectedTotal * virtualRowHeight}px`;
     (content as any).__listScroller = scroller;
     function paint() {
         const currentItems = state.items;
@@ -1445,23 +1465,27 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
             - content.getBoundingClientRect().top + content.scrollTop;
         const scrollTop = Math.max(0, content.scrollTop - scrollerTop);
         const viewportH = content.clientHeight;
-        const first = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - OVERSCAN);
-        const last = Math.min(currentItems.length - 1, Math.ceil((scrollTop + viewportH) / VIRTUAL_ROW_HEIGHT) + OVERSCAN);
+        const first = Math.max(0, Math.floor(scrollTop / virtualRowHeight) - OVERSCAN);
+        const last = Math.min(currentItems.length - 1, Math.ceil((scrollTop + viewportH) / virtualRowHeight) + OVERSCAN);
         scroller.querySelectorAll<HTMLElement>('.media-list-row').forEach(row => {
             const idx = Number(row.dataset.idx);
-            if (idx < first || idx > last) row.remove();
+            if ((idx < first || idx > last) && !row.contains(document.activeElement)) row.remove();
         });
         const existing = new Set(
             [...scroller.querySelectorAll<HTMLElement>('.media-list-row')].map(r => Number(r.dataset.idx))
         );
         for (let i = first; i <= last; i++) {
-            if (!existing.has(i)) scroller.appendChild(renderListRow(currentItems[i], i, onCurate));
+            if (!existing.has(i)) {
+                const following = [...scroller.querySelectorAll<HTMLElement>('.media-list-row')]
+                    .find(row => Number(row.dataset.idx) > i);
+                scroller.insertBefore(renderListRow(currentItems[i], i, onCurate), following ?? null);
+            }
         }
     }
     (content as any).__listPaint = paint;
     const scrollHandler = () => {
         if (state.listLoading) {
-            const maxScroll = state.items.length * VIRTUAL_ROW_HEIGHT;
+            const maxScroll = state.items.length * virtualRowHeight;
             if (content.scrollTop > maxScroll) content.scrollTop = maxScroll;
         }
         paint();
@@ -1470,7 +1494,7 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
             listAutoloadSupported() &&
             state.items.length < state.pagination.total
         ) {
-            const loadedBoundary = (state.items.length - LOAD_AHEAD) * VIRTUAL_ROW_HEIGHT;
+            const loadedBoundary = (state.items.length - LOAD_AHEAD) * virtualRowHeight;
             if (content.scrollTop + content.clientHeight >= loadedBoundary) {
                 loadMoreForListView();
             }
@@ -1479,8 +1503,10 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     content.addEventListener('scroll', scrollHandler);
     (content as any).__listScrollHandler = scrollHandler;
     const basketUpdateHandler = () => {
-        scroller.querySelectorAll('.media-list-row').forEach(r => r.remove());
-        paint();
+        scroller.querySelectorAll<HTMLElement>('.media-list-row').forEach(row => {
+            const item = state.items[Number(row.dataset.idx)];
+            if (item) refreshListRow(row, item);
+        });
     };
     basketStore.addEventListener('update', basketUpdateHandler);
     (content as any).__listBasketHandler = basketUpdateHandler;
@@ -1488,9 +1514,25 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     // Selection is usually cleared before a re-render, but if one is active
     // (e.g. a repaint without a clearing trigger) restore its UI.
     scroller.classList.toggle('has-selection', state.selectedIds.size > 0);
-    content.appendChild(scroller);
     updateBulkBar(content);
     paint();
+    const observer = new ResizeObserver(() => {
+        const nextHeight = measure.getBoundingClientRect().height;
+        if (!nextHeight || nextHeight === virtualRowHeight) return;
+        const origin = scroller.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+        const rowOffset = Math.max(0, content.scrollTop - origin) / virtualRowHeight;
+        virtualRowHeight = nextHeight;
+        scroller.style.height = `${Math.max(state.pagination.total, state.items.length) * virtualRowHeight}px`;
+        scroller.querySelectorAll<HTMLElement>('.media-list-row').forEach(row => {
+            row.style.top = `${Number(row.dataset.idx) * virtualRowHeight}px`;
+        });
+        const spinner = (content as any).__listSpinner as HTMLElement | undefined;
+        if (spinner) spinner.style.top = `${state.items.length * virtualRowHeight}px`;
+        if (content.scrollTop > origin) content.scrollTop = origin + rowOffset * virtualRowHeight;
+        paint();
+    });
+    observer.observe(measure);
+    (content as any).__listRowObserver = observer;
 }
 
 // Which (mode, depth) combinations loadMoreForListView() can actually paginate.
@@ -1516,6 +1558,7 @@ function listAutoloadSupported(): boolean {
 async function loadMoreForListView() {
     if (state.listLoading || !listAutoloadSupported() || state.items.length >= state.pagination.total) return;
     state.listLoading = true;
+    const generation = getBrowseGeneration();
     const content = document.getElementById('library-content');
     if (content) showListSpinner(content, state.items.length);
     try {
@@ -1559,14 +1602,21 @@ async function loadMoreForListView() {
         state.pagination.startIndex = state.items.length;
         if (content) {
             const scroller = (content as any).__listScroller as HTMLElement | undefined;
-            if (scroller) scroller.style.height = `${state.pagination.total * VIRTUAL_ROW_HEIGHT}px`;
+            if (scroller) scroller.style.height = `${state.pagination.total * virtualRowHeight}px`;
             (content as any).__listPaint?.();
         }
     } catch (e) {
         console.error('loadMoreForListView failed:', e);
+        if (!(e instanceof StaleBrowseResponse) && generation === getBrowseGeneration() && content) {
+            libraryLoadStatus(content).fail();
+            showToast(t('library.loading.failed'), 'danger');
+        }
     } finally {
         state.listLoading = false;
-        if (content) removeListSpinner(content);
+        if (content && generation === getBrowseGeneration()) {
+            removeListSpinner(content);
+            libraryLoadStatus(content).complete(state.items.length);
+        }
     }
 }
 
@@ -1585,6 +1635,8 @@ function renderCurrentView() {
     } else {
         renderGrid(state.items, onCurate);
     }
+    const content = document.getElementById('library-content');
+    if (content) libraryLoadStatus(content).complete(state.items.length);
 }
 
 function renderMusicSearch(): void {
@@ -1609,6 +1661,9 @@ function renderMusicSearch(): void {
     });
     container.append(form);
     const results = state.musicSearchResults;
+    const status = libraryLoadStatus(container);
+    if (state.musicSearchError) status.fail();
+    else status.complete(results ? results.artists.length + results.albums.length + results.tracks.length : 0);
     if (state.musicSearchError) {
         const error = document.createElement('p');
         error.className = 'error-message-detail';
@@ -1697,6 +1752,7 @@ function renderError(error: Error) {
     if (error instanceof StaleBrowseResponse) return;
     const container = document.getElementById('library-content');
     if (!container) return;
+    libraryLoadStatus(container).fail();
 
     // Build with DOM nodes, not innerHTML: error.message can carry raw,
     // server-derived text (the RPC layer surfaces backend detail verbatim, by
@@ -1920,17 +1976,18 @@ function refreshPodcastBasketButtons(): void {
     document.querySelectorAll<HTMLElement>('#library-content .podcast-basket-toggle').forEach(button => {
         const selected = basketStore.has(button.dataset.basketId ?? '');
         button.setAttribute('name', selected ? 'dash-circle-fill' : 'plus-circle-fill');
-        button.setAttribute('label', t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket'));
+        button.setAttribute('label', `${t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${button.dataset.basketLabel ?? ''}`);
         button.setAttribute('aria-pressed', String(selected));
         button.closest('.media-card, .podcast-show-row, .podcast-episode-row')?.classList.toggle('is-selected', selected);
     });
 }
 basketStore.addEventListener('update', refreshPodcastBasketButtons);
 
-function podcastBasketButton(id: string, add: () => Promise<void>): HTMLElement {
+function podcastBasketButton(id: string, name: string, add: () => Promise<void>): HTMLElement {
     const button = document.createElement('sl-icon-button') as any;
     button.className = 'basket-toggle-btn podcast-basket-toggle';
     button.dataset.basketId = id;
+    button.dataset.basketLabel = name;
     button.addEventListener('click', (event: Event) => {
         event.stopPropagation();
         if (!basketStore.admitPhysicalTargetMutation()) return;
@@ -1944,7 +2001,7 @@ function podcastBasketButton(id: string, add: () => Promise<void>): HTMLElement 
     });
     const selected = basketStore.has(id);
     button.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
-    button.label = t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket');
+    button.label = `${t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${name}`;
     button.setAttribute('aria-pressed', String(selected));
     return button;
 }
@@ -2037,7 +2094,7 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
         const artwork = podcastArtwork(episode.coverArtId);
         const overlay = document.createElement('div');
         overlay.className = 'selection-overlay';
-        overlay.append(podcastBasketButton(episode.id, async () => {
+        overlay.append(podcastBasketButton(episode.id, episode.title, async () => {
             const serverId = state.podcastServerId;
             if (serverId && basketStore.getActiveServerId() === serverId) basketStore.add(podcastEpisodeBasketItem(episode, serverId));
         }));
@@ -2069,7 +2126,7 @@ function podcastEpisodeRow(episode: PodcastEpisode): HTMLElement {
                 showToast(t(key), 'danger', ERROR_TOAST_DURATION);
             });
     }));
-    if (!grid) row.append(podcastBasketButton(episode.id, async () => {
+    if (!grid) row.append(podcastBasketButton(episode.id, episode.title, async () => {
         const serverId = state.podcastServerId;
         if (serverId && basketStore.getActiveServerId() === serverId) basketStore.add(podcastEpisodeBasketItem(episode, serverId));
     }));
@@ -2137,7 +2194,7 @@ function podcastShowRow(show: PodcastShow): HTMLElement {
     if (grid) {
         const overlay = document.createElement('div');
         overlay.className = 'selection-overlay';
-        overlay.append(podcastBasketButton(show.id, addShow));
+        overlay.append(podcastBasketButton(show.id, show.title, addShow));
         artwork.append(overlay);
     }
     row.append(artwork);
@@ -2154,7 +2211,7 @@ function podcastShowRow(show: PodcastShow): HTMLElement {
         content.append(count);
     }
     row.append(content);
-    if (!grid) row.append(podcastBasketButton(show.id, addShow));
+    if (!grid) row.append(podcastBasketButton(show.id, show.title, addShow));
     return row;
 }
 
@@ -2344,7 +2401,7 @@ async function loadArtistsByLetter(letter: string) {
         state.listLoading = true;
         showListSpinner(container, state.items.length);
     } else {
-        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+        showSpinner(container);
     }
 
     await yieldTick();
@@ -2391,7 +2448,7 @@ async function loadAlbumsByLetter(letter: string) {
         state.listLoading = true;
         showListSpinner(container, state.items.length);
     } else {
-        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+        showSpinner(container);
     }
 
     await yieldTick();
@@ -3135,6 +3192,8 @@ async function appendByLetter(mode: 'artists' | 'albums', letter: string) {
 async function loadMore() {
     if (state.loading) return;
     if (state.browseMode === 'favorites') return;
+    const content = document.getElementById('library-content');
+    if (content) libraryLoadStatus(content).start();
 
     state.pagination.startIndex = state.items.length;
 
@@ -3177,7 +3236,7 @@ export async function initLibraryView() {
 
     const container = document.getElementById('library-content');
     if (container) {
-        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+        showSpinner(container);
     }
 
     try {
@@ -3224,4 +3283,9 @@ export async function initLibraryView() {
     renderModeBar();
     if (state.availableModes.length > 0) await loadModeRoot();
     else container?.replaceChildren();
+    // Dedicated podcast/track views own their content; release the initial shell load.
+    if (generation === getBrowseGeneration() && container && state.browseMode !== 'tracks') {
+        if (podcastRecentError) libraryLoadStatus(container).fail();
+        else libraryLoadStatus(container).complete();
+    }
 }

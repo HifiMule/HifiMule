@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Playback action hardening checks</title>
+<style>body{overflow:auto!important}main{max-width:900px;margin:auto;padding:24px}#cards{max-width:220px}#actions{display:flex;gap:16px;margin:16px 0}#results{white-space:pre-wrap;overflow-wrap:anywhere}#queue li{margin-block:12px}</style>
+<main><h1>Playback action checks</h1><pre id="results" role="status">Running…</pre><div id="cards"></div><div id="actions"></div><section id="queue" class="playback-destination" aria-label="Upcoming tracks"></section></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const pending=[];
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+ if(command==='image_proxy')return '';
+ if(args?.method==='playback.getSession')return {data:{instanceId:'fixture',sessionId:'session',queueRevision:'1',generationId:'1'}};
+ if(['playback.playAlbum','playback.previewTrack'].includes(args?.method))return new Promise((resolve,reject)=>pending.push({resolve,reject}));
+ return {};
+}};
+const {setLanguage}=await import('../src/i18n.ts');
+const params=new URLSearchParams(location.search);await setLanguage(params.get('lang')||'en');
+if(params.get('zoom')==='200')document.documentElement.style.fontSize='32px';
+const {MediaCard}=await import('../src/components/MediaCard.ts');
+const {createAlbumPlayButton}=await import('../src/components/AlbumPlayButton.ts');
+const {createTrackPreviewButton}=await import('../src/components/TrackPreviewButton.ts');
+const {PlaybackDestination}=await import('../src/components/PlaybackDestination.ts');
+document.querySelector('#cards').append(MediaCard.create({id:'album',name:'夜の音楽 — Synced album',type:'MusicAlbum'},'items',true,()=>{},false));
+const album=createAlbumPlayButton('album','fixture','夜の音楽');
+const preview=createTrackPreviewButton('fixture','track','夜の音楽');
+document.querySelector('#actions').append(album,preview);
+const lines=[],check=(ok,label)=>{lines.push((ok?'PASS ':'FAIL ')+label);document.querySelector('#results').textContent=lines.join('\n');if(!ok)throw Error(label);};
+const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+for(const button of [album,preview]){
+ await button.updateComplete;
+ button.click();button.click();await settle();
+ check(pending.length===1&&button.disabled&&button.getAttribute('aria-busy')==='true','Rapid activation submits once and exposes pending state');
+ check(button.shadowRoot.querySelector('button').disabled,'Shadow button blocks keyboard and pointer reactivation');
+ pending.shift().reject(Error('Fixture offline'));await settle();
+ check(!button.disabled&&!button.hasAttribute('aria-busy'),'Failure unlocks retry');
+ button.click();await settle();pending.shift().resolve();await settle();
+ check(!button.disabled&&button.name!=='hourglass-split','Success restores the original action');
+}
+const renderer=Object.create(PlaybackDestination.prototype);
+const region=renderer.createRegion('upcoming');
+Object.assign(renderer,{regions:{upcoming:region},body:document.querySelector('#queue'),mutating:false});
+region.page={occurrences:[{occurrenceId:'first'},{occurrenceId:'last'}],precedingOccurrenceId:null,endOfSection:true};
+for(const id of ['first','last']){const row=renderer.row(region,id);row.firstElementChild.textContent=id==='first'?'夜の音楽 — Long opening track title':'Last track';region.nodes.set(id,row);region.list.append(row);}
+renderer.body.append(renderer.regionElement(region));renderer.updatePaging();
+const buttons=[...region.list.querySelectorAll('button')];
+check(buttons[0].getAttribute('aria-disabled')==='true'&&buttons[4].getAttribute('aria-disabled')==='true','Queue boundary actions are unavailable');
+await settle();buttons[0].focus();renderer.mutating=true;renderer.updatePaging();
+check(buttons.every(b=>b.getAttribute('aria-disabled')==='true')&&document.activeElement===buttons[0],'Pending queue actions retain keyboard focus');
+renderer.mutating=false;renderer.updatePaging();
+check(buttons[1].getAttribute('aria-disabled')==='false'&&document.activeElement===buttons[0],'Available actions recover without moving focus');
+check(document.documentElement.scrollWidth<=innerWidth,'No horizontal overflow');
+document.querySelector('#results').textContent+='\nREADY';
+</script></html>

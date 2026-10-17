@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Server management resilience fixture</title>
+<style>body{padding:24px}#hub{width:min(100%,420px);margin-block:24px}button{margin:4px}</style>
+<button id="offline">Fail next refresh</button><button id="recover">Recover</button>
+<div id="hub"></div><output id="calls" aria-live="polite"></output>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '@shoelace-style/shoelace/dist/shoelace.js';
+import '../src/styles.css';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const {setLanguage}=await import('../src/i18n.ts');
+await setLanguage(new URLSearchParams(location.search).get('lang')||'en');
+let offline=false, mutations=0;
+window.__TAURI_INTERNALS__={invoke:async (_,{method})=>{
+ if(method==='server.list'){if(offline)throw new Error('Fixture offline');return [{id:'local',serverId:'portable',name:'音楽 🎵 — مجموعة الموسيقى — '+ 'Long collection name '.repeat(8),serverType:'jellyfin',url:'https://example.invalid',username:'fixture',selected:true}];}
+ if(method==='server.update'||method==='server.remove'){
+  document.getElementById('calls').textContent='Requests: '+(++mutations);
+  await new Promise(resolve=>setTimeout(resolve,2500));throw new Error('Fixture: connection lost. Try again.');
+ }
+ return null;
+}};
+const {ServerHub}=await import('../src/components/ServerHub.ts');
+const hub=new ServerHub(document.getElementById('hub'),()=>{});
+document.getElementById('offline').onclick=()=>{offline=true;hub.refresh();};
+document.getElementById('recover').onclick=()=>{offline=false;hub.refresh();};
+</script>
+</html>

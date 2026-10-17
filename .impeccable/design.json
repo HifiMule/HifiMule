@@ -1,97 +1,379 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-06-05T00:00:00Z",
+  "generatedAt": "2026-10-17T00:38:13.484093+00:00",
   "title": "Design System: HifiMule",
   "extensions": {
     "colorMeta": {
       "void": {
         "role": "neutral",
         "displayName": "Void",
-        "canonical": "oklch(8% 0.03 265)",
-        "tonalRamp": ["#060810", "#0b1020", "#101827", "#141d2e", "#1a2540", "#243052", "#2e3c64", "#3a4a78"]
+        "tonalRamp": [
+          "oklch(15.00% 0.03411 269.559)",
+          "oklch(26.43% 0.03411 269.559)",
+          "oklch(37.86% 0.03411 269.559)",
+          "oklch(49.29% 0.03411 269.559)",
+          "oklch(60.71% 0.03411 269.559)",
+          "oklch(72.14% 0.03411 269.559)",
+          "oklch(83.57% 0.03411 269.559)",
+          "oklch(95.00% 0.03411 269.559)"
+        ]
       },
       "panel": {
         "role": "neutral",
         "displayName": "Panel",
-        "canonical": "oklch(14% 0.04 265)",
-        "tonalRamp": ["#0a0f1c", "#151d31", "#1a2440", "#202c50", "#2a3860", "#364870", "#445888", "#5468a0"]
+        "tonalRamp": [
+          "oklch(15.00% 0.04057 266.713)",
+          "oklch(26.43% 0.04057 266.713)",
+          "oklch(37.86% 0.04057 266.713)",
+          "oklch(49.29% 0.04057 266.713)",
+          "oklch(60.71% 0.04057 266.713)",
+          "oklch(72.14% 0.04057 266.713)",
+          "oklch(83.57% 0.04057 266.713)",
+          "oklch(95.00% 0.04057 266.713)"
+        ]
       },
       "panel-strong": {
         "role": "neutral",
         "displayName": "Panel Strong",
-        "canonical": "oklch(12% 0.04 265)",
-        "tonalRamp": ["#080d18", "#10182b", "#151f38", "#1c2848", "#243258", "#2e3e6a", "#3a4c7e", "#4a5e94"]
+        "tonalRamp": [
+          "oklch(15.00% 0.03964 265.814)",
+          "oklch(26.43% 0.03964 265.814)",
+          "oklch(37.86% 0.03964 265.814)",
+          "oklch(49.29% 0.03964 265.814)",
+          "oklch(60.71% 0.03964 265.814)",
+          "oklch(72.14% 0.03964 265.814)",
+          "oklch(83.57% 0.03964 265.814)",
+          "oklch(95.00% 0.03964 265.814)"
+        ]
       },
       "surface": {
         "role": "neutral",
         "displayName": "Surface",
-        "canonical": "oklch(18% 0.01 270)",
-        "tonalRamp": ["#141416", "#24252b", "#2e2f36", "#383940", "#44454e", "#52535c", "#62636e", "#747580"]
+        "tonalRamp": [
+          "oklch(15.00% 0.01122 278.103)",
+          "oklch(26.43% 0.01122 278.103)",
+          "oklch(37.86% 0.01122 278.103)",
+          "oklch(49.29% 0.01122 278.103)",
+          "oklch(60.71% 0.01122 278.103)",
+          "oklch(72.14% 0.01122 278.103)",
+          "oklch(83.57% 0.01122 278.103)",
+          "oklch(95.00% 0.01122 278.103)"
+        ]
       },
       "signal-cyan": {
         "role": "primary",
         "displayName": "Signal Cyan",
-        "canonical": "oklch(72% 0.14 218)",
-        "tonalRamp": ["#083040", "#0e5068", "#147090", "#1a90b8", "#22b8f0", "#56c8f4", "#8ad8f6", "#bee8fb"]
+        "tonalRamp": [
+          "oklch(15.00% 0.14016 230.259)",
+          "oklch(26.43% 0.14016 230.259)",
+          "oklch(37.86% 0.14016 230.259)",
+          "oklch(49.29% 0.14016 230.259)",
+          "oklch(60.71% 0.14016 230.259)",
+          "oklch(72.14% 0.14016 230.259)",
+          "oklch(83.57% 0.14016 230.259)",
+          "oklch(95.00% 0.14016 230.259)"
+        ]
       },
       "ink": {
         "role": "neutral",
         "displayName": "Ink",
-        "canonical": "oklch(97% 0.01 245)",
-        "tonalRamp": ["#1c2030", "#2c3448", "#3e4860", "#505c78", "#687090", "#8890a8", "#b0b8c8", "#f1f5f9"]
+        "tonalRamp": [
+          "oklch(15.00% 0.00685 247.896)",
+          "oklch(26.43% 0.00685 247.896)",
+          "oklch(37.86% 0.00685 247.896)",
+          "oklch(49.29% 0.00685 247.896)",
+          "oklch(60.71% 0.00685 247.896)",
+          "oklch(72.14% 0.00685 247.896)",
+          "oklch(83.57% 0.00685 247.896)",
+          "oklch(95.00% 0.00685 247.896)"
+        ]
       },
       "ink-dim": {
         "role": "neutral",
         "displayName": "Ink Dim",
-        "canonical": "oklch(75% 0.02 245)",
-        "tonalRamp": ["#1c2030", "#2c3448", "#3e4860", "#505c78", "#687090", "#8890a8", "#b0bac6", "#d0d8e4"]
+        "tonalRamp": [
+          "oklch(15.00% 0.02036 252.913)",
+          "oklch(26.43% 0.02036 252.913)",
+          "oklch(37.86% 0.02036 252.913)",
+          "oklch(49.29% 0.02036 252.913)",
+          "oklch(60.71% 0.02036 252.913)",
+          "oklch(72.14% 0.02036 252.913)",
+          "oklch(83.57% 0.02036 252.913)",
+          "oklch(95.00% 0.02036 252.913)"
+        ]
       },
       "amber-warn": {
-        "role": "tertiary",
+        "role": "neutral",
         "displayName": "Amber Warn",
-        "canonical": "oklch(80% 0.16 85)",
-        "tonalRamp": ["#3a2800", "#5c4000", "#806000", "#a48000", "#c8a010", "#ebb334", "#f4ca6a", "#f9dfa2"]
+        "tonalRamp": [
+          "oklch(15.00% 0.14879 83.095)",
+          "oklch(26.43% 0.14879 83.095)",
+          "oklch(37.86% 0.14879 83.095)",
+          "oklch(49.29% 0.14879 83.095)",
+          "oklch(60.71% 0.14879 83.095)",
+          "oklch(72.14% 0.14879 83.095)",
+          "oklch(83.57% 0.14879 83.095)",
+          "oklch(95.00% 0.14879 83.095)"
+        ]
+      },
+      "surface-border": {
+        "role": "neutral",
+        "displayName": "Surface Border",
+        "tonalRamp": [
+          "oklch(15.00% 0 0 / 0.1)",
+          "oklch(26.43% 0 0 / 0.1)",
+          "oklch(37.86% 0 0 / 0.1)",
+          "oklch(49.29% 0 0 / 0.1)",
+          "oklch(60.71% 0 0 / 0.1)",
+          "oklch(72.14% 0 0 / 0.1)",
+          "oklch(83.57% 0 0 / 0.1)",
+          "oklch(95.00% 0 0 / 0.1)"
+        ]
+      },
+      "surface-border-soft": {
+        "role": "neutral",
+        "displayName": "Surface Border Soft",
+        "tonalRamp": [
+          "oklch(15.00% 0 0 / 0.08)",
+          "oklch(26.43% 0 0 / 0.08)",
+          "oklch(37.86% 0 0 / 0.08)",
+          "oklch(49.29% 0 0 / 0.08)",
+          "oklch(60.71% 0 0 / 0.08)",
+          "oklch(72.14% 0 0 / 0.08)",
+          "oklch(83.57% 0 0 / 0.08)",
+          "oklch(95.00% 0 0 / 0.08)"
+        ]
+      },
+      "surface-fill": {
+        "role": "neutral",
+        "displayName": "Surface Fill",
+        "tonalRamp": [
+          "oklch(15.00% 0 0 / 0.03)",
+          "oklch(26.43% 0 0 / 0.03)",
+          "oklch(37.86% 0 0 / 0.03)",
+          "oklch(49.29% 0 0 / 0.03)",
+          "oklch(60.71% 0 0 / 0.03)",
+          "oklch(72.14% 0 0 / 0.03)",
+          "oklch(83.57% 0 0 / 0.03)",
+          "oklch(95.00% 0 0 / 0.03)"
+        ]
+      },
+      "surface-fill-hover": {
+        "role": "neutral",
+        "displayName": "Surface Fill Hover",
+        "tonalRamp": [
+          "oklch(15.00% 0 0 / 0.06)",
+          "oklch(26.43% 0 0 / 0.06)",
+          "oklch(37.86% 0 0 / 0.06)",
+          "oklch(49.29% 0 0 / 0.06)",
+          "oklch(60.71% 0 0 / 0.06)",
+          "oklch(72.14% 0 0 / 0.06)",
+          "oklch(83.57% 0 0 / 0.06)",
+          "oklch(95.00% 0 0 / 0.06)"
+        ]
+      },
+      "control-background": {
+        "role": "neutral",
+        "displayName": "Control Background",
+        "tonalRamp": [
+          "hsl(240 5.1% 15%)",
+          "hsl(240 5.7% 18.2%)",
+          "hsl(240 4.6% 22%)",
+          "hsl(240 5% 27.6%)",
+          "hsl(240 3.7% 44%)",
+          "hsl(240 5.6% 73%)",
+          "hsl(240 7.3% 84%)",
+          "hsl(0 0% 95%)"
+        ]
+      },
+      "control-text": {
+        "role": "neutral",
+        "displayName": "Control Text",
+        "tonalRamp": [
+          "hsl(240 5.1% 15%)",
+          "hsl(240 5.7% 18.2%)",
+          "hsl(240 4.6% 22%)",
+          "hsl(240 5% 27.6%)",
+          "hsl(240 3.7% 44%)",
+          "hsl(240 5.6% 73%)",
+          "hsl(240 7.3% 84%)",
+          "hsl(0 0% 95%)"
+        ]
+      },
+      "control-primary": {
+        "role": "primary",
+        "displayName": "Control Primary",
+        "tonalRamp": [
+          "hsl(203 63.8% 20.9%)",
+          "hsl(203.4 70.4% 28%)",
+          "hsl(202.7 75.8% 30.8%)",
+          "hsl(203.1 80.4% 36.1%)",
+          "hsl(199.7 85.9% 47.7%)",
+          "hsl(198.7 100% 70.5%)",
+          "hsl(198.8 100% 82.5%)",
+          "hsl(186 100% 95.5%)"
+        ]
+      },
+      "control-primary-hover": {
+        "role": "primary",
+        "displayName": "Control Primary Hover",
+        "tonalRamp": [
+          "hsl(203 63.8% 20.9%)",
+          "hsl(203.4 70.4% 28%)",
+          "hsl(202.7 75.8% 30.8%)",
+          "hsl(203.1 80.4% 36.1%)",
+          "hsl(199.7 85.9% 47.7%)",
+          "hsl(198.7 100% 70.5%)",
+          "hsl(198.8 100% 82.5%)",
+          "hsl(186 100% 95.5%)"
+        ]
+      },
+      "control-danger": {
+        "role": "neutral",
+        "displayName": "Control Danger",
+        "tonalRamp": [
+          "hsl(0 56% 23.9%)",
+          "hsl(0.6 60% 33.9%)",
+          "hsl(0.9 67.2% 37.1%)",
+          "hsl(1.1 71.3% 43.7%)",
+          "hsl(0.7 89.6% 57.2%)",
+          "hsl(0 100% 72.3%)",
+          "hsl(0 100% 85.6%)",
+          "hsl(0 100% 95.9%)"
+        ]
+      },
+      "control-success": {
+        "role": "neutral",
+        "displayName": "Control Success",
+        "tonalRamp": [
+          "hsl(144.3 53.6% 16%)",
+          "hsl(143.2 55.4% 23.5%)",
+          "hsl(141.5 58.2% 26.3%)",
+          "hsl(140.8 64.2% 31.8%)",
+          "hsl(141.1 64.9% 43%)",
+          "hsl(141.7 82.7% 70.1%)",
+          "hsl(141 90.9% 82.1%)",
+          "hsl(144 100% 95.5%)"
+        ]
       }
     },
     "typographyMeta": {
-      "body": { "displayName": "Body", "purpose": "Form labels, descriptions, basket item metadata, modal body text." },
-      "label": { "displayName": "Label", "purpose": "Metadata chips, capacity status, sync counters, browse mode filter text, folder type badges." },
-      "title": { "displayName": "Title", "purpose": "Card title text, panel sub-headers, component group labels." },
-      "headline": { "displayName": "Headline", "purpose": "Library view h1, basket sidebar heading, dialog titles." }
+      "body": {
+        "displayName": "Body"
+      },
+      "headline": {
+        "displayName": "Headline"
+      },
+      "section-title": {
+        "displayName": "Section Title"
+      },
+      "title": {
+        "displayName": "Title"
+      },
+      "label": {
+        "displayName": "Label"
+      },
+      "basket-title": {
+        "displayName": "Basket Title"
+      },
+      "metadata": {
+        "displayName": "Metadata"
+      }
     },
     "shadows": [
       {
         "name": "card-hover",
-        "value": "0 10px 24px rgba(0,0,0,0.28)",
-        "purpose": "Media card hover lift. Applied only on :hover, never at rest."
+        "value": "0 10px 24px rgba(0, 0, 0, 0.28)",
+        "purpose": "Media card hover only."
       },
       {
-        "name": "card-rest",
-        "value": "0 12px 28px rgba(0,0,0,0.16)",
-        "purpose": "Media card at rest (ambient depth). Subtle — mostly serves as anti-aliasing against the dark background."
+        "name": "synced-badge",
+        "value": "0 2px 4px rgba(0, 0, 0, 0.3)",
+        "purpose": "Resting status badge above artwork."
+      },
+      {
+        "name": "playback-menu",
+        "value": "0 8px 24px rgba(0, 0, 0, 0.4)",
+        "purpose": "Playback menu above the library surface."
+      },
+      {
+        "name": "playback-output",
+        "value": "0 8px 24px rgba(0, 0, 0, .36)",
+        "purpose": "Output selection popover."
       }
     ],
     "motion": [
       {
-        "name": "ease-standard",
-        "value": "ease",
-        "purpose": "Default for state transitions (hover, border-color, opacity). 0.15–0.2s duration."
+        "name": "ease-out-quart",
+        "value": "cubic-bezier(0.25, 1, 0.5, 1)",
+        "purpose": "Authored application motion token."
       },
       {
-        "name": "card-hover-lift",
-        "value": "transform 0.18s ease, box-shadow 0.18s ease",
-        "purpose": "Media card hover: translateY(-2px) + shadow in. Matches the product register's 150–200ms window."
+        "name": "ease-out-expo",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Authored application motion token."
       },
       {
-        "name": "fade-in-up",
-        "value": "opacity 0.3s ease-out, transform 0.3s ease-out",
-        "purpose": "Sync proposed banner entrance: fadeIn keyframe from opacity 0 + translateY(-4px)."
+        "name": "dur-fast",
+        "value": "140ms",
+        "purpose": "Authored application motion token."
+      },
+      {
+        "name": "dur-base",
+        "value": "200ms",
+        "purpose": "Authored application motion token."
+      },
+      {
+        "name": "selection-reveal",
+        "value": "240ms",
+        "purpose": "Inset artwork selection ring reveals across the cover; reverses from its current frame."
+      },
+      {
+        "name": "selection-reverse",
+        "value": "120ms",
+        "purpose": "Selection ring removal; reduced-motion selection uses opacity instead of clipping."
+      },
+      {
+        "name": "basket-row-enter",
+        "value": "200ms",
+        "purpose": "New visible rows enter from translateX(-6px) and opacity 0.65 using expo easing; existing rows stay still."
+      },
+      {
+        "name": "basket-row-reduced",
+        "value": "120ms",
+        "purpose": "Reduced-motion row entry fades from opacity 0.65 without translation."
+      },
+      {
+        "name": "capacity-settle",
+        "value": "300ms",
+        "purpose": "Transform interpolation from the displayed frame after rerender; immediate under reduced motion and no interpolation across devices."
       }
     ],
     "breakpoints": [
-      { "name": "compact", "value": "980px", "purpose": "Library header collapses from row to column; server chip goes full width." },
-      { "name": "narrow", "value": "1120px", "purpose": "Padding reduction on library view; media grid min card width decreases." },
-      { "name": "mobile", "value": "768px", "purpose": "Media grid min card width drops to 140px." }
+      {
+        "name": "viewport-narrow",
+        "value": "1120px"
+      },
+      {
+        "name": "viewport-compact",
+        "value": "980px"
+      },
+      {
+        "name": "viewport-short-height",
+        "value": "720px"
+      },
+      {
+        "name": "library-container-header",
+        "value": "47.5rem"
+      },
+      {
+        "name": "library-container-compact",
+        "value": "37.5rem"
+      },
+      {
+        "name": "playback-narrow",
+        "value": "600px"
+      }
     ]
   },
   "components": [
@@ -99,95 +381,116 @@
       "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "Main action trigger. Signal Cyan background, void text. Used for Connect, Sync now, Save changes.",
-      "html": "<button class=\"ds-btn-primary\">Sync now</button>",
-      "css": ".ds-btn-primary { background: #22b8f0; color: #0b1020; padding: 0 1rem; height: 2.5rem; font-family: Inter, system-ui, sans-serif; font-size: 0.875rem; font-weight: 600; border: none; border-radius: 4px; cursor: pointer; transition: filter 0.15s ease, transform 0.15s ease; } .ds-btn-primary:hover { filter: brightness(1.1); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: 2px solid #22b8f0; outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }"
+      "description": "Shoelace standard variant translated to standalone HTML; theme variables stay live.",
+      "html": "<button class=\"ds-button-primary\">Sync now</button>",
+      "css": ".ds-button-primary {font-family:var(--sl-input-font-family,system-ui,sans-serif);font-size:.875rem;font-weight:500;height:var(--sl-input-height-medium,2.5rem);padding:0 1rem;border:1px solid;border-radius:4px;cursor:pointer;transition:background-color 50ms linear,color 50ms linear,border-color 50ms linear;} .ds-button-primary{background-color: var(--sl-color-primary-600, hsl(198.7 97.9% 57.2%)); border-color: var(--sl-color-primary-600, hsl(198.7 97.9% 57.2%)); color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%));} .ds-button-primary:hover:not(:disabled){background-color: var(--sl-color-primary-500, hsl(199.7 85.9% 47.7%)); border-color: var(--sl-color-primary-500, hsl(199.7 85.9% 47.7%)); color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%));} .ds-button-primary:active:not(:disabled){background-color: var(--sl-color-primary-600, hsl(198.7 97.9% 57.2%)); border-color: var(--sl-color-primary-600, hsl(198.7 97.9% 57.2%)); color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%));}.ds-button-primary:focus-visible{outline:var(--sl-focus-ring,2px solid #22b8f0);outline-offset:2px;}.ds-button-primary:disabled{opacity:.5;cursor:not-allowed;}"
     },
     {
-      "name": "Ghost Button",
+      "name": "Default Button",
       "kind": "button",
-      "refersTo": "button-ghost",
-      "description": "Secondary actions and filter chips. Transparent background, subtle border.",
-      "html": "<button class=\"ds-btn-ghost\">Cancel</button>",
-      "css": ".ds-btn-ghost { background: transparent; color: #f1f5f9; padding: 0 1rem; height: 2.5rem; font-family: Inter, system-ui, sans-serif; font-size: 0.875rem; font-weight: 500; border: 1px solid rgba(255,255,255,0.18); border-radius: 4px; cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease; } .ds-btn-ghost:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.28); } .ds-btn-ghost:focus-visible { outline: 2px solid #22b8f0; outline-offset: 2px; } .ds-btn-ghost:disabled { opacity: 0.35; cursor: not-allowed; }"
+      "refersTo": "button-default",
+      "description": "Shoelace standard variant translated to standalone HTML; theme variables stay live.",
+      "html": "<button class=\"ds-button-default\">Cancel</button>",
+      "css": ".ds-button-default {font-family:var(--sl-input-font-family,system-ui,sans-serif);font-size:.875rem;font-weight:500;height:var(--sl-input-height-medium,2.5rem);padding:0 1rem;border:1px solid;border-radius:4px;cursor:pointer;transition:background-color 50ms linear,color 50ms linear,border-color 50ms linear;} .ds-button-default{background-color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%)); border-color: var(--sl-input-border-color, hsl(240 5% 35.5%)); color: var(--sl-color-neutral-700, hsl(240 5.6% 73%));} .ds-button-default:hover:not(:disabled){background-color: var(--sl-color-primary-50, hsl(203 63.8% 20.9%)); border-color: var(--sl-color-primary-300, hsl(203.1 80.4% 36.1%)); color: var(--sl-color-primary-700, hsl(198.7 100% 70.5%));} .ds-button-default:active:not(:disabled){background-color: var(--sl-color-primary-100, hsl(203.4 70.4% 28%)); border-color: var(--sl-color-primary-400, hsl(202.1 80.5% 44.3%)); color: var(--sl-color-primary-700, hsl(198.7 100% 70.5%));}.ds-button-default:focus-visible{outline:var(--sl-focus-ring,2px solid #22b8f0);outline-offset:2px;}.ds-button-default:disabled{opacity:.5;cursor:not-allowed;}"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Shoelace standard variant translated to standalone HTML; theme variables stay live.",
+      "html": "<button class=\"ds-button-danger\">Delete</button>",
+      "css": ".ds-button-danger {font-family:var(--sl-input-font-family,system-ui,sans-serif);font-size:.875rem;font-weight:500;height:var(--sl-input-height-medium,2.5rem);padding:0 1rem;border:1px solid;border-radius:4px;cursor:pointer;transition:background-color 50ms linear,color 50ms linear,border-color 50ms linear;} .ds-button-danger{background-color: var(--sl-color-danger-600, hsl(0 98.6% 67.9%)); border-color: var(--sl-color-danger-600, hsl(0 98.6% 67.9%)); color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%));} .ds-button-danger:hover:not(:disabled){background-color: var(--sl-color-danger-500, hsl(0.7 89.6% 57.2%)); border-color: var(--sl-color-danger-500, hsl(0.7 89.6% 57.2%)); color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%));} .ds-button-danger:active:not(:disabled){background-color: var(--sl-color-danger-600, hsl(0 98.6% 67.9%)); border-color: var(--sl-color-danger-600, hsl(0 98.6% 67.9%)); color: var(--sl-color-neutral-0, hsl(240, 5.9%, 11%));}.ds-button-danger:focus-visible{outline:var(--sl-focus-ring,2px solid #22b8f0);outline-offset:2px;}.ds-button-danger:disabled{opacity:.5;cursor:not-allowed;}"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Medium Shoelace field appearance, with inherited theme colors.",
+      "html": "<label class=\"ds-field\">Server URL<input placeholder=\"https://media.example\" /></label>",
+      "css": ".ds-field{display:grid;gap:.5rem;color:var(--ink,#f1f5f9);font-family:var(--sl-input-font-family,system-ui,sans-serif);}.ds-field input{height:2.5rem;padding:0 1rem;font:inherit;background:var(--sl-input-background-color,hsl(240, 5.9%, 11%));color:var(--sl-input-color,hsl(240 5.6% 73%));border:1px solid var(--sl-input-border-color,hsl(240 5% 35.5%));border-radius:4px;}.ds-field input:hover{border-color:var(--sl-input-border-color-hover,hsl(240 3.7% 44%));}.ds-field input:focus-visible{outline:2px solid var(--sl-input-border-color-focus,#22b8f0);outline-offset:2px;}"
+    },
+    {
+      "name": "Browse Navigation",
+      "kind": "nav",
+      "refersTo": "browse-tab",
+      "description": "Pressed browse tab with wrapping labels and an inset underline.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Browse\"><button aria-pressed=\"true\">Albums</button><button aria-pressed=\"false\">Artists</button></nav>",
+      "css": ".ds-nav{display:flex;flex-wrap:wrap;gap:.25rem}.ds-nav button{min-height:1.875rem;padding:0 6px;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--ink,#f1f5f9);font: .6875rem/1.3 Inter,system-ui,sans-serif;cursor:pointer;white-space:normal}.ds-nav button:hover{background:var(--surface-fill-hover,rgba(255,255,255,.06))}.ds-nav button[aria-pressed=\"true\"]{color:var(--accent,#22b8f0);background:rgba(var(--accent-rgb,34,184,240),.09);box-shadow:inset 0 -2px var(--sl-color-primary-600,#22b8f0)}.ds-nav button:focus-visible{outline:2px solid var(--accent,#22b8f0);outline-offset:2px}@media(any-pointer:coarse){.ds-nav button{min-width:44px;min-height:44px}}"
     },
     {
       "name": "Media Card",
       "kind": "card",
       "refersTo": "card-media",
-      "description": "Primary library browsing unit. Album art top, title + subtitle below. Hover lifts; selection applies a cyan ring.",
-      "html": "<div class=\"ds-media-card\"><div class=\"ds-media-card-image\"></div><div class=\"ds-media-card-body\"><strong class=\"ds-media-card-title\">Kind of Blue</strong><span class=\"ds-media-card-sub\">Miles Davis · 1959</span></div></div>",
-      "css": ".ds-media-card { background: #24252b; border: 1px solid rgba(255,255,255,0.10); border-radius: 8px; cursor: pointer; transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; overflow: hidden; width: 190px; } .ds-media-card:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,0.28); border-color: rgba(34,184,240,0.35); } .ds-media-card-image { width: 100%; aspect-ratio: 1/1; background: #1a2540; } .ds-media-card-body { padding: 0.65rem 0.75rem 0.7rem; } .ds-media-card-title { display: block; font-family: Inter, system-ui, sans-serif; font-size: 0.9rem; font-weight: 600; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-media-card-sub { display: block; font-size: 0.8rem; color: #b0bac6; margin-top: 0.1rem; }"
+      "description": "Artwork placeholder with keyboard-accessible title; hover depth follows the source.",
+      "html": "<article class=\"ds-card\"><div class=\"ds-art\"></div><div class=\"ds-content\"><button>Album title</button><span>Artist · Year</span></div></article>",
+      "css": ".ds-card{width:190px;background:var(--surface-bg,#24252b);color:var(--ink,#f1f5f9);border:1px solid var(--surface-border,rgba(255,255,255,.1));border-radius:var(--radius,8px);overflow:hidden;transition:transform var(--dur-base,200ms) var(--ease-out-expo,cubic-bezier(.16,1,.3,1)),box-shadow 200ms ease}.ds-card:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,.28);border-color:rgba(var(--accent-rgb,34,184,240),.35)}.ds-art{aspect-ratio:1;background:var(--sl-color-neutral-800,#d4d4d8)}.ds-content{padding:.65rem .75rem .7rem;min-height:3.5rem;font-family:Inter,system-ui,sans-serif}.ds-content button{display:block;width:100%;text-align:start;font:600 .9rem Inter,system-ui,sans-serif;background:transparent;color:inherit;border:0;padding:0;cursor:pointer}.ds-content button:focus-visible{outline:2px solid var(--accent,#22b8f0);outline-offset:2px}.ds-content span{font-size:.8rem;color:var(--ink-dim,#b0bac6)}@media(prefers-reduced-motion:reduce){.ds-card{transition:none}.ds-card:hover{transform:none}}.ds-content button{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ds-content span{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}"
     },
     {
-      "name": "Basket Item",
+      "name": "Basket Row",
       "kind": "card",
       "refersTo": "card-basket-item",
-      "description": "Item row in the sync basket sidebar. Thumbnail left, title and meta center, remove action right.",
-      "html": "<div class=\"ds-basket-item\"><div class=\"ds-basket-thumb\"></div><div class=\"ds-basket-info\"><span class=\"ds-basket-name\">Kind of Blue</span><span class=\"ds-basket-meta\">Album · 1 item</span></div></div>",
-      "css": ".ds-basket-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.075); border-radius: 8px; transition: background 0.2s ease, border-color 0.2s ease; } .ds-basket-item:hover { background: rgba(255,255,255,0.07); border-color: rgba(34,184,240,0.26); } .ds-basket-thumb { width: 48px; height: 48px; background: #1a2540; border-radius: 4px; flex-shrink: 0; } .ds-basket-info { flex: 1; overflow: hidden; } .ds-basket-name { display: block; font-family: Inter, system-ui, sans-serif; font-size: 0.85rem; font-weight: 500; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-basket-meta { display: block; font-size: 0.75rem; color: #b0bac6; }"
-    },
-    {
-      "name": "Capacity Bar",
-      "kind": "custom",
-      "description": "Storage visualization in the basket sidebar. A segmented 8px bar: used (white), pending selection (cyan), free (transparent).",
-      "html": "<div class=\"ds-capacity\"><div class=\"ds-capacity-bar\"><div class=\"ds-cap-used\" style=\"width:40%\"></div><div class=\"ds-cap-pending\" style=\"width:15%\"></div><div class=\"ds-cap-free\" style=\"flex:1\"></div></div><span class=\"ds-capacity-label\">14.2 GB free of 32 GB</span></div>",
-      "css": ".ds-capacity { display: flex; flex-direction: column; gap: 0.4rem; } .ds-capacity-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,0.08); } .ds-cap-used { background: rgba(255,255,255,0.25); transition: width 0.3s ease; } .ds-cap-pending { background: #22b8f0; opacity: 0.7; transition: width 0.3s ease; } .ds-cap-free { background: transparent; } .ds-capacity-label { font-family: Inter, system-ui, sans-serif; font-size: 0.8rem; color: #b0bac6; }"
+      "description": "Compact thumbnail, metadata, and remove action.",
+      "html": "<div class=\"ds-row\"><div class=\"ds-thumb\"></div><div class=\"ds-info\">Album title<small>Album · 1 item</small></div><button aria-label=\"Remove Album title\"><svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\"><path d=\"m4 4 8 8M12 4l-8 8\" stroke=\"currentColor\" stroke-width=\"1.5\"/></svg></button></div>",
+      "css": ".ds-row{display:flex;align-items:center;gap:var(--space-sm,.75rem);padding:var(--space-xs,.5rem);background:var(--surface-fill,rgba(255,255,255,.03));border:1px solid var(--surface-border-soft,rgba(255,255,255,.08));border-radius:var(--radius,8px);color:var(--ink,#f1f5f9);font:500 .85rem Inter,system-ui,sans-serif;transition:background 200ms ease,border-color 200ms ease}.ds-row:hover{background:var(--surface-fill-hover,rgba(255,255,255,.06));border-color:rgba(var(--accent-rgb,34,184,240),.26)}.ds-thumb{width:48px;height:48px;background:var(--panel-bg,#151d31);border-radius:3px;flex-shrink:0}.ds-info{flex:1;min-width:0}.ds-info small{display:block;font-size:.75rem;color:var(--ink-dim,#b0bac6)}.ds-row button{background:transparent;color:inherit;border:0;font-size:1.25rem;cursor:pointer}.ds-row button:focus-visible{outline:2px solid var(--accent,#22b8f0);outline-offset:2px}.ds-info{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ds-row button:hover{color:var(--sl-color-danger-600,hsl(0 98.6% 67.9%))}"
     },
     {
       "name": "Server Connection Chip",
       "kind": "chip",
-      "description": "Compact server status indicator in the library header. URL + server type badge, truncated. Indicates the active connection.",
-      "html": "<div class=\"ds-server-chip\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#22b8f0\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"/></svg><span class=\"ds-server-chip-url\">http://nas.local:8096</span><span class=\"ds-server-chip-badge\">Jellyfin</span></div>",
-      "css": ".ds-server-chip { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.45rem 0.35rem 0.6rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; background: rgba(10,16,30,0.62); font-size: 0.78rem; color: #b0bac6; max-width: 380px; } .ds-server-chip-url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-server-chip-badge { flex-shrink: 0; background: rgba(34,184,240,0.18); color: #22b8f0; border: 1px solid rgba(34,184,240,0.35); border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.72rem; font-weight: 600; }"
+      "description": "Bordered connection trigger; simplified text-only preview.",
+      "html": "<button class=\"ds-chip\"><span>Home Jellyfin</span><svg aria-hidden=\"true\" viewBox=\"0 0 16 16\" width=\"16\" height=\"16\"><path d=\"m4 6 4 4 4-4\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"/></svg></button>",
+      "css": ".ds-chip{display:flex;align-items:center;gap:.5rem;max-width:380px;padding:.35rem .45rem .35rem .6rem;border:1px solid rgba(255,255,255,.12);border-radius:4px;background:rgba(10,16,30,.62);color:var(--ink-dim,#b0bac6);font:.78rem Inter,system-ui,sans-serif;cursor:pointer}.ds-chip:hover{background:var(--surface-fill-hover,rgba(255,255,255,.06))}.ds-chip:focus-visible{outline:2px solid var(--accent,#22b8f0);outline-offset:2px}.ds-chip span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ds-chip svg{flex-shrink:0}"
     },
     {
-      "name": "Warning Banner",
+      "name": "Capacity Bar",
       "kind": "custom",
-      "description": "Inline warning strip for real problems: dirty manifest, sync warnings. Amber only; never decorative.",
-      "html": "<div class=\"ds-warn-banner\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z\"/><line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg><div class=\"ds-warn-body\"><strong>Manifest out of sync</strong><span>3 files on device are not tracked.</span></div></div>",
-      "css": ".ds-warn-banner { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.5rem 0.75rem; background: rgba(235,179,52,0.12); border: 1px solid rgba(235,179,52,0.3); border-radius: 4px; color: #EBB334; cursor: pointer; transition: background 0.2s ease; } .ds-warn-banner:hover { background: rgba(235,179,52,0.2); } .ds-warn-body { display: flex; flex-direction: column; gap: 0.1rem; font-size: 0.8rem; } .ds-warn-body strong { font-size: 0.85rem; font-weight: 600; } .ds-warn-body span { opacity: 0.85; }"
+      "description": "Illustrative proportions: unmanaged, reserved selection, recorded Auto-Fill, then free space.",
+      "html": "<div class=\"ds-capacity\"><div class=\"ds-bar\" role=\"img\" aria-label=\"40% unmanaged, 20% reserved, 10% Auto-Fill, 30% available\"><i></i><b></b><em></em></div><span>Available after selection and Auto-Fill</span><small><i class=\"ds-swatch\" aria-hidden=\"true\"></i>Used by Auto-Fill</small></div>",
+      "css": ".ds-capacity{display:grid;gap:.5rem;color:var(--ink-dim,#b0bac6);font:.8rem Inter,system-ui,sans-serif}.ds-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:rgba(255,255,255,.08)}.ds-bar i{width:40%;background:rgba(255,255,255,.25)}.ds-bar b{width:20%;background:var(--accent,#22b8f0)}.ds-bar em{width:10%;background:rgba(var(--accent-rgb,34,184,240),.35)}.ds-capacity small{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap}.ds-swatch{width:8px;height:8px;border-radius:2px;background:rgba(var(--accent-rgb,34,184,240),.35)}"
     }
   ],
   "narrative": {
     "northStar": "The Record Crate",
-    "overview": "HifiMule is the quiet room where a serious listener manages their collection. The interface is dark by necessity and conviction: audiophiles work at their desk with a device in hand, focused. There are no recommendations, no discovery nudges, no promotional surfaces. The UI holds the library the way a crate holds records: organized, accessible, non-intrusive.\n\nThe visual language is deep navy and silence. A very dark blue-tinted void (#0b1020) recedes behind layered panel surfaces. The only color that speaks is Signal Cyan (#22b8f0): one live wire in an otherwise dark board, used exclusively on primary actions, active states, and real-time indicators.\n\nThe system explicitly rejects the iTunes paradigm: no glossy gradients, no cover-flow showmanship, no paternalistic smart features. It also rejects the streaming-app aesthetic — no discovery carousels, no algorithmic surfaces.",
+    "overview": "HifiMule is the quiet room where a serious listener manages their collection. The interface holds the library the way a crate holds records: organized, accessible, non-intrusive. The music is the object of attention; the interface is the furniture. Quiet, precise, trustworthy remains the established direction.\n\nDeep navy surfaces, restrained blue signals, compact controls, and visible state make this a working desktop tool. Artwork provides variety. The system rejects glossy iTunes-style showmanship, promotional streaming surfaces, and SaaS metric-card decoration. User-configured Auto-Fill and discovery controls are existing functionality, not a reason to introduce promotional browsing.",
     "keyCharacteristics": [
-      "Deep dark void with a cold blue tint — not generic dark mode, but a specific nautical-instrument depth",
-      "Single accent color (Signal Cyan) used only on actionable and live-state elements",
-      "Shoelace web components for consistent interactive primitives",
-      "Tonal depth through transparency stacking over the gradient base rather than hard shadows",
-      "Inter at fixed sizes: legibility over expression",
-      "Density-comfortable: primary view is a full media grid with a persistent basket sidebar"
+      "Dark navy foundations with translucent panel layers.",
+      "Signal Cyan for custom actions and state; Shoelace sky-blue and semantic colors for inherited controls.",
+      "Inter for application text, with native system-font stacks inside Shoelace primitives.",
+      "Dense library browsing beside a persistent, resizable device basket.",
+      "Brief decelerating motion and explicit keyboard focus treatments."
     ],
     "rules": [
-      { "name": "The One Wire Rule", "body": "Signal Cyan appears on ≤10% of any given screen. Only active and actionable elements carry it. Decorative use is prohibited by definition.", "section": "colors" },
-      { "name": "The Amber Threshold", "body": "Amber (#EBB334) appears only when the user needs to act or be warned. If you are tempted to use it for visual interest, choose a neutral instead.", "section": "colors" },
-      { "name": "The Fixed-Scale Rule", "body": "No fluid/clamp typography. HifiMule runs as a desktop Tauri app at consistent DPI. All sizes are fixed rem.", "section": "typography" },
-      { "name": "The No-Display Rule", "body": "Inter is body and label. Do not introduce a display or serif family.", "section": "typography" },
-      { "name": "The Flat-At-Rest Rule", "body": "Shadows appear only in response to hover or selection state. A shadow on an interactive element at rest reads as noise, not depth.", "section": "elevation" },
-      { "name": "The Blur-Is-Structural Rule", "body": "backdrop-filter: blur() is used only on sticky/pinned layers that need to separate from content scrolling beneath them. Never on cards, list items, or anything rendered mid-scroll.", "section": "elevation" }
+      {
+        "name": "The One Wire Rule.",
+        "body": "Use the blue accent family to communicate interaction or state, not to decorate headings or unrelated surfaces.",
+        "section": "colors"
+      },
+      {
+        "name": "The Amber Threshold Rule.",
+        "body": "Reserve amber for warnings requiring attention; the ready-to-sync prompt is neutral with a blue icon.",
+        "section": "colors"
+      },
+      {
+        "name": "The No-Display Rule.",
+        "body": "Keep the functional sans-serif hierarchy; do not add a decorative heading face.",
+        "section": "typography"
+      }
     ],
     "dos": [
-      "Do use Signal Cyan exclusively for actionable and live-state elements.",
-      "Do convey depth through background color steps (Void → Panel → Surface), not shadow stacks.",
-      "Do use Amber (#EBB334) only for warnings that require user attention.",
-      "Do keep type at fixed rem sizes.",
-      "Do maintain WCAG 2.1 AA contrast (≥4.5:1 for body text).",
-      "Do use backdrop-filter: blur() only on sticky/pinned layers.",
-      "Do use Shoelace's native button states. Do not override the focus ring.",
-      "Do show hover lift on media cards as a state signal, not a structural treatment."
+      "**Do** preserve the Record Crate's quiet, precise, trustworthy atmosphere.",
+      "**Do** use shared spacing and white-alpha surface tokens before adding local values.",
+      "**Do** distinguish custom cyan tokens from inherited Shoelace theme tokens.",
+      "**Do** retain selected, focused, disabled, pending, synced, and failed states with meaningful text.",
+      "**Do** let translated labels wrap and keep controls reachable in compact windows.",
+      "**Do** preserve reduced-motion alternatives and verify keyboard behavior on custom controls.",
+      "**Do** treat WCAG 2.1 AA as the accessibility target, not as a certification supplied by a component library."
     ],
     "donts": [
-      "Don't use Signal Cyan decoratively.",
-      "Don't add a second typeface.",
-      "Don't build a glassmorphism card system.",
-      "Don't import the iTunes paradigm: no cover-flow, no smart auto-curated sections, no gradient hero.",
-      "Don't use streaming-app aesthetics: no discovery carousels, no recommendation surfaces.",
-      "Don't use SaaS dashboard patterns: no hero-metric cards.",
-      "Don't add shadows at rest.",
-      "Don't use uppercase for body copy or titles.",
-      "Don't introduce a new accent color without removing one."
+      "**Don't** introduce promotional streaming chrome, cover-flow showmanship, or decorative metric cards.",
+      "**Don't** add a decorative display font or uppercase body copy.",
+      "**Don't** convert local blur and shadow exceptions into an ornamental card system.",
+      "**Don't** erase user-configured Auto-Fill or discovery functions through an aesthetic prohibition.",
+      "**Don't** assume a root token override replaces a theme class applied on a descendant.",
+      "**Don't** describe unverified contrast, focus, or responsive behavior as guaranteed compliance."
     ]
   }
 }

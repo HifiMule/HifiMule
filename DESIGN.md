@@ -1,6 +1,6 @@
 ---
-name: HifiMule
-description: Sync your open-source media server library to portable devices.
+name: "HifiMule"
+description: "A quiet, precise desktop interface for listening and preparing portable media collections."
 colors:
   void: "#0b1020"
   panel: "#151d31"
@@ -9,232 +9,223 @@ colors:
   signal-cyan: "#22b8f0"
   ink: "#f1f5f9"
   ink-dim: "#b0bac6"
-  amber-warn: "#EBB334"
-  border-subtle: "#ffffff1a"
+  amber-warn: "#ebb334"
+  surface-border: "rgba(255, 255, 255, 0.1)"
+  surface-border-soft: "rgba(255, 255, 255, 0.08)"
+  surface-fill: "rgba(255, 255, 255, 0.03)"
+  surface-fill-hover: "rgba(255, 255, 255, 0.06)"
+  control-background: "hsl(240, 5.9%, 11%)"
+  control-text: "hsl(240 5.6% 73%)"
+  control-primary: "hsl(198.7 97.9% 57.2%)"
+  control-primary-hover: "hsl(199.7 85.9% 47.7%)"
+  control-danger: "hsl(0 98.6% 67.9%)"
+  control-success: "hsl(141.6 72.4% 55.2%)"
 typography:
   body:
     fontFamily: "Inter, system-ui, -apple-system, sans-serif"
     fontSize: "1rem"
-    fontWeight: 400
-    lineHeight: 1.5
-    letterSpacing: "normal"
+  headline:
+    fontFamily: "Inter, system-ui, -apple-system, sans-serif"
+    fontSize: "2em"
+    fontWeight: 600
+    letterSpacing: "0"
+  section-title:
+    fontFamily: "Inter, system-ui, -apple-system, sans-serif"
+    fontSize: "1.5em"
+    fontWeight: 600
+    letterSpacing: "0"
+  title:
+    fontFamily: "Inter, system-ui, -apple-system, sans-serif"
+    fontSize: "0.9rem"
+    fontWeight: 600
   label:
     fontFamily: "Inter, system-ui, -apple-system, sans-serif"
     fontSize: "0.8rem"
-    fontWeight: 600
-    lineHeight: 1.2
-    letterSpacing: "0.01em"
-  title:
+  basket-title:
     fontFamily: "Inter, system-ui, -apple-system, sans-serif"
-    fontSize: "0.95rem"
-    fontWeight: 600
-    lineHeight: 1.3
-    letterSpacing: "normal"
-  headline:
+    fontSize: "0.85rem"
+    fontWeight: 500
+  metadata:
     fontFamily: "Inter, system-ui, -apple-system, sans-serif"
-    fontSize: "1.25rem"
-    fontWeight: 600
-    lineHeight: 1.25
-    letterSpacing: "-0.01em"
+    fontSize: "0.75rem"
 rounded:
+  xs: "3px"
   sm: "4px"
   md: "8px"
 spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "16px"
-  lg: "24px"
-  xl: "32px"
+  2xs: "0.25rem"
+  xs: "0.5rem"
+  sm: "0.75rem"
+  md: "1rem"
+  lg: "1.5rem"
 components:
   button-primary:
-    backgroundColor: "{colors.signal-cyan}"
-    textColor: "{colors.void}"
+    backgroundColor: "{colors.control-primary}"
+    textColor: "{colors.control-background}"
     rounded: "{rounded.sm}"
+    height: "2.5rem"
     padding: "0 1rem"
-  button-ghost:
-    backgroundColor: "transparent"
-    textColor: "{colors.ink}"
+  button-default:
+    backgroundColor: "{colors.control-background}"
+    textColor: "{colors.control-text}"
     rounded: "{rounded.sm}"
+    height: "2.5rem"
     padding: "0 1rem"
+  button-danger:
+    backgroundColor: "{colors.control-danger}"
+    textColor: "{colors.control-background}"
+    rounded: "{rounded.sm}"
+    height: "2.5rem"
+    padding: "0 1rem"
+  input:
+    backgroundColor: "{colors.control-background}"
+    rounded: "{rounded.sm}"
+    height: "2.5rem"
   card-media:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
     rounded: "{rounded.md}"
-    padding: "0"
   card-basket-item:
-    backgroundColor: "rgba(255,255,255,0.045)"
+    backgroundColor: "{colors.surface-fill}"
     textColor: "{colors.ink}"
     rounded: "{rounded.md}"
-    padding: "0.5rem"
+    padding: "{spacing.xs}"
+  browse-tab:
+    backgroundColor: "transparent"
+    textColor: "{colors.ink}"
+    rounded: "{rounded.xs}"
+    padding: "0 6px"
+  browse-tab-selected:
+    backgroundColor: "rgba(34, 184, 240, 0.09)"
+    textColor: "{colors.signal-cyan}"
+    rounded: "{rounded.xs}"
 ---
 
 # Design System: HifiMule
 
-## 1. Overview
+## Overview
 
 **Creative North Star: "The Record Crate"**
 
-HifiMule is the quiet room where a serious listener manages their collection. The interface is dark by necessity and conviction: audiophiles work at their desk with a device in hand, focused. There are no recommendations, no discovery nudges, no promotional surfaces. The UI holds the library the way a crate holds records: organized, accessible, non-intrusive. The music is the object of attention; the interface is the furniture.
+HifiMule is the quiet room where a serious listener manages their collection. The interface holds the library the way a crate holds records: organized, accessible, non-intrusive. The music is the object of attention; the interface is the furniture. Quiet, precise, trustworthy remains the established direction.
 
-The visual language is deep navy and silence. A very dark blue-tinted void (`#0b1020`) recedes behind layered panel surfaces. The only color that speaks is Signal Cyan (`#22b8f0`): one live wire in an otherwise dark board, used exclusively on primary actions, active states, and real-time indicators. Everything else is slate, transparency, and restraint. New color elements must earn their place by communicating state, never by decorating.
-
-The system explicitly rejects the iTunes paradigm: no glossy gradients, no cover-flow showmanship, no paternalistic "smart" features that make choices for the user. It also rejects the streaming-app aesthetic — no discovery carousels, no algorithmic surfaces, no warm gradients designed to keep users engaged. HifiMule is a tool for people who already know what they want.
+Deep navy surfaces, restrained blue signals, compact controls, and visible state make this a working desktop tool. Artwork provides variety. The system rejects glossy iTunes-style showmanship, promotional streaming surfaces, and SaaS metric-card decoration. User-configured Auto-Fill and discovery controls are existing functionality, not a reason to introduce promotional browsing.
 
 **Key Characteristics:**
-- Deep dark void with a cold blue tint — not generic dark mode, but a specific nautical-instrument depth
-- Single accent color (Signal Cyan) used only on actionable and live-state elements
-- Shoelace web components for consistent interactive primitives
-- Tonal depth through transparency stacking over the gradient base rather than hard shadows
-- Inter at fixed sizes: legibility over expression
-- Density-comfortable: the primary view shows a full media grid with a persistent basket sidebar
 
-## 2. Colors: The Signal Palette
+- Dark navy foundations with translucent panel layers.
+- Signal Cyan for custom actions and state; Shoelace sky-blue and semantic colors for inherited controls.
+- Inter for application text, with native system-font stacks inside Shoelace primitives.
+- Dense library browsing beside a persistent, resizable device basket.
+- Brief decelerating motion and explicit keyboard focus treatments.
 
-One accent, eight shades of dark, and a warning amber for real problems.
+This refresh describes the current working tree, including uncommitted UI changes. Sources: `hifimule-ui/src/styles.css`, `src/components/MediaCard.ts`, `src/components/BasketSidebar.ts`, `src/components/ServerHub.ts`, `src/login.ts`, `index.html`, and the installed Shoelace dark theme and button styles. Desktop and compact layout fixtures plus the selection fixture were visually inspected. Fixtures contain placeholder content; they are not complete production-screen or accessibility verification.
+
+## Colors
+
+The palette keeps the established dark-blue atmosphere; semantic color communicates action, selection, storage, and outcomes.
 
 ### Primary
-- **Signal Cyan** (`#22b8f0`): The sole active-state color. Used on: primary buttons, selected card ring, active device chip, managed folder icon, folder hover state, progress indicators, basket toggle hover border, and link elements. If it glows cyan, something is active or requires action. Never used decoratively.
+
+**Signal Cyan** is the custom accent (`--accent`, with raw channels in `--accent-rgb`). Custom focus outlines, selected browse text, tint backgrounds, and capacity segments use it directly.
+
+**Control Primary** and **Control Primary Hover** record Shoelace's installed dark-theme sky colors. Shoelace controls retain that primary ramp through `.sl-theme-dark`; custom actions and selection treatments use Signal Cyan through `--accent`. The former root-only primary-600 override has been removed so the two roles are explicit and independent. Preserve this distinction when changing either palette.
 
 ### Neutral
-- **Void** (`#0b1020`): The window background. The deepest layer. Covered by a radial cyan glow at top-left (12% opacity) and a 135° gradient to near-black at the bottom. Sets the whole atmospheric context.
-- **Panel** (`#151d31`): Sidebar backgrounds, library header, browse-mode bar. One step lighter than Void; clearly a surface, not the floor.
-- **Panel-Strong** (`#10182b`): A deeper panel variant used for high-contrast panel moments. Rarely deployed; reserve for elements that need to read as lower than Panel.
-- **Surface** (`#24252b`): Card backgrounds, modal panel backgrounds. A deliberate step away from the navy toward warm charcoal — the neutral shelf things sit on.
-- **Ink** (`#f1f5f9`): Primary body text. Light slate, not pure white. Stays on-tone with the cold-blue atmosphere.
-- **Ink-Dim** (`#b0bac6`): Secondary metadata, captions, placeholder text. Used for less critical information like subtitle text under a card title, track counts, and folder paths.
-- **Amber-Warn** (`#EBB334`): Reserved strictly for real problems: dirty manifest warning, capacity amber zone, sync warning banners. Not used for emphasis or decoration.
-- **Border-Subtle** (`rgba(255,255,255,0.10)`): The default border for all surfaces. White transparency over dark backgrounds reads as a lift, not a line.
 
-### Implemented Tokens (`:root` in `styles.css`)
+**Void** is the page foundation. **Panel** and **Panel Strong** support navy layers; **Surface** backs media cards and dialog panels. **Ink** carries primary text, **Ink Dim** secondary metadata. **Surface Border**, **Surface Border Soft**, **Surface Fill**, and **Surface Fill Hover** are the reused white-alpha surface vocabulary. Control Background and Control Text belong to Shoelace's dark neutral palette.
 
-The values above are declared as CSS custom properties. Reference these names; do **not** reach for Shoelace `--sl-color-neutral-*` for text or surfaces (its dark-theme ramp fails contrast below stop 600).
+The body includes a restrained cyan radial wash over a diagonal dark gradient. These existing atmospheric backgrounds are compatible with the established direction; promotional gradient heroes are not.
 
-| Token | Value | Use |
-|-------|-------|-----|
-| `--ink` | `#f1f5f9` | Primary text |
-| `--ink-dim` | `#b0bac6` | Secondary text / metadata (8.5:1 on panels) |
-| `--amber-warn` | `#ebb334` | Warnings only |
-| `--surface-border` | `rgba(255,255,255,0.10)` | Strong hairline (panel edges, action dividers) |
-| `--surface-border-soft` | `rgba(255,255,255,0.08)` | Standard divider |
-| `--surface-fill` | `rgba(255,255,255,0.03)` | Subtle panel/card wash |
-| `--surface-fill-hover` | `rgba(255,255,255,0.06)` | Interactive surface (hover) |
-| `--radius` | `8px` | Card / panel corners (Shoelace's 6px stays for inputs) |
-| `--ease-out-quart` / `--ease-out-expo` | cubic-beziers | State / spatial motion curves |
-| `--dur-fast` / `--dur-base` | `140ms` / `200ms` | Transition durations |
+### Semantic states
 
-### Named Rules
-**The One Wire Rule.** Signal Cyan appears on ≤10% of any given screen. Only active and actionable elements carry it. A card grid where 40% of items glow cyan means 40% are selected; it conveys real state. Decorative use is prohibited by definition.
+**Amber Warn** marks interrupted sync, repair, and capacity warnings. Shoelace success and danger tokens mark synced/completed and destructive/error states. These are semantic colors, not extra brand accents.
 
-**The Amber Threshold.** Amber (`#EBB334`) appears only when the user needs to act or be warned. If you are tempted to use it for visual interest, choose a neutral instead.
+**The One Wire Rule.** Use the blue accent family to communicate interaction or state, not to decorate headings or unrelated surfaces.
 
-## 3. Typography
+**The Amber Threshold Rule.** Reserve amber for warnings requiring attention; the ready-to-sync prompt is neutral with a blue icon.
 
-**Body Font:** Inter (with system-ui, -apple-system fallback)
+## Typography
 
-**Character:** A single family across every text role. Product UI — no display/body pairing needed. Inter's legibility at small sizes and its precise weight range (400 body, 500 medium, 600 semibold) carry the entire hierarchy without a second typeface. The dark background demands clean, hinted glyphs; Inter delivers.
+Application text uses Inter with system fallbacks; Inter is bundled locally as variable WOFF2 subsets from `@fontsource-variable/inter` 5.2.8, with its SIL OFL license included in the app. `src/assets/fonts/inter.css` uses `font-display: swap` and Unicode ranges so only needed subsets load; startup does not depend on Google Fonts. System fallbacks cover unsupported scripts. Shoelace controls use their own `--sl-font-sans` through `--sl-input-font-family` unless a component explicitly inherits the application font.
 
-### Hierarchy
-- **Headline** (600, 1.25rem, -0.01em tracking): Section titles — library view h1, basket header, modal titles. One per major region.
-- **Title** (600, 0.95rem, normal tracking): Component titles, card label rows, panel headers like "Devices." Tight but readable.
-- **Body** (400, 1rem, 1.5 line-height): Form labels, descriptive paragraphs, long-form content. Line length capped at 65ch in prose contexts.
-- **Label** (600, 0.8rem, 0.01em tracking): Metadata chips, capacity status, sync counters, browse mode button text, folder type badges. Upper-weight labels read clearly at small sizes without uppercase.
-- **Caption** (400, 0.75rem): Timestamps, secondary metadata, item paths. Uses Ink-Dim color.
+The frontmatter records observed roles, not a newly imposed scale. Body remains the browser-default medium size (normally 16px); h1 and h2 retain browser-default relative sizes (2em and 1.5em) with weight 600 and zero tracking. The inspected fixture rendered those headings at 32px and 24px. There is no authored universal 1.25rem headline or 1.5 body line-height.
 
-### Named Rules
-**The Fixed-Scale Rule.** No fluid/clamp typography. HifiMule runs as a desktop Tauri app at consistent DPI. `clamp()` headings that shrink in a narrow panel introduce noise, not responsiveness. All sizes are fixed rem.
+Media titles use the title role; subtitles use label size and clamp to three lines with long-word wrapping. Basket titles and metadata have their own smaller roles. Browse tabs use 0.6875rem text, 1.3 line-height, and wrapping. Short server-group labels use 0.7rem, weight 600, uppercase, and 0.04em tracking. Do not generalize that treatment to titles or prose.
 
-**The No-Display Rule.** Inter is body and label. Do not introduce a display or serif family. The collection cover art provides visual richness; the type system provides structure.
+**The No-Display Rule.** Keep the functional sans-serif hierarchy; do not add a decorative heading face.
 
-## 4. Elevation
+## Layout
 
-This system is flat by default. Depth is conveyed through tonal layering: each panel level has a distinct background color, and transparency stacking over the gradient base creates perceived depth without casting shadows.
+The viewport-height shell is split between a flexible library and an end-anchored basket. The split divider is 4px with a 12px hit area. Basket bounds are 330–440px, reduced to 300–360px at viewport widths up to 980px. The basket's own minimum follows that bound. Library content and basket items scroll independently; short windows can also scroll the containing panels so controls remain reachable.
 
-Media cards receive a shadow on hover only (`0 10px 24px rgba(0,0,0,0.28)`) — depth is a state signal, not a structural role. At rest, cards sit flat. The hover lift confirms interactivity without pre-announcing it.
+The media grid starts with auto-filled columns of at least 190px and a 1.25rem gap. At viewport widths up to 1120px, its minimum becomes 170px and library horizontal padding becomes 1.5rem. The library is an inline-size query container: at 47.5rem or less, its header stacks and the server switcher stretches; at 37.5rem or less, padding and grid gap become 1rem and columns can shrink below 170px to fit the panel. Window widths and library container widths are different conditions.
 
-Modals use the Surface color (`#24252b`) and an 8px radius. They feel like a shelf raised above the panel, not a floating card with glow.
+The shared spacing scale maps directly to `--space-2xs` through `--space-lg`; card bodies and other local patterns retain their observed intermediate values. Browse controls wrap in a bounded scroll region (maximum block size `min(30vh, 20rem)`). A 720px maximum-height query reduces vertical padding. Playback controls live in the library layout flow, with additional narrow-screen and container rules; the desktop shell is not a fully separate mobile composition.
 
-The backdrop-filter blur on the library panel and browse-mode bar (`blur(10px)`, `blur(8px)`) is structural: it reinforces the panel hierarchy by visually separating the sticky header from scrolling content beneath. It is not decorative glassmorphism.
+## Elevation & Depth
 
-### Named Rules
-**The Flat-At-Rest Rule.** Shadows appear only in response to hover or selection state. A shadow on an interactive element at rest reads as noise, not depth.
+Tonal layers and hairline borders carry most structural separation. Media cards acquire a hover shadow (`0 10px 24px rgba(0, 0, 0, 0.28)`) and move up 2px. The synced badge has a small resting shadow (`0 2px 4px rgba(0, 0, 0, 0.3)`), and playback popovers have stronger shadows. The old blanket ban on resting shadows did not describe these existing exceptions.
 
-**The Blur-Is-Structural Rule.** `backdrop-filter: blur()` is used only on sticky/pinned layers that need to separate from content scrolling beneath them. Never on cards, list items, or anything rendered mid-scroll.
+Blur is local and functional: track-count badges use 4px over artwork; playback controls can use 10px on an isolated background layer. Do not turn those exceptions into a frosted-card visual system.
 
-## 5. Components
+Motion uses the authored quart and expo deceleration curves, with fast/base durations of 140ms and 200ms. Capacity segments animate their transforms over 300ms. Selection rings reveal over 240ms and reverse over 120ms; newly added basket rows enter from the library side over 200ms, while existing rows stay still on refresh. Capacity segments retain their displayed transform across sidebar rerenders and settle over 300ms; device switches do not interpolate between devices. Reduced motion uses a 120ms row fade and immediate capacity updates. Reduced-motion CSS suppresses general animation and hover movement while retaining a short 120ms opacity alternative for selection feedback. Shadow-DOM component internals require separate verification; a universal light-DOM selector is not proof of full reduced-motion coverage.
 
-### Buttons
-Delegated to Shoelace (`sl-button`). The system uses Shoelace's variant API directly.
+## Shapes
 
-- **Primary** (`variant="primary"`): Signal Cyan background, void text. Full-width in forms; auto-width in toolbars. Radius inherits from `--sl-border-radius-medium` (Shoelace default: ~4px). Primary action in any screen — "Connect", "Sync now", "Save changes".
-- **Default / Ghost** (`variant="default"`): Transparent with a border. Used for secondary actions — "Cancel", filter chips in browse mode, basket item removal.
-- **Danger** (`variant="danger"`): Reserved for destructive actions only — prune, delete, format device.
+Cards and panels share the 8px `--radius`. Shoelace medium control corners are 4px and small corners are 3px in the installed theme. Browse tabs also use 3px. Capacity bars use 4px corners, with 2px swatches. Artwork is square with rounded upper corners; the selected inset ring follows that silhouette. Borders are usually 1px, with dashed borders distinguishing configured Auto-Fill slots.
 
-States: Shoelace handles hover, focus, active, disabled, and loading natively. Do not override Shoelace's focus ring; it satisfies WCAG 2.1 AA keyboard requirements.
+## Components
 
-### Browse Mode Chips
-The `#browse-mode-bar` hosts filter buttons (Artists, Albums, Genres, Playlists, Songs). These are Shoelace default-variant buttons at small size. The active/current view is not visually distinguished at the moment — a clear selected state using Signal Cyan border or background tint would complete this pattern.
+### Buttons and inputs
 
-### Media Cards (`.media-card`)
-The primary browsing surface.
+Compact and familiar. Use Shoelace variant APIs for primary, default, danger, loading, and disabled states. Standard primary buttons take primary-600 with neutral-0 text; hover uses primary-500. Default buttons have a dark neutral fill and border, not a universal transparent ghost treatment. Danger is reserved for destructive operations. Medium controls are 2.5rem tall; local small sizes remain valid.
 
-- **Shape:** 8px radius, matching dialog and surface radius
-- **Background:** Surface (`#24252b`) with a 1px Border-Subtle border
-- **Image area:** 1:1 aspect ratio, full-width, covers the upper card
-- **Content block:** Padding `0.65rem 0.75rem`, title in Title weight, subtitle in Caption/Ink-Dim
-- **Hover:** `translateY(-2px)` + shadow (`0 10px 24px rgba(0,0,0,0.28)`) + Signal Cyan border tint (`rgba(34,184,240,0.35)`)
-- **Selected state:** 4px inset Signal Cyan ring on image (`box-shadow: inset 0 0 0 4px #22b8f0`), selection overlay at 0.4 opacity with basket toggle button
-- **Synced state:** 0.7 opacity; a success badge top-right
+Inputs use Shoelace background, border, text, and focus tokens. Preserve component keyboard and loading behavior, and application error copy. Retaining library focus styling is useful but does not by itself establish WCAG compliance. Custom controls use visible 2px blue outlines with offsets appropriate to the surface.
 
-### Basket Item Cards (`.basket-item-card`)
-List items in the right sidebar.
+### Navigation and server connection
 
-- **Shape:** 8px radius
-- **Background:** `rgba(255,255,255,0.045)` with `rgba(255,255,255,0.075)` border
-- **Layout:** Flex row — 48px thumbnail, title/meta block, remove action
-- **Hover:** Background lifts to `rgba(255,255,255,0.06)`, Signal Cyan border tint
-- **Special variants:** Auto-fill slot (dashed Signal Cyan border), Artist/Genre items (neutral border, icon placeholder)
+Browse tabs are small, wrapping controls. The pressed state uses cyan text, a faint cyan background, and an inset 2px blue underline; unavailable controls have reduced opacity. The server switcher is a bordered, dark connection chip with truncated identifying text and a dropdown. Its width responds to the library container. Navigation state must remain explicit; the earlier description of undifferentiated browse buttons is obsolete.
 
-### Capacity Bar (`.capacity-bar`)
+### Media cards
+
+Artwork leads; controls remain compact. The surface has the shared radius and border; content padding is `0.65rem 0.75rem 0.7rem`. Hover lifts and tints the border. The dark selection overlay becomes visible on hover, focus within, or selection. Selected artwork has a 4px inset blue ring; the ring transition reverses cleanly on rapid toggles. A title button carries keyboard focus. Synced cards use 0.7 opacity and a success badge; navigating cards use 0.75 opacity, including when already synced.
+
+Cards use `content-visibility: auto` with an intrinsic size estimate. Radio cards temporarily relax containment and clipping for interactive hints. Preserve these behavioral exceptions when reusing the pattern.
+
+### Basket rows
+
+A 48px thumbnail, compact title and metadata, and removal controls form each row. The row has half-rem padding, a three-quarter-rem gap, a faint white fill, and an 8px radius. Hover uses the shared hover fill and cyan-tinted border. Mixed-server rows retain source labels; locked content has an explicit placeholder. Auto-Fill slots use dashed borders; artist and genre groups have their own icon treatment.
+
+### Capacity bar
+
 A horizontal 8px bar showing device storage state. Segments: unmanaged used content (white 25%), reserved selection (solid Signal Cyan), recorded Auto-Fill usage (Signal Cyan at 35% opacity), and available space (transparent). Auto-Fill is shown only when recorded usage is positive; clip its segment to the width left after the reservation while retaining its full measured size in the text.
 
 The Compact layout keeps manual track/size totals above the bar. Below it, the primary row shows available space after the reservation and recorded Auto-Fill usage, followed by a secondary row with a translucent cyan swatch and “used by Auto-Fill.” Labels wrap in narrow sidebars, and the bar has a text description for assistive technology. With no recorded Auto-Fill, retain the existing remaining-space wording and omit the secondary row. Amber and red warnings keep priority and override the reserved-selection segment and primary status; measured Auto-Fill text remains secondary. These display values do not change sync admission or Auto-Fill budgets.
 
-### Sync Progress Panel (`.sync-progress-panel`)
-Replaces the basket item list during an active sync. Shows current file (truncated), byte progress, file counter. Transitions to success or error state on completion.
+### Playback, status, and dialogs
 
-- **Success:** centered icon + label, Shoelace success color
-- **Error:** centered icon + label + scrollable error list
+Playback controls persist below library content, with title/source, transport actions, seek progress, and output selection. Guidance and output panels use bounded overlays and visible focus. Empty, disconnected, and unavailable states retain explanatory text rather than relying on color.
 
-### Modals and Dialogs
-Three dialogs: Init Device, Repair, Device Settings. All use Shoelace `<sl-dialog>` with a custom panel override:
+The ready-to-sync banner is neutral with a blue signal icon. Active sync exposes progress and current work; terminal states distinguish completion and failure. Modal forms use Shoelace dialogs with local surface and width overrides. Keep dialog-specific sizing and scroll behavior with the component rather than assuming all dialogs share a single size.
 
-- **Background:** Surface (`#24252b`) with Ink (`#f1f5f9`) text
-- **Max width:** `min(92vw, 720px)` (Repair), `min(92vw, 560px)` (Init Device)
-- **Radius:** 8px on the panel
-- **Body:** scrollable with `max-height` constraints; a right-side padding offset for the scrollbar
-
-### Inputs and Forms
-Shoelace `<sl-input>` components. Height medium set to `2.5rem` via `--sl-input-height-medium`. Labels in Label weight. Error states via Shoelace's built-in danger variant.
-
-## 6. Do's and Don'ts
+## Do's and Don'ts
 
 ### Do:
-- **Do** use Signal Cyan exclusively for actionable and live-state elements. If it's cyan, it means the user can interact or something is happening right now.
-- **Do** convey depth through background color steps (Void → Panel → Surface), not shadow stacks.
-- **Do** use Amber (`#EBB334`) only for warnings that require user attention: manifest integrity, capacity thresholds, sync failures.
-- **Do** keep type at fixed rem sizes. This is a desktop Tauri app at consistent DPI; fluid typography adds noise.
-- **Do** maintain WCAG 2.1 AA contrast: `#f1f5f9` (Ink) on `#151d31` (Panel) is approximately 12:1; `#b0bac6` (Ink-Dim) on `#0b1020` (Void) must be verified to stay above 4.5:1.
-- **Do** use `backdrop-filter: blur()` only on sticky/pinned layers separating from scrolling content beneath. One structural purpose.
-- **Do** use Shoelace's native button states (hover, focus, active, disabled, loading). Do not override the focus ring; it handles WCAG keyboard compliance.
-- **Do** show hover lift (`translateY(-2px)` + shadow) on media cards as a state signal, not a structural treatment.
+
+- **Do** preserve the Record Crate's quiet, precise, trustworthy atmosphere.
+- **Do** use shared spacing and white-alpha surface tokens before adding local values.
+- **Do** distinguish custom cyan tokens from inherited Shoelace theme tokens.
+- **Do** retain selected, focused, disabled, pending, synced, and failed states with meaningful text.
+- **Do** let translated labels wrap and keep controls reachable in compact windows.
+- **Do** preserve reduced-motion alternatives and verify keyboard behavior on custom controls.
+- **Do** treat WCAG 2.1 AA as the accessibility target, not as a certification supplied by a component library.
 
 ### Don't:
-- **Don't** use Signal Cyan decoratively. Not on headings, not as a background tint on non-active states, not as a gradient.
-- **Don't** add a second typeface. Inter carries the entire hierarchy. A display or serif family for headings would be decorative, not communicative.
-- **Don't** build a glassmorphism card system. The blur on the library panel header is earned by being pinned above scrolling content. A blurry media card with frosted-glass texture is the exact visual language HifiMule rejects.
-- **Don't** import the iTunes paradigm: no cover-flow, no "smart" auto-curated sections, no gradient hero for featured content, no promotional chrome of any kind.
-- **Don't** use streaming-app aesthetics: no discovery carousels, no recommendation surfaces, no mood-based color washes.
-- **Don't** use SaaS dashboard patterns: no hero-metric cards (big number + small label + gradient accent), no stats overview panels.
-- **Don't** add shadows at rest. Shadows on interactive elements before hover introduces visual noise that implies permanence where there should be none.
-- **Don't** use uppercase for body copy or titles. Reserve uppercase for very short labels (4 words or fewer) like filter chips or folder-type badges. Sentences in uppercase are unreadable at the sizes used in this UI.
-- **Don't** introduce a new accent color without removing one. The palette is deliberately monochromatic except for Signal Cyan and Amber-Warn. A third accent is a third distraction.
+
+- **Don't** introduce promotional streaming chrome, cover-flow showmanship, or decorative metric cards.
+- **Don't** add a decorative display font or uppercase body copy.
+- **Don't** convert local blur and shadow exceptions into an ornamental card system.
+- **Don't** erase user-configured Auto-Fill or discovery functions through an aesthetic prohibition.
+- **Don't** assume a root token override replaces a theme class applied on a descendant.
+- **Don't** describe unverified contrast, focus, or responsive behavior as guaranteed compliance.

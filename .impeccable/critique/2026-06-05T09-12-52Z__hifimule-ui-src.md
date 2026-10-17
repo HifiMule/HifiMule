@@ -5,6 +5,7 @@ p0_count: 1
 p1_count: 1
 timestamp: 2026-06-05T09-12-52Z
 slug: hifimule-ui-src
+closed: true
 ---
 ## Design Health Score
 

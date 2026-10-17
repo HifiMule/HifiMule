@@ -64,15 +64,21 @@ export class PlaylistCurationView {
             this.render();
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            this.container.innerHTML = `<sl-alert variant="danger" open style="margin: 1rem;">${msg}</sl-alert>`;
+            const alert = document.createElement('sl-alert');
+            alert.setAttribute('variant', 'danger');
+            alert.setAttribute('open', '');
+            alert.style.margin = '1rem';
+            alert.textContent = msg;
+            this.container.replaceChildren(alert);
         }
     }
 
     private buildArtistIndex(): Map<string, Set<string>> {
         const index = new Map<string, Set<string>>();
         for (const track of this.tracks) {
-            const artist = track.artistName || 'Unknown Artist';
-            const album = track.albumName || 'Unknown Album';
+            // Empty keys identify missing metadata without colliding with real names.
+            const artist = track.artistName || '';
+            const album = track.albumName || '';
             if (!index.has(artist)) index.set(artist, new Set());
             index.get(artist)!.add(album);
         }
@@ -81,15 +87,15 @@ export class PlaylistCurationView {
 
     private getTrackIdsByArtist(artistName: string): string[] {
         return this.tracks
-            .filter(track => (track.artistName || 'Unknown Artist') === artistName)
+            .filter(track => (track.artistName || '') === artistName)
             .map(track => track.id);
     }
 
     private getTrackIdsByAlbum(artistName: string, albumName: string): string[] {
         return this.tracks
             .filter(track =>
-                (track.artistName || 'Unknown Artist') === artistName &&
-                (track.albumName || 'Unknown Album') === albumName
+                (track.artistName || '') === artistName &&
+                (track.albumName || '') === albumName
             )
             .map(track => track.id);
     }
@@ -97,8 +103,8 @@ export class PlaylistCurationView {
     private getTracksForPanel(): BrowseTrack[] {
         if (this.selectedArtist === null) return this.tracks;
         return this.tracks.filter(track => {
-            if ((track.artistName || 'Unknown Artist') !== this.selectedArtist) return false;
-            if (this.selectedAlbum !== null && (track.albumName || 'Unknown Album') !== this.selectedAlbum) return false;
+            if ((track.artistName || '') !== this.selectedArtist) return false;
+            if (this.selectedAlbum !== null && (track.albumName || '') !== this.selectedAlbum) return false;
             return true;
         });
     }
@@ -109,22 +115,22 @@ export class PlaylistCurationView {
         if (this.tracks.length === 0) {
             return `<p class="curation-empty-state">${t('playlist.curation.no_artists')}</p>`;
         }
-        return `<div class="curation-artist-row curation-all-artists${selectedArtist === null ? ' curation-selected' : ''}"
-                     role="button" tabindex="0"
+        return `<div class="curation-artist-row curation-all-artists${selectedArtist === null ? ' curation-selected' : ''}">
+                    <button type="button" class="curation-row-select curation-row-label"
                      aria-pressed="${selectedArtist === null ? 'true' : 'false'}">
-                    <span class="curation-row-label curation-row-label--italic">${t('playlist.curation.all_artists')}</span>
+                    <span class="curation-row-label curation-row-label--italic">${t('playlist.curation.all_artists')}</span></button>
                 </div>
                 ${artists.map(artist => `
                  <div class="curation-artist-row${artist === selectedArtist ? ' curation-selected' : ''}"
-                      data-artist="${this.escapeAttr(artist)}"
-                      role="button" tabindex="0"
+                      data-artist="${this.escapeAttr(artist)}">
+                     <button type="button" class="curation-row-select curation-row-label"
                       aria-pressed="${artist === selectedArtist ? 'true' : 'false'}">
-                     <span class="curation-row-label" title="${this.escapeAttr(artist)}">${this.escapeHtml(artist)}</span>
+                     <span class="curation-row-label" title="${this.escapeAttr(artist || t('playlist.curation.unknown_artist'))}">${this.escapeHtml(artist || t('playlist.curation.unknown_artist'))}</span></button>
                      <sl-icon-button
                          class="curation-remove-artist curation-row-action"
                          name="x-circle"
                          data-artist="${this.escapeAttr(artist)}"
-                         label="${t('playlist.curation.remove_artist')}"
+                         label="${this.escapeAttr(t('playlist.curation.remove_artist_named', { name: artist || t('playlist.curation.unknown_artist') }))}"
                          ${this.isMutating ? 'disabled' : ''}
                      ></sl-icon-button>
                  </div>
@@ -135,24 +141,24 @@ export class PlaylistCurationView {
         if (selectedArtist === null) {
             return `<p class="curation-empty-state">${t('playlist.curation.select_artist')}</p>`;
         }
-        return `<div class="curation-album-row curation-all-albums${this.selectedAlbum === null ? ' curation-album-focused' : ''}"
-                     role="button" tabindex="0"
+        return `<div class="curation-album-row curation-all-albums${this.selectedAlbum === null ? ' curation-album-focused' : ''}">
+                    <button type="button" class="curation-row-select curation-row-label"
                      aria-pressed="${this.selectedAlbum === null ? 'true' : 'false'}">
-                    <span class="curation-row-label curation-row-label--italic">${t('playlist.curation.all_albums')}</span>
+                    <span class="curation-row-label curation-row-label--italic">${t('playlist.curation.all_albums')}</span></button>
                 </div>
                 ${albums.map(album => `
                  <div class="curation-album-row${album === this.selectedAlbum ? ' curation-album-focused' : ''}"
                       data-artist="${this.escapeAttr(selectedArtist)}"
-                      data-album="${this.escapeAttr(album)}"
-                      role="button" tabindex="0"
+                      data-album="${this.escapeAttr(album)}">
+                     <button type="button" class="curation-row-select curation-row-label"
                       aria-pressed="${album === this.selectedAlbum ? 'true' : 'false'}">
-                     <span class="curation-row-label" title="${this.escapeAttr(album)}">${this.escapeHtml(album)}</span>
+                     <span class="curation-row-label" title="${this.escapeAttr(album || t('playlist.curation.unknown_album'))}">${this.escapeHtml(album || t('playlist.curation.unknown_album'))}</span></button>
                      <sl-icon-button
                          class="curation-remove-album curation-row-action"
                          name="x-circle"
                          data-artist="${this.escapeAttr(selectedArtist)}"
                          data-album="${this.escapeAttr(album)}"
-                         label="${t('playlist.curation.remove_album')}"
+                         label="${this.escapeAttr(t('playlist.curation.remove_album_named', { name: album || t('playlist.curation.unknown_album') }))}"
                          ${this.isMutating ? 'disabled' : ''}
                      ></sl-icon-button>
                  </div>
@@ -170,17 +176,17 @@ export class PlaylistCurationView {
                 <span class="curation-track-duration">${formatDuration(track.duration ?? 0)}</span>
                 ${this.supportsPlaylistWrite ? `
                     <sl-icon-button class="curation-move-up curation-row-action" name="chevron-up"
-                        data-panel-index="${panelIdx}" label="${t('playlist.curation.move_up')}"
+                        data-panel-index="${panelIdx}" label="${this.escapeAttr(t('playlist.curation.move_up_named', { name: track.title }))}"
                         ${panelIdx === 0 || this.isMutating ? 'disabled' : ''}></sl-icon-button>
                     <sl-icon-button class="curation-move-down curation-row-action" name="chevron-down"
-                        data-panel-index="${panelIdx}" label="${t('playlist.curation.move_down')}"
+                        data-panel-index="${panelIdx}" label="${this.escapeAttr(t('playlist.curation.move_down_named', { name: track.title }))}"
                         ${panelIdx === panelTracks.length - 1 || this.isMutating ? 'disabled' : ''}></sl-icon-button>
                 ` : ''}
                 <sl-icon-button
                     class="curation-remove-track curation-row-action"
                     name="x-circle"
                     data-track-id="${this.escapeAttr(track.id)}"
-                    label="${t('playlist.curation.remove_track')}"
+                    label="${this.escapeAttr(t('playlist.curation.remove_track_named', { name: track.title }))}"
                     ${this.isMutating ? 'disabled' : ''}
                 ></sl-icon-button>
             </div>
@@ -216,7 +222,7 @@ export class PlaylistCurationView {
     // Used for: initial load, rename/delete operations, track mutations (add/remove).
     // Artist/album selection and track reorder use the targeted partial methods below.
 
-    private render(): void {
+    private render(focusTarget?: string): void {
         const artistIndex = this.buildArtistIndex();
         const artists = Array.from(artistIndex.keys()).sort((a, b) => a.localeCompare(b));
         if (this.selectedArtist !== null && !artistIndex.has(this.selectedArtist)) {
@@ -244,6 +250,7 @@ export class PlaylistCurationView {
                     ${this.isRenamingPlaylist
                         ? `<sl-input
                                id="playlist-rename-input"
+                               label="${t('playlist.curation.rename_hint')}"
                                value="${this.escapeAttr(this.playlistName)}"
                                size="small"
                                class="curation-rename-input"
@@ -266,7 +273,7 @@ export class PlaylistCurationView {
                                class="playlist-name-title curation-playlist-name"
                                role="button"
                                tabindex="0"
-                               aria-label="${t('playlist.curation.rename_hint')}"
+                               aria-label="${this.escapeAttr(this.playlistName)} — ${t('playlist.curation.rename_hint')}"
                                title="${t('playlist.curation.rename_hint')}"
                            >${this.escapeHtml(this.playlistName)}</span>`
                     }
@@ -305,10 +312,23 @@ export class PlaylistCurationView {
         `;
 
         this.bindEvents();
+        if (focusTarget) void this.focusRenderedControl(focusTarget);
 
         requestAnimationFrame(() => {
             this.container.querySelector<HTMLElement>('.curation-artist-row.curation-selected')?.scrollIntoView({ block: 'nearest' });
         });
+    }
+
+    /** Shoelace inputs cannot receive focus until their shadow input is rendered. */
+    private async focusRenderedControl(selector: string): Promise<void> {
+        const control = this.container.querySelector<HTMLElement & { updateComplete?: Promise<unknown> }>(selector);
+        if (!control) return;
+        await control.updateComplete;
+        // A later render/navigation may have replaced the requested control.
+        if (!control.isConnected || !this.container.contains(control)) return;
+        const active = document.activeElement;
+        if (active !== document.body && active !== null && !this.container.contains(active)) return;
+        control.focus();
     }
 
     // ─── Partial re-render methods ─────────────────────────────────────────────
@@ -334,7 +354,7 @@ export class PlaylistCurationView {
             const isAll = row.classList.contains('curation-all-artists');
             const isSelected = isAll ? selectedArtist === null : row.dataset.artist === selectedArtist;
             row.classList.toggle('curation-selected', isSelected);
-            row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+            row.querySelector('.curation-row-select')?.setAttribute('aria-pressed', String(isSelected));
         });
 
         const albumPanel = this.container.querySelector('#curation-album-panel');
@@ -364,7 +384,7 @@ export class PlaylistCurationView {
             const isAll = row.classList.contains('curation-all-albums');
             const isSelected = isAll ? this.selectedAlbum === null : row.dataset.album === this.selectedAlbum;
             row.classList.toggle('curation-album-focused', isSelected);
-            row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+            row.querySelector('.curation-row-select')?.setAttribute('aria-pressed', String(isSelected));
         });
 
         const trackPanel = this.container.querySelector('#curation-track-panel');
@@ -400,15 +420,9 @@ export class PlaylistCurationView {
             row.addEventListener('click', (e) => {
                 if ((e.target as HTMLElement).closest('.curation-remove-artist')) return;
                 const artist = row.dataset.artist;
-                if (artist) {
+                if (artist !== undefined) {
                     this.selectedArtist = artist;
                     this.updateAlbumsAndTracks();
-                }
-            });
-            row.addEventListener('keydown', (e) => {
-                if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
-                    e.preventDefault();
-                    row.click();
                 }
             });
         });
@@ -417,7 +431,7 @@ export class PlaylistCurationView {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
-                if (artist) await this.removeArtist(artist);
+                if (artist != null) await this.removeArtist(artist);
             });
         });
     }
@@ -432,15 +446,9 @@ export class PlaylistCurationView {
             row.addEventListener('click', (e) => {
                 if ((e.target as HTMLElement).closest('.curation-remove-album')) return;
                 const album = row.dataset.album;
-                if (album) {
+                if (album !== undefined) {
                     this.selectedAlbum = album === this.selectedAlbum ? null : album;
                     this.updateTracksPanel();
-                }
-            });
-            row.addEventListener('keydown', (e) => {
-                if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
-                    e.preventDefault();
-                    row.click();
                 }
             });
         });
@@ -450,7 +458,7 @@ export class PlaylistCurationView {
                 e.stopPropagation();
                 const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
                 const album = (btn as any).dataset?.album ?? btn.closest('[data-album]')?.getAttribute('data-album');
-                if (artist && album) await this.removeAlbum(artist, album);
+                if (artist != null && album != null) await this.removeAlbum(artist, album);
             });
         });
     }
@@ -490,17 +498,13 @@ export class PlaylistCurationView {
         // Rename: click title → enter edit mode
         this.container.querySelector('.playlist-name-title')?.addEventListener('click', () => {
             this.isRenamingPlaylist = true;
-            this.render();
-            const input = this.container.querySelector('#playlist-rename-input') as any;
-            if (input) input.focus();
+            this.render('#playlist-rename-input');
         });
         this.container.querySelector('.playlist-name-title')?.addEventListener('keydown', (e) => {
             if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
                 e.preventDefault();
                 this.isRenamingPlaylist = true;
-                this.render();
-                const input = this.container.querySelector('#playlist-rename-input') as any;
-                if (input) input.focus();
+                this.render('#playlist-rename-input');
             }
         });
 
@@ -511,11 +515,11 @@ export class PlaylistCurationView {
             const newName = input?.value?.trim();
             if (!newName || newName === this.playlistName) {
                 this.isRenamingPlaylist = false;
-                this.render();
+                this.render('.playlist-name-title');
                 return;
             }
             this.isSavingRename = true;
-            this.render();
+            this.render('#playlist-rename-input');
             try {
                 await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
                 this.playlistName = newName;
@@ -527,13 +531,13 @@ export class PlaylistCurationView {
             } finally {
                 this.isSavingRename = false;
             }
-            this.render();
+            this.render(this.isRenamingPlaylist ? '#playlist-rename-input' : '.playlist-name-title');
         });
 
         // Rename: cancel
         this.container.querySelector('.playlist-rename-cancel')?.addEventListener('click', () => {
             this.isRenamingPlaylist = false;
-            this.render();
+            this.render('.playlist-name-title');
         });
 
         // Rename: Escape cancels, Enter confirms
@@ -541,7 +545,7 @@ export class PlaylistCurationView {
             const key = (e as KeyboardEvent).key;
             if (key === 'Escape') {
                 this.isRenamingPlaylist = false;
-                this.render();
+                this.render('.playlist-name-title');
             } else if (key === 'Enter') {
                 this.container.querySelector<HTMLElement>('.playlist-rename-save')?.click();
             }
@@ -710,6 +714,7 @@ export class PlaylistCurationView {
         dialog.innerHTML = `
             <sl-input
                 id="add-tracks-query"
+                label="${t('playlist.curation.add_tracks_placeholder')}"
                 placeholder="${t('playlist.curation.add_tracks_placeholder')}"
                 clearable
                 autofocus
@@ -770,6 +775,12 @@ export class PlaylistCurationView {
 
                 const cb = document.createElement('sl-checkbox') as any;
                 cb.checked = selectedIds.has(track.id);
+                // Shoelace labels its internal input from the default slot;
+                // aria-label on the host only names the surrounding container.
+                const checkboxLabel = document.createElement('span');
+                checkboxLabel.className = 'sr-only';
+                checkboxLabel.textContent = [track.title, track.artistName, track.albumName].filter(Boolean).join(' · ');
+                cb.appendChild(checkboxLabel);
 
                 const info = document.createElement('div');
                 info.className = 'curation-track-result-info';

@@ -186,8 +186,17 @@ export class AutoFillPanel {
         return ALL_SOURCE_KINDS.filter((k) => k !== 'playlist' || this.playlistsSupported);
     }
 
-    private renderBody(): void {
+    private renderBody(movedIndex?: number): void {
         if (!this.dialog) return;
+        const focused = document.activeElement as HTMLElement | null;
+        const ownsFocus = focused && this.dialog.contains(focused);
+        const focusId = ownsFocus ? focused.id : '';
+        // Repeated controls have no IDs. Retain their action and row position;
+        // after removal choose the next row, then the preceding row.
+        const focusClass = ownsFocus ? Array.from(focused.classList).find(name => name.startsWith('af-')) : undefined;
+        const focusGroup = ownsFocus ? focused.dataset.group : undefined;
+        const focusIndex = movedIndex ?? (ownsFocus && focused.dataset.index !== undefined ? Number(focused.dataset.index) : undefined);
+        const openStages = new Map(Array.from((this.dialog as HTMLElement).querySelectorAll('details')).map(el => [el.querySelector('summary')?.textContent, el.open]));
         // A structural change (toggle/source/ordering edit, advanced disclosure) invalidates any
         // prior preview so we never show a stale count. Text-input edits clear it via their own
         // handler (they don't re-render). Bumping the generation also discards any in-flight
@@ -228,15 +237,15 @@ export class AutoFillPanel {
                 ${this.opts.modes.includes('podcasts') ? '' : this.renderFilterStage()}
 
                 ${this.opts.modes.includes('podcasts') ? '' : `<div class="auto-fill-advanced">
-                    <div id="af-advanced-header" class="device-folders-header" role="button" tabindex="0"
+                    <button type="button" id="af-advanced-header" class="device-folders-header"
                          aria-expanded="${this.advancedOpen}">
                         <sl-icon name="chevron-right" class="af-advanced-chevron${this.advancedOpen ? ' af-advanced-chevron--open' : ''}"></sl-icon>
                         <span>${t('basket.autofill.advanced')}</span>
-                    </div>
+                    </button>
                     ${this.advancedOpen ? this.renderAdvanced() : ''}
                 </div>`}
                 ${this.renderBudgetStage()}
-                <div id="af-preview" class="auto-fill-preview">${this.renderPreviewContent()}</div>
+                <div id="af-preview" class="auto-fill-preview" role="status" aria-live="polite" aria-atomic="true">${this.renderPreviewContent()}</div>
             </div>
             <sl-button slot="footer" variant="default" id="af-preview-btn" ${this.previewLoading ? 'loading' : ''}>
                 <sl-icon slot="prefix" name="eye"></sl-icon>
@@ -249,6 +258,36 @@ export class AutoFillPanel {
             </sl-button>
         `;
         this.bindEvents();
+        (this.dialog as HTMLElement).querySelectorAll('details').forEach(el => {
+            const wasOpen = openStages.get(el.querySelector('summary')?.textContent);
+            if (wasOpen !== undefined) el.open = wasOpen;
+        });
+        if (ownsFocus) {
+            let replacement = focusId ? this.dialog.querySelector(`#${CSS.escape(focusId)}`) as HTMLElement | null : null;
+            if (!replacement && focusClass) {
+                const candidates = Array.from((this.dialog as HTMLElement).querySelectorAll<HTMLElement>(`.${CSS.escape(focusClass)}`))
+                    .filter(el => el.dataset.group === focusGroup && !el.hasAttribute('disabled'));
+                replacement = candidates.find(el => Number(el.dataset.index) === focusIndex)
+                    ?? candidates.find(el => focusIndex === undefined || Number(el.dataset.index) > focusIndex)
+                    ?? candidates[candidates.length - 1] ?? null;
+            }
+            if (!replacement && focusClass) {
+                const addControl = focusClass.startsWith('af-source-')
+                    ? `.af-source-add[data-group="${focusGroup === 'fallback' ? 'fallback' : 'source'}"]`
+                    : focusClass.startsWith('af-tier-') ? '.af-tier-add'
+                    : focusClass.startsWith('af-ordering-') ? '#af-ordering-add'
+                    : focusClass.startsWith('af-version-') ? '#af-version-add'
+                    : focusClass.startsWith('af-context-') ? '.af-context-add' : '';
+                if (addControl) replacement = this.dialog.querySelector(addControl);
+            }
+            replacement ??= this.dialog.querySelector('#af-advanced-header, #af-enabled');
+            if (replacement) {
+                const target = replacement;
+                Promise.resolve((target as any).updateComplete).then(() => {
+                    if (target.isConnected) target.focus({ preventScroll: true });
+                });
+            }
+        }
     }
 
     /** Renders the current preview state: loading, error, empty-result, or "~N tracks · ~size".
@@ -329,7 +368,7 @@ export class AutoFillPanel {
             <div class="auto-fill-advanced-body">
                 ${this.renderSourcesStage()}
                 ${this.renderStage(t('basket.autofill.unit'), `
-                    <sl-select id="af-unit" size="small" value="${this.pipeline.unit}">
+                    <sl-select label="${t('basket.autofill.unit')}" class="af-compact-labeled" id="af-unit" size="small" value="${this.pipeline.unit}">
                         ${UNITS.map((u) => `<sl-option value="${u}">${t('basket.autofill.unit_' + u)}</sl-option>`).join('')}
                     </sl-select>
                 `)}
@@ -361,17 +400,17 @@ export class AutoFillPanel {
             <div class="auto-fill-caption">${t('basket.autofill.spotlight_hint')}</div>
             ${pr.spotlight ? `
                 <div class="auto-fill-memory-dial">
-                    <label class="auto-fill-substage-label">${t('basket.autofill.spotlight_share')}</label>
+                    <div class="auto-fill-substage-label">${t('basket.autofill.spotlight_share')}</div>
                     <div class="af-share-cell">
-                        <sl-range id="af-spotlight-share" min="0" max="100" step="1" value="${sharePct}"></sl-range>
+                        <sl-range label="${t('basket.autofill.spotlight_share')}" class="af-labeled-range" id="af-spotlight-share" min="0" max="100" step="1" value="${sharePct}"></sl-range>
                         <span class="af-share-value">${sharePct}%</span>
                     </div>
                 </div>
             ` : ''}
             <div class="auto-fill-memory-dial">
-                <label class="auto-fill-substage-label">${t('basket.autofill.album_track_ratio')}</label>
+                <div class="auto-fill-substage-label">${t('basket.autofill.album_track_ratio')}</div>
                 <div class="af-share-cell">
-                    <sl-range id="af-album-track-ratio" min="0" max="100" step="1" value="${ratioPct}"></sl-range>
+                    <sl-range label="${t('basket.autofill.album_track_ratio')}" class="af-labeled-range" id="af-album-track-ratio" min="0" max="100" step="1" value="${ratioPct}"></sl-range>
                     <span class="af-share-value">${ratioPct}%</span>
                 </div>
             </div>
@@ -417,12 +456,12 @@ export class AutoFillPanel {
         return `
             <div class="auto-fill-context-rule" data-index="${i}">
                 <div class="auto-fill-ordering-row">
-                    <sl-select class="af-ctx-window-kind" size="small" data-index="${i}" value="${kind}">
+                    <sl-select label="${t('basket.autofill.context')} ${i + 1}" class="af-ctx-window-kind af-compact-labeled" size="small" data-index="${i}" value="${kind}">
                         <sl-option value="timeOfDay">${t('basket.autofill.context_window_time_of_day')}</sl-option>
                         <sl-option value="months">${t('basket.autofill.context_window_months')}</sl-option>
                         <sl-option value="dateRange">${t('basket.autofill.context_window_date_range')}</sl-option>
                     </sl-select>
-                    <sl-icon-button class="af-context-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+                    <sl-icon-button class="af-context-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: `${t('basket.autofill.context')} ${i + 1}` }))}" data-index="${i}"></sl-icon-button>
                 </div>
                 ${this.renderContextWindowFields(r.window, i)}
                 <sl-input class="af-ctx-source-refs" size="small" data-index="${i}"
@@ -524,9 +563,9 @@ export class AutoFillPanel {
                     label="${t('basket.autofill.pity_threshold')}"
                     value="${p.thresholdSyncs ?? ''}"></sl-input>
                 <div class="auto-fill-memory-dial">
-                    <label class="auto-fill-substage-label">${t('basket.autofill.pity_ratio')}</label>
+                    <div class="auto-fill-substage-label">${t('basket.autofill.pity_ratio')}</div>
                     <div class="af-share-cell">
-                        <sl-range id="af-pity-ratio" min="0" max="100" step="1" value="${ratioPct}"></sl-range>
+                        <sl-range label="${t('basket.autofill.pity_ratio')}" class="af-labeled-range" id="af-pity-ratio" min="0" max="100" step="1" value="${ratioPct}"></sl-range>
                         <span class="af-share-value">${ratioPct}%</span>
                     </div>
                 </div>
@@ -558,9 +597,9 @@ export class AutoFillPanel {
         const rows = used.map((trait, i) => `
             <div class="auto-fill-ordering-row" data-index="${i}">
                 <span class="af-ordering-label">${i + 1}. ${t('basket.autofill.version_trait_' + trait)}</span>
-                <sl-icon-button class="af-version-up" name="chevron-up" label="${t('basket.autofill.move_up')}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-version-down" name="chevron-down" label="${t('basket.autofill.move_down')}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-version-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+                <sl-icon-button class="af-version-up" name="chevron-up" label="${escapeHtml(t('basket.autofill.move_up_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-version-down" name="chevron-down" label="${escapeHtml(t('basket.autofill.move_down_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-version-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
         return `
@@ -569,7 +608,7 @@ export class AutoFillPanel {
                 ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_version_preference')}</div>`}
                 <div class="auto-fill-caption">${t('basket.autofill.version_preference_hint')}</div>
                 ${unused.length > 0 ? `
-                    <sl-select id="af-version-add" size="small" placeholder="${t('basket.autofill.version_preference_add')}" value="">
+                    <sl-select label="${t('basket.autofill.version_preference_add')}" class="af-compact-labeled" id="af-version-add" size="small" placeholder="${t('basket.autofill.version_preference_add')}" value="">
                         ${unused.map((trait) => `<sl-option value="${trait}">${t('basket.autofill.version_trait_' + trait)}</sl-option>`).join('')}
                     </sl-select>
                 ` : ''}
@@ -597,17 +636,17 @@ export class AutoFillPanel {
                 ${t('basket.autofill.played_exclusion')}
             </sl-switch>
             <div class="auto-fill-memory-dial">
-                <label class="auto-fill-substage-label">${t('basket.autofill.stable_core_pct')}</label>
+                <div class="auto-fill-substage-label">${t('basket.autofill.stable_core_pct')}</div>
                 <div class="af-share-cell">
-                    <sl-range id="af-stable-core" min="0" max="100" step="1" value="${corePct}"></sl-range>
+                    <sl-range label="${t('basket.autofill.stable_core_pct')}" class="af-labeled-range" id="af-stable-core" min="0" max="100" step="1" value="${corePct}"></sl-range>
                     <span class="af-share-value">${corePct}%</span>
                 </div>
                 <div class="auto-fill-caption">${t('basket.autofill.stable_core_pct_hint')}</div>
             </div>
             <div class="auto-fill-memory-dial">
-                <label class="auto-fill-substage-label">${t('basket.autofill.repeat_tolerance')}</label>
+                <div class="auto-fill-substage-label">${t('basket.autofill.repeat_tolerance')}</div>
                 <div class="af-share-cell">
-                    <sl-range id="af-repeat-tolerance" min="0" max="100" step="1" value="${tolPct}"></sl-range>
+                    <sl-range label="${t('basket.autofill.repeat_tolerance')}" class="af-labeled-range" id="af-repeat-tolerance" min="0" max="100" step="1" value="${tolPct}"></sl-range>
                     <span class="af-share-value">${tolPct}%</span>
                 </div>
                 <div class="auto-fill-caption">${t('basket.autofill.repeat_tolerance_hint')}</div>
@@ -621,17 +660,17 @@ export class AutoFillPanel {
         const tiers = this.memoryTiers();
         const rows = tiers.map((tier, i) => `
             <div class="auto-fill-source-row" data-index="${i}">
-                <sl-select class="af-tier-kind" size="small" value="${tier.kind}" data-index="${i}">
+                <sl-select label="${t('basket.autofill.tiers')} ${i + 1}" class="af-tier-kind af-compact-labeled" size="small" value="${tier.kind}" data-index="${i}">
                     <sl-option value="library">${t('basket.autofill.source_library')}</sl-option>
                     ${this.playlistsSupported ? `<sl-option value="playlist">${t('basket.autofill.source_playlist')}</sl-option>` : ''}
                 </sl-select>
                 ${tier.kind === 'playlist' && this.playlistsSupported ? `
-                    <sl-select class="af-tier-ref" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
+                    <sl-select label="${t('basket.autofill.pick_playlist')} ${i + 1}" class="af-tier-ref af-compact-labeled" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
                         value="${escapeHtml(tier.ref ?? '')}" data-index="${i}">
                         ${this.opts.playlists.map((pl) => `<sl-option value="${escapeHtml(pl.id)}">${escapeHtml(pl.name)}</sl-option>`).join('')}
                     </sl-select>
                 ` : ''}
-                <sl-icon-button class="af-tier-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+                <sl-icon-button class="af-tier-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: `${t('basket.autofill.tiers')} ${i + 1}` }))}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
         return `
@@ -668,23 +707,23 @@ export class AutoFillPanel {
             const sharePct = typeof src.share === 'number' ? Math.round(src.share * 100) : '';
             return `
                 <div class="auto-fill-source-row" data-group="${group}" data-index="${i}">
-                    <sl-select class="af-source-kind" size="small" value="${src.kind}" data-group="${group}" data-index="${i}">
+                    <sl-select label="${escapeHtml(label)} ${i + 1}" class="af-source-kind af-compact-labeled" size="small" value="${src.kind}" data-group="${group}" data-index="${i}">
                         ${kinds.map((k) => `<sl-option value="${k}">${t('basket.autofill.source_' + k)}</sl-option>`).join('')}
                     </sl-select>
                     ${src.kind === 'playlist' && this.playlistsSupported ? `
-                        <sl-select class="af-source-ref" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
+                        <sl-select label="${t('basket.autofill.pick_playlist')} ${i + 1}" class="af-source-ref af-compact-labeled" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
                             value="${escapeHtml(src.ref ?? '')}" data-group="${group}" data-index="${i}">
                             ${this.opts.playlists.map((pl) => `<sl-option value="${escapeHtml(pl.id)}">${escapeHtml(pl.name)}</sl-option>`).join('')}
                         </sl-select>
                     ` : ''}
                     ${showShares ? `
                         <div class="af-share-cell">
-                            <sl-range class="af-source-share" min="0" max="100" step="5"
+                            <sl-range label="${escapeHtml(label)} ${i + 1}" class="af-source-share af-labeled-range" min="0" max="100" step="5"
                                 value="${sharePct === '' ? 0 : sharePct}" data-group="${group}" data-index="${i}"></sl-range>
                             <span class="af-share-value">${sharePct === '' ? '—' : sharePct + '%'}</span>
                         </div>
                     ` : ''}
-                    <sl-icon-button class="af-source-remove" name="x" label="${t('basket.actions.remove')}"
+                    <sl-icon-button class="af-source-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: `${label} ${i + 1}: ${t('basket.autofill.source_' + src.kind)}` }))}"
                         data-group="${group}" data-index="${i}"></sl-icon-button>
                 </div>
             `;
@@ -694,7 +733,7 @@ export class AutoFillPanel {
                 <label class="auto-fill-substage-label">${label}</label>
                 ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_sources')}</div>`}
                 <sl-button class="af-source-add" size="small" variant="text" data-group="${group}">
-                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>${t('basket.autofill.add_source')}
+                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>${t('basket.autofill.add_source')}<span class="sr-only">: ${escapeHtml(label)}</span>
                 </sl-button>
             </div>
         `;
@@ -706,15 +745,15 @@ export class AutoFillPanel {
         const rows = used.map((key, i) => `
             <div class="auto-fill-ordering-row" data-index="${i}">
                 <span class="af-ordering-label">${i + 1}. ${t('basket.autofill.ordering_' + key)}</span>
-                <sl-icon-button class="af-ordering-up" name="chevron-up" label="${t('basket.autofill.move_up')}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-ordering-down" name="chevron-down" label="${t('basket.autofill.move_down')}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-ordering-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+                <sl-icon-button class="af-ordering-up" name="chevron-up" label="${escapeHtml(t('basket.autofill.move_up_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-ordering-down" name="chevron-down" label="${escapeHtml(t('basket.autofill.move_down_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-ordering-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
         return this.renderStage(t('basket.autofill.ordering'), `
             ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_ordering')}</div>`}
             ${unused.length > 0 ? `
-                <sl-select id="af-ordering-add" size="small" placeholder="${t('basket.autofill.add_ordering')}" value="">
+                <sl-select label="${t('basket.autofill.add_ordering')}" class="af-compact-labeled" id="af-ordering-add" size="small" placeholder="${t('basket.autofill.add_ordering')}" value="">
                     ${unused.map((k) => `<sl-option value="${k}">${t('basket.autofill.ordering_' + k)}</sl-option>`).join('')}
                 </sl-select>
             ` : ''}
@@ -725,11 +764,19 @@ export class AutoFillPanel {
         return group === 'source' ? this.pipeline.sources : this.pipeline.fallback;
     }
 
+    private updateShareReadout(event: Event): void {
+        const slider = event.target as HTMLElement & { value: number };
+        const readout = slider.parentElement?.querySelector('.af-share-value');
+        if (readout) readout.textContent = `${slider.value}%`;
+        this.invalidatePreview();
+    }
+
     private bindEvents(): void {
         const d = this.dialog;
         // --- Default-view controls (mutate live) ---
         d.querySelector('#af-enabled')?.addEventListener('sl-change', (e: Event) => {
             this.pipeline.enabled = (e.target as HTMLInputElement).checked;
+            this.invalidatePreview();
         });
         d.querySelector('#af-podcast-mode')?.addEventListener('sl-change', () => {
             this.buildPipeline();
@@ -756,9 +803,11 @@ export class AutoFillPanel {
         // --- Unit ---
         d.querySelector('#af-unit')?.addEventListener('sl-change', (e: Event) => {
             this.pipeline.unit = (e.target as any).value as Unit;
+            this.invalidatePreview();
         });
         d.querySelector('#af-played-exclusion')?.addEventListener('sl-change', (e: Event) => {
             this.pipeline.memory.playedExclusion = (e.target as HTMLInputElement).checked;
+            this.invalidatePreview();
         });
 
         // --- Memory: stable-core %, repeat-tolerance dial, rotation tiers (Story 13.1) ---
@@ -766,13 +815,13 @@ export class AutoFillPanel {
             this.captureInputs();
             const pct = Number((e.target as any).value);
             this.pipeline.memory.stableCorePct = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
-            this.renderBody(); // refresh the % readout
+            this.updateShareReadout(e);
         });
         d.querySelector('#af-repeat-tolerance')?.addEventListener('sl-change', (e: Event) => {
             this.captureInputs();
             const pct = Number((e.target as any).value);
             this.pipeline.memory.repeatTolerance = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
-            this.renderBody();
+            this.updateShareReadout(e);
         });
         d.querySelectorAll('.af-tier-kind').forEach((el: Element) => {
             el.addEventListener('sl-change', (e: Event) => {
@@ -827,7 +876,7 @@ export class AutoFillPanel {
                 const { group, index } = this.rowRef(e.target as HTMLElement);
                 const pct = Number((e.target as any).value);
                 this.listFor(group)[index].share = isNaN(pct) ? undefined : pct / 100;
-                this.renderBody(); // refresh the % readout
+                this.updateShareReadout(e);
             });
         });
         d.querySelectorAll('.af-source-remove').forEach((el: Element) => {
@@ -961,7 +1010,7 @@ export class AutoFillPanel {
             this.captureInputs();
             const pct = Number((e.target as any).value);
             this.pipeline.pity.guaranteedRatio = isNaN(pct) ? undefined : pct / 100;
-            this.renderBody(); // refresh the % readout
+            this.updateShareReadout(e);
         });
 
         // --- Promotion stage (Story 13.6 #33/#8/#9/#27) ---
@@ -979,13 +1028,13 @@ export class AutoFillPanel {
             this.captureInputs();
             const pct = Number((e.target as any).value);
             this.pipeline.promotion.spotlightShare = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
-            this.renderBody(); // refresh the % readout
+            this.updateShareReadout(e);
         });
         d.querySelector('#af-album-track-ratio')?.addEventListener('sl-change', (e: Event) => {
             this.captureInputs();
             const pct = Number((e.target as any).value);
             this.pipeline.promotion.albumTrackRatio = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
-            this.renderBody(); // refresh the % readout
+            this.updateShareReadout(e);
         });
         bindNum('#af-promote-min-favorites', (v) => {
             this.pipeline.promotion.promoteAlbumMinFavorites = v == null ? undefined : Math.floor(v);
@@ -1137,7 +1186,7 @@ export class AutoFillPanel {
         const list = this.pipeline.ordering;
         if (target < 0 || target >= list.length) return;
         [list[index], list[target]] = [list[target], list[index]];
-        this.renderBody();
+        this.renderBody(target);
     }
 
     private moveVersionPreference(index: number, delta: number): void {
@@ -1145,7 +1194,7 @@ export class AutoFillPanel {
         const list = this.versionPreference();
         if (target < 0 || target >= list.length) return;
         [list[index], list[target]] = [list[target], list[index]];
-        this.renderBody();
+        this.renderBody(target);
     }
 
     /** Reads the free-text/number inputs into the in-memory model and returns the serialized

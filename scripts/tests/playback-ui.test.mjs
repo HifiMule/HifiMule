@@ -477,6 +477,7 @@ function albumButtonHarness() {
     children = []; dataset = {}; attributes = {};
     appendChild(child) { child.parent = this; this.children.push(child); return child; }
     setAttribute(name, value) { this.attributes[name] = value; }
+    removeAttribute(name) { delete this.attributes[name]; }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     async dispatchEvent(name, detail = {}) {
       const event = { target: this, defaultPrevented: false, stopped: false, ...detail,
@@ -524,6 +525,9 @@ function previewButtonHarness() {
   const document = { activeElement: null };
   class Element {
     listeners = new Map(); disabled = false; name = ''; label = ''; children = [];
+    attributes = {};
+    setAttribute(name, value) { this.attributes[name] = value; }
+    removeAttribute(name) { delete this.attributes[name]; }
     appendChild(child) { child.parent = this; this.children.push(child); return child; }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     focus() { document.activeElement = this; }
@@ -556,6 +560,9 @@ function queueButtonHarness() {
   const document = { activeElement: null };
   class Element {
     listeners = new Map(); disabled = false; name = ''; label = ''; children = []; dataset = {};
+    attributes = new Map();
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    removeAttribute(name) { this.attributes.delete(name); }
     appendChild(child) { child.parent = this; this.children.push(child); return child; }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     focus() { document.activeElement = this; }
@@ -675,6 +682,9 @@ function libraryQueueHarness({ conflict, refreshFails = false, deferAdmission = 
   const document = { activeElement: null };
   class Element {
     listeners = new Map(); dataset = {}; disabled = false; loading = false;
+    attributes = new Map();
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    removeAttribute(name) { this.attributes.delete(name); }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
   }
   document.createElement = () => new Element();

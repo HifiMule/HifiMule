@@ -1,13 +1,17 @@
+import { invalidatePlaylistsCache } from '../state/libraryCache';
+import './cardArtwork';
+import type { CardArtwork } from './cardArtwork';
 // MediaCard Component
 // Handles rendering of media items in the grid with selection support.
 
 import { basketStore } from '../state/basket';
-import { fetchBrowseAlbum, getImageUrl, playbackPlayTrack, rpcCall } from '../rpc';
+import { fetchBrowseAlbum, getImageUrl, rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { showToast } from '../toast';
 import { createAlbumPlayButton } from './AlbumPlayButton';
 import { createPlaylistPlayButton } from './PlaylistPlayButton';
 import { createRadioPlayButton } from './RadioPlayButton';
+import { createTrackPlayButton } from './TrackPlayButton';
 import { createTrackPreviewButton } from './TrackPreviewButton';
 import { createTrackQueueButton } from './TrackQueueButton';
 import { bookBasketItem } from '../state/mediaSyncSelection';
@@ -65,6 +69,7 @@ export class MediaCard {
         // Identifies the card for the grid's single delegated basket listener
         // (see MediaCard.refreshSelection). Avoids a per-card store subscription.
         card.dataset.basketId = itemId;
+        card.dataset.basketLabel = itemName;
         if (isSynced) card.classList.add('synced');
 
         const isSelected = basketStore.has(itemId);
@@ -87,8 +92,8 @@ export class MediaCard {
         }
 
         card.innerHTML = `
-            <div class="card-image">
-                ${isSynced ? '<div class="synced-badge"><sl-icon name="check-circle-fill"></sl-icon></div>' : ''}
+            <hm-card-artwork class="card-image">
+                ${isSynced ? `<div class="synced-badge"><sl-icon name="check-circle-fill" aria-hidden="true"></sl-icon></div>` : ''}
 
                 ${showSelection ? `
                     <div class="selection-overlay">
@@ -96,7 +101,7 @@ export class MediaCard {
                             name="${isSelected ? 'dash-circle-fill' : 'plus-circle-fill'}"
                             class="basket-toggle-btn"
                             variant="${isSelected ? 'danger' : 'primary'}"
-                            label="${isSelected ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket')}"
+                            label="${this.escapeHtml(`${t(isSelected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${itemName}`)}"
                             ${btnDisabled ? 'disabled' : ''}
                         ></sl-icon-button>
                     </div>
@@ -104,9 +109,9 @@ export class MediaCard {
 
                 <sl-skeleton effect="sheen" class="image-skeleton"></sl-skeleton>
                 <div class="track-count-placeholder"></div>
-            </div>
+            </hm-card-artwork>
             <div class="card-content">
-                <strong>${this.escapeHtml(itemName)}</strong>
+                <button type="button" class="card-open" title="${this.escapeHtml(itemName)}">${this.escapeHtml(itemName)}${isSynced ? `<span class="sr-only"> — ${t('library.media.synced')}</span>` : ''}</button>
                 ${subtitleHtml}
                 ${yearHtml}
             </div>
@@ -115,20 +120,7 @@ export class MediaCard {
         if (isBrowseItem && ['Audio', 'BookPart'].includes((item as BrowseDisplayItem).type)) {
             const audio = item as BrowseDisplayItem;
             const isPart = audio.type === 'BookPart';
-            const play = document.createElement('sl-icon-button') as any;
-            play.name = 'play-fill';
-            play.label = t(isPart ? 'library.books.play_part' : 'playback.play_track', { title: itemName });
-            play.disabled = !audio.serverId;
-            const playbackSource = audio.serverId
-                ? { serverId: audio.serverId, trackId: audio.id }
-                : null;
-            play.addEventListener('mousedown', (event: Event) => event.stopPropagation());
-            play.addEventListener('click', async (event: Event) => {
-                event.stopPropagation();
-                if (!playbackSource) return;
-                try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
-                catch (error) { showToast((error as Error).message, 'danger'); }
-            });
+            const play = createTrackPlayButton(audio.serverId, audio.id, itemName, isPart ? 'part' : 'track');
             card.querySelector('.card-content')?.appendChild(play);
             if (!isPart) {
                 card.querySelector('.card-content')?.appendChild(
@@ -171,7 +163,7 @@ export class MediaCard {
             const ji = item as JellyfinItem | JellyfinView;
             imageId = ji.ImageId || ji.Id;
         }
-        getImageUrl(imageId, 300, 90).then(dataUrl => {
+        (cardImage as CardArtwork).load = () => getImageUrl(imageId, 300, 90).then(dataUrl => {
             if (cardImage) {
                 cardImage.style.backgroundImage = `url('${dataUrl}')`;
                 const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
@@ -200,120 +192,111 @@ export class MediaCard {
         // Event: Toggle Basket
         if (showSelection) {
             const toggleBtn = card.querySelector('.basket-toggle-btn') as any;
+            let pending = false;
             toggleBtn.addEventListener('click', async (e: Event) => {
                 e.stopPropagation();
-                if (!selectionAllowed) return;
+                if (!selectionAllowed || pending) return;
                 if (!basketStore.admitPhysicalTargetMutation()) return;
 
                 if (basketStore.has(itemId)) {
                     basketStore.remove(itemId);
-                } else if (isBrowseItem) {
-                    const bi = item as BrowseDisplayItem;
-                    if (bi.serverId && basketStore.getActiveServerId() !== bi.serverId) return;
-                    const resolvedType = bi.basketType ?? bi.type;
-                    if (resolvedType === 'Book') {
-                        toggleBtn.loading = true;
-                        try {
-                            const detail = await fetchBrowseAlbum(bi.id);
-                            if (bi.serverId && basketStore.getActiveServerId() !== bi.serverId) return;
-                            basketStore.add(bookBasketItem(bi.id, bi.name, bi.serverId, bi.subtitle ?? undefined, detail.tracks));
-                        } catch (err) {
-                            showToast((err as Error).message, 'danger');
-                        } finally {
-                            toggleBtn.loading = false;
+                    return;
+                }
+                pending = true;
+                toggleBtn.setAttribute('aria-disabled', 'true');
+                toggleBtn.setAttribute('aria-busy', 'true');
+                toggleBtn.shadowRoot?.querySelector('button')?.setAttribute('aria-disabled', 'true');
+                const overlay = document.createElement('div');
+                overlay.className = 'nav-loading-overlay';
+                // Pointer repeats still reach the guarded toggle, not card navigation.
+                overlay.style.pointerEvents = 'none';
+                overlay.appendChild(document.createElement('sl-spinner'));
+                cardImage.appendChild(overlay);
+                try {
+                    if (isBrowseItem) {
+                        const bi = item as BrowseDisplayItem;
+                        if (bi.serverId && basketStore.getActiveServerId() !== bi.serverId) return;
+                        const resolvedType = bi.basketType ?? bi.type;
+                        if (resolvedType === 'Book') {
+                            try {
+                                const detail = await fetchBrowseAlbum(bi.id);
+                                if (bi.serverId && basketStore.getActiveServerId() !== bi.serverId) return;
+                                basketStore.add(bookBasketItem(bi.id, bi.name, bi.serverId, bi.subtitle ?? undefined, detail.tracks));
+                            } catch (err) {
+                                showToast(err instanceof Error ? err.message : String(err), 'danger');
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    const CONTAINER_TYPES = ['MusicArtist', 'BookAuthor', 'MusicAlbum', 'MusicGenre', 'Playlist'];
-                    const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
-                    const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!bi.childCount || !bi.sizeBytes);
+                        const CONTAINER_TYPES = ['MusicArtist', 'BookAuthor', 'MusicAlbum', 'MusicGenre', 'Playlist'];
+                        const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
+                        const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!bi.childCount || !bi.sizeBytes);
 
-                    if (needsFetch) {
-                        toggleBtn.loading = true;
-                        let overlay: HTMLElement | null = null;
-                        if (cardImage) {
-                            overlay = document.createElement('div');
-                            overlay.className = 'nav-loading-overlay';
-                            const spinner = document.createElement('sl-spinner');
-                            overlay.appendChild(spinner);
-                            cardImage.appendChild(overlay);
-                        }
-                        try {
-                            const resolvedId = bi.basketId ?? bi.id;
-                            const [metadata, sizeData] = await Promise.all([
-                                rpcCall('jellyfin_get_item_counts', { itemIds: [resolvedId] }),
-                                rpcCall('jellyfin_get_item_sizes', { itemIds: [resolvedId] }),
-                            ]);
-                            const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
-                            const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
+                        if (needsFetch) {
+                            try {
+                                const resolvedId = bi.basketId ?? bi.id;
+                                const [metadata, sizeData] = await Promise.all([
+                                    rpcCall('jellyfin_get_item_counts', { itemIds: [resolvedId] }),
+                                    rpcCall('jellyfin_get_item_sizes', { itemIds: [resolvedId] }),
+                                ]);
+                                const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
+                                const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
+                                basketStore.add({
+                                    id: resolvedId,
+                                    name: bi.name,
+                                    type: resolvedType,
+                                    serverId: bi.serverId,
+                                    artist: bi.subtitle ?? undefined,
+                                    childCount: info.recursiveItemCount,
+                                    sizeTicks: bi.sizeTicks || info.cumulativeRunTimeTicks,
+                                    sizeBytes: sizeInfo.totalSizeBytes,
+                                });
+                            } catch (err) {
+                                console.error('Failed to fetch item count:', err);
+                                showToast(err instanceof Error ? err.message : String(err), 'danger');
+                            }
+                        } else {
                             basketStore.add({
-                                id: resolvedId,
+                                id: bi.basketId ?? bi.id,
                                 name: bi.name,
                                 type: resolvedType,
                                 serverId: bi.serverId,
                                 artist: bi.subtitle ?? undefined,
+                                childCount: bi.childCount ?? 0,
+                                sizeTicks: bi.sizeTicks ?? 0,
+                                sizeBytes: bi.sizeBytes ?? 0,
+                            });
+                        }
+                    } else {
+                        // Fetch metadata (track count + file size) from daemon (Jellyfin-specific)
+                        try {
+                            const ji = item as JellyfinItem | JellyfinView;
+                            const [metadata, sizeData] = await Promise.all([
+                                rpcCall('jellyfin_get_item_counts', { itemIds: [ji.Id] }),
+                                rpcCall('jellyfin_get_item_sizes', { itemIds: [ji.Id] }),
+                            ]);
+                            const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
+                            const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
+
+                            basketStore.add({
+                                id: ji.Id,
+                                name: ji.Name,
+                                type: ji.Type,
+                                artist: (ji as JellyfinItem).AlbumArtist,
                                 childCount: info.recursiveItemCount,
-                                sizeTicks: bi.sizeTicks || info.cumulativeRunTimeTicks,
+                                sizeTicks: info.cumulativeRunTimeTicks,
                                 sizeBytes: sizeInfo.totalSizeBytes,
                             });
                         } catch (err) {
-                            console.error('Failed to fetch item count:', err);
+                            console.error("Failed to fetch item metadata:", err);
                             showToast(err instanceof Error ? err.message : String(err), 'danger');
-                        } finally {
-                            toggleBtn.loading = false;
-                            if (overlay) overlay.remove();
-                        }
-                    } else {
-                        basketStore.add({
-                            id: bi.basketId ?? bi.id,
-                            name: bi.name,
-                            type: resolvedType,
-                            serverId: bi.serverId,
-                            artist: bi.subtitle ?? undefined,
-                            childCount: bi.childCount ?? 0,
-                            sizeTicks: bi.sizeTicks ?? 0,
-                            sizeBytes: bi.sizeBytes ?? 0,
-                        });
-                    }
-                } else {
-                    // Fetch metadata (track count + file size) from daemon (Jellyfin-specific)
-                    toggleBtn.loading = true;
-
-                    let overlay: HTMLElement | null = null;
-                    if (cardImage) {
-                        overlay = document.createElement('div');
-                        overlay.className = 'nav-loading-overlay';
-                        const spinner = document.createElement('sl-spinner');
-                        overlay.appendChild(spinner);
-                        cardImage.appendChild(overlay);
-                    }
-
-                    try {
-                        const ji = item as JellyfinItem | JellyfinView;
-                        const [metadata, sizeData] = await Promise.all([
-                            rpcCall('jellyfin_get_item_counts', { itemIds: [ji.Id] }),
-                            rpcCall('jellyfin_get_item_sizes', { itemIds: [ji.Id] }),
-                        ]);
-                        const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
-                        const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
-
-                        basketStore.add({
-                            id: ji.Id,
-                            name: ji.Name,
-                            type: ji.Type,
-                            artist: (ji as JellyfinItem).AlbumArtist,
-                            childCount: info.recursiveItemCount,
-                            sizeTicks: info.cumulativeRunTimeTicks,
-                            sizeBytes: sizeInfo.totalSizeBytes,
-                        });
-                    } catch (err) {
-                        console.error("Failed to fetch item metadata:", err);
-                    } finally {
-                        toggleBtn.loading = false;
-                        if (overlay) {
-                            overlay.remove();
                         }
                     }
+                } finally {
+                    pending = false;
+                    toggleBtn.removeAttribute('aria-disabled');
+                    toggleBtn.removeAttribute('aria-busy');
+                    toggleBtn.shadowRoot?.querySelector('button')?.removeAttribute('aria-disabled');
+                    overlay.remove();
                 }
             });
         }
@@ -330,9 +313,14 @@ export class MediaCard {
 
             if (itemType === 'MusicArtist' || itemType === 'MusicAlbum' || itemType === 'Audio') {
                 const serverItemId = (item as BrowseDisplayItem).id;
+                const trigger = card.querySelector<HTMLElement>('.card-open');
+                if (trigger) MediaCard.bindPlaylistMenuKeyboard(trigger, serverItemId, itemName);
+                // A normal Tab stop also exposes this action on platforms where
+                // the OS consumes the context-menu shortcut before the webview.
+                card.querySelector('.card-content')?.appendChild(MediaCard.createPlaylistAction(serverItemId, itemName));
                 card.addEventListener('contextmenu', (e) => {
                     e.preventDefault();
-                    MediaCard.showItemContextMenu(e.clientX, e.clientY, serverItemId, itemName);
+                    MediaCard.showItemContextMenu(e.clientX, e.clientY, serverItemId, itemName, card.querySelector<HTMLElement>('.card-open') ?? undefined);
                 });
             }
         }
@@ -368,15 +356,45 @@ export class MediaCard {
             const selected = basketStore.has(id);
             card.classList.toggle('is-selected', selected);
             const btn = card.querySelector('.basket-toggle-btn') as any;
-            if (btn) btn.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
+            if (btn) {
+                btn.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
+                btn.label = `${t(selected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${card.dataset.basketLabel ?? ''}`;
+            }
         });
     }
 
     private static dismissActiveMenu: (() => void) | null = null;
 
-    static showItemContextMenu(x: number, y: number, itemId: string, itemName: string): void {
+    static createPlaylistAction(itemId: string, itemName: string): HTMLElement {
+        const action = document.createElement('sl-icon-button') as any;
+        action.name = 'collection-play';
+        action.label = `${t('playlist.context.add_to_playlist')} ${itemName}`;
+        action.addEventListener('click', (event: MouseEvent) => {
+            event.stopPropagation();
+            MediaCard.openAddToPlaylistDialog([itemId], itemName);
+        });
+        return action;
+    }
+
+    /** WebKit does not synthesize contextmenu for these keyboard shortcuts. */
+    static bindPlaylistMenuKeyboard(trigger: HTMLElement, itemId: string, itemName: string): void {
+        trigger.setAttribute('aria-haspopup', 'menu');
+        trigger.addEventListener('keydown', (event) => {
+            if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const bounds = trigger.getBoundingClientRect();
+            MediaCard.showItemContextMenu(bounds.left, bounds.bottom, itemId, itemName, trigger);
+        });
+    }
+
+    static showItemContextMenu(x: number, y: number, itemId: string, itemName: string, trigger?: HTMLElement): void {
         if (MediaCard.dismissActiveMenu) {
             MediaCard.dismissActiveMenu();
+        }
+        let returnFocus = trigger ?? (document.activeElement as HTMLElement | null);
+        while (returnFocus?.shadowRoot?.activeElement) {
+            returnFocus = returnFocus.shadowRoot.activeElement as HTMLElement;
         }
 
         const menu = document.createElement('div');
@@ -403,12 +421,15 @@ export class MediaCard {
 
         // Reveal + focus in the same frame so the animation starts visible.
         requestAnimationFrame(() => {
+            if (!menu.isConnected) return;
             menu.classList.add('is-open');
             menuItem.focus();
         });
 
         const cleanup = () => {
+            const hadFocus = menu.contains(document.activeElement);
             menu.remove();
+            if (hadFocus && returnFocus?.isConnected) returnFocus.focus();
             MediaCard.dismissActiveMenu = null;
             document.removeEventListener('click', onDocClick, true);
             window.removeEventListener('scroll', cleanup, true);
@@ -424,7 +445,8 @@ export class MediaCard {
             if (ev.key === 'Escape') {
                 cleanup();
             } else if (ev.key === 'Tab') {
-                ev.preventDefault();
+                // Restore the invoker before the browser performs normal
+                // forward/backward tab navigation from that point.
                 cleanup();
             } else if (ev.key === 'Enter' || ev.key === ' ') {
                 if (document.activeElement === menuItem) {
@@ -445,12 +467,29 @@ export class MediaCard {
         document.addEventListener('keydown', onKeyDown, true);
     }
 
+    private static setPlaylistWriting(dialog: any, writing: boolean): void {
+        const closeButton = dialog.shadowRoot?.querySelector('[part="close-button"]');
+        if (closeButton) closeButton.disabled = writing;
+        if (writing) {
+            dialog.setAttribute('aria-busy', 'true');
+            dialog.panel?.setAttribute('aria-busy', 'true');
+            // The submit button becomes disabled. Keep focus inside the modal.
+            dialog.panel?.focus();
+        } else {
+            dialog.removeAttribute('aria-busy');
+            dialog.panel?.removeAttribute('aria-busy');
+        }
+    }
+
     static openCreatePlaylistDialog(itemIds: string[], suggestedName: string, onSuccess?: () => void): void {
         const dialog = document.createElement('sl-dialog') as any;
+        dialog.className = 'playlist-write-dialog';
         dialog.label = t('library.context.create_playlist_title');
         dialog.innerHTML = `
             <sl-input
                 id="ctx-playlist-name"
+                label="${t('basket.playlist.name_label')}"
+                required
                 placeholder="${t('basket.playlist.name_placeholder')}"
                 autofocus
                 clearable
@@ -463,17 +502,31 @@ export class MediaCard {
 
         document.body.appendChild(dialog);
 
-        const dismissDialog = () => dialog.hide();
+        let writing = false;
+        const cancelBtn = dialog.querySelector('#ctx-playlist-cancel') as any;
+        const dismissDialog = () => { if (!writing) dialog.hide(); };
         dialog.querySelector('#ctx-playlist-cancel')?.addEventListener('click', dismissDialog);
+        dialog.addEventListener('sl-request-close', (event: Event) => {
+            if (event.target === dialog && writing) event.preventDefault();
+        });
 
         const submit = async () => {
+            if (writing) return;
             const createBtn = dialog.querySelector('#ctx-playlist-create') as any;
             const errorEl = dialog.querySelector('#ctx-playlist-error') as HTMLElement | null;
             const nameInput = dialog.querySelector('#ctx-playlist-name') as any;
             const name = (nameInput?.value ?? '').trim();
-            if (!name) return;
-            if (createBtn?.loading) return; // guard against double-submit
-
+            if (!name) {
+                nameInput.setCustomValidity(t('basket.playlist.name_required'));
+                nameInput.reportValidity();
+                nameInput.focus();
+                return;
+            }
+            nameInput.setCustomValidity('');
+            writing = true;
+            cancelBtn.disabled = true;
+            nameInput.disabled = true;
+            MediaCard.setPlaylistWriting(dialog, true);
             createBtn.loading = true;
             createBtn.disabled = true;
             if (errorEl) errorEl.style.display = 'none';
@@ -481,7 +534,6 @@ export class MediaCard {
             try {
                 const { rpcCall } = await import('../rpc');
                 await rpcCall('playlist.create', { name, itemIds });
-                const { invalidatePlaylistsCache } = await import('../library');
                 invalidatePlaylistsCache();
                 dialog.hide();
                 showToast(t('playlist.context.created_success'), 'success');
@@ -494,11 +546,20 @@ export class MediaCard {
                     (errorEl as any).open = true;
                 }
             } finally {
+                writing = false;
+                cancelBtn.disabled = false;
+                nameInput.disabled = false;
+                MediaCard.setPlaylistWriting(dialog, false);
                 createBtn.loading = false;
                 createBtn.disabled = false;
+                await createBtn.updateComplete;
+                if (dialog.open) createBtn.focus();
             }
         };
 
+        dialog.querySelector('#ctx-playlist-name')?.addEventListener('sl-input', () => {
+            (dialog.querySelector('#ctx-playlist-name') as any).setCustomValidity('');
+        });
         dialog.querySelector('#ctx-playlist-create')?.addEventListener('click', submit);
         dialog.querySelector('#ctx-playlist-name')?.addEventListener('keydown', (e: KeyboardEvent) => {
             if (e.key === 'Enter') {
@@ -518,6 +579,7 @@ export class MediaCard {
 
     static openAddToPlaylistDialog(itemIds: string[], label: string, onSuccess?: () => void): void {
         const dialog = document.createElement('sl-dialog') as any;
+        dialog.className = 'playlist-write-dialog';
         dialog.label = t('playlist.context.pick_playlist_title');
         dialog.innerHTML = `
             <div id="ctx-track-playlist-list" style="display:flex; flex-direction:column; gap:0.5rem; max-height:300px; overflow-y:auto;">
@@ -529,7 +591,12 @@ export class MediaCard {
 
         document.body.appendChild(dialog);
 
-        dialog.querySelector('#ctx-track-cancel')?.addEventListener('click', () => dialog.hide());
+        let writing = false;
+        const cancelBtn = dialog.querySelector('#ctx-track-cancel') as any;
+        cancelBtn.addEventListener('click', () => { if (!writing) dialog.hide(); });
+        dialog.addEventListener('sl-request-close', (event: Event) => {
+            if (event.target === dialog && writing) event.preventDefault();
+        });
         dialog.addEventListener('sl-after-hide', (event: Event) => {
             if (event.target === dialog) dialog.remove();
         });
@@ -551,6 +618,7 @@ export class MediaCard {
                 newBtn.style.cssText = 'width: 100%; text-align: left;';
                 newBtn.innerHTML = `<sl-icon slot="prefix" name="plus-circle"></sl-icon> ${t('playlist.context.new_playlist')}`;
                 newBtn.addEventListener('click', () => {
+                    if (writing) return;
                     dialog.addEventListener('sl-after-hide', () => {
                         MediaCard.openCreatePlaylistDialog(itemIds, label, onSuccess);
                     }, { once: true });
@@ -570,8 +638,12 @@ export class MediaCard {
                     btn.textContent = pl.name;
                     btn.dataset.plId = pl.id;
                     btn.addEventListener('click', async () => {
+                        if (writing) return;
+                        writing = true;
+                        MediaCard.setPlaylistWriting(dialog, true);
+                        cancelBtn.disabled = true;
+                        listEl.querySelectorAll('sl-button').forEach(button => { (button as any).disabled = true; });
                         btn.loading = true;
-                        btn.disabled = true;
                         if (errorEl) errorEl.style.display = 'none';
                         try {
                             await rpcCall('playlist.addItems', { playlistId: pl.id, itemIds });
@@ -585,8 +657,14 @@ export class MediaCard {
                                 errorEl.style.display = '';
                                 (errorEl as any).open = true;
                             }
+                        } finally {
+                            writing = false;
+                            MediaCard.setPlaylistWriting(dialog, false);
+                            cancelBtn.disabled = false;
+                            listEl.querySelectorAll('sl-button').forEach(button => { (button as any).disabled = false; });
                             btn.loading = false;
-                            btn.disabled = false;
+                            await btn.updateComplete;
+                            if (dialog.open) btn.focus();
                         }
                     });
                     listEl.appendChild(btn);
@@ -594,7 +672,7 @@ export class MediaCard {
 
                 if (playlists.length === 0) {
                     const emptyNote = document.createElement('p');
-                    emptyNote.style.cssText = 'color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small); padding: 0.5rem 0;';
+                    emptyNote.style.cssText = 'color: var(--ink-dim); font-size: var(--sl-font-size-small); padding: 0.5rem 0;';
                     emptyNote.textContent = t('playlist.context.no_playlists_yet');
                     listEl.appendChild(emptyNote);
                 }

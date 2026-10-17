@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Basket playlist validation</title>
+<style>body{overflow:auto!important}main{padding:24px;max-width:800px}output{display:block;white-space:pre-wrap;margin-block:16px}</style>
+<main><h1>Basket playlist validation</h1><p>Production dialog with isolated basket and RPC fixtures. No server writes.</p>
+<button id="check">Run validation checks</button> <button id="preview">Preview German dialog</button>
+<output id="result" aria-live="polite"></output></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import { BasketSidebar } from '../src/components/BasketSidebar.ts';
+import { basketStore } from '../src/state/basket.ts';
+import { setLanguage, t } from '../src/i18n.ts';
+const requests = [];
+let rejectWrite = false;
+window.__TAURI_INTERNALS__ = { invoke: async (_command, args) => {
+  requests.push(args);
+  if (rejectWrite) throw new Error('Fixture offline');
+  return {};
+}};
+basketStore.getItems = () => [{id:'fixture-track',name:'Fixture track',serverId:'fixture-server',type:'Audio'}];
+const sidebar = Object.create(BasketSidebar.prototype);
+sidebar.currentServerId = 'fixture-server';
+const result = document.querySelector('#result');
+async function open() {
+  sidebar.handleSaveAsPlaylist();
+  const dialog = document.querySelector('sl-dialog');
+  await new Promise(resolve => dialog.addEventListener('sl-after-show', resolve, {once:true}));
+  const input = dialog.querySelector('#playlist-name-input');
+  await input.updateComplete;
+  return {dialog, input, create:dialog.querySelector('#playlist-create-btn')};
+}
+async function close(dialog) {
+  const hidden = new Promise(resolve => dialog.addEventListener('sl-after-hide', resolve, {once:true}));
+  dialog.hide(); await hidden;
+}
+document.querySelector('#check').onclick = async () => {
+  const lines = [];
+  const assert = (ok, label) => { if (!ok) throw new Error(label); lines.push(`PASS: ${label}`); };
+  try {
+    for (const lang of ['en','fr','es','de']) {
+      await setLanguage(lang);
+      const {dialog,input,create} = await open();
+      assert(input.label === t('basket.playlist.name_label') && input.required, `${lang}: persistent translated required label`);
+      const before = requests.length;
+      for (const empty of ['', '   ']) {
+        input.value = empty; create.click();
+        assert(requests.length === before, `${lang}: ${empty ? 'whitespace' : 'empty'} name makes no request`);
+        assert(input.validationMessage === t('basket.playlist.name_required') && document.activeElement === input, `${lang}: translated error and input focus`);
+      }
+      input.value = '  夜の音楽 🎵 — Écoute  ';
+      input.dispatchEvent(new CustomEvent('sl-input', {bubbles:true}));
+      assert(!input.validity.customError, `${lang}: editing clears stale validation`);
+      rejectWrite = true;
+      input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true,cancelable:true}));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert(requests.length === before + 1 && requests.at(-1).params.name === input.value.trim(), `${lang}: Enter submits trimmed Unicode name`);
+      assert(dialog.open && input.value.includes('夜の音楽') && dialog.querySelector('#playlist-create-error').textContent.includes('Fixture offline'), `${lang}: RPC failure preserves input and explains error`);
+      rejectWrite = false;
+      const hidden = new Promise(resolve => dialog.addEventListener('sl-after-hide', resolve, {once:true}));
+      create.click(); await hidden;
+      assert(requests.length === before + 2, `${lang}: valid retry completes`);
+    }
+    result.textContent = lines.join('\n');
+  } catch (error) { result.textContent = lines.join('\n') + `\nFAIL: ${error.stack}`; }
+};
+document.querySelector('#preview').onclick = async () => {
+  const existing = document.querySelector('sl-dialog');
+  if (existing) await close(existing);
+  await setLanguage('de');
+  await open();
+};
+</script></html>

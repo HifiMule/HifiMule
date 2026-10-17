@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Playlist accessibility fixture</title>
+<style>body{overflow:auto!important}#controls{padding:8px}#stage{height:80vh;container-type:inline-size;container-name:library}#library-content{height:100%}</style>
+<div id="controls"><label>Width <select id="width"><option>1000</option><option>600</option></select></label> <label>Text <select id="zoom"><option value="16">100%</option><option value="32">200%</option></select></label> <label>Language <select id="lang"><option>en</option><option>de</option></select></label> <button id="reset">Reset fixture</button> <button id="playback-error">Trigger playback error</button> <button id="load-error">Load error with markup</button> <output id="calls">No mutations</output></div>
+<div id="stage"><div id="library-content"></div></div>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+let failLoad = false;
+const tracks=[{id:'missing',title:'Missing metadata fixture'},{id:'1',title:'First track',artistName:'Artist A',albumName:'Album A',duration:180},{id:'2',title:'Second track',artistName:'Artist B',albumName:'Album B',duration:200},{id:'3',title:'A very long title — 夜の音楽 🎵 & <live> '.repeat(4),artistName:'Artist B',albumName:'Album C',duration:220}];
+window.__TAURI_INTERNALS__={invoke:async(_command,{method,params})=>{
+ if(method==='playback.getSession')return {data:{instanceId:'fixture',sessionId:'fixture',queueRevision:'1',generationId:'1'}};
+ if(method==='playback.playPlaylist')throw new Error('Fixture playback failure: server unavailable. Reconnect the server and try playback again.');
+ if(method==='browse.getPlaylist' && failLoad)throw new Error('<img src=x onerror=alert(1)> & <strong>Server unavailable</strong>');
+ if(method==='browse.getPlaylist')return {playlist:{id:'fixture',name:'Fixture playlist'},tracks:structuredClone(tracks)};
+ if(method==='browse.search')return {tracks:structuredClone(tracks),artists:[],albums:[]};
+ if(method.startsWith('playlist.')){document.querySelector('#calls').textContent=method+' '+JSON.stringify(params);return {};}
+ return {};
+}};
+const {PlaylistCurationView}=await import('../src/components/PlaylistCurationView');
+const {setLanguage}=await import('../src/i18n');
+const {createPlaylistPlayButton}=await import('../src/components/PlaylistPlayButton');
+const errorPlay=createPlaylistPlayButton('fixture','fixture','Fixture playlist',3);
+errorPlay.id='playback-error';
+errorPlay.label='Trigger playback error';
+document.querySelector('#playback-error').replaceWith(errorPlay);
+function mount(){new PlaylistCurationView(document.querySelector('#library-content'),'fixture','Fixture playlist',()=>{},true).load();}
+function resize(){document.querySelector('#stage').style.width=document.querySelector('#width').value+'px';document.documentElement.style.fontSize=document.querySelector('#zoom').value+'px';}
+document.querySelector('#width').onchange=document.querySelector('#zoom').onchange=resize;
+document.querySelector('#lang').onchange=async e=>{await setLanguage(e.target.value);mount();};
+document.querySelector('#load-error').onclick=()=>{failLoad=true;mount();};
+document.querySelector('#reset').onclick=()=>{failLoad=false;document.querySelector('#calls').textContent='No mutations';mount();};
+await setLanguage(document.querySelector('#lang').value);resize();mount();
+</script></html>

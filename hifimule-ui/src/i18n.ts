@@ -1,16 +1,43 @@
-import catalog from '@hifimule/i18n-catalog';
+import english from 'virtual:hifimule-locale/en';
 
 type Language = 'en' | 'fr' | 'es' | 'de';
 type CatalogKey = string;
 
 const DEFAULT_LANGUAGE: Language = 'en';
 
-/** Languages the catalog ships translations for. Adding a language here (and to
- * the `Language` union) is all the wiring an already-translated locale needs —
- * the catalog is the source of truth. */
+/** Keep supported locales aligned with the loaders and the Vite catalog plugin. */
 const SUPPORTED_LANGUAGES: readonly Language[] = ['en', 'fr', 'es', 'de'];
 
-const translations: Record<string, Record<string, string> | undefined> = catalog;
+const translations: Partial<Record<Language, Record<string, string>>> = { en: english };
+const loaders = {
+    fr: () => import('virtual:hifimule-locale/fr'),
+    es: () => import('virtual:hifimule-locale/es'),
+    de: () => import('virtual:hifimule-locale/de'),
+};
+const pending = new Map<Language, Promise<void>>();
+let languageRevision = 0;
+
+async function loadLanguage(language: Language): Promise<void> {
+    if (translations[language] || language === 'en') return;
+    let request = pending.get(language);
+    if (!request) {
+        request = loaders[language]().then(module => {
+            translations[language] = module.default;
+        }).finally(() => pending.delete(language));
+        pending.set(language, request);
+    }
+    await request;
+}
+
+/** Await before rendering either webview. A missing local chunk falls back to English. */
+export async function initializeI18n(): Promise<void> {
+    try {
+        await loadLanguage(currentLanguage());
+    } catch (error) {
+        console.warn('Could not load UI language; using English.', error);
+    }
+    applyDocumentLanguage();
+}
 
 function isSupported(language: string): language is Language {
     return (SUPPORTED_LANGUAGES as readonly string[]).includes(language);
@@ -29,8 +56,12 @@ export function currentLanguage(): Language {
     );
 }
 
-export function setLanguage(language: string): void {
-    localStorage.setItem('hifimule.language', normalizeLanguage(language));
+export async function setLanguage(language: string): Promise<void> {
+    const revision = ++languageRevision;
+    const next = normalizeLanguage(language);
+    await loadLanguage(next);
+    if (revision !== languageRevision) return;
+    localStorage.setItem('hifimule.language', next);
     applyDocumentLanguage();
 }
 
@@ -40,7 +71,8 @@ export function setLanguage(language: string): void {
  * for English users; this keeps it honest for everyone else. */
 export function applyDocumentLanguage(): void {
     if (typeof document !== 'undefined') {
-        document.documentElement.lang = currentLanguage();
+        const language = currentLanguage();
+        document.documentElement.lang = translations[language] ? language : DEFAULT_LANGUAGE;
     }
 }
 

@@ -11,9 +11,17 @@ export function createAlbumPlayButton(albumId: string, serverId: string | undefi
     play.addEventListener('mousedown', event => event.stopPropagation());
     play.addEventListener('click', async event => {
         event.stopPropagation();
-        if (!source) return;
+        if (!source || play.disabled) return;
+        play.disabled = true;
+        play.setAttribute('aria-busy', 'true');
+        play.name = 'hourglass-split';
         try { await playbackPlayAlbum(source.serverId, source.albumId); }
         catch (error) { showToast((error as Error).message, 'danger'); }
+        finally {
+            play.disabled = false;
+            play.removeAttribute('aria-busy');
+            play.name = 'play-fill';
+        }
     });
     return play;
 }

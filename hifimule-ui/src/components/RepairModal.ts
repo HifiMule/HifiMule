@@ -25,20 +25,50 @@ export class RepairModal {
     /** Serializes manifest mutations so a rapid double-click (or clicking prune
      * while a relink is in flight) can't fire two writes against the manifest. */
     private busy = false;
+    private scanGeneration = 0;
+    private disabledControls: HTMLElement[] = [];
 
     constructor(private container: HTMLElement, onComplete?: () => void) {
         this.onComplete = onComplete || null;
     }
 
     async open() {
+        if (this.busy) return;
+        this.discrepancies = null;
         this.renderDialog();
         this.showDialog();
+        await this.scan();
+    }
 
+    private async scan() {
+        const generation = ++this.scanGeneration;
         try {
-            this.discrepancies = await rpcCall('manifest_get_discrepancies') as Discrepancies;
+            const discrepancies = await rpcCall('manifest_get_discrepancies') as Discrepancies;
+            if (generation !== this.scanGeneration) return;
+            this.discrepancies = discrepancies;
             this.renderContent();
         } catch (err) {
-            this.renderError((err as Error).message);
+            if (generation !== this.scanGeneration) return;
+            this.discrepancies = null;
+            this.renderError(this.errorMessage(err));
+        }
+    }
+
+    private errorMessage(error: unknown): string {
+        return error instanceof Error ? error.message : String(error);
+    }
+
+    private setBusy(busy: boolean) {
+        this.busy = busy;
+        this.dialog?.setAttribute('aria-busy', String(busy));
+        if (busy) {
+            this.disabledControls = Array.from(
+                this.dialog?.querySelectorAll<HTMLElement>('sl-button:not([disabled]), sl-select:not([disabled])') ?? []
+            );
+            this.disabledControls.forEach(control => control.setAttribute('disabled', ''));
+        } else {
+            this.disabledControls.forEach(control => control.removeAttribute('disabled'));
+            this.disabledControls = [];
         }
     }
 
@@ -60,7 +90,7 @@ export class RepairModal {
         dialogEl.setAttribute('style', 'max-width: 90vw; --width: 720px;');
         dialogEl.innerHTML = `
             <div class="repair-body">
-                <div class="repair-loading">
+                <div class="repair-loading" role="status">
                     <sl-spinner style="font-size: 2rem;"></sl-spinner>
                     <p>${t('repair.scanning')}</p>
                 </div>
@@ -69,8 +99,18 @@ export class RepairModal {
 
         this.container.appendChild(dialogEl);
 
-        dialogEl.addEventListener('sl-after-hide', () => {
-            dialogEl.remove();
+        dialogEl.addEventListener('sl-request-close', event => {
+            if (event.target === dialogEl && this.busy) event.preventDefault();
+        });
+        dialogEl.addEventListener('sl-hide', event => {
+            if (event.target === dialogEl && this.dialog === dialogEl) {
+                ++this.scanGeneration;
+                this.dialog = null;
+                this.discrepancies = null;
+            }
+        });
+        dialogEl.addEventListener('sl-after-hide', event => {
+            if (event.target === dialogEl) dialogEl.remove();
         });
     }
 
@@ -198,7 +238,7 @@ export class RepairModal {
         if (!body) return;
 
         body.innerHTML = `
-            <div class="repair-error">
+            <div class="repair-error" role="alert">
                 <sl-icon name="exclamation-triangle-fill" style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
                 <p>${t('repair.scan_failed', { message: this.escapeHtml(message) })}</p>
                 <sl-button id="repair-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
@@ -241,22 +281,21 @@ export class RepairModal {
 
     private async handlePrune(ids: string[]) {
         if (this.busy) return;
-        this.busy = true;
+        this.setBusy(true);
         try {
             await rpcCall('manifest_prune', { itemIds: ids });
             // Refresh discrepancies
-            this.discrepancies = await rpcCall('manifest_get_discrepancies') as Discrepancies;
-            this.renderContent();
+            await this.scan();
         } catch (err) {
             console.error('[Repair] Prune failed:', err);
-            showToast(t('repair.prune_failed', { message: (err as Error).message }), 'danger', ERROR_TOAST_DURATION);
+            showToast(t('repair.prune_failed', { message: this.errorMessage(err) }), 'danger', ERROR_TOAST_DURATION);
         } finally {
-            this.busy = false;
+            this.setBusy(false);
         }
     }
 
     private async handleRelinkPrompt(orphanPath: string) {
-        if (!this.discrepancies || this.discrepancies.missing.length === 0) {
+        if (this.busy || !this.discrepancies || this.discrepancies.missing.length === 0) {
             return;
         }
 
@@ -277,14 +316,18 @@ export class RepairModal {
         if (!actionsDiv) return;
 
         actionsDiv.innerHTML = `
-            <sl-select class="relink-select" size="small" placeholder="${this.escapeAttr(t('repair.link_to'))}">
+            <sl-select class="relink-select" size="small" hoist label="${this.escapeAttr(t('repair.link_to'))}" placeholder="${this.escapeAttr(t('repair.link_to'))}">
                 ${this.discrepancies.missing.map(m =>
             `<sl-option value="${this.escapeAttr(m.jellyfinId)}">${this.escapeHtml(m.name)}</sl-option>`
         ).join('')}
             </sl-select>
         `;
 
-        const select = actionsDiv.querySelector('.relink-select') as HTMLSelectElement;
+        const select = actionsDiv.querySelector('.relink-select') as HTMLSelectElement & { updateComplete: Promise<boolean> };
+        // Wait for Shoelace to create the internal combobox before moving focus.
+        await select.updateComplete;
+        if (!select.isConnected) return;
+        select.focus();
         select.addEventListener('sl-change', async () => {
             const selectedId = select.value;
             if (selectedId) {
@@ -295,33 +338,32 @@ export class RepairModal {
 
     private async handleRelink(jellyfinId: string, newLocalPath: string) {
         if (this.busy) return;
-        this.busy = true;
+        this.setBusy(true);
         try {
             await rpcCall('manifest_relink', { jellyfinId, newLocalPath });
             // Refresh discrepancies
-            this.discrepancies = await rpcCall('manifest_get_discrepancies') as Discrepancies;
-            this.renderContent();
+            await this.scan();
         } catch (err) {
             console.error('[Repair] Relink failed:', err);
-            showToast(t('repair.relink_failed', { message: (err as Error).message }), 'danger', ERROR_TOAST_DURATION);
+            showToast(t('repair.relink_failed', { message: this.errorMessage(err) }), 'danger', ERROR_TOAST_DURATION);
         } finally {
-            this.busy = false;
+            this.setBusy(false);
         }
     }
 
     private async handleClearDirty() {
         if (this.busy) return;
-        this.busy = true;
+        this.setBusy(true);
         try {
             await rpcCall('manifest_clear_dirty');
-            const dialog = this.container.querySelector('#repair-dialog') as any;
+            const dialog = this.dialog as any;
             if (dialog) dialog.hide();
             this.onComplete?.();
         } catch (err) {
             console.error('[Repair] Clear dirty failed:', err);
-            showToast(t('repair.clear_dirty_failed', { message: (err as Error).message }), 'danger', ERROR_TOAST_DURATION);
+            showToast(t('repair.clear_dirty_failed', { message: this.errorMessage(err) }), 'danger', ERROR_TOAST_DURATION);
         } finally {
-            this.busy = false;
+            this.setBusy(false);
         }
     }
 

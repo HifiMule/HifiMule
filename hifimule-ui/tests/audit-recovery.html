@@ -1,0 +1,15 @@
+<!doctype html><html lang="en" class="sl-theme-dark"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Audit recovery fixture</title>
+<style>main{padding:24px}body{overflow:auto!important}</style>
+<main><h1>Recovery checks</h1><p>Fixture data — first setup request fails; retry succeeds.</p><button id="init">Initialize fixture device</button><button id="tray">Show tray guidance</button><output id="focus"></output></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';import '../src/shoelace';import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const {setLanguage}=await import('../src/i18n.ts');await setLanguage(new URLSearchParams(location.search).get('lang')||'en');
+let failed=false;
+window.__TAURI_INTERNALS__={invoke:async(_command,{method})=>{if(method==='get_credentials'){if(!failed){failed=true;throw 'Fixture connection interrupted';}return {userId:'fixture-user'};}if(method==='device_profiles.list')return [{id:'passthrough',name:'Original format'}];return {};}};
+const {InitDeviceModal}=await import('../src/components/InitDeviceModal.ts');
+const {mountTraySetupGuidance}=await import('../src/components/TraySetupGuidance.ts');
+document.querySelector('#init').onclick=()=>new InitDeviceModal(document.body).open('Fixture player','fixture','1');
+document.querySelector('#tray').onclick=()=>{let calls=0;mountTraySetupGuidance(async()=>({state:++calls===1?'missing':'available',fedora:false}),async()=>{},document.body,{getItem:()=>null,setItem:()=>{}});};
+document.addEventListener('focusin',()=>document.querySelector('#focus').textContent='Focused: '+(document.activeElement.id||document.activeElement.tagName));
+</script></html>

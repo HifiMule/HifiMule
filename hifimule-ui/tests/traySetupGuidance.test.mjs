@@ -15,13 +15,19 @@ function environment(storageFails = false) {
         remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
         setAttribute(key, value) { this.attrs[key] = value; }
         addEventListener(event, fn) { this.handlers[event] = fn; }
+        contains(el) { return el === this || this.children.some(child => child.contains(el)); }
+        focus() { document.activeElement = this; }
+        closest() { return null; }
+        getAttribute(key) { return this.attrs[key] ?? null; }
+        removeAttribute(key) { delete this.attrs[key]; }
+        querySelector() { return this.children.find(child => child.tag === 'main') ?? null; }
     }
     const body = new Element('body'); const root = new Element('main'); body.append(root);
-    const document = { body, createElement: tag => new Element(tag) };
+    const document = { body, activeElement: body, createElement: tag => new Element(tag) };
     const store = new Map(); const storage = { getItem(key) { if (storageFails) throw Error('blocked'); return store.get(key); }, setItem(key, value) { if (storageFails) throw Error('blocked'); store.set(key,value); } };
-    const context = { exports: {}, document, sessionStorage: storage, t: key => key };
+    const context = { exports: {}, document, HTMLElement: Element, sessionStorage: storage, t: key => key };
     runInNewContext(js, context);
-    return { body, root, storage, mount: context.exports.mountTraySetupGuidance };
+    return { body, root, storage, document, mount: context.exports.mountTraySetupGuidance };
 }
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 const children = element => [element, ...element.children.flatMap(children)];
@@ -69,7 +75,7 @@ test('shutdown discards late initial detection and late recheck', async () => {
 test('recheck is serialized and dismissal discards pending result', async () => {
     const env = environment(); let calls = 0, resolve;
     env.mount(() => { calls++; return calls === 1 ? Promise.resolve({state:'missing',fedora:true}) : new Promise(done => {resolve=done;}); }, async () => {}); await flush();
-    const anchor = notice(env); const check = button(anchor,'checkAgain'); check.handlers.click(); check.handlers.click(); assert.equal(calls,2); assert.equal(check.disabled,true);
+    const anchor = notice(env); const check = button(anchor,'checkAgain'); check.handlers.click(); check.handlers.click(); assert.equal(calls,2); assert.equal(check.attrs['aria-disabled'],'true');
     button(anchor,'dismiss').handlers.click(); resolve({state:'missing',fedora:true}); await flush(); assert.equal(notice(env),undefined);
 });
 
@@ -90,4 +96,28 @@ test('hydration acknowledgment precedes nonblocking guidance and translations ar
     const keys = Object.keys(catalog.en).filter(key => key.startsWith('traySetup.'));
     assert.equal(keys.length, 11);
     for (const language of ['en','fr','es','de']) for (const key of keys) assert.ok(catalog[language][key], `${language}: ${key}`);
+});
+
+for (const action of ['dismiss', 'checkAgain']) test(`${action} restores focus after guidance disappears`, async () => {
+    const env = environment(); let state = 'missing';
+    env.mount(async () => ({ state, fedora: false }), async () => {}); await flush();
+    const anchor = notice(env); env.root.focus();
+    anchor.handlers.focusin({ relatedTarget: env.root });
+    button(anchor, action).focus(); state = 'available';
+    button(anchor, action).handlers.click(); await flush();
+    assert.equal(env.document.activeElement, env.root);
+});
+test('successful recheck does not steal focus moved outside the notice', async () => {
+    const env = environment(); let resolve, calls = 0;
+    env.mount(() => ++calls === 1 ? Promise.resolve({state:'missing',fedora:false}) : new Promise(done => resolve=done), async () => {}); await flush();
+    const anchor = notice(env); button(anchor, 'checkAgain').focus(); button(anchor, 'checkAgain').handlers.click();
+    env.root.focus(); resolve({state:'available',fedora:false}); await flush();
+    assert.equal(env.document.activeElement, env.root);
+});
+test('dismiss falls back to current app root after the old control was removed', async () => {
+    const env = environment(); env.mount(async () => ({state:'missing',fedora:false}), async () => {}); await flush();
+    const old = new env.body.constructor('button'); env.root.append(old);
+    const anchor = notice(env); anchor.handlers.focusin({relatedTarget:old}); old.remove();
+    button(anchor,'dismiss').focus(); button(anchor,'dismiss').handlers.click();
+    assert.equal(env.document.activeElement,env.root); assert.equal(env.root.getAttribute('tabindex'),null);
 });

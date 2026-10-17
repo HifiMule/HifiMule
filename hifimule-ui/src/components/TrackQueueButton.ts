@@ -17,10 +17,14 @@ export function createTrackQueueButton(
         event.stopPropagation();
         if (!source || button.disabled) return;
         button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        button.name = 'hourglass-split';
         try {
             await appendTracksToQueueFromLibrary([{ ...source }]);
         } finally {
             button.disabled = false;
+            button.removeAttribute('aria-busy');
+            button.name = 'list-ul';
         }
     });
     return button;

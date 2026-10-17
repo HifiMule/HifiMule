@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radio pending and reduced motion checks</title>
+<style>body{overflow:auto!important}main{padding:24px;max-width:60rem}.actions{display:flex;gap:16px;align-items:center;flex-wrap:wrap}section{margin-block:24px}#status{display:block;margin-block:16px}</style>
+<main><h1>Radio and loading feedback</h1><p>Fixture data · production controls · requests wait for completion below.</p>
+<label>Language <select id="language"><option>en</option><option>de</option><option>fr</option><option>es</option></select></label>
+<label><input id="reduce" type="checkbox"> Simulate reduced motion</label>
+<section class="actions" id="actions"></section>
+<button id="complete">Complete request</button> <button id="fail">Fail request</button> <button id="add">Mount another radio action</button>
+<output id="status">Ready</output>
+<section class="actions"><sl-spinner style="font-size:32px"></sl-spinner><sl-button loading>Loading</sl-button><sl-input loading label="Loading source"></sl-input></section>
+</main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace'; import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+let finish, fail;
+window.__TAURI_INTERNALS__={invoke:async (_command,{method})=>{
+ if(method==='playback.getSelectionConfig')return {data:{sources:[],ordering:['random']}};
+ if(method==='playback.startSelection')return new Promise((resolve,reject)=>{document.querySelector('#status').textContent='Request pending';finish=()=>{resolve({data:{}});document.querySelector('#status').textContent='Request completed'};fail=()=>{reject(new Error('PLAYBACK_SELECTION_PREPARATION_FAILED'));document.querySelector('#status').textContent='Request failed'};});
+ return {data:{}};
+}};
+const {createRadioPlayButton}=await import('../src/components/RadioPlayButton.ts');
+const {setLanguage}=await import('../src/i18n.ts');await setLanguage('en');
+document.querySelector('#reduce').onchange=e=>{
+ for(const sheet of document.styleSheets)for(const rule of sheet.cssRules){
+  if(rule instanceof CSSMediaRule && (rule.conditionText==='(prefers-reduced-motion: reduce)'||rule.conditionText==='all'))rule.media.mediaText=e.target.checked?'all':'(prefers-reduced-motion: reduce)';
+ }
+};
+let count=0;const add=()=>document.querySelector('#actions').append(createRadioPlayButton({type:'MusicArtist',id:String(++count),name:'夜の音楽 · A long artist name for radio playback',serverId:'fixture'}));
+add();add();document.querySelector('#add').onclick=add;
+document.querySelector('#complete').onclick=()=>finish?.();document.querySelector('#fail').onclick=()=>fail?.();
+document.querySelector('#language').onchange=async e=>{await setLanguage(e.target.value);document.querySelector('#actions').replaceChildren();add();add();};
+</script></html>

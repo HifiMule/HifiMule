@@ -1,3 +1,5 @@
+import { createTrackPlayButton } from './TrackPlayButton';
+import { libraryLoadStatus } from './libraryLoadStatus';
 import {
     fetchBrowseArtists,
     fetchBrowseArtist,
@@ -7,7 +9,6 @@ import {
     BrowseAlbum,
     BrowseTrack,
     StaleBrowseResponse,
-    playbackPlayTrack,
 } from '../rpc';
 import { appendTracksToQueueFromLibrary } from '../state/queue';
 import { MediaCard } from './MediaCard';
@@ -90,6 +91,8 @@ export class TracksBrowseView {
 
     async load(): Promise<void> {
         this.renderLayout();
+        const layout = this.container.firstElementChild;
+        libraryLoadStatus(this.container).start();
         // Register before the awaits: the track panel renders selectable rows
         // as soon as its own fetch resolves (Escape must already work, AC 10),
         // and a destroy() during the await must find the listener/subscription
@@ -101,6 +104,11 @@ export class TracksBrowseView {
             this.fetchAlbums(true),
             this.fetchTracks(true),
         ]);
+        if (this.container.isConnected && this.container.firstElementChild === layout) {
+            const status = libraryLoadStatus(this.container);
+            if (this.artistState.errored || this.albumState.errored || this.trackState.errored) status.fail();
+            else status.complete(this.trackState.items.length);
+        }
     }
 
     remount(): void {
@@ -109,6 +117,7 @@ export class TracksBrowseView {
         this.renderAlbumPanel();
         this.renderTrackPanel();
         this.restoreScrolls();
+        libraryLoadStatus(this.container).complete(this.trackState.items.length);
         this.subscribeBasket();
         this.ensureEscapeListener();
     }
@@ -141,18 +150,14 @@ export class TracksBrowseView {
                     <div id="tracks-artist-panel" class="curation-artist-panel"
                          style="display:flex; flex-direction:row; overflow:hidden; padding:0;">
                         <div id="tracks-artist-scroll" style="flex:1; overflow-y:auto; padding:0.5rem 0; min-width:0;"></div>
-                        <div id="tracks-artist-az"
-                             style="display:none; width:2.5rem; overflow-y:auto;
-                                    border-left:1px solid var(--surface-border-soft);
-                                    background:var(--surface-fill); flex-shrink:0;"></div>
+                        <div id="tracks-artist-az" class="tracks-az" role="group"
+                             aria-label="${t('tracks.view.artist_letters')}" style="display:none"></div>
                     </div>
                     <div id="tracks-album-panel" class="curation-album-panel"
                          style="display:flex; flex-direction:row; overflow:hidden; padding:0;">
                         <div id="tracks-album-scroll" style="flex:1; overflow-y:auto; padding:0.5rem 0; min-width:0;"></div>
-                        <div id="tracks-album-az"
-                             style="display:none; width:2.5rem; overflow-y:auto;
-                                    border-left:1px solid var(--surface-border-soft);
-                                    background:var(--surface-fill); flex-shrink:0;"></div>
+                        <div id="tracks-album-az" class="tracks-az" role="group"
+                             aria-label="${t('tracks.view.album_letters')}" style="display:none"></div>
                     </div>
                 </div>
                 <div id="tracks-track-panel" class="curation-track-panel"
@@ -489,20 +494,15 @@ export class TracksBrowseView {
         const isSelected = album.id === this.selectedAlbumId;
         row.className = `curation-album-row${isSelected ? ' curation-album-focused' : ''}`;
         row.dataset.albumId = album.id;
-        row.setAttribute('role', 'button');
-        row.setAttribute('tabindex', '0');
-        row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
-        row.innerHTML = `<span class="curation-row-label" title="${this.escapeAttr(album.name)}">${this.escapeHtml(album.name)}</span>`;
+        const select = document.createElement('button');
+        select.type = 'button';
+        select.className = 'curation-row-select curation-row-label';
+        select.title = album.name;
+        select.textContent = album.name;
+        select.setAttribute('aria-pressed', String(isSelected));
+        select.addEventListener('click', () => this.selectAlbum(album.id));
         const play = createAlbumPlayButton(album.id, album.serverId, album.name);
-        row.appendChild(play);
-        row.addEventListener('click', () => this.selectAlbum(album.id));
-        row.addEventListener('keydown', (e) => {
-            if (e.target !== row) return;
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                this.selectAlbum(album.id);
-            }
-        });
+        row.append(select, play);
         return row;
     }
 
@@ -511,7 +511,8 @@ export class TracksBrowseView {
         row.className = 'curation-track-row';
         if (this.selectedTrackIds.has(track.id)) row.classList.add('is-checked');
         row.dataset.trackId = track.id;
-        row.setAttribute('tabindex', '0');
+        // The checkbox and actions are the keyboard stops; retain programmatic focus.
+        row.setAttribute('tabindex', '-1');
 
         // Leading multi-select checkbox (Story 9.12). Native input: focus and
         // Space-toggle semantics come for free (AC 11).
@@ -524,7 +525,11 @@ export class TracksBrowseView {
             e.stopPropagation();
             this.toggleTrackSelection(track, index, row);
         });
-        row.appendChild(check);
+        const target = document.createElement('label');
+        target.className = 'media-list-row__check-target';
+        target.addEventListener('click', event => event.stopPropagation());
+        target.appendChild(check);
+        row.appendChild(target);
 
         // Ctrl/Cmd-click toggles, Shift-click range-selects from the anchor;
         // plain click stays a no-op (track rows have no navigation). The
@@ -561,21 +566,8 @@ export class TracksBrowseView {
         info.appendChild(meta);
         row.appendChild(info);
 
-        const playBtn = document.createElement('sl-icon-button') as any;
-        playBtn.name = 'play-fill';
-        playBtn.label = t('playback.play_track', { title: track.title });
-        playBtn.disabled = !track.serverId;
+        const playBtn = createTrackPlayButton(track.serverId, track.id, track.title);
         playBtn.style.fontSize = '1.1rem';
-        const playbackSource = track.serverId
-            ? { serverId: track.serverId, trackId: track.id }
-            : null;
-        playBtn.addEventListener('mousedown', (event: Event) => event.stopPropagation());
-        playBtn.addEventListener('click', async (event: Event) => {
-            event.stopPropagation();
-            if (!playbackSource) return;
-            try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
-            catch (error) { showToast((error as Error).message, 'danger'); }
-        });
         row.appendChild(playBtn);
 
         const previewBtn = createTrackPreviewButton(track.serverId, track.id, track.title) as any;
@@ -589,7 +581,8 @@ export class TracksBrowseView {
         const isInBasket = basketStore.has(track.id);
         const toggleBtn = document.createElement('sl-icon-button') as any;
         toggleBtn.name = isInBasket ? 'dash-circle-fill' : 'plus-circle-fill';
-        toggleBtn.label = isInBasket ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
+        toggleBtn.label = `${t(isInBasket ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${track.title}`;
+        toggleBtn.dataset.basketLabel = track.title;
         toggleBtn.style.fontSize = '1.1rem';
         toggleBtn.dataset.basketToggle = track.id;
         // AC 9: (+) controls render disabled when no device (server) is selected.
@@ -618,7 +611,7 @@ export class TracksBrowseView {
 
             row.addEventListener('contextmenu', (e: MouseEvent) => {
                 e.preventDefault();
-                MediaCard.showItemContextMenu(e.clientX, e.clientY, track.id, track.title);
+                MediaCard.showItemContextMenu(e.clientX, e.clientY, track.id, track.title, playlistBtn);
             });
         }
 
@@ -639,7 +632,7 @@ export class TracksBrowseView {
             const trackId = (btn as any).dataset.basketToggle;
             const isInBasket = basketStore.has(trackId);
             (btn as any).name = isInBasket ? 'dash-circle-fill' : 'plus-circle-fill';
-            (btn as any).label = isInBasket ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
+            (btn as any).label = `${t(isInBasket ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${btn.dataset.basketLabel ?? ''}`;
             (btn as any).disabled = noDevice;
         });
     }
@@ -931,7 +924,7 @@ export class TracksBrowseView {
                 const isAll = 'allAlbums' in row.dataset;
                 const isSelected = isAll ? albumId === null : row.dataset.albumId === albumId;
                 row.classList.toggle('curation-album-focused', isSelected);
-                row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+                (row.querySelector('.curation-row-select') ?? row).setAttribute('aria-pressed', String(isSelected));
             });
         }
 
@@ -976,32 +969,23 @@ export class TracksBrowseView {
             return;
         }
 
-        azEl.style.display = 'grid';
-        azEl.style.gridTemplateColumns = '1fr 1fr';
-        azEl.innerHTML = '';
+        azEl.style.display = 'flex';
+        // Keep the same controls through fetches and pagination so focus and
+        // the strip's scroll position survive an asynchronous result.
         for (const letter of ALL_LETTERS) {
-            const btn = document.createElement('button');
-            btn.textContent = letter;
-            const isActive = letter === activeLetter;
-            btn.style.cssText = [
-                'width:100%',
-                'padding:0.15rem 0',
-                'background:none',
-                'border:none',
-                'cursor:pointer',
-                'font-size:0.55rem',
-                'font-weight:600',
-                'text-align:center',
-                'line-height:1',
-                isActive
-                    ? 'color:var(--sl-color-primary-500)'
-                    : 'color:var(--ink-dim,rgba(255,255,255,0.45))',
-            ].join(';');
-            btn.addEventListener('click', () => {
-                if (type === 'artist') this.setArtistLetter(letter);
-                else this.setAlbumLetter(letter);
-            });
-            azEl.appendChild(btn);
+            let btn = azEl.querySelector<HTMLButtonElement>(`button[data-letter="${letter}"]`);
+            if (!btn) {
+                btn = document.createElement('button');
+                btn.type = 'button';
+                btn.dataset.letter = letter;
+                btn.textContent = letter;
+                btn.addEventListener('click', () => {
+                    if (type === 'artist') void this.setArtistLetter(letter);
+                    else void this.setAlbumLetter(letter);
+                });
+                azEl.appendChild(btn);
+            }
+            btn.setAttribute('aria-pressed', String(letter === activeLetter));
         }
     }
 

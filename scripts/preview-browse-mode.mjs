@@ -57,12 +57,12 @@ if(m==='playback.getSession')return {data:null};
 throw Error('Unexpected mutation/request: '+m);},{shouldMockEvents:true});
 const q=new URLSearchParams(location.search);const before=q.get('version')==='before';document.querySelector('#version').value=before?'before':'current';
 const css=document.createElement('link');css.rel='stylesheet';css.href=before?'/.browse-before.css':'/src/styles.css';document.head.append(css);
-const {setLanguage}=await import('/src/i18n.ts');setLanguage(q.get('lang')||'en');
+const {setLanguage}=await import('/src/i18n.ts');await setLanguage(q.get('lang')||'en');
 const {initLibraryView,browseProbe}=await import(before?'/src/.browse-before.ts':'/src/.browse-current.ts');
 const {state,renderModeBar}=browseProbe;
 for(const key of ['width','lang','scale'])if(q.has(key))document.querySelector('#'+key).value=q.get(key);
 function measure(){requestAnimationFrame(()=>{const b=document.querySelector('#browse-mode-bar'),c=document.querySelector('#library-content');const buttons=[...b.querySelectorAll('[data-mode]')];document.querySelector('#metrics').textContent=JSON.stringify({width:b.clientWidth,barHeight:b.offsetHeight,contentHeight:c.clientHeight,rows:new Set(buttons.map(n=>n.offsetTop)).size,gap:getComputedStyle(b.querySelector('.browse-mode-bar')).gap,buttonHeight:buttons[0]?.offsetHeight,font:buttons[0]?getComputedStyle(buttons[0].shadowRoot.querySelector('button')).fontSize:null,overflow:b.scrollWidth>b.clientWidth,mode:state.browseMode},null,0)})}
-function controls(){document.querySelector('.fixture-shell').style.width=document.querySelector('#width').value+'px';document.documentElement.style.fontSize=(16*Number(document.querySelector('#scale').value))+'px';setLanguage(document.querySelector('#lang').value);renderModeBar();measure()}
+async function controls(){document.querySelector('.fixture-shell').style.width=document.querySelector('#width').value+'px';document.documentElement.style.fontSize=(16*Number(document.querySelector('#scale').value))+'px';await setLanguage(document.querySelector('#lang').value);renderModeBar();measure()}
 for(const id of ['width','lang','scale'])document.querySelector('#'+id).onchange=controls;
 document.querySelector('#version').onchange=e=>{const params=new URLSearchParams();for(const id of ['version','width','lang','scale'])params.set(id,document.querySelector('#'+id).value);location.search=params.toString()};
 document.querySelector('#modes').onchange=async e=>{available=e.target.value==='Broad'?broad:e.target.value==='Limited'?['albums','tracks','favorites']:[];await initLibraryView();measure()};

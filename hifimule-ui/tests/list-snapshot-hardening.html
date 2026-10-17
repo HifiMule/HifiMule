@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>List and snapshot recovery regression checks</title>
+<style>
+  body { overflow:auto!important; }
+  main { padding:24px; max-width:1100px; margin:auto; }
+  #results { white-space:pre-wrap; font:14px/1.5 system-ui; }
+  #library-content { height:340px; overflow:auto; position:relative; padding:12px; }
+  #snapshots { margin-block:24px; }
+</style>
+<main><h1>List and snapshot recovery</h1><pre id="results" role="status">Running checks…</pre>
+<div id="browse-mode-bar"></div><div id="library-content"></div><div id="snapshots"></div></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+// Fixtures never persist a basket or settings to the user's browser storage.
+const memory = new Map();
+Object.defineProperty(window, 'localStorage', {value:{getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,String(value)),removeItem:key=>memory.delete(key)}});
+const params=new URLSearchParams(location.search);
+document.documentElement.style.fontSize=params.get('zoom')==='200'?'32px':'16px';
+const results=[];
+const check=(value,label)=>{results.push(`${value?'PASS':'FAIL'} ${label}`);document.querySelector('#results').textContent=results.join('\n');if(!value)throw new Error(label);};
+const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+const settle=async()=>{for(let i=0;i<12;i++)await Promise.resolve();await frame();};
+const pending=[];
+let failAddition=false,holdAddition=false,countRequests=0,artistOpens=0;
+const artists=Array.from({length:100},(_,i)=>({id:`artist-${i}`,name:`Artist ${String(i+1).padStart(3,'0')} — 音楽 🎵`,albumCount:2}));
+const snapshot={snapshotId:'snapshot-1',name:'Saved listening session',createdAt:'2026-10-17T10:00:00Z',entryCount:'10'};
+const exportOperation={operationId:'playlist-operation',snapshotId:snapshot.snapshotId,status:'partial',parts:[{serverId:'server',sourceLabel:'Home library — '+ 'Long source name '.repeat(4),state:'partial',confirmedCount:'4',expectedCount:'10',safeToRetry:true}]};
+const basketOperation={operationId:'basket-operation',snapshotId:snapshot.snapshotId,state:'commitUncertain'};
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+ if(command==='image_proxy')return '';
+ const {method,params:p}=args??{};
+ if(method==='browse.listModes')return {modes:['artists']};
+ if(method==='server.list')return [{id:'server',serverId:'server',name:'Fixture server',serverType:'jellyfin',selected:true}];
+ if(method==='browse.listArtists')return {artists,total:artists.length};
+ if(method==='browse.getArtist'){artistOpens++;return {artist:artists.find(a=>a.id===p.artistId),albums:[]};}
+ if(method==='jellyfin_get_item_counts'){
+  countRequests++;
+  if(holdAddition)await new Promise(resolve=>pending.push({resolve}));
+  if(failAddition)throw new Error('Fixture offline');
+  return p.itemIds.map(id=>({id,recursiveItemCount:2}));
+ }
+ if(method==='jellyfin_get_item_sizes')return p.itemIds.map(id=>({id,totalSizeBytes:1024}));
+ if(method==='playback.listSnapshotEntries')return {data:{snapshotId:p.snapshotId,entries:[],nextCursor:null}};
+ if(method==='playback.listSnapshotPlaylistExports')return {data:[structuredClone(exportOperation)]};
+ if(method==='playback.listSnapshotBasketExports')return {data:[structuredClone(basketOperation)]};
+ if(method==='playback.listSnapshots')return {data:{snapshots:[snapshot],nextCursor:null}};
+ if(['playback.retrySnapshotPlaylistExport','playback.reconcileSnapshotPlaylistExport','playback.recoverSnapshotBasketExport'].includes(method))return new Promise((resolve,reject)=>pending.push({method,resolve:value=>resolve({data:value}),reject}));
+ if(method==='get_daemon_state')return {destinations:[]};
+ if(method==='playback.getSession')throw new Error('Fixture playback offline');
+ return {};
+}};
+const {setLanguage,t}=await import('../src/i18n.ts');await setLanguage(params.get('lang')||'en');
+const {basketStore}=await import('../src/state/basket.ts');
+basketStore.setActiveServerId('server');basketStore.setPhysicalTargetAvailable(true);
+const {initLibraryView}=await import('../src/library.ts');
+const {PlaybackSnapshots}=await import('../src/components/PlaybackSnapshots.ts');
+const snapshots=new PlaybackSnapshots(()=>{});document.querySelector('#snapshots').append(snapshots.element);
+const content=document.querySelector('#library-content');
+try {
+ await initLibraryView();document.querySelector('[data-view="list"]').click();await settle();
+ let row=content.querySelector('.media-list-row');
+ const title=row.querySelector('.media-list-row__open');
+ check(title?.tagName==='BUTTON'&&title.type==='button','Item titles are native keyboard buttons');
+ let toggle=row.querySelector('.basket-toggle-btn');await toggle.updateComplete;toggle.focus();
+ const originalRows=[...content.querySelectorAll('.media-list-row')];
+ holdAddition=true;toggle.click();toggle.click();await settle();
+ check(countRequests===1&&toggle.getAttribute('aria-busy')==='true','Rapid basket activation sends one pending request');
+ pending.shift().resolve();holdAddition=false;await settle();
+ check(basketStore.has('artist-0')&&document.activeElement===toggle&&originalRows.every(r=>r.isConnected),'Adding preserves focused control and existing rows');
+ toggle.click();await settle();
+ check(!basketStore.has('artist-0')&&document.activeElement===toggle&&row.isConnected,'Removing preserves focused control and row');
+ failAddition=true;toggle.click();await settle();
+ check(document.querySelector('sl-alert')?.textContent.includes(t('library.selection.add_failed',{name:artists[0].name}))&&!basketStore.has('artist-0'),'Failed addition displays a localized error and retains the item');
+ check(!toggle.hasAttribute('aria-busy')&&document.activeElement===toggle,'Failed addition unlocks the focused action for retry');
+ failAddition=false;toggle.click();await settle();check(basketStore.has('artist-0'),'Basket addition succeeds on retry');
+ // Verify both initial and live text scaling against real shadow-DOM controls.
+ const initialFontSize=document.documentElement.style.fontSize;
+ for(const size of ['16px','32px']) {
+  document.documentElement.style.fontSize=size;await frame();await frame();
+  const rows=[...content.querySelectorAll('.media-list-row')];
+  const height=rows[0].getBoundingClientRect().height;
+  check(rows.every(r=>r.querySelector('.basket-toggle-btn').getBoundingClientRect().height<=height),`Basket controls fit rows at ${size}`);
+  check(rows.every(r=>Math.abs(parseFloat(r.style.top)-Number(r.dataset.idx)*height)<.1),`Virtual offsets match rows at ${size}`);
+  check(Math.abs(parseFloat(content.querySelector('.media-list').style.height)-artists.length*height)<.1,`Virtual extent matches rows at ${size}`);
+  check(document.activeElement===toggle,'Text scaling preserves focused action');
+ }
+ document.documentElement.style.fontSize=initialFontSize;await frame();await frame();
+ // Restore earlier rows while keeping a later focused row mounted.
+ content.scrollTop=34*row.getBoundingClientRect().height;content.dispatchEvent(new Event('scroll'));await frame();
+ check(row.isConnected&&document.activeElement===toggle,'Scrolling retains the focused virtual row');
+ content.querySelector('[data-idx="35"] .media-list-row__open').focus();
+ content.scrollTop=23*row.getBoundingClientRect().height;content.dispatchEvent(new Event('scroll'));await frame();
+ const indexes=[...content.querySelectorAll('.media-list-row')].map(r=>Number(r.dataset.idx));
+ check(indexes.every((v,i)=>i===0||indexes[i-1]<v),'Upward scrolling preserves DOM reading and tab order');
+ // Leave the view ready for an actual browser Enter/Space navigation check.
+ content.scrollTop=0;content.dispatchEvent(new Event('scroll'));await frame();
+ snapshots.showEntries(snapshot);await settle();
+ const retrySelector='button[data-recovery-action="retry:server"]';
+ let retry=snapshots.element.querySelector(retrySelector);retry.focus();retry.click();retry.click();
+ snapshots.element.querySelector('button[data-recovery-action="reconcile:server"]').click();
+ check(pending.length===1&&retry.getAttribute('aria-disabled')==='true','Retry and reconciliation share an operation guard');
+ pending.shift().reject(new Error('Fixture offline'));await settle();
+ check(snapshots.exportStatus.textContent.includes(t('playback.snapshots.recoveryFailed'))&&retry.getAttribute('aria-disabled')==='false'&&document.activeElement===retry,'Playlist failure is announced without losing controls or focus');
+ retry.click();check(pending.length===1,'Failed playlist action remains retryable');
+ pending.shift().resolve(exportOperation);await settle();
+ check(document.activeElement===snapshots.element.querySelector(retrySelector),'Playlist refresh restores focus to the matching action');
+ let reconcile=snapshots.element.querySelector('button[data-recovery-action="reconcile:server"]');
+ reconcile.click();reconcile.click();check(pending.length===1,'Playlist reconciliation rejects repeated activation');
+ pending.shift().reject(null);await settle();
+ check(snapshots.exportStatus.textContent.includes(t('playback.snapshots.recoveryFailed')),'Non-Error reconciliation rejection has localized feedback');
+ let recover=snapshots.element.querySelector('button[data-recovery-operation="basket:basket-operation"]');
+ recover.focus();recover.click();recover.click();check(pending.length===1,'Basket recovery rejects repeated activation');
+ pending.shift().reject(new Error('Fixture disconnected'));await settle();
+ check(snapshots.basketStatus.textContent.includes(t('playback.snapshots.recoveryFailed'))&&document.activeElement===recover&&recover.getAttribute('aria-disabled')==='false','Basket recovery failure keeps focus and permits retry');
+ recover.click();pending.shift().resolve({...basketOperation,state:'commitConfirmed',basketItems:[]});await settle();
+ check(!recover.isConnected&&document.activeElement===snapshots.heading,'Completed basket recovery removes the stale action and preserves a focus destination');
+ retry=snapshots.element.querySelector(retrySelector);retry.click();
+ snapshots.showEntries({...snapshot,snapshotId:'snapshot-2',name:'Different snapshot'});await settle();
+ const before=snapshots.exportStatus.textContent;
+ pending.shift().reject(new Error('Late failure'));await settle();
+ check(snapshots.exportStatus.textContent===before,'Late recovery failure cannot overwrite a different snapshot');
+ snapshots.showEntries(snapshot);await settle();
+ check(snapshots.element.querySelector(retrySelector).getAttribute('aria-disabled')==='false','Returning to a snapshot permits recovery again');
+ retry=snapshots.element.querySelector(retrySelector);retry.click();
+ snapshots.showEntries({...snapshot,snapshotId:'snapshot-2',name:'Different snapshot'});await settle();
+ const unchanged=snapshots.exportStatus.textContent;
+ pending.shift().resolve({...exportOperation,status:'succeeded'});await settle();
+ check(snapshots.exportStatus.textContent===unchanged,'Late recovery success cannot overwrite a different snapshot');
+ snapshots.showEntries(snapshot);await settle();
+ retry=snapshots.element.querySelector(retrySelector);retry.click();
+ snapshots.destroy();const disposedStatus=snapshots.exportStatus.textContent;
+ pending.shift().reject(new Error('Late failure after disposal'));await settle();
+ check(snapshots.exportStatus.textContent===disposedStatus,'Disposed snapshots ignore pending recovery failures');
+ // A fresh component leaves the fixture usable for manual inspection.
+ snapshots.element.remove();const preview=new PlaybackSnapshots(()=>{});
+ document.querySelector('#snapshots').append(preview.element);preview.showEntries(snapshot);await settle();
+ check(document.documentElement.scrollWidth<=innerWidth,'No page horizontal overflow');
+ document.querySelector('#results').textContent+='\nREADY for keyboard and visual inspection';
+} catch(error) {document.querySelector('#results').textContent+='\nERROR '+(error?.stack??error);}
+</script></html>

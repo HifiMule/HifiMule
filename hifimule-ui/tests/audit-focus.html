@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audit focus regression checks</title>
+<style>body{padding:24px}#stage{width:min(100%,900px)}#tracks{height:360px}#results{white-space:pre-wrap}button{font:inherit}</style>
+<div id="stage"><h1>Device and letter filters</h1><pre id="results" role="status"></pre><div id="devices"></div><div id="tracks"></div></div>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '@shoelace-style/shoelace/dist/shoelace.js';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+let albumPlays=0;
+window.__TAURI_INTERNALS__={invoke:async(_command,args)=>{
+ if(args?.method==='playback.getSession')return {data:{instanceId:'fixture',sessionId:'fixture',queueRevision:'1',generationId:'1'}};
+ if(args?.method==='playback.playAlbum'){albumPlays++;return {};}
+ throw new Error('Fixture offline');
+}};
+const {DestinationHub}=await import('../src/components/DestinationHub.ts');
+const {TracksBrowseView}=await import('../src/components/TracksBrowseView.ts');
+const {setLanguage}=await import('../src/i18n.ts');
+const params=new URLSearchParams(location.search);
+await setLanguage(params.get('lang')||'en');
+document.documentElement.style.fontSize=params.get('zoom')==='200'?'32px':'16px';
+const messages=[];
+function check(condition,label){messages.push((condition?'PASS':'FAIL')+' '+label);document.querySelector('#results').textContent=messages.join('\n');}
+const hub=new DestinationHub(document.querySelector('#devices'),()=>{},()=>{});
+await Promise.resolve();hub.destroy();hub.disposed=false;
+const state={destinationRevision:'1',destinations:[{kind:'device',path:'/fixture',deviceId:'fixture',name:'Portable music player',selected:true}]};
+await hub.applyState(state);
+await customElements.whenDefined('sl-icon-button');
+const gear=document.querySelector('.destination-hub__settings');await gear.updateComplete;gear.focus();
+for(let i=0;i<5;i++)await hub.applyState(state);
+check(document.activeElement===gear,'Settings focus survives repeated refreshes');
+check(!gear.closest('button'),'Settings is a sibling of selection');
+const view=new TracksBrowseView(document.querySelector('#tracks'));
+view.renderLayout();view.artistState.total=200;view.albumState.total=200;
+view.syncAzStrip('artist');view.syncAzStrip('album');
+const letter=document.querySelector('#tracks-artist-az button[data-letter="B"]');
+letter.focus();view.artistLetter='B';view.syncAzStrip('artist');view.syncAzStrip('artist');
+check(document.activeElement===letter,'Letter focus survives filtering and pagination');
+check(letter.getAttribute('aria-pressed')==='true','Active letter is announced');
+const r=letter.getBoundingClientRect();check(r.width>=44&&r.height>=44,'Letter targets are at least 44px');
+check(getComputedStyle(letter).textDecorationLine.includes('underline'),'Selection has a non-color cue');
+check(document.documentElement.scrollWidth<=innerWidth,'No page horizontal overflow');
+// Use production row builders and selection updates; avoid a live library fetch.
+view.fetchTracks=async()=>{};
+const albums=document.querySelector('#tracks-album-scroll');
+const all=view.buildAllAlbumsRow();
+const album=view.buildAlbumRow({id:'album',serverId:'fixture',name:'Long album name — 夜の音楽 & <live> '.repeat(4)});
+albums.append(all,album);
+const select=album.querySelector('button'),play=album.querySelector('sl-icon-button');
+await play.updateComplete;
+check(!album.hasAttribute('role')&&!album.hasAttribute('tabindex')&&select.parentElement===play.parentElement,'Album selection and playback are sibling controls');
+select.click();
+check(select.getAttribute('aria-pressed')==='true'&&all.getAttribute('aria-pressed')==='false','Album selection exposes pressed state');
+all.click();play.click();await new Promise(resolve=>requestAnimationFrame(resolve));
+check(albumPlays===1&&select.getAttribute('aria-pressed')==='false'&&all.getAttribute('aria-pressed')==='true','Album playback leaves selection unchanged');
+const track=view.buildTrackRow({id:'track',title:'夜の音楽 🎵 <live>',artistName:'Artist',albumName:'Album'},0);
+document.querySelector('#tracks-track-panel').append(track);
+const checkbox=track.querySelector('input[type="checkbox"]');
+check(track.tabIndex===-1&&checkbox.tabIndex===0,'Track rows skip Tab while selection stays keyboard-accessible');
+checkbox.focus();
+// Let the existing background transition settle before measuring its color.
+await new Promise(resolve=>setTimeout(resolve,250));
+check(document.activeElement===checkbox&&getComputedStyle(track).backgroundColor!=='rgba(0, 0, 0, 0)','Keyboard selection highlights its containing track row');
+</script></html>

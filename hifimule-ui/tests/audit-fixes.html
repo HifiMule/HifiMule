@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audit fixes fixture</title>
+<style>body{overflow:auto!important}main{padding:24px}#covers{height:300px;overflow:auto;width:340px}.media-grid{grid-template-columns:1fr}output{display:block;margin:16px 0}</style>
+<main><h1>Audit fixes</h1><button id="autofill">Configure Auto-Fill</button> <button id="init">Initialize fixture device</button>
+<button id="settings">Device settings</button>
+<button id="playlist">Create fixture playlist</button> <button id="playlist-picker">Choose fixture playlist</button> <label>Language <select id="language"><option>en</option><option>fr</option><option>es</option><option>de</option></select></label>
+<output id="requests">Artwork requests: 0 / 40 cards</output><div id="covers"><div class="media-grid" id="grid"></div></div></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+import '../src/styles.css';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+let requests=0;
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+ if(command==='image_proxy'){document.querySelector('#requests').textContent=`Artwork requests: ${++requests} / 40 cards`;return '';}
+ if(args?.method==='get_credentials')return {userId:'fixture-user'};
+ if(args?.method==='device_profiles.list')return [{id:'passthrough',name:'Original format',description:'Keep original audio'}];
+ if(args?.method==='autoFill.preview')return {count:10,bytes:1000};
+ return {};
+}};
+const {AutoFillPanel}=await import('../src/components/AutoFillPanel.ts');
+const {InitDeviceModal}=await import('../src/components/InitDeviceModal.ts');
+const {BasketSidebar}=await import('../src/components/BasketSidebar.ts');
+const {MediaCard}=await import('../src/components/MediaCard.ts');
+const {setLanguage}=await import('../src/i18n.ts');
+await setLanguage('en');
+document.querySelector('#language').onchange=async e=>await setLanguage(e.target.value);
+document.querySelector('#playlist').onclick=()=>MediaCard.openCreatePlaylistDialog(['fixture'],'');
+document.querySelector('#playlist-picker').onclick=()=>MediaCard.openAddToPlaylistDialog(['fixture'],'Fixture track');
+document.querySelector('#autofill').onclick=()=>new AutoFillPanel({serverId:'fixture',serverLabel:'Fixture library',pipeline:null,modes:['albums','genres','playlists'],playlists:[],onSave:()=>{},formatSize:String}).open();
+document.querySelector('#settings').onclick=()=>{
+ const sidebar=Object.create(BasketSidebar.prototype);
+ Object.assign(sidebar,{connectedDevices:[{path:'/fixture',deviceId:'fixture',name:'Fixture player',icon:'usb-drive'}],selectedDevicePath:'/fixture',currentDevice:{}});
+ return sidebar.openDeviceSettings();
+};
+document.querySelector('#init').onclick=()=>new InitDeviceModal(document.body).open('Fixture player','fixture','1');
+for(let i=0;i<40;i++)document.querySelector('#grid').append(MediaCard.create({id:String(i),name:`Fixture album ${i+1}`,type:'MusicAlbum'},'items',false,()=>{},false));
+</script></html>

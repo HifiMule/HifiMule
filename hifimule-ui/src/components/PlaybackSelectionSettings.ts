@@ -40,6 +40,7 @@ export class PlaybackSelectionSettings {
         heading.textContent = t('playback.selection.title');
         heading.tabIndex = -1;
         const description = document.createElement('p');
+        description.className = 'playback-selection-settings__description';
         description.textContent = t('playback.selection.description');
         this.rows.className = 'playback-selection-settings__rows';
         this.status.setAttribute('role', 'status');
@@ -48,6 +49,7 @@ export class PlaybackSelectionSettings {
         this.add.textContent = t('playback.selection.add');
         this.save.textContent = t('playback.selection.save');
         this.start.textContent = t('playback.selection.start');
+        this.start.className = 'playback-selection-settings__start';
         this.cancel.textContent = t('playback.selection.cancel');
         this.seed.type = 'number'; this.seed.min = '0'; this.seed.max = '4294967295'; this.seed.step = '1';
         this.seed.addEventListener('input', () => this.markDirty());
@@ -222,7 +224,14 @@ export class PlaybackSelectionSettings {
                     highlight();
                 }
             });
-            remove.addEventListener('click', () => { this.config.sources.splice(index, 1); this.markDirty(); this.renderRows(); });
+            remove.addEventListener('click', () => {
+                this.config.sources.splice(index, 1);
+                this.markDirty();
+                this.renderRows();
+                const next = this.rows.children[Math.min(index, this.rows.children.length - 1)];
+                const target = next?.querySelector<HTMLSelectElement>('select') ?? this.add;
+                target.focus();
+            });
             picker.append(this.label('playback.selection.input', ref), suggestions);
             row.append(this.label('playback.selection.server', server), this.label('playback.selection.kind', kind),
                 picker, more, remove, explanation);

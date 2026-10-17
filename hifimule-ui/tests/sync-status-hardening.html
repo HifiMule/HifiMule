@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sync status and focus regression checks</title>
+<style>body{overflow:auto!important}main{max-width:900px;margin:auto;padding:24px}#results{white-space:pre-wrap}#basket{padding:16px;max-width:400px;border:1px solid var(--surface-border)}#cards{max-width:220px}#settings{margin-top:24px}</style>
+<main><h1>Sync status and focus</h1><pre id="results" role="status">Running…</pre><button id="outside">Outside action</button><section id="basket" aria-label="Device basket"></section><div id="cards"></div><div id="settings"></div></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const memory = new Map();
+Object.defineProperty(window,'localStorage',{value:{getItem:k=>memory.get(k)??null,setItem:(k,v)=>memory.set(k,String(v)),removeItem:k=>memory.delete(k)}});
+let response, requests=0;
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+ if(command==='image_proxy')return '';
+ if(args?.method==='sync_get_operation_status'){requests++;return await response();}
+ if(args?.method==='server.list')return [{id:'fixture',serverId:'fixture',name:'Fixture library',serverType:'jellyfin',url:'https://example.invalid',username:'fixture'}];
+ if(args?.method==='playback.getSelectionConfig')return {data:{schemaVersion:1,sources:[{serverId:'fixture',kind:'library'},{serverId:'fixture',kind:'library'}],ordering:['random'],seed:0,maxTracks:16}};
+ if(args?.method==='get_credentials')return {};
+ return {};
+}};
+const {BasketSidebar}=await import('../src/components/BasketSidebar.ts');
+const {MediaCard}=await import('../src/components/MediaCard.ts');
+const {PlaybackSelectionSettings}=await import('../src/components/PlaybackSelectionSettings.ts');
+const {basketStore}=await import('../src/state/basket.ts');
+const {setLanguage,t}=await import('../src/i18n.ts');
+await setLanguage(new URLSearchParams(location.search).get('lang')||'en');
+const lines=[];
+const check=(ok,label)=>{lines.push(`${ok?'PASS':'FAIL'} ${label}`);document.querySelector('#results').textContent=lines.join('\n');if(!ok)throw new Error(label);};
+const settle=async()=>{await Promise.resolve();await new Promise(resolve=>requestAnimationFrame(resolve));await Promise.resolve();};
+const basket=document.querySelector('#basket');
+const sidebar=Object.create(BasketSidebar.prototype);
+Object.assign(sidebar,{container:basket,isDestroyed:false,isSyncing:true,isCancelling:false,currentOperationId:'operation-1',pollingInterval:null,syncPollRevision:0,syncSnapshotIds:[],syncErrorMessages:null,showSyncComplete:false,updateDeviceLockState(){},isSubsonicServer:()=>false,syncTokenStorageKey:()=>null});
+basketStore.getItems=()=>[];
+basketStore.resetDirty=()=>{};
+sidebar.ensureSyncAnnouncement();
+const live=sidebar.syncAnnouncement;
+const op={status:'running',filesCompleted:1,filesTotal:10,totalBytes:1000,bytesTransferred:100,startedAt:new Date().toISOString(),currentFile:'Album/Track.flac',errors:[]};
+sidebar.currentOperation=op;
+sidebar.renderSyncProgress();
+let tick;
+const originalInterval=window.setInterval,originalClear=window.clearInterval;
+window.setInterval=callback=>{tick=callback;return 999999;};window.clearInterval=()=>{};
+try {
+ const cancel=basket.querySelector('#cancel-sync-btn');await cancel.updateComplete;cancel.focus();
+ response=()=>{throw new Error('Fixture connection lost');};
+ sidebar.startPolling();await tick();await tick();await tick();await settle();
+ check(sidebar.isSyncing&&sidebar.currentOperationId==='operation-1','Lost monitoring preserves the tracked operation and syncing state');
+ check(basket.querySelector('#sync-status-retry')&&!basket.querySelector('#cancel-sync-btn'),'Unknown status offers reconciliation, not stale progress or a new sync');
+ check(document.activeElement===basket.querySelector('#sync-status-retry'),'Lost monitoring preserves a keyboard focus destination');
+ check(live.isConnected&&live.textContent===t('basket.sync.status_unavailable_help'),'Persistent live region announces lost monitoring');
+ let resolve;
+ response=()=>new Promise(r=>resolve=r);
+ const retry=basket.querySelector('#sync-status-retry');retry.click();
+ const before=requests,pending=tick();await tick();
+ check(requests===before+1,'Status checks cannot overlap while a request is pending');
+ resolve(op);await pending;await settle();
+ check(!sidebar.syncMonitoringUnavailable&&basket.querySelector('#sync-progress-bar'),'Retry reconciles the same operation and restores progress');
+ check(document.activeElement===basket.querySelector('#cancel-sync-btn'),'Recovery preserves focus on the restored controls');
+ check(sidebar.syncAnnouncement===live&&live.textContent===t('basket.sync.status_restored'),'Recovery reuses the mounted live region');
+ response=()=>({...op,status:'complete',filesCompleted:10});await tick();await settle();
+ check(live.textContent.includes(t('basket.sync.complete')),'Completion is announced');
+ check(document.activeElement===basket.querySelector('#sync-done-btn'),'Completion restores focus to Done');
+ sidebar.renderSyncError(['Fixture transfer failed']);await settle();
+ check(live.textContent.includes('Fixture transfer failed')&&document.activeElement===basket.querySelector('#sync-retry-btn'),'Failure announces details and restores focus to Retry');
+ document.querySelector('#outside').focus();sidebar.renderSyncComplete();await settle();
+ check(document.activeElement===document.querySelector('#outside'),'Terminal updates do not steal focus from another workflow');
+ sidebar.isSyncing=true;sidebar.currentOperationId='operation-2';sidebar.currentOperation=op;
+ response=()=>new Promise(r=>resolve=r);sidebar.startPolling();const stale=tick();sidebar.stopPolling();
+ resolve({...op,status:'failed',errors:[]});await stale;
+ check(sidebar.currentOperationId==='operation-2'&&sidebar.isSyncing,'Stopped polling ignores late responses');
+ sidebar.syncMonitoringUnavailable=true;sidebar.renderSyncUnavailable();await settle();
+ response=()=>{throw new Error('Still offline');};basket.querySelector('#sync-status-retry').click();await tick();await tick();await tick();
+ check(basket.querySelector('#sync-status-retry').getAttribute('aria-busy') !== 'true','A failed status retry remains retryable');
+} finally {window.setInterval=originalInterval;window.clearInterval=originalClear;}
+const card=MediaCard.create({id:'album',name:'Fixture album',type:'MusicAlbum'},'items',true,()=>{},false);
+document.querySelector('#cards').append(card);
+check(card.querySelector('.card-open').textContent.includes(t('library.media.synced')),'Synced status belongs to the card button accessible name');
+const settings=new PlaybackSelectionSettings();document.querySelector('#settings').append(settings.element);await settle();
+const remove=()=>settings.element.querySelector('.playback-selection-settings__row button:last-of-type');
+remove().focus();remove().click();
+check(document.activeElement===settings.element.querySelector('.playback-selection-settings__row select'),'Removing a source focuses the remaining source');
+remove().focus();remove().click();
+check(document.activeElement===settings.add,'Removing the last source focuses Add Source');
+document.querySelector('#results').textContent+='\nREADY';
+</script></html>

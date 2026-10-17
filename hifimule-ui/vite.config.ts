@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import { cpSync } from "fs";
 import { resolve } from "path";
+import { localeCatalog } from './localeCatalog';
 
 const host = process.env.TAURI_DEV_HOST;
 const shoelaceAssets = resolve(__dirname, 'node_modules/@shoelace-style/shoelace/dist/assets');
@@ -8,7 +9,7 @@ const shoelaceAssets = resolve(__dirname, 'node_modules/@shoelace-style/shoelace
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   root: __dirname,
-  plugins: [{
+  plugins: [localeCatalog(resolve(__dirname, '../hifimule-i18n/catalog.json')), {
     name: 'copy-shoelace-assets',
     closeBundle() {
       cpSync(shoelaceAssets, resolve(__dirname, 'dist/shoelace/assets'), { recursive: true });

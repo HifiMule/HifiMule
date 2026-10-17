@@ -15,11 +15,18 @@ export function createTrackPreviewButton(
     button.addEventListener('mousedown', (event: Event) => event.stopPropagation());
     button.addEventListener('click', async (event: Event) => {
         event.stopPropagation();
-        if (!source) return;
+        if (!source || button.disabled) return;
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        button.name = 'hourglass-split';
         try {
             await playbackPreviewTrack(source.serverId, source.trackId);
         } catch (error) {
             showToast((error as Error).message, 'danger');
+        } finally {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            button.name = 'soundwave';
         }
     });
     return button;

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Music scan hardening fixture</title>
+<button id="open">Open music scan fixture</button>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const params = new URLSearchParams(location.search);
+const scenario = params.get('scenario') || 'cancel';
+let rejectScan, cancels=0, polls=0;
+window.__TAURI_INTERNALS__={invoke:async(_command,{method})=>{
+ if(method==='device.music_scan_start')return new Promise((resolve,reject)=>{
+  rejectScan=reject;
+  if(scenario==='complete')setTimeout(()=>resolve({imported:18,unmatched:3,ambiguous:1,incompatible:0}),1800);
+  if(scenario==='failure')setTimeout(()=>reject('Fixture device disconnected'),1800);
+ });
+ if(method==='device.music_scan_cancel'){
+  if(++cancels===1)throw 'Fixture connection unavailable';
+  rejectScan?.('Music scan cancelled'); return {cancelled:true};
+ }
+ if(method==='device.music_scan_status'){
+  if(scenario==='stale' && ++polls<=3)throw 'Fixture connection unavailable';
+  return {scanned:42,total:100};
+ }
+ if(method==='manifest_get_basket')return {targetDeviceId:'other'};
+ return {};
+}};
+const {setLanguage}=await import('../src/i18n.ts');
+await setLanguage(params.get('lang')||'en');
+if(params.has('zoom'))document.documentElement.style.fontSize='32px';
+const {InitDeviceModal}=await import('../src/components/InitDeviceModal.ts');
+document.querySelector('#open').onclick=async()=>{
+ const modal=new InitDeviceModal(document.body);
+ modal.renderDialog();
+ const shown=new Promise(resolve=>modal.dialog.addEventListener('sl-after-show',resolve,{once:true}));
+ await modal.showDialog();await shown;
+ modal.showMusicScan(document.querySelector('.init-device-body'),'fixture','device');
+};
+</script>
+</html>

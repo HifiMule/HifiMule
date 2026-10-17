@@ -26,7 +26,8 @@ test('Audiobookshelf books and parts use the existing playback routes without mu
     assert.match(library, /item\.type === 'MusicAlbum' \|\| item\.type === 'Book'/);
     assert.match(library, /resolved === 'Book' \|\| resolved === 'BookPart'/);
     assert.match(albumPlay, /playbackPlayAlbum\(source\.serverId, source\.albumId\)/);
-    assert.match(card, /playbackPlayTrack\(playbackSource\.serverId, playbackSource\.trackId\)/);
+    // BookPart playback routing is exercised through the production card and
+    // shared play button in mediaCardHardening.test.mjs.
     for (const locale of Object.values(catalog)) {
         assert.match(locale['library.books.play_book'], /\{title\}/);
         assert.match(locale['library.books.play_part'], /\{title\}/);

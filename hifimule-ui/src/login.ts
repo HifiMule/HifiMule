@@ -55,7 +55,7 @@ export interface LoginViewOptions {
 
 function iconPickerHtml(selectedIcon: string): string {
     return SERVER_ICON_OPTIONS.map(icon => `
-        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${escapeHtml(icon)}" title="${escapeHtml(icon)}">
+        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${escapeHtml(icon)}" title="${escapeHtml(icon)}" aria-label="${escapeHtml(icon)}" aria-pressed="${icon === selectedIcon}">
             <sl-icon name="${escapeHtml(icon)}"></sl-icon>
         </button>
     `).join('');
@@ -65,7 +65,7 @@ function loginFormHtml(options: LoginViewOptions, showIdentity = true): string {
     const prefillUrl = options.prefillUrl;
     const scopedReauth = options.mode === 'reauth' && options.serverType === 'audiobookshelf';
     const urlAttrs = prefillUrl
-        ? `value="${prefillUrl.replace(/"/g, '&quot;')}" readonly`
+        ? `value="${escapeHtml(prefillUrl)}" readonly`
         : '';
     const defaultIcon = defaultServerIcon('unknown');
     const identityFields = showIdentity ? `
@@ -76,7 +76,6 @@ function loginFormHtml(options: LoginViewOptions, showIdentity = true): string {
                     ${iconPickerHtml(defaultIcon)}
                 </div>
             </div>
-            <br>
     ` : '';
     return `
         <form id="login-form" class="login-form">
@@ -87,20 +86,18 @@ function loginFormHtml(options: LoginViewOptions, showIdentity = true): string {
                 <sl-option value="subsonic">Subsonic / OpenSubsonic</sl-option>
                 <sl-option value="audiobookshelf">Audiobookshelf</sl-option>
             </sl-select>
-            <br>` : ''}
+            ` : ''}
             ${!scopedReauth ? `
             <div style="position: relative;">
                 <sl-input name="url" label="${t('login.server_url')}" placeholder="${t('login.server_url_placeholder')}" ${urlAttrs} required></sl-input>
-                <div id="server-type-indicator" style="min-height: 1.5rem; margin-top: 0.4rem;"></div>
+                <div id="server-type-indicator" aria-live="polite"></div>
             </div>
-            <br>
             <sl-input name="username" label="${t('login.username')}" value="${escapeHtml(options.prefillUsername ?? '')}" required></sl-input>
-            <br>` : `<p>${t('login.audiobookshelf.reauth_password_only')}</p>`}
+            ` : `<p>${t('login.audiobookshelf.reauth_password_only')}</p>`}
             <sl-input name="password" type="password" label="${t('login.password')}" required password-toggle></sl-input>
-            <br>
             ${identityFields}
 
-            <div id="login-error" class="error-text" style="display: none; color: var(--sl-color-danger-500); margin-bottom: 1rem;"></div>
+            <div id="login-error" class="error-text" role="alert" tabindex="-1" style="display: none; color: var(--sl-color-danger-500); margin-bottom: 1rem;"></div>
 
             <sl-button type="submit" variant="primary" style="width: 100%;">${t('login.connect')}</sl-button>
         </form>
@@ -148,7 +145,7 @@ export function initLoginView(onLoginSuccess: () => void, options: LoginViewOpti
         <div class="login-container">
             <sl-card class="login-card">
                 <div slot="header">
-                    <h3>${t('login.title')}</h3>
+                    <h1>${t('login.title')}</h1>
                 </div>
                 ${loginFormHtml({ ...options, mode }, true)}
             </sl-card>
@@ -179,7 +176,9 @@ function bindLoginForm(
     const setSelectedIcon = (icon: string) => {
         selectedIcon = icon;
         root.querySelectorAll('.login-server-icon-picker .init-icon-tile').forEach(tile => {
-            tile.classList.toggle('selected', (tile as HTMLElement).dataset.icon === icon);
+            const selected = (tile as HTMLElement).dataset.icon === icon;
+            tile.classList.toggle('selected', selected);
+            tile.setAttribute('aria-pressed', String(selected));
         });
     };
 
@@ -211,6 +210,18 @@ function bindLoginForm(
     };
 
     let probeGeneration = 0;
+    let submitting = false;
+    const invalidateProbe = () => {
+        probeGeneration += 1;
+        if (probeTimer) clearTimeout(probeTimer);
+    };
+    root.addEventListener('sl-hide', (event) => {
+        if (event.target === root) invalidateProbe();
+    });
+    // A committed connection must finish before its dialog can be dismissed.
+    root.addEventListener('sl-request-close', (event) => {
+        if (event.target === root && submitting) event.preventDefault();
+    });
     providerSelect?.addEventListener('sl-change', () => {
         probeGeneration += 1;
         if (probeTimer) clearTimeout(probeTimer);
@@ -230,6 +241,7 @@ function bindLoginForm(
         if (probeTimer) clearTimeout(probeTimer);
         const url = urlInput.value.trim();
         if (providerSelect?.value !== 'auto') return;
+        if (indicator) indicator.innerHTML = '';
         if (!url.startsWith('http')) {
             if (indicator) indicator.innerHTML = '';
             applyIdentityDefaults('unknown');
@@ -237,9 +249,11 @@ function bindLoginForm(
         }
         const generation = probeGeneration;
         probeTimer = setTimeout(async () => {
+            if (!root.isConnected || submitting) return;
             try {
                 const result = await rpcCall('server.probe', { url });
                 if (generation !== probeGeneration || providerSelect?.value !== 'auto') return;
+                if (!root.isConnected) return;
                 const serverType = result?.serverType ?? null;
                 const badge = serverTypeBadge(serverType);
                 if (indicator) {
@@ -249,6 +263,7 @@ function bindLoginForm(
                 }
                 applyIdentityDefaults(serverType);
             } catch {
+                if (generation !== probeGeneration || !root.isConnected) return;
                 if (indicator) indicator.innerHTML = '';
             }
         }, 600);
@@ -256,8 +271,11 @@ function bindLoginForm(
 
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (submitting || form.hidden) return;
+        submitting = true;
+        invalidateProbe();
         const formData = new FormData(form);
-        const url = (formData.get('url') as string | null) ?? options.prefillUrl ?? '';
+        const url = ((formData.get('url') as string | null) ?? options.prefillUrl ?? '').trim();
         const username = (formData.get('username') as string | null) ?? options.prefillUsername ?? '';
         const password = formData.get('password') as string;
         const name = nameInput?.value?.trim();
@@ -309,10 +327,12 @@ function bindLoginForm(
         } catch (err: any) {
             console.error('Login failed', err);
             if (errorEl) {
-                errorEl.textContent = err.message || t('login.authentication_failed');
+                errorEl.textContent = err?.message || (typeof err === 'string' && err) || t('login.authentication_failed');
                 errorEl.style.display = 'block';
+                errorEl.focus();
             }
         } finally {
+            submitting = false;
             if (btn) btn.loading = false;
         }
     });
@@ -331,11 +351,8 @@ function renderAudiobookshelfPicker(
     form.hidden = true;
     picker.hidden = false;
     picker.dataset.setupId = setup.setupId;
-    if (libraries.length === 0) {
-        picker.innerHTML = `<sl-alert variant="warning" open>${t('login.audiobookshelf.empty')}</sl-alert>`;
-        return;
-    }
     picker.innerHTML = `
+        ${libraries.length === 0 ? `<sl-alert variant="warning" open>${t('login.audiobookshelf.empty')}</sl-alert>` : `
         <h3>${t('login.audiobookshelf.choose_library')}</h3>
         <p>${t('login.audiobookshelf.choose_library_hint')}</p>
         <sl-radio-group name="audiobookshelf-library" label="${t('login.audiobookshelf.library_label')}" required>
@@ -346,24 +363,36 @@ function renderAudiobookshelfPicker(
                 </sl-radio>
             `).join('')}
         </sl-radio-group>
+        `}
         <div id="audiobookshelf-picker-error" class="error-text" role="alert" style="display:none"></div>
-        <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem">
+        <div class="login-picker-actions">
             <sl-button id="audiobookshelf-picker-back" variant="default">${t('login.audiobookshelf.back')}</sl-button>
-            <sl-button id="audiobookshelf-picker-commit" variant="primary">${t('login.audiobookshelf.add_library')}</sl-button>
+            ${libraries.length ? `<sl-button id="audiobookshelf-picker-commit" variant="primary">${t('login.audiobookshelf.add_library')}</sl-button>` : ''}
         </div>
     `;
     const group = picker.querySelector('sl-radio-group') as (HTMLElement & { value: string }) | null;
     const back = picker.querySelector('#audiobookshelf-picker-back') as (HTMLElement & { disabled: boolean }) | null;
     const commit = picker.querySelector('#audiobookshelf-picker-commit') as (HTMLElement & { loading: boolean }) | null;
     const error = picker.querySelector('#audiobookshelf-picker-error') as HTMLElement | null;
+    let busy = false;
+    const preventClose = (event: Event) => {
+        if (event.target === root && busy) event.preventDefault();
+    };
+    root.addEventListener('sl-request-close', preventClose);
     back?.addEventListener('click', async () => {
+        if (busy) return;
+        busy = true;
+        back.disabled = true;
         await audiobookshelfCancelSetup(setup.setupId).catch(() => undefined);
+        root.removeEventListener('sl-request-close', preventClose);
         delete picker.dataset.setupId;
         picker.hidden = true;
         picker.innerHTML = '';
         form.hidden = false;
+        (form.querySelector('sl-input[name="url"]') as HTMLElement | null)?.focus();
     });
     commit?.addEventListener('click', async () => {
+        if (busy) return;
         const choiceId = group?.value;
         if (!choiceId || !libraries.some(choice => choice.choiceId === choiceId)) {
             if (error) {
@@ -373,6 +402,7 @@ function renderAudiobookshelfPicker(
             return;
         }
         try {
+            busy = true;
             commit.loading = true;
             if (back) back.disabled = true;
             if (error) error.style.display = 'none';
@@ -388,13 +418,16 @@ function renderAudiobookshelfPicker(
             if (formError) {
                 formError.textContent = caught instanceof Error ? caught.message : t('login.authentication_failed');
                 formError.style.display = 'block';
+                formError.focus();
             }
         } finally {
+            busy = false;
+            root.removeEventListener('sl-request-close', preventClose);
             commit.loading = false;
             if (back) back.disabled = false;
         }
     });
     customElements.whenDefined('sl-radio-group').then(() => {
-        (picker.querySelector('sl-radio') as HTMLElement | null)?.focus();
+        ((picker.querySelector('sl-radio') as HTMLElement | null) ?? back)?.focus();
     });
 }

@@ -59,6 +59,9 @@ export class PlaybackControls {
     private readonly duration = document.createElement('span');
     private readonly seekStatus = document.createElement('span');
     private readonly onPageHide = () => this.destroy();
+    private readonly onVisibilityChange = () => {
+        if (!this.disposed) this.renderTimeline();
+    };
     private readonly title = document.createElement('strong');
     private readonly status = document.createElement('span');
     private readonly startStatus = document.createElement('span');
@@ -235,6 +238,7 @@ export class PlaybackControls {
         container.replaceChildren(info, actions, timelineGroup, this.messages);
         this.back.hidden = this.primary.hidden = this.returnToSession.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
+        document.addEventListener('visibilitychange', this.onVisibilityChange);
         void this.refreshServerLabels();
         this.unsubscribePlayback = playbackStore.subscribe(
             (snapshot, previous) => this.receiveSnapshot(snapshot, previous),
@@ -278,8 +282,10 @@ export class PlaybackControls {
         this.unsubscribePlayback?.();
         this.unsubscribePlayback = undefined;
         if (this.repaintTimer !== undefined) globalThis.clearInterval(this.repaintTimer);
+        this.repaintTimer = undefined;
         if (this.reportTimer !== undefined) globalThis.clearInterval(this.reportTimer);
         window.removeEventListener('pagehide', this.onPageHide);
+        document.removeEventListener('visibilitychange', this.onVisibilityChange);
     }
     openOutputChoice(): void {
         if (this.disposed) return;
@@ -700,7 +706,17 @@ export class PlaybackControls {
     }
 
     private scheduleRepaint(): void {
-        if (this.disposed || typeof globalThis.setInterval !== 'function') return;
+        // Stationary states are rendered by snapshot/connection updates. Only
+        // interpolate while a visible, fresh session is actually advancing.
+        const advancing = !this.disposed && this.container.isConnected && !document.hidden
+            && this.fresh() && Boolean(this.snapshot?.current)
+            && this.snapshot?.playback.status === 'active' && !this.snapshot.playback.pendingSeek;
+        if (!advancing) {
+            if (this.repaintTimer !== undefined) globalThis.clearInterval(this.repaintTimer);
+            this.repaintTimer = undefined;
+            return;
+        }
+        if (this.repaintTimer !== undefined || typeof globalThis.setInterval !== 'function') return;
         this.repaintTimer = globalThis.setInterval(() => {
             if (!this.disposed && this.container.isConnected) this.renderTimeline();
             else this.destroy();
@@ -743,6 +759,7 @@ export class PlaybackControls {
             this.setText(this.seekStatus, '');
         }
         this.updateMessages();
+        this.scheduleRepaint();
     }
 
     private updateMessages(): void {
@@ -754,6 +771,7 @@ export class PlaybackControls {
         const feedbackAttention = this.feedbackLoading || this.feedbackQueued > 0 || Boolean(this.feedbackIssue || this.feedback?.operation);
         this.messagesVisible = this.messagesOverride ?? (this.statusPopup || feedbackAttention || Boolean(this.startStatus.textContent || this.seekStatus.textContent || this.error.textContent));
         this.messages.className = `playback-controls__messages${this.messagesVisible ? ' is-visible' : ''}`;
+        this.messages.tabIndex = this.messagesVisible ? 0 : -1;
         this.messagesToggle.setAttribute('aria-expanded', String(this.messagesVisible));
         this.setIcon(this.messagesToggle, 'info-circle', t(this.messagesVisible ? 'playback.guidance.hide' : 'playback.guidance.show'));
     }

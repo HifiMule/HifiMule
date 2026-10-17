@@ -33,7 +33,8 @@ class Element {
   focus() { if (this.isConnected) document.activeElement = this; }
   async click() { await this.listeners.get('click')?.(); }
   querySelectorAll(selector) {
-    const own = selector === '*' || selector === 'button' && this.tagName === 'button' ? [this] : [];
+    const own = selector === '*' || selector === 'button' && this.tagName === 'button'
+      || selector === '[data-queue-action]' && this.dataset.queueAction ? [this] : [];
     return own.concat(this.children.flatMap(child => child.querySelectorAll(selector)));
   }
   querySelector(selector) {
@@ -1049,5 +1050,38 @@ test('Playing entry focuses the visible upcoming heading even while Retry is hid
   assert.equal(h.component.retry.hidden, true);
   h.receive(queueSnapshot); await settle();
   assert.equal(document.activeElement, h.component.regions.upcoming.heading);
+  h.component.destroy();
+});
+
+test('queue boundary and pending actions expose availability without losing focus', async () => {
+  const h = queueHarness({playbackListOccurrences: async () => occurrencePage([{occurrenceId:'a'}, {occurrenceId:'b'}])});
+  h.receive(queueSnapshot); await settle();
+  const region=h.component.regions.upcoming;
+  const actions=id=>region.nodes.get(id).querySelectorAll('[data-queue-action]');
+  const [up,down,remove]=actions('a');
+  const disabled=button=>button.getAttribute('aria-disabled');
+  assert.equal(disabled(up),'true');
+  assert.equal(disabled(down),'false');
+  assert.equal(disabled(actions('b')[1]),'true');
+  let moves=0; h.component.move=async()=>{moves++;};
+  up.focus(); await up.click(); assert.equal(moves,0);
+  assert.equal(document.activeElement,up);
+  region.page.precedingOccurrenceId='previous';
+  region.page.endOfSection=false;
+  region.page.followingOccurrenceIds=['following'];
+  h.component.updatePaging();
+  assert.equal(disabled(up),'false');
+  assert.equal(disabled(actions('b')[1]),'false');
+  await up.click(); assert.equal(moves,1);
+  for (const state of ['loading','mutating']) {
+    if(state==='loading') region.loading=true; else h.component.mutating=true;
+    h.component.updatePaging();
+    assert.ok(actions('a').every(b=>disabled(b)==='true'));
+    await down.click(); assert.equal(moves,1);
+    assert.equal(document.activeElement,up);
+    region.loading=false; h.component.mutating=false;
+  }
+  region.page=undefined; h.component.updatePaging();
+  assert.equal(disabled(remove),'true');
   h.component.destroy();
 });

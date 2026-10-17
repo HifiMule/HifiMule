@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Selection and playlist hardening fixture</title>
+<style>body{overflow:auto!important}main{padding:24px;max-width:760px;margin:auto}.media-grid{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}output{display:block;margin:16px 0}.fixture-tools{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}</style>
+<main><h1>Selection feedback</h1><p>Production cards and playlist dialogs, with delayed fixture responses. Right-click an album to test menu focus. Enable OS Reduce Motion to check the fade alternative.</p>
+<div class="fixture-tools"><label>Response <select id="response"><option value="success">Delayed success</option><option value="failure">Delayed failure</option></select></label><label>Language <select id="language"><option>en</option><option>de</option><option>fr</option><option>es</option></select></label><button id="create">Create playlist</button><button id="choose">Choose playlist</button></div>
+<div class="media-grid" id="cards"></div><output aria-live="polite" id="status">1 selected</output>
+<div class="sync-proposed-banner"><sl-icon name="arrow-repeat"></sl-icon>Ready to sync</div></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+import '../src/styles.css';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+ if(command==='image_proxy')return '';
+ if(args?.method==='browse.listPlaylists')return {playlists:[{id:'one',name:'夜の音楽 🎵 — Long playlist name for wrapping and focus checks'},{id:'two',name:'Second playlist'}]};
+ if(args?.method==='browse.getAlbum')return {tracks:[]};
+ if(args?.method==='get_credentials')return {userId:'fixture-user'};
+ const failed=document.querySelector('#response').value==='failure';
+ await new Promise(resolve=>setTimeout(resolve,2500));
+ if(failed)throw new Error('Fixture request failed. Please try again.');
+ return [];
+}};
+const {basketStore}=await import('../src/state/basket');
+const {MediaCard}=await import('../src/components/MediaCard');
+const {setLanguage}=await import('../src/i18n');
+const selected=new Map([['two',{id:'two'}]]);
+// Replace only the fixture's data boundary; render and interact through production code.
+basketStore.has=id=>selected.has(id);
+basketStore.admitPhysicalTargetMutation=()=>true;
+basketStore.getActiveServerId=()=> 'fixture';
+const refresh=()=>{MediaCard.refreshSelection(document.querySelector('#cards'));document.querySelector('#status').textContent=selected.size+' selected';};
+basketStore.add=item=>{selected.set(item.id,item);refresh();};
+basketStore.remove=id=>{selected.delete(id);refresh();};
+const items=[{id:'one',name:'夜の音楽 🎵 — Album with a longer title',type:'MusicAlbum',serverId:'fixture'},{id:'two',name:'Existing selection fixture',type:'MusicAlbum',serverId:'fixture'}];
+function mount(){document.querySelector('#cards').replaceChildren(...items.map(item=>MediaCard.create(item,'items',false,()=>{},true,true)));}
+document.querySelector('#language').onchange=async e=>{await setLanguage(e.target.value);mount();};
+document.querySelector('#create').onclick=()=>MediaCard.openCreatePlaylistDialog(['one'],'夜の音楽 🎵');
+document.querySelector('#choose').onclick=()=>MediaCard.openAddToPlaylistDialog(['one'],'夜の音楽 🎵');
+const params=new URLSearchParams(location.search);
+if(params.get('zoom')==='200')document.documentElement.style.fontSize='32px';
+const language=params.get('lang')||'en';document.querySelector('#language').value=language;
+await setLanguage(language);mount();
+</script></html>

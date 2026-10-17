@@ -20,6 +20,25 @@ export function mountTraySetupGuidance(
     anchor.hidden = true;
     anchor.setAttribute('aria-label', t('traySetup.title'));
     body.append(anchor);
+    let returnFocus: HTMLElement | null = null;
+    anchor.addEventListener('focusin', event => {
+        const previous = (event as FocusEvent).relatedTarget;
+        if (previous instanceof HTMLElement && !anchor.contains(previous)) returnFocus = previous;
+    });
+    const restoreFocus = () => {
+        if (!anchor.contains(document.activeElement)) return;
+        if (returnFocus?.isConnected && !returnFocus.closest('[hidden], [inert]')) {
+            returnFocus.focus();
+            if (!anchor.contains(document.activeElement) && document.activeElement !== document.body) return;
+        }
+        // The root remains available when onboarding has replaced the old control.
+        const root = body.querySelector<HTMLElement>('.app-container, main') ?? body;
+        const previousTabIndex = root.getAttribute('tabindex');
+        root.setAttribute('tabindex', '-1');
+        root.focus();
+        if (previousTabIndex === null) root.removeAttribute('tabindex');
+        else root.setAttribute('tabindex', previousTabIndex);
+    };
     let checking = false;
     let visible = false;
     let result: TraySupport | undefined;
@@ -47,6 +66,7 @@ export function mountTraySetupGuidance(
         dismiss.addEventListener('click', () => {
             dismissed = dismissedInMemory = true;
             try { storage?.setItem(dismissalKey, 'true'); } catch { /* Keep in memory. */ }
+            restoreFocus();
             anchor.remove();
         });
         actions.append(page, checkButton, dismiss); anchor.append(actions);
@@ -55,17 +75,17 @@ export function mountTraySetupGuidance(
     const check = async () => {
         if (checking || !current()) return;
         checking = true;
-        if (checkButton) checkButton.disabled = true;
+        if (checkButton) { checkButton.setAttribute('aria-disabled', 'true'); checkButton.setAttribute('aria-busy', 'true'); }
         try {
             const next = await probe();
             if (!current()) return;
             result = next;
-            if (next.state === 'available' || next.state === 'not-applicable') { anchor.hidden = true; visible = false; anchor.replaceChildren(); }
+            if (next.state === 'available' || next.state === 'not-applicable') { restoreFocus(); anchor.hidden = true; visible = false; anchor.replaceChildren(); }
             else if (next.state === 'missing') { show(); if (status) status.textContent = t('traySetup.stillMissing'); }
             else if (visible && status) status.textContent = t('traySetup.unknown');
         } catch {
             if (current() && visible && status) status.textContent = t('traySetup.unknown');
-        } finally { checking = false; if (checkButton) checkButton.disabled = false; }
+        } finally { checking = false; if (checkButton) { checkButton.setAttribute('aria-disabled', 'false'); checkButton.setAttribute('aria-busy', 'false'); } }
     };
     void check();
 }

@@ -1,12 +1,11 @@
 // Toast notifications — lightweight wrapper around Shoelace's sl-alert.toast().
-// Shoelace components auto-register via the CDN autoloader; we wait for the
-// custom element before toasting so the call doesn't no-op on first use.
+// Wait for the registered custom element before toasting on first use.
 
 type ToastVariant = 'primary' | 'success' | 'neutral' | 'warning' | 'danger';
 
-// Error toasts often carry a raw backend {message}; give them longer than the
-// 3s default so the detail can actually be read before it auto-dismisses.
-export const ERROR_TOAST_DURATION = 6000;
+// Error details remain available until dismissed, including existing callers
+// that explicitly request the shared error duration.
+export const ERROR_TOAST_DURATION = Infinity;
 
 const VARIANT_ICONS: Record<ToastVariant, string> = {
     primary: 'info-circle',
@@ -25,7 +24,7 @@ function escapeHtml(text: string): string {
 export function showToast(
     message: string,
     variant: ToastVariant = 'primary',
-    duration = 3000,
+    duration = variant === 'danger' ? ERROR_TOAST_DURATION : 3000,
 ): void {
     const alert = document.createElement('sl-alert') as any;
     alert.variant = variant;

@@ -5,27 +5,28 @@ import ts from 'typescript';
 const source=readFileSync(new URL('../src/components/InitDeviceModal.ts',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace('export class','class');
 const script=ts.transpile(source,{target:ts.ScriptTarget.ES2022});
 class Element {
-    children=new Map();listeners=new Map();hidden=false;loading=false;textContent='';
+    children=new Map();listeners=new Map();hidden=false;loading=false;textContent='';isConnected=true;style={};
     set innerHTML(value){this.html=value;this.children.clear();for(const match of value.matchAll(/id="([^"]+)"/g)){const child=new Element();child.parent=this;child.id=match[1];this.children.set('#'+match[1],child);}}
-    get innerHTML(){return this.html;}
-    querySelector(id){return this.children.get(id);}
+    get innerHTML(){return (this.html ?? '') + [...this.children.values()].map(child=>child.innerHTML).join('');}
+    querySelector(id){return this.children.get(id) ?? [...this.children.values()].map(child=>child.querySelector(id)).find(Boolean);}
     addEventListener(event,fn){this.listeners.set(event,fn);}
     click(){return this.listeners.get('click')?.();}
     remove(){this.parent?.children.delete('#'+this.id);}
     setAttribute(){}
+    focus(){}
     prepend(child){child.parent=this;this.children.set('#'+child.id,child);}
     hide(){this.hidden=true;}
 }
 function setup(rpc){
     const window={setInterval:()=>1,clearInterval:()=>{}};
     const basketEvents=[];const basketStore={setDaemonContext:(...args)=>basketEvents.push(['context',...args]),hydrateFromDaemon:(items)=>basketEvents.push(['hydrate',items])};
-    const {InitDeviceModal}=new Function('rpcCall','t','window','document','basketStore',`${script}\nreturn {InitDeviceModal};`)(rpc,(key)=>key,window,{createElement:()=>new Element()},basketStore);
-    const modal=Object.create(InitDeviceModal.prototype);modal.dialog=new Element();modal.dialog.innerHTML='<button id="init-device-confirm-btn"></button><button id="init-device-cancel-btn"></button>';
+    const {InitDeviceModal}=new Function('rpcCall','t','window','document','basketStore','withDeadline','setInterval','clearInterval',`${script}\nreturn {InitDeviceModal};`)(rpc,(key)=>key,window,{createElement:()=>new Element()},basketStore,promise=>promise,window.setInterval,window.clearInterval);
+    const modal=Object.create(InitDeviceModal.prototype);modal.escapeHtml=value=>value;modal.dialog=new Element();modal.dialog.innerHTML='<button id="init-device-confirm-btn"></button><button id="init-device-cancel-btn"></button>';
     let completed=0;modal.onComplete=()=>{basketEvents.push(['complete']);completed++;};
     const body=new Element();modal.showMusicScan(body,'captured-scan','device-1');return {modal,body,basketEvents,completed:()=>completed};
 }
 test('setup asks before import and declining finishes without starting a scan',async()=>{
-    const calls=[];const ui=setup(async(method,params)=>calls.push({method,params}));
+    const calls=[];const ui=setup(async(method,params)=>{calls.push({method,params});return {cancelled:true};});
     assert.match(ui.body.innerHTML,/device.scan.ownership/);assert.deepEqual(calls,[]);
     await ui.body.querySelector('#scan-no').click();assert.deepEqual(calls,[{method:'device.music_scan_cancel',params:{scanId:'captured-scan'}}]);assert.equal(ui.completed(),1);
 });
@@ -41,7 +42,7 @@ test('scan completion has one action and hydrates the basket before closing',asy
     await ui.body.querySelector('#scan-yes').click();
     assert.equal(ui.completed(),0);assert.deepEqual(ui.basketEvents,[]);
     assert.match(ui.body.innerHTML,/device.scan.result/);
-    assert.deepEqual([...ui.body.children.keys()],['#scan-done']);
+    assert.deepEqual([...ui.body.querySelector('#scan-content').children.keys()],['#scan-done']);
     await ui.body.querySelector('#scan-done').click();
     assert.deepEqual(calls,[{method:'device.music_scan_start',params:{scanId:'captured-scan'}},{method:'manifest_get_basket',params:undefined}]);
     assert.deepEqual(ui.basketEvents,[['context','device-1','imported-hash'],['hydrate',items],['complete']]);
@@ -60,9 +61,9 @@ test('basket refresh failure can be retried without initializing or scanning aga
     await ui.body.querySelector('#scan-yes').click();
     const done=ui.body.querySelector('#scan-done');await done.click();
     assert.equal(ui.completed(),0);assert.equal(done.disabled,false);
-    assert.match(ui.body.querySelector('#scan-refresh-error').textContent,/temporarily unavailable/);
+    assert.match(ui.body.querySelector('#scan-error').textContent,/temporarily unavailable/);
     fail=false;await done.click();
-    assert.equal(ui.completed(),1);assert.equal(ui.body.querySelector('#scan-refresh-error'),undefined);
+    assert.equal(ui.completed(),1);assert.equal(ui.body.querySelector('#scan-error').textContent,'');
     assert.deepEqual(calls,['device.music_scan_start','manifest_get_basket','manifest_get_basket']);
 });
 test('completion does not replace the basket when the selected destination changed',async()=>{
@@ -102,5 +103,6 @@ test('cancel racing a committed import preserves the successful result',async()=
 test('expired proposal can be dismissed without initializing the device again',async()=>{
     const ui=setup(async()=>{throw new Error('Music scan expired');});
     await ui.body.querySelector('#scan-yes').click();
-    await ui.body.querySelector('#scan-no').click();assert.equal(ui.completed(),1);
+    await ui.body.querySelector('#scan-no').click();assert.equal(ui.completed(),0);
+    await ui.body.querySelector('#scan-dismiss').click();assert.equal(ui.completed(),1);
 });

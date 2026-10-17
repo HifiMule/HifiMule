@@ -1,9 +1,9 @@
 import '@shoelace-style/shoelace/dist/themes/dark.css';
-import '@shoelace-style/shoelace/dist/shoelace.js';
+import './shoelace';
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
-import { t } from './i18n';
+import { t, initializeI18n } from './i18n';
 import { mountTraySetupGuidance, type TraySupport } from './components/TraySetupGuidance';
 import { withDeadline } from './lifecycleDeadline';
 import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } from './shutdownStatus';
@@ -37,23 +37,8 @@ const ABSOLUTE_MIN_MAIN_WIDTH = 900;
 const ABSOLUTE_MIN_MAIN_HEIGHT = 640;
 
 async function init() {
+    await initializeI18n();
     console.log("init() called, path:", window.location.pathname);
-
-    // If we are on the splashscreen page
-    if (window.location.pathname.includes('splashscreen')) {
-        console.log("Detected Splashscreen window");
-        try {
-            const mainWin = await Window.getByLabel('main');
-            const splashWin = await Window.getByLabel('splashscreen');
-            console.log("Windows found:", { mainWin: !!mainWin, splashWin: !!splashWin });
-            initSplashScreen(mainWin, splashWin);
-        } catch (e) {
-            console.error("Failed to get windows:", e);
-            // Fallback: try to init anyway if UI elements are there
-            initSplashScreen(null, null);
-        }
-        return;
-    }
 
     // If we are on the main page (index.html)
     console.log("HifiMule Hub Initialized");
@@ -468,7 +453,7 @@ function renderMainLayout(_state: any = null) {
 
     root.innerHTML = `
     <sl-split-panel primary="end" position="32" class="split-panel">
-      <div slot="start" class="library-view">
+      <div slot="start" class="library-view" role="main" aria-labelledby="surface-title">
         <header>
           <div class="library-header-row">
             <div class="library-title-block">
@@ -479,7 +464,7 @@ function renderMainLayout(_state: any = null) {
           </div>
         </header>
 
-        <div id="browse-mode-bar"></div>
+        <nav id="browse-mode-bar" aria-label="${t('ui.library.navigation')}"></nav>
 
         <div id="library-content" class="content">
           <!-- Media grid will be rendered here by library.ts -->
@@ -488,7 +473,7 @@ function renderMainLayout(_state: any = null) {
         <div id="playback-controls-container"></div>
       </div>
 
-      <div slot="end" class="basket-view" id="basket-sidebar-container">
+      <div slot="end" class="basket-view" id="basket-sidebar-container" role="region" aria-label="${t('basket.title')}">
         <!-- BasketSidebar component will render here -->
       </div>
     </sl-split-panel>
@@ -580,60 +565,5 @@ function showSurface(surface: 'library' | 'playback', focus = true): void {
 }
 
 function showLibrarySurface(focus = true): void { showSurface('library', focus); }
-
-async function initSplashScreen(mainWin: Window | null, splashWin: Window | null) {
-    console.log("initSplashScreen started");
-    const statusEl = document.getElementById('status-text');
-    const container = document.getElementById('container');
-    const retryButton = document.getElementById('retry-btn');
-    const closeButton = document.getElementById('close-btn');
-    if (retryButton) retryButton.textContent = t('lifecycle.retry');
-    if (closeButton) closeButton.textContent = t('lifecycle.close');
-    document.getElementById('close-btn')?.addEventListener('click', () => {
-        void import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_ui'));
-    });
-
-    if (!statusEl) {
-        console.error("Status element not found!");
-        return;
-    }
-
-    // The main webview alone hydrates and changes routes. Splash reflects the same
-    // native attempt and is closed by main only after routing (or rendering failure).
-    const { invoke } = await import('@tauri-apps/api/core');
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    window.addEventListener('pagehide', () => {
-        disposed = true;
-        if (timer !== undefined) clearTimeout(timer);
-    }, { once: true });
-    retryButton?.addEventListener('click', async () => {
-        await invoke('retry_daemon_startup');
-        // Restart the main webview too; it owns state hydration.
-        await invoke('reload_main_window');
-        window.location.reload();
-    });
-    const poll = async () => {
-        try {
-            const status = await invoke<{state: string; errorCode?: string}>('get_sidecar_status');
-            if (disposed) return;
-            statusEl.textContent = status.state === 'ready'
-                ? t('ui.splash.daemon_ready')
-                : status.errorCode ?? t('ui.splash.connecting_daemon');
-            if (['failed', 'stopped'].includes(status.state)) {
-                container?.classList.add('error');
-                (retryButton as HTMLButtonElement | null)?.focus();
-                return;
-            }
-        } catch {
-            if (disposed) return;
-            statusEl.textContent = t('ui.splash.failed');
-        }
-        if (!disposed) timer = setTimeout(poll, 250);
-    };
-    void mainWin;
-    void splashWin;
-    void poll();
-}
 
 window.addEventListener('DOMContentLoaded', init);

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="de" class="sl-theme-dark">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Repair resilience fixture</title>
+<div id="repair"></div>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '@shoelace-style/shoelace/dist/shoelace.js';
+import '../src/styles.css';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+document.documentElement.style.fontSize=new URLSearchParams(location.search).get('zoom')==='200'?'32px':'16px';
+const {setLanguage}=await import('../src/i18n.ts');await setLanguage('de');
+const multiple=new URLSearchParams(location.search).get('multiple')==='1';
+const item={jellyfinId:'missing',name:'音楽 🎵 مجموعة الموسيقى '+ 'Long name '.repeat(15),localPath:'Music/'+ 'long-folder-'.repeat(20)+'/track.flac'};
+let scans=0;
+window.__TAURI_INTERNALS__={invoke:async (_,{method})=>{
+ await new Promise(resolve=>setTimeout(resolve,800));
+ if(method==='manifest_get_discrepancies'){if(++scans===2)throw 'Device disconnected';return {missing:multiple?[item,{...item,jellyfinId:'missing-second',name:'Second album — 夜の音楽 🎵'}]:[item],orphaned:[{...item,jellyfinId:'orphan'}]};}
+ return null;
+}};
+const {RepairModal}=await import('../src/components/RepairModal.ts');
+const modal=new RepairModal(document.getElementById('repair'));modal.open();
+</script></html>

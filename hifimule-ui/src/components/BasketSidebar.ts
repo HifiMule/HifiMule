@@ -2,13 +2,15 @@
 // Displays the list of items selected for synchronization.
 
 import { basketStore, BasketItem, autoFillSlotId, isAutoFillSlotId } from '../state/basket';
+import { BasketArtwork } from './basketArtwork';
+import { captureBasketMotion, animateBasketUpdate } from './basketMotion';
 import { rpcCall, getImageUrl, fetchBrowseModes, fetchBrowsePlaylists, fetchPodcastShows } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 import { AutoFillPanel } from './AutoFillPanel';
 import { AutoFillPipeline, defaultLegacyPipeline, normalizePipeline } from '../state/autoFill';
 import { t } from '../i18n';
-import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
+import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../state/libraryCache';
 import { formatServerIdentity } from '../serverIdentity';
 import type { ServerSummary, PodcastShow } from '../rpc';
 import { plannedSelectionBytes, syncCapacity, type SyncedCapacityItem, type SyncedCapacityTotals } from '../state/syncCapacity';
@@ -200,6 +202,7 @@ export class BasketSidebar {
     private isDirtyManifest: boolean = false;
     private lastHydratedDeviceId: string | null = null;
     private serverType: string | null = null;
+    private artwork?: BasketArtwork;
     private currentServerId: string | null = null;
     // Server metadata for read-only basket group labels (Story 2.11 AC35).
     private serversById: Map<string, ServerSummary> = new Map();
@@ -226,9 +229,65 @@ export class BasketSidebar {
     private supportsPlaylistWrite: boolean = false;
     private destinationHub?: { mountDeviceChooser(host: HTMLElement | null): void };
     private focusedDestinationKey?: string;
+    private syncMonitoringUnavailable = false;
+    private syncPollRevision = 0;
+    private syncAnnouncement?: HTMLElement;
+
+    private ensureSyncAnnouncement(): HTMLElement {
+        if (!this.syncAnnouncement) {
+            this.syncAnnouncement = document.createElement('div');
+            this.syncAnnouncement.className = 'sr-only';
+            this.syncAnnouncement.setAttribute('role', 'status');
+            this.syncAnnouncement.setAttribute('aria-live', 'polite');
+            this.syncAnnouncement.setAttribute('aria-atomic', 'true');
+            // Keep this node outside the sidebar's replaceable content.
+            this.container.insertAdjacentElement('afterend', this.syncAnnouncement);
+        }
+        return this.syncAnnouncement;
+    }
+
+    private announceSync(message: string): void {
+        const status = this.ensureSyncAnnouncement();
+        if (status.textContent !== message) status.textContent = message;
+    }
+
+    private restoreSyncFocus(previous: Element | null, selector: string): void {
+        if (!previous) return;
+        const target = this.container.querySelector<HTMLElement>(selector);
+        if (!target) return;
+        void Promise.resolve((target as HTMLElement & { updateComplete?: Promise<boolean> }).updateComplete).then(() => {
+            if (!this.isDestroyed && target.isConnected && document.activeElement === document.body) {
+                target.focus({ preventScroll: true });
+            }
+        });
+    }
+
+    private renderSyncUnavailable(): void {
+        if (this.container.querySelector('#sync-status-retry')) return;
+        const focused = this.container.contains(document.activeElement) ? document.activeElement : null;
+        this.container.innerHTML = `
+            <div class="basket-header"><h2>${t('basket.sync.status_unavailable')}</h2></div>
+            <div class="sync-progress-panel"><p>${t('basket.sync.status_unavailable_help')}</p></div>
+            <div class="basket-footer">
+                <sl-button id="sync-status-retry" variant="primary" style="width: 100%;">${t('basket.sync.check_status')}</sl-button>
+            </div>`;
+        this.container.querySelector('#sync-status-retry')?.addEventListener('click', () => {
+            const button = this.container.querySelector('#sync-status-retry') as any;
+            if (button.getAttribute('aria-busy') === 'true') return;
+            // Keep the focused button mounted and focusable during reconciliation.
+            button.setAttribute('aria-busy', 'true');
+            button.setAttribute('aria-disabled', 'true');
+            button.textContent = t('basket.sync.checking_status');
+            this.announceSync(t('basket.sync.checking_status'));
+            this.startPolling();
+        });
+        this.announceSync(t('basket.sync.status_unavailable_help'));
+        this.restoreSyncFocus(focused, '#sync-status-retry');
+    }
 
     constructor(container: HTMLElement) {
         this.container = container;
+        this.ensureSyncAnnouncement();
         this.updateListener = () => this.refreshAndRender();
         // Custom clickable divs (device cards, folder toggle, repair banner) are
         // rendered as role="button". One delegated handler makes them keyboard-
@@ -363,6 +422,8 @@ export class BasketSidebar {
 
     public destroy() {
         this.isDestroyed = true;
+        this.artwork?.destroy();
+        this.syncAnnouncement?.remove();
         this.container.removeEventListener('keydown', this.keyActivateHandler);
         this.stopPolling();
         if (this.daemonStateInterval !== null) {
@@ -615,14 +676,14 @@ export class BasketSidebar {
             <div class="device-settings-form">
                 <sl-input id="device-settings-name" label="${t('basket.device.name')}" value="${this.escapeHtml(selected.name || selected.deviceId)}"></sl-input>
                 <div>
-                    <label class="device-settings-label">${t('basket.device.icon')}</label>
-                    <div id="device-settings-icon-picker" class="device-settings-icon-picker">
+                    <div id="device-settings-icon-label" class="device-settings-label">${t('basket.device.icon')}</div>
+                    <div id="device-settings-icon-picker" class="device-settings-icon-picker" role="group" aria-labelledby="device-settings-icon-label">
                         ${['usb-drive', 'phone-fill', 'watch', 'sd-card', 'headphones', 'music-note-list'].map(icon => `
-                            <div class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}"
+                            <button type="button" aria-pressed="${icon === selectedIcon}" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}"
                                  data-icon="${icon}">
-                                <sl-icon name="${icon}"></sl-icon>
+                                <sl-icon name="${icon}" aria-hidden="true"></sl-icon>
                                 <span>${this.iconLabel(icon)}</span>
-                            </div>
+                            </button>
                         `).join('')}
                     </div>
                 </div>
@@ -659,6 +720,7 @@ export class BasketSidebar {
                     const el = t as HTMLElement;
                     const isSelected = el.dataset.icon === selectedIcon;
                     el.classList.toggle('selected', isSelected);
+                    el.setAttribute('aria-pressed', String(isSelected));
                 });
             });
         });
@@ -1007,7 +1069,7 @@ export class BasketSidebar {
             </div>
             <div class="basket-placeholder">
                 <sl-icon name="usb-drive" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
-                <p style="opacity: 0.5;">${t('basket.select_device')}</p>
+                <p style="color: var(--ink-dim);">${t('basket.select_device')}</p>
             </div>
             <div class="basket-footer">
                 ${this.renderDestinationChooserHost()}
@@ -1030,10 +1092,58 @@ export class BasketSidebar {
         this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
     }
 
+    private motionDevicePath: string | null | undefined;
+
     public render() {
+        if (this.isDestroyed) return;
+        this.artwork?.disconnect();
+        const sameDevice = this.motionDevicePath === this.selectedDevicePath;
+        const active = document.activeElement as HTMLElement | null;
+        const removalControls = Array.from(this.container.querySelectorAll<HTMLElement>('.remove-item-btn'));
+        const focusedRemovalIndex = sameDevice && active ? removalControls.indexOf(active) : -1;
+        const focusedRemovalId = focusedRemovalIndex >= 0 ? active?.dataset.id : undefined;
+        const before = sameDevice ? captureBasketMotion(this.container) : undefined;
+        const listScrollTop = sameDevice
+            ? this.container.querySelector<HTMLElement>('.basket-items-list')?.scrollTop
+            : undefined;
+        const panelScrollTop = this.container.scrollTop;
+        this.renderContent();
+        if (sameDevice) {
+            // Restore the viewport before entry animations measure the replacement rows.
+            // Native scrollTop assignment clamps offsets when the content gets shorter.
+            const list = this.container.querySelector<HTMLElement>('.basket-items-list');
+            if (list && listScrollTop !== undefined) list.scrollTop = listScrollTop;
+            this.container.scrollTop = panelScrollTop;
+        }
+        this.motionDevicePath = this.selectedDevicePath;
+        if (before) animateBasketUpdate(this.container, before);
+        if (focusedRemovalIndex >= 0) {
+            const controls = Array.from(this.container.querySelectorAll<HTMLElement>('.remove-item-btn'));
+            const target = controls.find(control => control.dataset.id === focusedRemovalId)
+                ?? controls[Math.min(focusedRemovalIndex, controls.length - 1)]
+                ?? this.container.querySelector<HTMLElement>('.basket-placeholder');
+            if (target) {
+                if (target.classList.contains('basket-placeholder')) target.tabIndex = -1;
+                // New Shoelace controls render their internal button asynchronously.
+                // Never take focus back from a user who has already moved elsewhere.
+                void Promise.resolve((target as HTMLElement & { updateComplete?: Promise<boolean> }).updateComplete).then(() => {
+                    if (target.isConnected && (document.activeElement === document.body || document.activeElement === this.container)) {
+                        target.focus({ preventScroll: true });
+                    }
+                });
+            }
+        }
+    }
+
+    private renderContent() {
         if (this.isDestroyed) return;
         const active = document.activeElement as HTMLElement | null;
         this.focusedDestinationKey = active?.dataset.destinationKey;
+        if (this.isSyncing && this.syncMonitoringUnavailable) {
+            this.updateDeviceLockState();
+            this.renderSyncUnavailable();
+            return;
+        }
         if (this.showSyncComplete) {
             this.updateDeviceLockState();
             this.renderSyncComplete();
@@ -1088,7 +1198,7 @@ export class BasketSidebar {
                 </div>
                 <div class="basket-placeholder">
                     <sl-icon name="basket" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
-                    <p style="opacity: 0.5;">${t('basket.empty')}</p>
+                <p style="color: var(--ink-dim);">${t('basket.empty')}</p>
                 </div>
             <div class="basket-footer">
                      ${this.renderDestinationChooserHost()}
@@ -1171,7 +1281,7 @@ export class BasketSidebar {
                             ${this.isSyncing ? t('basket.sync.syncing') : t('basket.actions.start_sync')}
                         </sl-button>
                         <sl-dropdown id="sync-mode-dropdown" placement="bottom-end" ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}>
-                            <sl-button slot="trigger" variant="primary" caret ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}></sl-button>
+                            <sl-button slot="trigger" variant="primary" caret ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}><span class="sr-only">${t('basket.actions.sync_options')}</span></sl-button>
                             <sl-menu>
                                 <sl-menu-item id="force-sync-item">
                                     <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
@@ -1524,20 +1634,23 @@ export class BasketSidebar {
 
     private startPolling() {
         this.stopPolling();
+        const revision = this.syncPollRevision;
+        if (!this.syncMonitoringUnavailable) this.announceSync('');
         let consecutiveFailures = 0;
+        let inFlight = false;
         this.pollingInterval = window.setInterval(async () => {
-            if (!this.currentOperationId) {
-                this.stopPolling();
-                return;
-            }
+            if (inFlight || this.isDestroyed) return;
+            const operationId = this.currentOperationId;
+            if (!operationId) { this.stopPolling(); return; }
+            const current = () => !this.isDestroyed && revision === this.syncPollRevision && operationId === this.currentOperationId;
+            inFlight = true;
             try {
-                const op = await rpcCall('sync_get_operation_status', {
-                    operationId: this.currentOperationId
-                }) as SyncOperation;
+                const op = await rpcCall('sync_get_operation_status', { operationId }) as SyncOperation;
+                if (!current()) return;
                 consecutiveFailures = 0;
+                const recovered = this.syncMonitoringUnavailable;
+                this.syncMonitoringUnavailable = false;
                 this.currentOperation = op;
-                this.renderSyncProgress();
-
                 if (op.status === 'complete') {
                     this.stopPolling();
                     await this.handleSyncComplete();
@@ -1547,22 +1660,34 @@ export class BasketSidebar {
                 } else if (op.status === 'cancelled') {
                     this.stopPolling();
                     this.handleSyncCancelled();
+                } else {
+                    this.renderSyncProgress();
+                    if (recovered) this.announceSync(t('basket.sync.status_restored'));
                 }
             } catch (err) {
+                if (!current()) return;
                 console.error('[Sync] Progress poll failed:', err);
-                consecutiveFailures++;
-                if (consecutiveFailures >= 3) {
+                if (++consecutiveFailures >= 3) {
                     this.stopPolling();
-                    this.isSyncing = false;
-                    this.currentOperationId = null;
-                    this.currentOperation = null;
+                    // A lost connection is not evidence that device writes stopped.
+                    this.syncMonitoringUnavailable = true;
                     this.render();
+                    const retry = this.container.querySelector('#sync-status-retry') as any;
+                    if (retry) {
+                        retry.removeAttribute('aria-busy');
+                        retry.removeAttribute('aria-disabled');
+                        retry.textContent = t('basket.sync.check_status');
+                    }
+                    this.announceSync(t('basket.sync.status_unavailable_help'));
                 }
+            } finally {
+                inFlight = false;
             }
         }, 500);
     }
 
     private stopPolling() {
+        this.syncPollRevision = (this.syncPollRevision ?? 0) + 1;
         if (this.pollingInterval !== null) {
             clearInterval(this.pollingInterval);
             this.pollingInterval = null;
@@ -1670,6 +1795,7 @@ export class BasketSidebar {
 
     private renderSyncProgress() {
         if (!this.currentOperation || this.isDestroyed) return;
+        if (this.syncMonitoringUnavailable) { this.renderSyncUnavailable(); return; }
 
         const op = this.currentOperation;
         const pct = op.filesTotal > 0
@@ -1688,6 +1814,7 @@ export class BasketSidebar {
         // and would falsely satisfy the guard, leaving the spinner frozen.
         const hasShell = !!this.container.querySelector('#sync-progress-bar');
         if (!hasShell) {
+            const focused = this.container.contains(document.activeElement) ? document.activeElement : null;
             this.container.innerHTML = `
                 <div class="basket-header">
                     <h2>${t('basket.sync.syncing_title')}</h2>
@@ -1714,6 +1841,7 @@ export class BasketSidebar {
             this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
                 this.handleCancelSync();
             });
+            this.restoreSyncFocus(focused, '#cancel-sync-btn');
         }
 
         // --- Patch: update only the leaf values that change each tick ---
@@ -1753,6 +1881,7 @@ export class BasketSidebar {
     }
 
     private renderSyncComplete() {
+        const focused = this.container.contains(document.activeElement) ? document.activeElement : null;
         const summary = this.completedFilesCount > 0
             ? t('basket.sync.complete_summary', {
                 files: this.completedFilesCount,
@@ -1778,6 +1907,8 @@ export class BasketSidebar {
             </div>
         `;
 
+        this.announceSync([t('basket.sync.complete'), summary].filter(Boolean).join(' '));
+        this.restoreSyncFocus(focused, '#sync-done-btn');
         this.container.querySelector('#sync-done-btn')?.addEventListener('click', () => {
             this.showSyncComplete = false;
             this.refreshAndRender();
@@ -1785,6 +1916,7 @@ export class BasketSidebar {
     }
 
     private renderSyncError(errors: string[]) {
+        const focused = this.container.contains(document.activeElement) ? document.activeElement : null;
         const errorList = errors.length > 0
             ? errors.map(msg => `<li>${this.escapeHtml(msg)}</li>`).join('')
             : `<li>${t('basket.sync.failed_retry')}</li>`;
@@ -1810,6 +1942,8 @@ export class BasketSidebar {
             </div>
         `;
 
+        this.announceSync([t('basket.sync.failed'), ...errors].join(' '));
+        this.restoreSyncFocus(focused, '#sync-retry-btn');
         this.container.querySelector('#sync-retry-btn')?.addEventListener('click', () => {
             this.syncErrorMessages = null;
             this.handleStartSync();
@@ -1933,7 +2067,7 @@ export class BasketSidebar {
     /** Remove control, hidden for locked (non-selected-server) items (AC35). */
     private removeButtonFor(item: BasketItem, id: string): string {
         if (basketStore.isItemLocked(item)) return '';
-        return `<sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(id)}" label="${t('basket.actions.remove')}"></sl-icon-button>`;
+        return `<sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(id)}" label="${this.escapeHtml(t('basket.actions.remove_named', { name: item.name }))}"></sl-icon-button>`;
     }
 
     private lockedCardClass(item: BasketItem): string {
@@ -2088,16 +2222,9 @@ export class BasketSidebar {
         return `<div class="basket-item-image" data-image-id="${this.escapeHtml(item.id)}"></div>`;
     }
 
-    /** Load basket item images asynchronously after HTML is in the DOM. */
+    /** Reuse visible artwork across redraws, scoped to the active provider. */
     private loadBasketImages(): void {
-        const imageEls = this.container.querySelectorAll<HTMLElement>('.basket-item-image[data-image-id]');
-        for (const el of imageEls) {
-            const id = el.dataset.imageId;
-            if (!id) continue;
-            getImageUrl(id, 100, 80).then(dataUrl => {
-                el.style.backgroundImage = `url('${dataUrl}')`;
-            }).catch(() => { /* image load failed, leave blank */ });
-        }
+        (this.artwork ??= new BasketArtwork(getImageUrl)).mount(this.container, this.currentServerId);
     }
 
     private async handleCancelSync(): Promise<void> {
@@ -2198,6 +2325,8 @@ export class BasketSidebar {
             </div>
             <sl-input
                 id="playlist-name-input"
+                label="${t('basket.playlist.name_label')}"
+                required
                 placeholder="${t('basket.playlist.name_placeholder')}"
                 autofocus
                 clearable>
@@ -2218,8 +2347,14 @@ export class BasketSidebar {
             const errorEl = dialog.querySelector('#playlist-create-error') as HTMLElement | null;
             const nameInput = dialog.querySelector('#playlist-name-input') as any;
             const name = (nameInput?.value ?? '').trim();
-            if (!name) return;
             if (createBtn?.loading) return; // guard against double-submit
+            if (!name) {
+                nameInput.setCustomValidity(t('basket.playlist.name_required'));
+                nameInput.reportValidity();
+                nameInput.focus();
+                return;
+            }
+            nameInput.setCustomValidity('');
 
             const showError = (text: string) => {
                 if (errorEl) {
@@ -2257,6 +2392,9 @@ export class BasketSidebar {
             }
         };
 
+        dialog.querySelector('#playlist-name-input')?.addEventListener('sl-input', () => {
+            (dialog.querySelector('#playlist-name-input') as any)?.setCustomValidity('');
+        });
         dialog.querySelector('#playlist-create-btn')?.addEventListener('click', submit);
         dialog.querySelector('#playlist-name-input')?.addEventListener('keydown', (e: KeyboardEvent) => {
             if (e.key === 'Enter') {

@@ -10,6 +10,7 @@ class Element {
   classList = { add() {} };
   append(...items) { this.children.push(...items); }
   replaceChildren(...items) { this.children = items; }
+  querySelectorAll(selector) { return this.children.flatMap(child => [...(selector === '[data-queue-action]' && child.dataset.queueAction ? [child] : []), ...child.querySelectorAll(selector)]); }
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, handler) { this.listeners.set(name, handler); }
   click() { this.listeners.get('click')?.(); }

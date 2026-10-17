@@ -14,6 +14,8 @@ export class DestinationHub {
     private selectedKey?: string;
     private issueNodes = new Map<string, { element: HTMLDivElement; revision: string }>();
     private buttons = new Map<string, HTMLButtonElement>();
+    private observedDestinations = new Map<string, Destination>();
+    private rows = new Map<string, HTMLDivElement>();
     private readonly list = document.createElement('div');
     private readonly issues = document.createElement('div');
     private readonly announcement = document.createElement('div');
@@ -77,51 +79,60 @@ export class DestinationHub {
         if (this.disposed) return;
         const previousSelected = this.selectedKey;
         const ordered = state.destinations.filter(destination => destination.kind !== 'playback');
-        const mounted: HTMLButtonElement[] = [];
+        const mounted: HTMLDivElement[] = [];
         for (const destination of ordered) {
             const key = this.key(destination);
             let button = this.buttons.get(key);
-            if (!button) {
+            let row = this.rows.get(key);
+            if (!button || !row) {
+                row = document.createElement('div');
+                row.className = 'destination-hub__row';
                 button = document.createElement('button');
                 button.type = 'button';
                 button.dataset.destinationKey = key;
-                button.addEventListener('click', () => void this.select(destination));
+                // Read the latest observation rather than capturing stale device data.
+                button.addEventListener('click', () => {
+                    const current = this.observedDestinations.get(key);
+                    if (current) void this.select(current);
+                });
+                const icon = document.createElement('sl-icon');
+                icon.setAttribute('aria-hidden', 'true');
+                button.append(icon, document.createElement('span'));
+                row.append(button);
                 this.buttons.set(key, button);
+                this.rows.set(key, row);
             }
+            this.observedDestinations.set(key, destination);
             button.dataset.destinationKind = destination.kind;
             button.className = `destination-hub__item${destination.selected ? ' is-selected' : ''}`;
             button.setAttribute('aria-pressed', String(destination.selected));
-            button.replaceChildren();
-            if (destination.kind === 'device') {
-                const icon = document.createElement('sl-icon');
-                icon.setAttribute('name', destination.icon || 'usb-drive');
-                icon.setAttribute('aria-hidden', 'true');
-                button.append(icon);
-            }
-            const label = document.createElement('span');
-            label.textContent = destination.name;
-            button.append(label);
-            button.setAttribute('aria-label', destination.name);
+            const icon = button.querySelector('sl-icon')!;
+            icon.hidden = destination.kind !== 'device';
+            if (destination.kind === 'device') icon.setAttribute('name', destination.icon || 'usb-drive');
+            const label = destination.kind === 'pendingDevice'
+                ? `${destination.name} — ${t('destination.setup')}` : destination.name;
+            button.querySelector('span')!.textContent = label;
+            button.setAttribute('aria-label', destination.kind === 'pendingDevice'
+                ? t('destination.setup_named', { name: destination.name }) : destination.name);
+            let settings = row.querySelector<HTMLElement>('.destination-hub__settings');
             if (destination.kind === 'device' && destination.selected && this.onDeviceSettings) {
-                const settings = document.createElement('sl-icon-button');
-                settings.setAttribute('name', 'gear');
+                if (!settings) {
+                    settings = document.createElement('sl-icon-button');
+                    settings.setAttribute('name', 'gear');
+                    settings.className = 'destination-hub__settings';
+                    settings.addEventListener('click', () => this.onDeviceSettings?.());
+                    row.append(settings);
+                }
                 settings.setAttribute('label', t('basket.device.settings'));
-                settings.className = 'destination-hub__settings';
-                settings.addEventListener('click', event => {
-                    event.stopPropagation();
-                    this.onDeviceSettings?.();
-                });
-                button.append(settings);
+            } else if (settings) {
+                if (document.activeElement === settings) button.focus();
+                settings.remove();
             }
-            if (destination.kind === 'pendingDevice') {
-                button.textContent = `${destination.name} — ${t('destination.setup')}`;
-                button.setAttribute('aria-label', t('destination.setup_named', { name: destination.name }));
-            }
-            mounted.push(button);
+            mounted.push(row);
         }
         const mountedSet = new Set(mounted);
         for (const child of [...this.list.children]) {
-            if (!mountedSet.has(child as HTMLButtonElement)) child.remove();
+            if (!mountedSet.has(child as HTMLDivElement)) child.remove();
         }
         // New observations are already ordered by the daemon's mutation clock. Append
         // only genuinely new nodes so refreshing selection state never detaches the
@@ -129,7 +140,11 @@ export class DestinationHub {
         for (const button of mounted) {
             if (button.parentElement !== this.list) this.list.append(button);
         }
-        for (const [key] of this.buttons) if (!ordered.some(item => this.key(item) === key)) this.buttons.delete(key);
+        for (const [key] of this.buttons) if (!ordered.some(item => this.key(item) === key)) {
+            this.buttons.delete(key);
+            this.rows.delete(key);
+            this.observedDestinations.delete(key);
+        }
         const issueIds = new Set<string>();
         for (const issue of state.deviceDiscoveryIssues ?? []) {
             issueIds.add(issue.discoveryId);

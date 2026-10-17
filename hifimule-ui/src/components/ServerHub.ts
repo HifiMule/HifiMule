@@ -16,6 +16,8 @@ export class ServerHub {
      * can reload the library + basket for the new active server. */
     private onServerChanged: () => void;
     private switchInFlight = false;
+    private refreshGeneration = 0;
+    private refreshFailed = false;
 
     constructor(container: HTMLElement, onServerChanged: () => void) {
         this.container = container;
@@ -24,15 +26,19 @@ export class ServerHub {
     }
 
     public async refresh(): Promise<void> {
+        const generation = ++this.refreshGeneration;
         try {
-            this.servers = await serverList();
+            const servers = await serverList();
+            if (generation !== this.refreshGeneration) return;
+            this.servers = servers;
+            this.refreshFailed = false;
             this.selectedId = this.servers.find(s => s.selected)?.id ?? null;
             // Reconcile any legacy composite serverIds in the persisted basket (AC22).
             basketStore.reconcileServerIds(this.servers);
         } catch (e) {
+            if (generation !== this.refreshGeneration) return;
             console.error('[ServerHub] Failed to list servers', e);
-            this.servers = [];
-            this.selectedId = null;
+            this.refreshFailed = true;
         }
         this.render();
     }
@@ -75,7 +81,7 @@ export class ServerHub {
                         <sl-icon name="chevron-down"></sl-icon>
                     </div>
                     <sl-menu>
-                        ${rows || `<sl-menu-item disabled>${t('serverHub.empty')}</sl-menu-item>`}
+                        ${rows || (!this.refreshFailed ? `<sl-menu-item disabled>${t('serverHub.empty')}</sl-menu-item>` : '')}
                         <sl-divider></sl-divider>
                         <sl-menu-item class="server-hub-add">
                             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -87,6 +93,9 @@ export class ServerHub {
                         </sl-menu-item>
                     </sl-menu>
                 </sl-dropdown>
+                ${this.refreshFailed ? `<div role="status" style="max-width:100%;overflow-wrap:anywhere">
+                    <sl-button class="server-hub-retry" size="small" style="max-width:100%">${t('serverHub.refresh_failed')}</sl-button>
+                </div>` : ''}
             </div>
         `;
 
@@ -94,6 +103,7 @@ export class ServerHub {
     }
 
     private bindEvents(): void {
+        this.container.querySelector('.server-hub-retry')?.addEventListener('click', () => void this.refresh());
         // Switch server on row click (ignore clicks on the remove button).
         this.container.querySelectorAll('.server-hub-row').forEach(row => {
             row.addEventListener('click', (e) => {
@@ -142,7 +152,7 @@ export class ServerHub {
                 <label class="device-settings-label">${t('serverHub.identity_icon')}</label>
                 <div class="device-settings-icon-picker server-identity-icon-picker">
                     ${SERVER_ICON_OPTIONS.map(icon => `
-                        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${this.escape(icon)}" title="${this.escape(icon)}">
+                        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${this.escape(icon)}" title="${this.escape(icon)}" aria-label="${this.escape(icon)}" aria-pressed="${icon === selectedIcon}">
                             <sl-icon name="${this.escape(icon)}"></sl-icon>
                         </button>
                     `).join('')}
@@ -158,6 +168,7 @@ export class ServerHub {
             selectedIcon = icon;
             dialog.querySelectorAll('.init-icon-tile').forEach((tile: Element) => {
                 tile.classList.toggle('selected', (tile as HTMLElement).dataset.icon === icon);
+                tile.setAttribute('aria-pressed', String((tile as HTMLElement).dataset.icon === icon));
             });
         };
         dialog.querySelectorAll('.init-icon-tile').forEach((tile: Element) => {
@@ -166,9 +177,15 @@ export class ServerHub {
                 if (icon) setSelectedIcon(icon);
             });
         });
-        dialog.querySelector('#server-identity-cancel')?.addEventListener('click', () => dialog.hide());
+        const cancel = dialog.querySelector('#server-identity-cancel') as any;
+        const save = dialog.querySelector('#server-identity-save') as any;
+        cancel?.addEventListener('click', () => { if (!save.loading) dialog.hide(); });
+        dialog.addEventListener('sl-request-close', (event: Event) => {
+            if (event.target === dialog && save.loading) event.preventDefault();
+        });
         dialog.querySelector('#server-identity-save')?.addEventListener('click', async () => {
             const saveBtn = dialog.querySelector('#server-identity-save') as any;
+            if (saveBtn.loading) return;
             const errorEl = dialog.querySelector('#server-identity-error') as HTMLElement | null;
             const nameInput = dialog.querySelector('#server-identity-name') as any;
             const name = (nameInput?.value ?? '').trim();
@@ -182,6 +199,7 @@ export class ServerHub {
             }
             try {
                 saveBtn.loading = true;
+                cancel.disabled = true;
                 await serverUpdate({ id, name, icon: selectedIcon });
                 dialog.hide();
                 await this.refresh();
@@ -195,6 +213,7 @@ export class ServerHub {
                 }
             } finally {
                 saveBtn.loading = false;
+                cancel.disabled = false;
             }
         });
         dialog.addEventListener('sl-after-hide', (ev: Event) => {
@@ -251,13 +270,22 @@ export class ServerHub {
             : '';
         dialog.innerHTML = `
             ${warning}
-            <p>${t('serverHub.remove_confirm', { server: identity.label })}</p>
+            <p style="overflow-wrap:anywhere">${this.escape(t('serverHub.remove_confirm', { server: identity.label }))}</p>
             <sl-button slot="footer" variant="default" id="server-remove-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="danger" id="server-remove-confirm">${t('serverHub.remove')}</sl-button>
         `;
         document.body.appendChild(dialog);
-        dialog.querySelector('#server-remove-cancel')?.addEventListener('click', () => dialog.hide());
+        const cancel = dialog.querySelector('#server-remove-cancel') as any;
+        const remove = dialog.querySelector('#server-remove-confirm') as any;
+        cancel?.addEventListener('click', () => { if (!remove.loading) dialog.hide(); });
+        dialog.addEventListener('sl-request-close', (event: Event) => {
+            if (event.target === dialog && remove.loading) event.preventDefault();
+        });
         dialog.querySelector('#server-remove-confirm')?.addEventListener('click', async () => {
+            const confirm = dialog.querySelector('#server-remove-confirm') as any;
+            if (confirm.loading) return;
+            confirm.loading = true;
+            cancel.disabled = true;
             try {
                 await serverRemove(id);
                 // Drop the removed server's basket items and notify (AC7). Basket
@@ -288,6 +316,9 @@ export class ServerHub {
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
                 window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: msg } }));
+            } finally {
+                confirm.loading = false;
+                cancel.disabled = false;
             }
         });
         dialog.addEventListener('sl-after-hide', (ev: Event) => {
@@ -304,6 +335,8 @@ export class ServerHub {
             this.onServerChanged();
         } catch (e) {
             console.error('[ServerHub] logout failed', e);
+            const message = e instanceof Error ? e.message : String(e);
+            window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message } }));
         }
     }
 

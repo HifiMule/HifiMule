@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Basket motion checks</title>
+<style>
+  body { overflow:auto !important; }
+  main { max-width:760px; margin:24px auto; padding:16px; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0; }
+  #basket { width:400px; max-width:100%; padding:16px; box-sizing:border-box; background:var(--panel); }
+  #basket.compact { width:300px; }
+  #result { display:block; white-space:pre-wrap; margin-top:16px; }
+</style>
+<main><h1>Basket motion</h1><p>Illustrative selection. Add and remove items quickly, refresh unchanged state, or run the checks. OS Reduce Motion keeps a short fade and makes capacity updates immediate.</p>
+<div class="controls"><button id="add">Add album</button><button id="remove">Remove last</button><button id="refresh">Refresh unchanged</button><button id="compact">Toggle compact</button><button id="check">Run checks</button></div>
+<section id="basket" aria-label="Device basket"></section><output id="result" aria-live="polite"></output></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/styles.css';
+import {captureBasketMotion, animateBasketUpdate} from '../src/components/basketMotion.ts';
+const basket=document.querySelector('#basket'), result=document.querySelector('#result');
+let count=1;
+function render(animate=true) {
+  const before=captureBasketMotion(basket);
+  basket.innerHTML=`<h2>Device basket</h2><div class="basket-items-list">${Array.from({length:count},(_,i)=>`<div class="basket-item-card" data-id="album-${i}"><div class="basket-item-info"><div class="basket-item-name">Fixture album ${i+1}</div><div class="basket-item-meta">12 tracks · 1 GB</div></div></div>`).join('')}</div><div class="capacity-section"><div class="capacity-bar-container"><div class="capacity-bar" role="img" aria-label="${count} GB selected"><div class="capacity-segment capacity-used" style="--seg-x:0;--seg-w:.2"></div><div class="capacity-segment capacity-projected" style="--seg-x:.2;--seg-w:${count*.08};background:var(--accent)"></div><div class="capacity-segment capacity-free" style="--seg-x:${.2+count*.08};--seg-w:${.8-count*.08}"></div></div></div><p>${count} GB selected · ${(10-count-2)} GB available</p></div>`;
+  if(animate)animateBasketUpdate(basket,before);
+}
+document.querySelector('#add').onclick=()=>{count=Math.min(7,count+1);render();};
+document.querySelector('#remove').onclick=()=>{count=Math.max(0,count-1);render();};
+document.querySelector('#refresh').onclick=()=>render();
+document.querySelector('#compact').onclick=()=>basket.classList.toggle('compact');
+document.querySelector('#check').onclick=async()=>{
+  const lines=[];
+  const assert=(ok,label)=>lines.push(`${ok?'PASS':'FAIL'}: ${label}`);
+  const settle=()=>Promise.allSettled(basket.getAnimations({subtree:true}).map(a=>a.finished));
+  count=1;render(false);count=2;render();
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  assert(basket.querySelector('[data-id="album-0"]').getAnimations().length===0,'existing row stays still');
+  assert(basket.querySelector('[data-id="album-1"]').getAnimations().length===1,'new row acknowledges addition');
+  assert(basket.querySelector('.capacity-projected').getAnimations().length===(reduced?0:1),'capacity respects motion preference');
+  count=3;render();count=2;render();await settle();
+  assert(basket.querySelectorAll('.basket-item-card').length===2,'rapid add/remove settles on final selection');
+  render();
+  assert(basket.getAnimations({subtree:true}).length===0,'unchanged refresh does not replay motion');
+  basket.classList.add('compact');
+  assert(basket.scrollWidth===basket.clientWidth,'300px basket has no horizontal overflow');
+  result.textContent=lines.join('\n')+`\nMotion preference: ${reduced?'reduced':'standard'}`;
+};
+render(false);
+</script></html>

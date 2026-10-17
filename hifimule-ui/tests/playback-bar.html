@@ -81,8 +81,8 @@ async function update(){
  await playbackStore.refresh().catch(()=>{});requestAnimationFrame(measure);
 }
 width.onchange=state.onchange=zoom.onchange=update;
-lang.onchange=()=>{setLanguage(lang.value);mount();update();};
-setLanguage(lang.value);mount();await update();
+lang.onchange=async()=>{await setLanguage(lang.value);mount();update();};
+await setLanguage(lang.value);mount();await update();
 document.getElementById('last').onclick=()=>{library.lastElementChild.focus();library.lastElementChild.scrollIntoView({block:'nearest'});measure();};
 new ResizeObserver(measure).observe(document.getElementById('stage'));
 document.querySelector('sl-split-panel').addEventListener('sl-reposition',measure);

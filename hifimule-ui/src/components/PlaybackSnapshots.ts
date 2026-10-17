@@ -9,7 +9,7 @@ function button(key: string, action: () => void): HTMLButtonElement {
     const value = document.createElement('button'); value.type = 'button'; value.textContent = t(key);
     value.addEventListener('click', action); return value;
 }
-function message(code?: string): string {
+function message(code?: string, fallback = 'loadError'): string {
     const keys: Record<string, string> = {
         INVALID_SNAPSHOT_NAME: 'invalidName', INVALID_SNAPSHOT_REQUEST: 'invalidRequest', INVALID_SNAPSHOT_CURSOR: 'invalidCursor',
         STALE_INSTANCE: 'stale', STALE_SESSION: 'stale', QUEUE_CONFLICT: 'stale', STALE_MAIN_OCCURRENCE: 'stale',
@@ -17,7 +17,7 @@ function message(code?: string): string {
         SNAPSHOT_CORRUPT: 'corrupt', UNSUPPORTED_SNAPSHOT_VERSION: 'version', PLAYBACK_BUSY: 'busy', TERMINAL_PENDING: 'terminal',
         RESTORE_FAILED: 'restore', DAEMON_STOPPED: 'shutdown', SNAPSHOT_RECOVERY_STORAGE: 'recoveryStorage', SNAPSHOT_NOT_SAVED: 'notSaved',
     };
-    return t(`playback.snapshots.${keys[code ?? ''] ?? 'loadError'}`);
+    return t(`playback.snapshots.${keys[code ?? ''] ?? fallback}`);
 }
 
 /** Saved pages have their own identity fence; live polling never reloads them. */
@@ -65,6 +65,9 @@ export class PlaybackSnapshots {
     private previous: (string | null)[] = [];
     private request = 0;
     private basketRequest = 0;
+    private viewRevision = 0;
+    private exportRevision = 0;
+    private readonly pendingRecoveries = new Set<string>();
     private loading = false;
     private disposed = false;
     private exportPoll?: ReturnType<typeof setTimeout>;
@@ -102,7 +105,7 @@ export class PlaybackSnapshots {
         }));
         if (snapshotSaves.pending) void snapshotSaves.recover();
     }
-    destroy(): void { this.disposed = true; ++this.request;++this.basketRequest; if(this.exportPoll)clearTimeout(this.exportPoll);for (const unsubscribe of this.unsubscribers) unsubscribe(); }
+    destroy(): void { this.disposed = true; ++this.viewRevision; ++this.request;++this.basketRequest; if(this.exportPoll)clearTimeout(this.exportPoll);for (const unsubscribe of this.unsubscribers) unsubscribe(); }
     focus(): boolean { if (this.panel.hidden || this.disposed) return false; this.heading.focus(); return true; }
     private async refreshLive(): Promise<void> {
         this.requiresRefresh = true; this.renderSave();
@@ -127,8 +130,8 @@ export class PlaybackSnapshots {
         this.recover.hidden = !snapshotSaves.pending; this.recover.disabled = state.kind === 'saving';
         this.refresh.hidden = fresh && state.kind !== 'error'; this.openResult.hidden = !state.snapshot;
     }
-    private reset(): void { ++this.request; this.cursor = null; this.nextCursor = null; this.previous = []; this.list.replaceChildren(); }
-    private showLive(): void { ++this.request; this.panel.hidden = true; this.onSavedView(false); this.browse.focus(); }
+    private reset(): void { ++this.request; ++this.viewRevision; if(this.exportPoll)clearTimeout(this.exportPoll); this.cursor = null; this.nextCursor = null; this.previous = []; this.list.replaceChildren(); }
+    private showLive(): void { ++this.request; ++this.viewRevision; if(this.exportPoll)clearTimeout(this.exportPoll); this.panel.hidden = true; this.onSavedView(false); this.browse.focus(); }
     showList(): void {
         if (this.disposed) return;
         this.selection = undefined; this.reset(); this.panel.hidden = false; this.savedList.hidden = true;
@@ -142,7 +145,13 @@ export class PlaybackSnapshots {
         this.details.textContent = `${new Date(snapshot.createdAt).toLocaleString()} · ${t('playback.snapshots.count', { count: snapshot.entryCount })}`;
         this.exportName.value=snapshot.name;this.exportStatus.replaceChildren();this.exportButton.disabled=false;
         this.basketStatus.replaceChildren();void this.refreshBasketTarget(snapshot.snapshotId);void this.loadBasketRecoveries(snapshot.snapshotId);
-        this.onSavedView(true); this.heading.focus(); void this.loadPage(); void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(v=>{if(v[0])this.renderExport(v[0]);}).catch(error=>{if(!this.disposed&&this.selection?.snapshotId===snapshot.snapshotId)this.exportStatus.textContent=message(snapshotErrorCode(error));});
+        this.onSavedView(true); this.heading.focus(); void this.loadPage();
+        const revision = this.viewRevision, exportRevision = this.exportRevision;
+        const current = () => !this.disposed && !this.panel.hidden && revision === this.viewRevision
+            && exportRevision === this.exportRevision && this.selection?.snapshotId === snapshot.snapshotId;
+        void playbackListSnapshotPlaylistExports(snapshot.snapshotId).then(exports => {
+            if (current() && exports[0]) this.renderExport(exports[0]);
+        }).catch(error => { if (current()) this.exportStatus.textContent = message(snapshotErrorCode(error)); });
     }
     private async refreshBasketTarget(snapshotId:string):Promise<void>{
         const request=++this.basketRequest;
@@ -153,15 +162,83 @@ export class PlaybackSnapshots {
         }catch{if(!this.disposed&&request===this.basketRequest){this.target=undefined;this.basketAdd.disabled=true;this.basketReplace.disabled=true;this.basketTarget.textContent=t('playback.snapshots.basket.unavailable');}}
     }
     private async loadBasketRecoveries(snapshotId:string):Promise<void>{
-        try{const operations=await playbackListSnapshotBasketExports(snapshotId);if(this.disposed||this.selection?.snapshotId!==snapshotId)return;
+        const revision = this.viewRevision;
+        try{const operations=await playbackListSnapshotBasketExports(snapshotId);if(this.disposed||this.panel.hidden||revision!==this.viewRevision||this.selection?.snapshotId!==snapshotId)return;
             const uncertain=operations.filter(operation=>operation.state==='commitUncertain');
             if(uncertain.length)this.renderBasketRecoveries(uncertain);
         }catch{/* A recovery listing failure must not disable a new export. */}
     }
-    private renderBasketRecoveries(operations:SnapshotBasketOperation[]):void{
-        const list=document.createElement('ul');
-        for(const operation of operations){const row=document.createElement('li');row.append(document.createTextNode(t('playback.snapshots.basket.state.commitUncertain')));row.append(button('playback.snapshots.export.reconcile',()=>void playbackRecoverSnapshotBasketExport(operation.operationId).then(result=>{if(result.state==='commitConfirmed'&&result.basketItems)basketStore.hydrateFromDaemon(result.basketItems);void this.loadBasketRecoveries(operation.snapshotId);})));list.append(row);}
+    private syncRecoveryButtons(): void {
+        this.element.querySelectorAll<HTMLButtonElement>('button[data-recovery-operation]').forEach(control => {
+            const pending = this.pendingRecoveries.has(control.dataset.recoveryOperation!);
+            control.setAttribute('aria-disabled', String(pending));
+            control.setAttribute('aria-busy', String(pending));
+        });
+    }
+
+    private recoveryButton<T>(
+        label: string, operationKey: string, actionKey: string, snapshotId: string,
+        status: HTMLElement, action: () => Promise<T>, apply: (result: T) => void,
+    ): HTMLButtonElement {
+        const revision = this.viewRevision;
+        const current = () => !this.disposed && !this.panel.hidden
+            && this.viewRevision === revision && this.selection?.snapshotId === snapshotId;
+        const control = button(label, () => { void run(); });
+        control.dataset.recoveryOperation = operationKey;
+        control.dataset.recoveryAction = actionKey;
+        const run = async () => {
+            if (!current() || this.pendingRecoveries.has(operationKey)) return;
+            this.pendingRecoveries.add(operationKey);
+            this.syncRecoveryButtons();
+            status.textContent = t('playback.snapshots.recoveryPending');
+            // A poll must not replace the controls while an action is pending.
+            if (operationKey.startsWith('playlist:')) {
+                ++this.exportRevision;
+                if (this.exportPoll) clearTimeout(this.exportPoll);
+            }
+            try {
+                const result = await action();
+                if (!current()) return;
+                this.pendingRecoveries.delete(operationKey);
+                const hadFocus = document.activeElement === control;
+                status.textContent = '';
+                apply(result);
+                if (hadFocus && !control.isConnected) {
+                    const replacement = [...this.element.querySelectorAll<HTMLButtonElement>('button[data-recovery-action]')]
+                        .find(value => value.dataset.recoveryOperation === operationKey && value.dataset.recoveryAction === actionKey);
+                    (replacement ?? this.heading).focus({ preventScroll: true });
+                }
+            } catch (error) {
+                if (current()) status.textContent = message(snapshotErrorCode(error), 'recoveryFailed');
+            } finally {
+                this.pendingRecoveries.delete(operationKey);
+                if (!this.disposed) this.syncRecoveryButtons();
+            }
+        };
+        return control;
+    }
+
+    private renderBasketRecoveries(operations: SnapshotBasketOperation[]): void {
+        const list = document.createElement('ul');
+        for (const operation of operations) {
+            const row = document.createElement('li');
+            const state = document.createElement('span');
+            state.textContent = t(`playback.snapshots.basket.state.${operation.state}`);
+            const status = document.createElement('span');
+            status.className = 'playback-snapshots__recovery-status';
+            const recover = this.recoveryButton(
+                'playback.snapshots.export.reconcile', `basket:${operation.operationId}`, 'reconcile', operation.snapshotId,
+                status, () => playbackRecoverSnapshotBasketExport(operation.operationId), result => {
+                    if (result.state === 'commitConfirmed' && result.basketItems) basketStore.hydrateFromDaemon(result.basketItems);
+                    state.textContent = t(`playback.snapshots.basket.state.${result.state}`);
+                    if (result.state !== 'commitUncertain') recover.remove();
+                },
+            );
+            row.append(state, recover, status);
+            list.append(row);
+        }
         this.basketStatus.replaceChildren(list);
+        this.syncRecoveryButtons();
     }
     private async confirmBasketExport(action:SnapshotBasketAction):Promise<void>{
         const snapshot=this.selection,target=this.target;if(!snapshot||!target||this.disposed)return;
@@ -184,8 +261,41 @@ export class PlaybackSnapshots {
         try{const plan=await playbackPlanSnapshotPlaylistExport(snapshot.snapshotId,this.exportName.value);if(this.disposed||request!==this.request||this.selection?.snapshotId!==snapshot.snapshotId)return;const parts=plan.parts.map(p=>`${p.sourceLabel}: ${p.expectedCount} · ${t(`playback.snapshots.export.state.${p.state}`)}${p.reason?` · ${t(`playback.snapshots.export.reason.${p.reason}`)}`:''}`).join('\n');if(!plan.parts.some(p=>p.state==='planned')){this.renderExport(plan);return;}if(!window.confirm(t('playback.snapshots.export.confirm',{name:plan.name,parts})))return;this.renderExport(await playbackStartSnapshotPlaylistExport(snapshot.snapshotId,plan.name));}
         catch(error){this.exportStatus.textContent=message(snapshotErrorCode(error));}finally{if(!this.disposed&&request===this.request)this.exportButton.disabled=false;}
     }
-    private renderExport(operation:SnapshotPlaylistExport):void{
-        if(this.disposed||operation.snapshotId!==this.selection?.snapshotId)return;const list=document.createElement('ul');for(const part of operation.parts){const row=document.createElement('li');row.append(`${part.sourceLabel}: ${t(`playback.snapshots.export.state.${part.state}`)} · ${part.confirmedCount}/${part.expectedCount}${part.playlistId?` · ${part.playlistId}`:''}${part.reason?` · ${t(`playback.snapshots.export.reason.${part.reason}`)}`:''}`);if(part.safeToRetry&&operation.operationId)row.append(button('playback.retry',()=>void playbackRetrySnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));if((part.state==='ambiguous'||part.state==='partial')&&operation.operationId)row.append(button('playback.snapshots.export.reconcile',()=>void playbackReconcileSnapshotPlaylistExport(operation.operationId!,part.serverId).then(v=>this.renderExport(v))));list.append(row);}this.exportStatus.replaceChildren(document.createTextNode(t(`playback.snapshots.export.aggregate.${operation.status}`)),list);if(this.exportPoll)clearTimeout(this.exportPoll);if(operation.status==='running'&&operation.operationId){const snapshotId=operation.snapshotId;this.exportPoll=setTimeout(()=>void playbackGetSnapshotPlaylistExport(operation.operationId!).then(next=>{if(!this.disposed&&this.selection?.snapshotId===snapshotId)this.renderExport(next);}).catch(error=>{if(!this.disposed&&this.selection?.snapshotId===snapshotId)this.exportStatus.textContent=message(snapshotErrorCode(error));}),1000);}
+    private renderExport(operation: SnapshotPlaylistExport): void {
+        const operationKey = `playlist:${operation.operationId}`;
+        if (this.disposed || this.panel.hidden || operation.snapshotId !== this.selection?.snapshotId
+            || this.pendingRecoveries.has(operationKey)) return;
+        const list = document.createElement('ul');
+        for (const part of operation.parts) {
+            const row = document.createElement('li');
+            row.append(`${part.sourceLabel}: ${t(`playback.snapshots.export.state.${part.state}`)} · ${part.confirmedCount}/${part.expectedCount}${part.playlistId ? ` · ${part.playlistId}` : ''}${part.reason ? ` · ${t(`playback.snapshots.export.reason.${part.reason}`)}` : ''}`);
+            const status = document.createElement('span');
+            status.className = 'playback-snapshots__recovery-status';
+            if (part.safeToRetry && operation.operationId) row.append(this.recoveryButton(
+                'playback.retry', operationKey, `retry:${part.serverId}`, operation.snapshotId, status,
+                () => playbackRetrySnapshotPlaylistExport(operation.operationId!, part.serverId), result => this.renderExport(result),
+            ));
+            if ((part.state === 'ambiguous' || part.state === 'partial') && operation.operationId) row.append(this.recoveryButton(
+                'playback.snapshots.export.reconcile', operationKey, `reconcile:${part.serverId}`, operation.snapshotId, status,
+                () => playbackReconcileSnapshotPlaylistExport(operation.operationId!, part.serverId), result => this.renderExport(result),
+            ));
+            row.append(status);
+            list.append(row);
+        }
+        this.exportStatus.replaceChildren(document.createTextNode(t(`playback.snapshots.export.aggregate.${operation.status}`)), list);
+        this.syncRecoveryButtons();
+        if (this.exportPoll) clearTimeout(this.exportPoll);
+        if (operation.status === 'running' && operation.operationId) {
+            const revision = this.viewRevision, exportRevision = this.exportRevision;
+            const current = () => !this.disposed && !this.panel.hidden && revision === this.viewRevision
+                && exportRevision === this.exportRevision && this.selection?.snapshotId === operation.snapshotId
+                && !this.pendingRecoveries.has(operationKey);
+            this.exportPoll = setTimeout(() => void playbackGetSnapshotPlaylistExport(operation.operationId!).then(next => {
+                if (current()) this.renderExport(next);
+            }).catch(error => {
+                if (current()) this.exportStatus.textContent = message(snapshotErrorCode(error));
+            }), 1000);
+        }
     }
     private paging(): void {
         this.first.disabled = this.loading || this.cursor === null;

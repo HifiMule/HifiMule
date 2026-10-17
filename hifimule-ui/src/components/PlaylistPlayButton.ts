@@ -12,9 +12,15 @@ export function createPlaylistPlayButton(playlistId: string, serverId: string | 
         event.stopPropagation();
         if (!serverId || play.disabled) return;
         play.disabled = true;
+        play.setAttribute('aria-busy', 'true');
+        play.name = 'hourglass-split';
         try { await playbackPlayPlaylist(serverId, playlistId); }
         catch (error) { showToast((error as Error).message, 'danger'); }
-        finally { play.disabled = false; }
+        finally {
+            play.disabled = false;
+            play.removeAttribute('aria-busy');
+            play.name = 'play-fill';
+        }
     });
     return play;
 }

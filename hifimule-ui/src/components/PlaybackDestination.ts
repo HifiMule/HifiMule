@@ -334,7 +334,9 @@ export class PlaybackDestination {
         accessibleLabel.className = 'sr-only';
         accessibleLabel.textContent = label;
         button.append(icon, accessibleLabel);
-        button.addEventListener('click', () => void run());
+        button.addEventListener('click', () => {
+            if (button.getAttribute('aria-disabled') !== 'true') void run();
+        });
         const hint = document.createElement('sl-tooltip');
         hint.setAttribute('content', label);
         hint.setAttribute('placement', 'top');
@@ -415,6 +417,17 @@ export class PlaybackDestination {
             region.previousButton.setAttribute('aria-disabled', String(this.mutating || region.loading
                 || region.previous.length === 0 && !region.page?.precedingOccurrenceId));
             region.nextButton.setAttribute('aria-disabled', String(this.mutating || region.loading || !region.nextCursor));
+            // ARIA-disabled keeps the focused action mounted and focusable while
+            // a move changes its position, including arrival at a queue boundary.
+            const page = region.page;
+            const positions = new Map(page?.occurrences.map((row, index) => [row.occurrenceId, index]));
+            for (const button of region.list.querySelectorAll<HTMLButtonElement>('[data-queue-action]')) {
+                const index = positions.get(button.dataset.occurrenceId ?? '');
+                const unavailable = this.mutating || region.loading || !page || index === undefined
+                    || button.dataset.queueAction === 'moveUp' && index === 0 && !page.precedingOccurrenceId
+                    || button.dataset.queueAction === 'moveDown' && index === page.occurrences.length - 1 && page.endOfSection;
+                button.setAttribute('aria-disabled', String(unavailable));
+            }
         }
         this.body.setAttribute('aria-busy', String(this.mutating || Object.values(this.regions).some(region => region.loading)));
     }
