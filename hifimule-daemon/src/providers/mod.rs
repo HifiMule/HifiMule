@@ -182,6 +182,17 @@ pub struct PlaybackDescription {
     pub representations: Vec<PlaybackRepresentation>,
 }
 
+/// Authoritative book fields applied only to a staged local download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncBookTags {
+    pub album: Option<String>,
+    pub authors: Option<String>,
+    pub title: Option<String>,
+    pub track: u32,
+    pub total: u32,
+    pub year: Option<u32>,
+}
+
 /// Daemon-private representation admitted for managed device sync. Ownership of
 /// `request` keeps provider session cleanup alive until the staged read ends.
 #[derive(Debug, Clone)]
@@ -189,6 +200,7 @@ pub struct SyncMediaRepresentation {
     pub codec: String,
     pub container: String,
     pub request: PlaybackRequest,
+    pub book_tags: Option<SyncBookTags>,
 }
 
 impl SyncMediaRepresentation {
@@ -227,6 +239,7 @@ impl SyncMediaRepresentation {
             codec,
             container,
             request: representation.request,
+            book_tags: None,
         })
     }
 }

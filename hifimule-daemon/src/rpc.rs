@@ -17188,6 +17188,7 @@ mod tests {
             _id: &str,
         ) -> Result<crate::providers::SyncMediaRepresentation, ProviderError> {
             Ok(crate::providers::SyncMediaRepresentation {
+                book_tags: None,
                 codec: "mp3".into(),
                 container: "mp3".into(),
                 request: crate::providers::PlaybackRequest {

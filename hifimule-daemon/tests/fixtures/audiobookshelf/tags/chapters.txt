@@ -1,0 +1,14 @@
+;FFMETADATA1
+title=Stale title
+album=Stale album
+artist=Stale author
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=250
+title=Opening
+[CHAPTER]
+TIMEBASE=1/1000
+START=250
+END=500
+title=Ending

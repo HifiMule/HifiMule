@@ -2051,6 +2051,7 @@ dependencies = [
  "hifimule-i18n",
  "hifimule-lifecycle",
  "http",
+ "id3",
  "image",
  "libc",
  "libpulse-binding",
@@ -2058,6 +2059,7 @@ dependencies = [
  "machine-uid",
  "md-5",
  "mockito",
+ "mp4ameta",
  "notify-rust",
  "pkg-config",
  "rand 0.8.5",
@@ -2389,6 +2391,17 @@ dependencies = [
  "zerofrom",
  "zerotrie",
  "zerovec",
+]
+
+[[package]]
+name = "id3"
+version = "1.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef8be496a46468ba3d43690775aa3a79102ce4daf7d99e8072589aae1a3cd955"
+dependencies = [
+ "bitflags 2.13.2",
+ "byteorder",
+ "flate2",
 ]
 
 [[package]]
@@ -3034,6 +3047,12 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
+
+[[package]]
+name = "mp4ameta"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "453e991b2efe96c288cbc2d03a19e353504294559ecb6c03067fff5bd824616d"
 
 [[package]]
 name = "muda"

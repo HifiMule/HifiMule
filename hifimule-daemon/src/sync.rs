@@ -2623,6 +2623,40 @@ impl StagedBytePermit {
     }
 }
 
+async fn apply_staged_book_tags(
+    path: &Path,
+    size: u64,
+    media: Option<&crate::providers::SyncMediaRepresentation>,
+    permit: &mut StagedBytePermit,
+    operations: &SyncOperationManager,
+    operation_id: &str,
+) -> Result<u64> {
+    let Some((media, tags)) = media.and_then(|m| m.book_tags.as_ref().map(|tags| (m, tags))) else {
+        return Ok(size);
+    };
+    let reservation = crate::sync_tags::rewrite_reservation(size)?;
+    permit
+        .reserve_to(reservation, operations, operation_id)
+        .await?;
+    let path = path.to_path_buf();
+    let container = media.container.clone();
+    let tags = tags.clone();
+    let cancel = operations
+        .cancel_tokens
+        .read()
+        .await
+        .get(operation_id)
+        .cloned()
+        .context("Missing sync cancellation token")?;
+    // Never abandon the blocking worker: its staging file and byte permit must
+    // remain alive until its cooperative cancellation has stopped all writes.
+    tokio::task::spawn_blocking(move || {
+        crate::sync_tags::apply_cancellable(&path, &container, &tags, &cancel)
+    })
+    .await
+    .context("Audiobook tag worker failed")?
+}
+
 impl Drop for StagedBytePermit {
     fn drop(&mut self) {
         let mut budget = self
@@ -3658,6 +3692,13 @@ async fn execute_plan_sync_buffered(
                         retry_error
                     )),
                 }
+            };
+            let staged_size_result = match staged_size_result {
+                Ok(size) => apply_staged_book_tags(
+                    &staged_path, size, direct_media.as_ref(), &mut byte_permit,
+                    &producer_operation_manager, &producer_operation_id,
+                ).await,
+                Err(error) => Err(error),
             };
             let staged_size = match staged_size_result {
                 Ok(staged_size) => staged_size,
@@ -6189,9 +6230,350 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sync_tags_pipeline_uses_current_metadata_and_final_bytes_and_rejects_bad_audio() {
+        use crate::providers::ProviderLibraryRole;
+        use id3::TagLike;
+        let mut server = mockito::Server::new_async().await;
+        let login = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"user":{"accessToken":"fixture-token"}}"#)
+            .create_async()
+            .await;
+        let _libraries = server
+            .mock("GET", "/api/libraries")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"libraries":[{"id":"l","name":"Books","mediaType":"book"}]}"#)
+            .create_async()
+            .await;
+        let provider = Arc::new(
+            crate::providers::audiobookshelf::AudiobookshelfProvider::from_stored_config(
+                &server.url(),
+                "fixture",
+                "fixture",
+                "l",
+                ProviderLibraryRole::Audiobook,
+            )
+            .await
+            .unwrap(),
+        );
+        let source_audio = include_bytes!("../tests/fixtures/audiobookshelf/tags/untagged.mp3");
+        let dir = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(dir.path()).await;
+        let id = "abs-track-6c.69.6d.66"; // l / i / m / f
+        let mut last_path = None;
+        // Explicitly re-adding the same managed part is the existing force-sync
+        // replacement path. The source bytes remain unchanged between runs.
+        for (round, title) in [
+            "First correction",
+            "Second correction",
+            "Broken audio",
+            "Autofill bad audio",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let detail = server.mock("GET", "/api/items/i").with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(serde_json::json!({"id":"i", "libraryId":"l", "mediaType":"book", "media": {
+                    "id":"m", "metadata":{"title":title,"authors":[{"name":"Correct author"}],"publishedYear":"2024"},
+                    "audioFiles":[{"ino":"f", "index":1,"duration":0.5}]
+                }}).to_string()).expect(2).create_async().await;
+            let play = server.mock("POST", "/api/items/i/play").with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"id":"session","serverVersion":"2.37.1","libraryId":"l","libraryItemId":"i","mediaType":"book","playMethod":0,"audioTracks":[{"ino":"f","contentUrl":"/api/items/i/file/f","mimeType":"audio/mpeg","codec":"mp3"}]}"#)
+                .create_async().await;
+            let probe = server
+                .mock("GET", "/api/items/i/file/f")
+                .match_header("range", "bytes=0-0")
+                .with_status(206)
+                .with_header("content-type", "audio/mpeg")
+                .with_header("accept-ranges", "bytes")
+                .with_header(
+                    "content-range",
+                    &format!("bytes 0-0/{}", source_audio.len()),
+                )
+                .with_body(vec![source_audio[0]])
+                .expect(1)
+                .create_async()
+                .await;
+            let download = server
+                .mock("GET", "/api/items/i/file/f")
+                .match_header("range", mockito::Matcher::Missing)
+                .with_status(200)
+                .with_header("content-type", "audio/mpeg")
+                .with_body(if round >= 2 {
+                    b"broken source audio".to_vec()
+                } else {
+                    source_audio.to_vec()
+                })
+                .expect(1)
+                .create_async()
+                .await;
+            let close = server
+                .mock("POST", "/api/session/session/close")
+                .with_status(200)
+                .create_async()
+                .await;
+            let progress = server
+                .mock(
+                    "PATCH",
+                    mockito::Matcher::Regex("/api/me/progress/.*".into()),
+                )
+                .expect(0)
+                .create_async()
+                .await;
+            let mut add =
+                add_item_with_provider_format(id, "mp3", "audio/mpeg", source_audio.len() as u64);
+            add.media_role = crate::device::MediaRole::Audiobook;
+            add.is_auto_fill = round == 3;
+            let delta = SyncDelta {
+                adds: vec![add],
+                provenance_updates: Default::default(),
+                blocked: vec![],
+                deletes: vec![],
+                id_changes: vec![],
+                unchanged: 0,
+                playlists: vec![],
+                pity_fired_servers: vec![],
+            };
+            let operations = Arc::new(SyncOperationManager::new());
+            let operation = format!("tag-pipeline-{round}");
+            operations.create_operation(operation.clone(), 1).await;
+            let (synced, errors) = execute_test_provider_sync(
+                &delta,
+                dir.path(),
+                ProviderSyncSource {
+                    provider: provider.clone(),
+                    transcoding_profile: None,
+                    providers_by_server: Default::default(),
+                },
+                operations,
+                operation,
+                devices.clone(),
+                io.clone(),
+            )
+            .await
+            .unwrap();
+            if round < 2 {
+                assert!(errors.is_empty(), "{errors:?}");
+                assert_eq!(synced.len(), 1);
+                let path = dir.path().join(&synced[0].local_path);
+                let tags = id3::Tag::read_from_path(&path).unwrap();
+                assert_eq!(tags.album(), Some(*title));
+                assert_eq!(tags.artist(), Some("Correct author"));
+                assert_eq!(tags.track(), Some(1));
+                assert_eq!(tags.total_tracks(), Some(1));
+                assert_eq!(
+                    synced[0].size_bytes,
+                    std::fs::metadata(&path).unwrap().len()
+                );
+                assert!(synced[0].size_bytes > source_audio.len() as u64);
+                last_path = Some(path);
+            } else {
+                // The result includes previously committed items, never a new
+                // manifest entry for this failed replacement.
+                assert_eq!(synced.len(), 1);
+                assert_eq!(errors.len(), if round == 2 { 1 } else { 0 });
+                assert_eq!(
+                    synced[0].size_bytes,
+                    std::fs::metadata(last_path.as_ref().unwrap())
+                        .unwrap()
+                        .len()
+                );
+                let path = last_path.as_ref().unwrap();
+                assert_eq!(
+                    id3::Tag::read_from_path(path).unwrap().album(),
+                    Some("Second correction")
+                );
+            }
+            detail.assert_async().await;
+            probe.assert_async().await;
+            download.assert_async().await;
+            progress.assert_async().await;
+            // Drop mocks only once cleanup has had a chance to complete.
+            for _ in 0..50 {
+                if close.matched_async().await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            drop((detail, play, probe, download, close, progress));
+        }
+        login.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn sync_tags_reservation_cancellation_and_growth_release_capacity() {
+        let operations = SyncOperationManager::new();
+        operations.create_operation("tags".into(), 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stage");
+        let audio = include_bytes!("../tests/fixtures/audiobookshelf/tags/untagged.mp3");
+        std::fs::write(&path, audio).unwrap();
+        let size = audio.len() as u64;
+        let reservation = crate::sync_tags::rewrite_reservation(size).unwrap();
+        let media = crate::providers::SyncMediaRepresentation {
+            codec: "mp3".into(),
+            container: "mp3".into(),
+            request: crate::providers::PlaybackRequest {
+                url: "http://unused".parse().unwrap(),
+                headers: Default::default(),
+                range_supported: false,
+                cleanup: None,
+                refresh: None,
+                expected_content_type: None,
+            },
+            book_tags: Some(crate::providers::SyncBookTags {
+                album: Some("New".into()),
+                authors: None,
+                title: None,
+                track: 1,
+                total: 1,
+                year: None,
+            }),
+        };
+        let limiter = Arc::new(StagedByteLimiter::new(reservation));
+        let (mut permit, _) = limiter.acquire(size, &operations, "tags").await.unwrap();
+        let final_size =
+            apply_staged_book_tags(&path, size, Some(&media), &mut permit, &operations, "tags")
+                .await
+                .unwrap();
+        assert_eq!(limiter.used(), reservation);
+        permit.shrink_to(final_size);
+        permit.mark_complete();
+        assert_eq!(limiter.used(), std::fs::metadata(&path).unwrap().len());
+        drop(permit);
+        assert_eq!(limiter.used(), 0);
+        let before = std::fs::read(&path).unwrap();
+        let small = Arc::new(StagedByteLimiter::new(final_size));
+        let (mut permit, _) = small
+            .acquire(final_size, &operations, "tags")
+            .await
+            .unwrap();
+        assert!(
+            apply_staged_book_tags(
+                &path,
+                final_size,
+                Some(&media),
+                &mut permit,
+                &operations,
+                "tags"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(permit);
+        assert_eq!(small.used(), 0);
+        let (mut permit, _) = limiter
+            .acquire(final_size, &operations, "tags")
+            .await
+            .unwrap();
+        operations.request_cancel("tags").await;
+        assert!(
+            apply_staged_book_tags(
+                &path,
+                final_size,
+                Some(&media),
+                &mut permit,
+                &operations,
+                "tags"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(permit);
+        assert_eq!(limiter.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn sync_tags_concurrent_growth_and_cancellation_release_all_reservations() {
+        let audio = include_bytes!("../tests/fixtures/audiobookshelf/tags/untagged.mp3");
+        let size = audio.len() as u64;
+        let reservation = crate::sync_tags::rewrite_reservation(size).unwrap();
+        // Three downloads fit, but only one native rewrite workspace fits.
+        let limiter = Arc::new(StagedByteLimiter::new(reservation + size * 3));
+        let operations = Arc::new(SyncOperationManager::new());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let root = tempfile::tempdir().unwrap();
+        let mut workers = Vec::new();
+        for index in 0..3 {
+            let operation = format!("concurrent-tags-{index}");
+            operations.create_operation(operation.clone(), 1).await;
+            let path = root.path().join(index.to_string());
+            std::fs::write(&path, audio).unwrap();
+            let (mut permit, _) = limiter
+                .acquire(size, &operations, &operation)
+                .await
+                .unwrap();
+            let operations = operations.clone();
+            let barrier = barrier.clone();
+            workers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                if index == 2 {
+                    operations.request_cancel(&operation).await;
+                }
+                let media = crate::providers::SyncMediaRepresentation {
+                    codec: "mp3".into(),
+                    container: "mp3".into(),
+                    request: crate::providers::PlaybackRequest {
+                        url: "http://unused".parse().unwrap(),
+                        headers: Default::default(),
+                        range_supported: false,
+                        cleanup: None,
+                        refresh: None,
+                        expected_content_type: None,
+                    },
+                    book_tags: Some(crate::providers::SyncBookTags {
+                        album: Some("Concurrent book".into()),
+                        authors: None,
+                        title: None,
+                        track: 1,
+                        total: 1,
+                        year: None,
+                    }),
+                };
+                let result = apply_staged_book_tags(
+                    &path,
+                    size,
+                    Some(&media),
+                    &mut permit,
+                    &operations,
+                    &operation,
+                )
+                .await;
+                if index == 2 {
+                    assert!(result.is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), audio);
+                } else {
+                    let final_size = result.unwrap();
+                    permit.shrink_to(final_size);
+                    permit.mark_complete();
+                    assert_eq!(final_size, std::fs::metadata(&path).unwrap().len());
+                    tokio::task::yield_now().await;
+                }
+                drop(permit);
+            }));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::future::try_join_all(workers),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(limiter.used(), 0);
+    }
+
     #[test]
     fn sync_direct_media_compatibility_uses_verified_codec() {
         let media = crate::providers::SyncMediaRepresentation {
+            book_tags: None,
             codec: "mp3".into(),
             container: "mp3".into(),
             request: crate::providers::PlaybackRequest {

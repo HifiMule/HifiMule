@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 
 [dependencies]
+id3 = "1.17.2"
+mp4ameta = "0.13.0"
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

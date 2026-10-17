@@ -2400,6 +2400,82 @@ fn validated_duration_seconds(value: Option<f64>) -> Option<u32> {
         .map(|value| value.round().min(u32::MAX as f64) as u32)
 }
 
+fn sync_book_tags(
+    book: &BookDto,
+    library: &str,
+    item: &str,
+    media: &str,
+    file: &str,
+) -> Result<crate::providers::SyncBookTags, ProviderError> {
+    let invalid = || {
+        ProviderError::Deserialization("invalid Audiobookshelf sync identity or part order".into())
+    };
+    if book.is_missing
+        || book.library_id != library
+        || book.id != item
+        || book.media.id != media
+        || book.media_type != "book"
+        || book
+            .media
+            .library_item_id
+            .as_deref()
+            .is_some_and(|id| id != item)
+    {
+        return Err(invalid());
+    }
+    let total = u32::try_from(book.media.audio_files.len()).map_err(|_| invalid())?;
+    if total == 0
+        || book
+            .media
+            .num_audio_files
+            .is_some_and(|count| count != total)
+    {
+        return Err(invalid());
+    }
+    let mut indices = std::collections::HashSet::new();
+    let mut identities = std::collections::HashSet::new();
+    let mut selected = None;
+    for part in &book.media.audio_files {
+        let index = numeric_index(&part.index).ok_or_else(invalid)?;
+        if index == 0 || index > total || !indices.insert(index) || !identities.insert(&part.ino) {
+            return Err(invalid());
+        }
+        if part.ino == file {
+            selected = Some(index);
+        }
+    }
+    let track = selected.ok_or_else(invalid)?;
+    let metadata = &book.media.metadata;
+    let album = metadata
+        .title
+        .as_ref()
+        .filter(|v| !v.trim().is_empty())
+        .cloned();
+    let title = album
+        .as_ref()
+        .map(|title| part_title(Some(title), track, total as usize));
+    let authors = metadata
+        .authors
+        .iter()
+        .map(|a| a.name.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let year = metadata
+        .published_year
+        .as_deref()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| (1..=9999).contains(v));
+    Ok(crate::providers::SyncBookTags {
+        album,
+        authors: (!authors.is_empty()).then_some(authors),
+        title,
+        track,
+        total,
+        year,
+    })
+}
+
 fn part_title(book_title: Option<&str>, index: u32, file_count: usize) -> String {
     let title = book_title.unwrap_or_default();
     if file_count <= 1 {
@@ -3500,9 +3576,19 @@ impl MediaProvider for AudiobookshelfProvider {
         // A direct session supplies authenticated media and cleanup, without
         // reading or writing the player's progress record.
         let playback = self.resolve_playback(id).await?;
-        crate::providers::SyncMediaRepresentation::from_playback_representations(
+        let mut media = crate::providers::SyncMediaRepresentation::from_playback_representations(
             playback.representations,
-        )
+        )?;
+        if self.library_role == Some(ProviderLibraryRole::Audiobook) {
+            let (library, item, media_id, file) = parse_track_id(id)?;
+            let response = self
+                .protected_get(&item_endpoint(&self.base_url, &item)?)
+                .await?;
+            check_status(&response)?;
+            let book: BookDto = bounded_json(response, "book sync metadata").await?;
+            media.book_tags = Some(sync_book_tags(&book, &library, &item, &media_id, &file)?);
+        }
+        Ok(media)
     }
     async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
         if self.library_role == Some(ProviderLibraryRole::Podcast) {
@@ -6969,5 +7055,49 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(matches!(refresh_error, ProviderError::Deserialization(_)));
+    }
+    #[test]
+    fn audiobookshelf_sync_tags_validate_identity_and_server_order() {
+        let value = serde_json::json!({"id":"item", "libraryId":"library", "mediaType":"book", "media": {
+            "id":"media", "metadata":{"title":"Current title", "authors":[{"name":"One"}, {"name":"Two"}], "publishedYear":"2024"},
+            "numAudioFiles":2, "audioFiles":[{"ino":"second", "index":2},{"ino":"first", "index":1}]
+        }});
+        let book: BookDto = serde_json::from_value(value.clone()).unwrap();
+        let tags = sync_book_tags(&book, "library", "item", "media", "second").unwrap();
+        assert_eq!(tags.track, 2);
+        assert_eq!(tags.total, 2);
+        assert_eq!(tags.title.as_deref(), Some("Current title — Part 2"));
+        assert_eq!(tags.authors.as_deref(), Some("One; Two"));
+        assert_eq!(tags.year, Some(2024));
+        for (library, item, media, file) in [
+            ("foreign", "item", "media", "second"),
+            ("library", "other", "media", "second"),
+            ("library", "item", "other", "second"),
+            ("library", "item", "media", "missing"),
+        ] {
+            assert!(sync_book_tags(&book, library, item, media, file).is_err());
+        }
+        for index in [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(3),
+            serde_json::json!(1.5),
+            serde_json::json!(null),
+        ] {
+            let mut value = value.clone();
+            value["media"]["audioFiles"][0]["index"] = index;
+            let book = serde_json::from_value(value).unwrap();
+            assert!(sync_book_tags(&book, "library", "item", "media", "second").is_err());
+        }
+        let mut value = value;
+        value["media"]["metadata"] = serde_json::json!({"publishedYear":"invalid"});
+        let book = serde_json::from_value(value.clone()).unwrap();
+        let tags = sync_book_tags(&book, "library", "item", "media", "first").unwrap();
+        assert_eq!(tags.authors, None);
+        assert_eq!(tags.year, None);
+        assert_eq!(tags.album, None);
+        value["media"]["numAudioFiles"] = serde_json::json!(3);
+        let book = serde_json::from_value(value).unwrap();
+        assert!(sync_book_tags(&book, "library", "item", "media", "first").is_err());
     }
 }
