@@ -377,7 +377,46 @@ pub async fn reconcile(
     profile: Option<&serde_json::Value>,
     manager: Option<&Arc<crate::sync::SyncOperationManager>>,
 ) -> Result<()> {
+    if !manifest.reconcile_before_sync {
+        return Ok(());
+    }
+    let mut summary = ReconciliationSummary::default();
+    crate::daemon_log!("[Sync] Reconciliation started: device={}", manifest.device_id);
+    let result = reconcile_enabled(delta, manifest, io, profile, manager, &mut summary).await;
+    crate::daemon_log!("{}", summary.terminal_message(&manifest.device_id, &result, manager.is_some_and(|m| m.is_pipeline_cancelled())));
+    result
+}
+
+#[derive(Default, Debug, PartialEq)]
+struct ReconciliationSummary {
+    reused: usize,
+    unmatched: usize,
+    ambiguous: usize,
+    incompatible: usize,
+}
+
+impl ReconciliationSummary {
+    fn terminal_message(&self, device: &str, result: &Result<()>, cancelled: bool) -> String {
+        match result {
+            Ok(()) => format!("[Sync] Reconciliation completed: device={device} reused={} unmatched={} ambiguous={} incompatible={}", self.reused, self.unmatched, self.ambiguous, self.incompatible),
+            Err(error) => format!("[Sync] Reconciliation ended: device={device} outcome={} error={error}", if cancelled { "cancelled" } else { "failed" }),
+        }
+    }
+}
+
+async fn reconcile_enabled(
+    delta: &mut crate::sync::SyncDelta,
+    manifest: &crate::device::DeviceManifest,
+    io: &dyn DeviceIO,
+    profile: Option<&serde_json::Value>,
+    manager: Option<&Arc<crate::sync::SyncOperationManager>>,
+    summary: &mut ReconciliationSummary,
+) -> Result<()> {
     let progress = Arc::new(Progress::default());
+    if manager.is_some_and(|m| m.is_pipeline_cancelled()) {
+        progress.cancelled.store(true, Ordering::Relaxed);
+    }
+    progress.check()?;
     struct CancelBridge(Option<tokio::task::JoinHandle<()>>);
     impl Drop for CancelBridge {
         fn drop(&mut self) {
@@ -442,6 +481,8 @@ pub async fn reconcile(
         }
     }
     if delta.adds.is_empty() {
+        progress.check()?;
+        anyhow::ensure!(!manager.is_some_and(|m| m.is_pipeline_cancelled()), "Music scan cancelled");
         return Ok(());
     }
     let folder = manifest.media_path(MediaRole::Music).unwrap_or("");
@@ -466,6 +507,7 @@ pub async fn reconcile(
         let tags = match probe(io, &file, progress.clone()).await {
             Ok(tags) => tags,
             Err(error) if error.downcast_ref::<ffmpeg_next::Error>().is_some() => {
+                summary.incompatible += 1;
                 crate::daemon_log!("[Sync] Cannot reuse '{}': audio metadata probe failed: {}", file.path, error);
                 continue;
             },
@@ -478,6 +520,7 @@ pub async fn reconcile(
             &tags.codec,
             tags.bitrate,
         ) {
+            summary.incompatible += 1;
             crate::daemon_log!("[Sync] Cannot reuse '{}': encoding is incompatible with selected profile", file.path);
             continue;
         }
@@ -511,21 +554,29 @@ pub async fn reconcile(
             })
             .map(|(i, _)| i)
             .collect();
+        if candidates.is_empty() { summary.unmatched += 1; }
+        else if candidates.len() > 1 { summary.ambiguous += 1; }
         if candidates.len() != 1 {
             crate::daemon_log!("[Sync] Cannot reuse '{}': {} selected tracks match its metadata (need exactly one)", file.path, candidates.len());
         }
         if candidates.len() == 1 {
             let i = candidates[0];
-            if found.contains_key(&i) {
+            if let Some(previous) = found.get(&i) {
+                summary.ambiguous += if previous.is_some() { 2 } else { 1 };
                 found.insert(i, None);
             } else {
                 found.insert(i, Some(file));
             }
         }
     }
+    progress.check()?;
+    if manager.is_some_and(|m| m.is_pipeline_cancelled()) {
+        anyhow::bail!("Music scan cancelled");
+    }
     let mut retained = Vec::new();
     for (i, a) in delta.adds.drain(..).enumerate() {
         if let Some(Some(file)) = found.remove(&i) {
+            summary.reused += 1;
             // An incompatible old owned copy may be removed after this adoption;
             // never schedule deletion of the very file being reused.
             delta.deletes.retain(|d| d.local_path != file.path);
@@ -870,6 +921,76 @@ pub(crate) mod tests {
         };
         (root, io, file)
     }
+    #[test]
+    fn reconciliation_terminal_logs_distinguish_success_failure_and_cancel() {
+        let summary = ReconciliationSummary::default();
+        let success = summary.terminal_message("device-a", &Ok(()), false);
+        assert!(success.contains("device=device-a reused=0 unmatched=0 ambiguous=0 incompatible=0"));
+        let error = Err(anyhow::anyhow!("disconnected"));
+        for (cancelled, outcome) in [(false, "failed"), (true, "cancelled")] {
+            let message = summary.terminal_message("device-a", &error, cancelled);
+            assert!(message.contains(&format!("outcome={outcome}")));
+            assert!(!message.contains("completed"));
+        }
+    }
+
+    fn pending_delta() -> crate::sync::SyncDelta {
+        serde_json::from_value(serde_json::json!({"adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":100,"providerSuffix":"mp3"}],"deletes":[],"idChanges":[],"unchanged":0,"playlists":[]})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn disabled_reconciliation_skips_invalid_device_and_cancellation() {
+        let io = crate::device_io::MscBackend::new(std::path::PathBuf::from("/missing-hifimule-device"));
+        let mut manifest = crate::device::DeviceManifest::default();
+        manifest.managed_paths = vec!["../escape".into()];
+        let mut delta = pending_delta();
+        let manager = Arc::new(crate::sync::SyncOperationManager::new());
+        let _guard = manager.try_start_pipeline().unwrap();
+        assert!(manager.request_pipeline_cancel());
+        reconcile(&mut delta, &manifest, &io, None, Some(&manager)).await.unwrap();
+        assert_eq!(delta.adds.len(), 1);
+        manifest.reconcile_before_sync = true;
+        assert!(reconcile(&mut delta, &manifest, &io, None, Some(&manager)).await.unwrap_err().to_string().contains("cancelled"));
+        assert!(reconcile(&mut delta, &manifest, &io, None, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn summary_counts_final_matches_duplicates_unmatched_and_incompatible() {
+        let (root, io, file) = fixture().await;
+        let manifest = crate::device::DeviceManifest { reconcile_before_sync: true, managed_paths: vec!["Music".into()], ..Default::default() };
+        let mut summary = ReconciliationSummary::default();
+        reconcile_enabled(&mut pending_delta(), &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(summary, ReconciliationSummary { reused: 1, ..Default::default() });
+        for name in ["duplicate", "third"] {
+            tokio::fs::copy(root.path().join(&file.path), root.path().join(format!("Music/{name}.mp3"))).await.unwrap();
+        }
+        let mut summary = ReconciliationSummary::default();
+        reconcile_enabled(&mut pending_delta(), &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(summary, ReconciliationSummary { ambiguous: 3, ..Default::default() });
+        let mut delta = pending_delta(); delta.adds[0].name = "Missing".into();
+        let mut summary = ReconciliationSummary::default();
+        reconcile_enabled(&mut delta, &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(summary.unmatched, 3);
+        tokio::fs::write(root.path().join("Music/broken.mp3"), b"not audio").await.unwrap();
+        let mut summary = ReconciliationSummary::default();
+        reconcile_enabled(&mut pending_delta(), &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(summary.incompatible, 1);
+        let mut delta = pending_delta(); delta.adds.clear();
+        let mut summary = ReconciliationSummary::default();
+        reconcile_enabled(&mut delta, &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(summary, ReconciliationSummary::default());
+        // Refreshing an owned file's measured size is not a newly matched file.
+        let mut manifest = manifest;
+        let mut owned = synced(&song(), &file, "server-a");
+        owned.size_bytes = 1;
+        manifest.synced_items.push(owned);
+        delta.unchanged = 1;
+        reconcile_enabled(&mut delta, &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(delta.id_changes.len(), 1);
+        assert_eq!(delta.id_changes[0].size_bytes, file.size);
+        assert_eq!(summary, ReconciliationSummary::default());
+    }
+
     #[tokio::test]
     async fn tagged_fixture_is_probed_without_copying_and_cancellation_stops() {
         let (_root, io, file) = fixture().await;
@@ -885,7 +1006,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn incompatible_and_mismatched_existing_files_remain_pending() {
         let (root, io, file) = fixture().await;
-        let manifest = crate::device::DeviceManifest { managed_paths: vec!["Music".into()], ..Default::default() };
+        let manifest = crate::device::DeviceManifest { reconcile_before_sync: true, managed_paths: vec!["Music".into()], ..Default::default() };
         let original: crate::sync::SyncDelta = serde_json::from_value(serde_json::json!({
             "adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":100,"providerSuffix":"mp3"}],
             "deletes":[],"idChanges":[],"unchanged":0,"playlists":[]
@@ -907,7 +1028,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn later_file_becomes_read_only_adoption_and_duplicates_stay_unmanaged() {
         let (root, io, file) = fixture().await;
-        let manifest:crate::device::DeviceManifest=serde_json::from_value(serde_json::json!({"device_id":"device","version":"1.0","managedPaths":["Music"],"syncedItems":[]})).unwrap();
+        let manifest:crate::device::DeviceManifest=serde_json::from_value(serde_json::json!({"device_id":"device","version":"1.0","reconcileBeforeSync":true,"managedPaths":["Music"],"syncedItems":[]})).unwrap();
         let mut delta:crate::sync::SyncDelta=serde_json::from_value(serde_json::json!({"adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":50000000,"providerSuffix":"flac","serverId":"server-a"}],"deletes":[],"idChanges":[],"unchanged":0,"playlists":[]})).unwrap();
         let mut wrong_disc=delta.clone();wrong_disc.adds[0].disc_number=Some(2);
         reconcile(&mut wrong_disc,&manifest,&io,Some(&profile()),None).await.unwrap();

@@ -1,5 +1,7 @@
 {
   "en": {
+    "basket.device.reconcile_before_sync": "Reconcile files before syncing — enable only if files are managed outside HifiMule.",
+    "basket.device.reconcile_hint": "Matching existing files to server tracks can take time on large devices.",
     "playlist.curation.unknown_artist": "Unknown artist",
     "playlist.curation.unknown_album": "Unknown album",
     "ui.library.navigation": "Library navigation",
@@ -896,6 +898,8 @@
     "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
+    "basket.device.reconcile_before_sync": "Rapprocher les fichiers avant la synchronisation — à activer uniquement si les fichiers sont gérés en dehors de HifiMule.",
+    "basket.device.reconcile_hint": "Associer les fichiers existants aux pistes du serveur peut prendre du temps sur les appareils contenant beaucoup de fichiers.",
     "playlist.curation.unknown_artist": "Artiste inconnu",
     "playlist.curation.unknown_album": "Album inconnu",
     "ui.library.navigation": "Navigation dans la bibliothèque",
@@ -1768,6 +1772,8 @@
     "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
+    "basket.device.reconcile_before_sync": "Relacionar archivos antes de sincronizar — activar solo si los archivos se gestionan fuera de HifiMule.",
+    "basket.device.reconcile_hint": "Relacionar los archivos existentes con las pistas del servidor puede llevar tiempo en dispositivos con muchos archivos.",
     "playlist.curation.unknown_artist": "Artista desconocido",
     "playlist.curation.unknown_album": "Álbum desconocido",
     "ui.library.navigation": "Navegación de la biblioteca",
@@ -2640,6 +2646,8 @@
     "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
+    "basket.device.reconcile_before_sync": "Dateien vor der Synchronisierung abgleichen — nur aktivieren, wenn Dateien außerhalb von HifiMule verwaltet werden.",
+    "basket.device.reconcile_hint": "Das Zuordnen vorhandener Dateien zu Servertiteln kann auf Geräten mit vielen Dateien einige Zeit dauern.",
     "playlist.curation.unknown_artist": "Unbekannter Künstler",
     "playlist.curation.unknown_album": "Unbekanntes Album",
     "ui.library.navigation": "Bibliotheksnavigation",

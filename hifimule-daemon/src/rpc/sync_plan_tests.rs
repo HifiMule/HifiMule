@@ -188,7 +188,7 @@ async fn prepared_sync_expiry_and_manifest_changes_are_rejected_before_admission
     let summary = publish_test_plan(&state, empty()).await;
     state
         .device_manager
-        .update_manifest(|m| m.name = Some("Configuration changed".into()))
+        .update_manifest(|m| m.reconcile_before_sync = true)
         .await
         .unwrap();
     let error = handle_sync_execute(&state, Some(json!({"planId":summary["planId"]})))
@@ -947,7 +947,9 @@ async fn setup_music_scan_fixture() -> (tempfile::TempDir, Arc<AppState>, String
 async fn setup_music_scan_publishes_manifest_and_basket_atomically_for_captured_server() {
     let _guard=credential_test_lock();
     let (_root,state,id)=setup_music_scan_fixture().await;
+    assert!(!state.device_manager.get_current_device().await.unwrap().reconcile_before_sync);
     let result=handle_music_setup_scan(&state,"device.music_scan_start",Some(json!({"scanId":id}))).await.unwrap();
+    assert!(!state.device_manager.get_current_device().await.unwrap().reconcile_before_sync);
     assert_eq!(result["imported"],1);
     let manifest=state.device_manager.get_current_device().await.unwrap();
     assert_eq!(manifest.synced_items.len(),1);assert_eq!(manifest.basket_items.len(),1);
@@ -979,6 +981,12 @@ async fn normal_existing_audio_is_reused_but_force_schedules_replacement() {
     let before = tokio::fs::read(root.path().join("Music/existing.mp3")).await.unwrap();
     let manifest = state.device_manager.get_current_device().await.unwrap();
     let delta: crate::sync::SyncDelta = serde_json::from_value(json!({"adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":50000000,"providerSuffix":"flac"}],"deletes":[],"idChanges":[],"unchanged":0,"playlists":[]})).unwrap();
+    assert!(!manifest.reconcile_before_sync);
+    let disabled = finish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
+    assert_eq!(disabled["adds"].as_array().unwrap().len(), 1);
+    assert!(disabled["idChanges"].as_array().unwrap().is_empty());
+    state.device_manager.update_manifest(|m| m.reconcile_before_sync = true).await.unwrap();
+    let manifest = state.device_manager.get_current_device().await.unwrap();
     let preview = finish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
     assert!(preview["adds"].as_array().unwrap().is_empty());
     assert_eq!(preview["idChanges"][0]["sizeBytes"], before.len() as u64);

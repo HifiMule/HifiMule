@@ -1785,6 +1785,7 @@ async fn test_dirty_manifest_roundtrip() {
         dirty: true,
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2115,6 +2116,7 @@ async fn test_write_manifest_creates_files() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2163,6 +2165,7 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2202,6 +2205,7 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2258,6 +2262,7 @@ async fn test_get_discrepancies_missing_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2305,6 +2310,7 @@ async fn test_get_discrepancies_orphaned_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2373,6 +2379,7 @@ async fn test_get_discrepancies_no_issues() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2451,6 +2458,7 @@ async fn test_prune_items() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2515,6 +2523,7 @@ async fn test_relink_item() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2563,6 +2572,7 @@ async fn test_relink_item_path_traversal() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2599,6 +2609,7 @@ async fn test_clear_dirty_flag() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -2646,6 +2657,7 @@ async fn test_clear_dirty_flag_with_orphaned_files() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -3535,6 +3547,7 @@ async fn test_save_basket_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -3602,6 +3615,7 @@ async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -3648,6 +3662,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -3696,6 +3711,7 @@ fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -4350,6 +4366,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
@@ -5398,4 +5415,18 @@ async fn manifest_migration_regression_explicit_confirmation_rejects_changed_sta
             serde_json::to_value(before).unwrap()
         );
     }
+}
+
+#[test]
+fn reconciliation_defaults_off_and_survives_manifest_roundtrip_and_polling() {
+    let legacy = serde_json::json!({"device_id":"legacy", "version":"1.0"});
+    let mut manifest: DeviceManifest = serde_json::from_value(legacy).unwrap();
+    assert!(!manifest.reconcile_before_sync);
+    assert!(!DeviceManifest::default().reconcile_before_sync);
+    manifest.reconcile_before_sync = true;
+    let serialized = serde_json::to_value(&manifest).unwrap();
+    assert_eq!(serialized["reconcileBeforeSync"], true);
+    let restored: DeviceManifest = serde_json::from_value(serialized).unwrap();
+    assert!(restored.reconcile_before_sync);
+    assert!(restored.polling_metadata().reconcile_before_sync);
 }

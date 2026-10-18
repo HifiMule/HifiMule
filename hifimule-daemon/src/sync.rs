@@ -5418,6 +5418,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,

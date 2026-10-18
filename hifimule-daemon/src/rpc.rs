@@ -4478,6 +4478,7 @@ async fn handle_get_daemon_state_params(
                 "podcastPath": m.podcast_path.clone(),
                 "playlistPath": m.playlist_path.clone(),
                 "transcodingProfileId": m.transcoding_profile_id.clone(),
+                "reconcileBeforeSync": m.reconcile_before_sync,
                 "deviceClass": match class {
                     crate::device::DeviceClass::Msc => "msc",
                     crate::device::DeviceClass::Mtp => "mtp",
@@ -9454,6 +9455,14 @@ fn apply_manifest_settings_update(
     }
 }
 
+fn optional_bool_param(params: &Value, key: &str) -> Result<Option<bool>, JsonRpcError> {
+    params.get(key).map(|value| value.as_bool().ok_or_else(|| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: format!("{key} must be a boolean"),
+        data: None,
+    })).transpose()
+}
+
 async fn handle_device_update_manifest(
     state: &AppState,
     params: Option<Value>,
@@ -9502,6 +9511,7 @@ async fn handle_device_update_manifest(
     let icon_for_validation = icon.as_ref().and_then(|icon| icon.as_deref());
     validate_device_name_and_icon(name, icon_for_validation)?;
 
+    let reconcile_before_sync = optional_bool_param(&params, "reconcileBeforeSync")?;
     let music_folder_path = string_param(&params, "musicFolderPath")?
         .map(normalize_editable_folder_path)
         .transpose()?;
@@ -9577,6 +9587,9 @@ async fn handle_device_update_manifest(
     state
         .device_manager
         .update_manifest(|manifest| {
+            if let Some(enabled) = reconcile_before_sync {
+                manifest.reconcile_before_sync = enabled;
+            }
             outcome = apply_manifest_settings_update(
                 manifest,
                 name_update,
@@ -9919,6 +9932,7 @@ async fn handle_device_initialize(
             "podcastPath": manifest.podcast_path,
             "playlistPath": manifest.playlist_path,
             "transcodingProfileId": manifest.transcoding_profile_id,
+            "reconcileBeforeSync": manifest.reconcile_before_sync,
         }
     }))
 }
@@ -11754,6 +11768,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: Some("legacy-profile".to_string()),
@@ -12150,6 +12165,19 @@ mod tests {
         assert_eq!(updated.managed_paths, vec!["Audio".to_string()]);
         assert_eq!(updated.playlist_path, None);
         assert_eq!(updated.resolved_playlist_path(), Some("Audio"));
+        let dirty = updated.transcoding_profile_dirty;
+        for value in [true, false] {
+            let result = handle_device_update_manifest(&state, Some(json!({"deviceId":"dev-1", "reconcileBeforeSync":value}))).await.unwrap();
+            assert_eq!(result["relocationRequired"], false);
+            let updated = state.device_manager.get_current_device().await.unwrap();
+            assert_eq!(updated.reconcile_before_sync, value);
+            assert_eq!(updated.transcoding_profile_dirty, dirty);
+            handle_device_update_manifest(&state, Some(json!({"deviceId":"dev-1"}))).await.unwrap();
+            assert_eq!(state.device_manager.get_current_device().await.unwrap().reconcile_before_sync, value);
+            let persisted: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(&std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap()).unwrap();
+            assert_eq!(persisted.reconcile_before_sync, value);
+        }
+
     }
 
     #[tokio::test]
@@ -12175,6 +12203,9 @@ mod tests {
             .unwrap();
 
         for params in [
+            json!({ "deviceId": "dev-1", "reconcileBeforeSync": "true" }),
+            json!({ "deviceId": "dev-1", "reconcileBeforeSync": 1 }),
+            json!({ "deviceId": "dev-1", "reconcileBeforeSync": null }),
             json!({ "deviceId": "dev-1", "icon": 7 }),
             json!({ "deviceId": "dev-1", "playlistFolderPath": false }),
             json!({ "deviceId": "dev-1", "transcodingProfileId": { "id": "passthrough" } }),
@@ -12955,6 +12986,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -13136,6 +13168,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -13256,6 +13289,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -13414,6 +13448,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -15135,6 +15170,7 @@ mod tests {
                 size_ticks: 0,
                 size_bytes: 4000,
             }],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -15252,6 +15288,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -15341,6 +15378,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -15401,6 +15439,7 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -15482,6 +15521,7 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -15632,6 +15672,7 @@ mod tests {
                     dirty: false,
                     pending_item_ids: vec![],
                     basket_items: vec![],
+                    reconcile_before_sync: false,
                     auto_sync_on_connect: false,
                     auto_fill: crate::device::AutoFillConfig::default(),
                     transcoding_profile_id: None,
@@ -15738,6 +15779,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -16028,6 +16070,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -16128,6 +16171,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: true,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -16306,6 +16350,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -16323,6 +16368,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
@@ -16386,6 +16432,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,

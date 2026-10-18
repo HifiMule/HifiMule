@@ -48,6 +48,7 @@ interface ConnectedDeviceSummary {
     playlistPath?: string | null;
     audiobookPath?: string | null;
     podcastPath?: string | null;
+    reconcileBeforeSync?: boolean;
     transcodingProfileId?: string | null;
     deviceClass?: 'msc' | 'mtp';
 }
@@ -177,7 +178,7 @@ export class BasketSidebar {
 
     private preparedCapacity: { key: string; bytes: number } | null = null;
     private capacityRevision(): string {
-        return JSON.stringify([this.currentDevice?.device_id, this.currentDevice?.transcoding_profile_id, this.currentDevice?.transcodingProfileId, basketStore.getItems()]);
+        return JSON.stringify([this.currentDevice?.device_id, this.currentDevice?.reconcileBeforeSync ?? false, this.currentDevice?.transcoding_profile_id, this.currentDevice?.transcodingProfileId, basketStore.getItems()]);
     }
     private plannedManualBytes() {
         if (this.preparedCapacity?.key === this.capacityRevision()) return this.preparedCapacity.bytes;
@@ -656,6 +657,7 @@ export class BasketSidebar {
             ?? current.playlist_path
             ?? '';
         const audiobookFolder = selected.audiobookPath ?? current.audiobookPath ?? current.audiobook_path ?? '';
+        const reconcileBeforeSync = selected.reconcileBeforeSync ?? current.reconcileBeforeSync ?? false;
         const podcastFolder = selected.podcastPath ?? current.podcastPath ?? current.podcast_path ?? '';
         let selectedIcon = selected.icon || 'usb-drive';
         const selectedProfileId = selected.transcodingProfileId
@@ -704,6 +706,7 @@ export class BasketSidebar {
                 <sl-input id="device-settings-audiobook" label="${t('basket.device.audiobook_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(audiobookFolder)}"></sl-input>
                 <sl-input id="device-settings-podcast" label="${t('basket.device.podcast_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(podcastFolder)}"></sl-input>
                 <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
+                <sl-checkbox id="device-settings-reconcile" ${reconcileBeforeSync ? 'checked' : ''} help-text="${t('basket.device.reconcile_hint')}">${t('basket.device.reconcile_before_sync')}</sl-checkbox>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
             <sl-button slot="footer" variant="default" id="device-settings-cancel">${t('basket.actions.cancel')}</sl-button>
@@ -789,6 +792,7 @@ export class BasketSidebar {
                     name: (dialog.querySelector('#device-settings-name') as any)?.value ?? '',
                     icon: selectedIcon || null,
                     transcodingProfileId: (dialog.querySelector('#device-settings-transcoding-profile') as any)?.value ?? 'passthrough',
+                    reconcileBeforeSync: (dialog.querySelector('#device-settings-reconcile') as any)?.checked === true,
                     playlistFolderPath: playlistFolderValue,
                     audiobookFolderPath: audiobookFolderValue,
                     podcastFolderPath: podcastFolderValue,

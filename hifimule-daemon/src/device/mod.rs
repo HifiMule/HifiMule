@@ -174,6 +174,9 @@ pub struct DeviceManifest {
     pub basket_items: Vec<BasketItem>,
     #[serde(default)]
     pub auto_sync_on_connect: bool,
+    /// Match externally managed files before sync; setup scanning is independent.
+    #[serde(default, rename = "reconcileBeforeSync")]
+    pub reconcile_before_sync: bool,
     /// Unix timestamp of the last successfully completed sync (manual or automatic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<i64>,
@@ -292,6 +295,7 @@ impl DeviceManifest {
             playlist_path: self.playlist_path.clone(),
             dirty: self.dirty,
             auto_sync_on_connect: self.auto_sync_on_connect,
+            reconcile_before_sync: self.reconcile_before_sync,
             last_sync_at: self.last_sync_at,
             auto_fill: self.auto_fill.clone(),
             transcoding_profile_id: self.transcoding_profile_id.clone(),
@@ -2453,6 +2457,7 @@ impl DeviceManager {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            reconcile_before_sync: false,
             auto_sync_on_connect: false,
             last_sync_at: None,
             auto_fill: AutoFillConfig::default(),

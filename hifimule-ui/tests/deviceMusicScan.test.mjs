@@ -25,7 +25,7 @@ function setup(rpc){
     let completed=0;modal.onComplete=()=>{basketEvents.push(['complete']);completed++;};
     const body=new Element();modal.showMusicScan(body,'captured-scan','device-1');return {modal,body,basketEvents,completed:()=>completed};
 }
-test('setup asks before import and declining finishes without starting a scan',async()=>{
+test('setup asks before import independently of sync settings and declining finishes without starting a scan',async()=>{
     const calls=[];const ui=setup(async(method,params)=>{calls.push({method,params});return {cancelled:true};});
     assert.match(ui.body.innerHTML,/device.scan.ownership/);assert.deepEqual(calls,[]);
     await ui.body.querySelector('#scan-no').click();assert.deepEqual(calls,[{method:'device.music_scan_cancel',params:{scanId:'captured-scan'}}]);assert.equal(ui.completed(),1);
