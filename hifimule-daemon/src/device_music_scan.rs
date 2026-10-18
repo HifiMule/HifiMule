@@ -51,6 +51,12 @@ pub struct ScanResult {
     pub incompatible: usize,
 }
 pub fn audio_file(path: &str) -> bool {
+    // Device paths use forward slashes. macOS AppleDouble sidecars (._*)
+    // and other dotfiles are metadata, even when they have an audio extension.
+    let filename = path.rsplit('/').next().unwrap_or("");
+    if filename.starts_with('.') {
+        return false;
+    }
     matches!(
         path.rsplit('.')
             .next()
