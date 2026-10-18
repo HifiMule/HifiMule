@@ -5111,6 +5111,10 @@ async fn preflight_state_media_adds(
     delta: &mut crate::sync::SyncDelta,
     default_provider: Option<Arc<dyn MediaProvider>>,
 ) -> Result<(), JsonRpcError> {
+
+    let needed = delta.adds.iter().any(|add| add.media_role != crate::device::MediaRole::Music);
+    let mut lifecycle = crate::sync_logging::Step::current("media_preflight");
+    let result = async {
     if !delta
         .adds
         .iter()
@@ -5173,6 +5177,11 @@ async fn preflight_state_media_adds(
     }
     apply_blocked_media_adds(delta, blocked);
     Ok(())
+    }.await;
+    lifecycle.finish(if result.is_err() { "failed" } else if !needed { "skipped" } else { "success" }, 0);
+
+    result
+
 }
 
 fn podcast_episode_to_desired(
@@ -5585,6 +5594,9 @@ async fn provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
+
+    let mut phases = crate::sync_logging::Phases::default();
+    let result = async {
     let media_role = provider_media_role(provider.as_ref());
     // Story 12.3: normalize both the legacy single object and the new array form
     // (AC1). This single-server fast path is reached only when routing resolved
@@ -5598,6 +5610,7 @@ async fn provider_calculate_delta(
     let mut playlist_sync_items = Vec::new();
     let mut seen_ids = HashSet::new();
 
+    phases.next("basket_expansion");
     // Step 1: Resolve basket items (always, regardless of auto-fill).
     let basket_items = basket_items_from_params_or_manifest(params, manifest);
     let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
@@ -5629,6 +5642,8 @@ async fn provider_calculate_delta(
         }
     }
 
+    phases.finish("success", desired_items.len());
+    if auto_fill_enabled { phases.next("auto_fill_preparation"); }
     // Step 2: If auto-fill is enabled, fill remaining space after basket items.
     // When basket is empty this is a pure auto-fill (device fully managed by auto-fill).
     // When basket has items this augments them — playlists/albums stay, free space is filled.
@@ -5800,6 +5815,7 @@ async fn provider_calculate_delta(
         playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
+    phases.finish("success", af_item_ids.len());
     // Story 2.13: tag untagged items with the selected server's portable id.
     tag_untagged_with_selected_portable(_state, &mut desired_items)?;
     for item in &mut desired_items {
@@ -5867,6 +5883,10 @@ async fn provider_calculate_delta(
     preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
     finish_sync_delta(_state, delta, manifest, params).await
+    }.await;
+    phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) || _state.sync_operation_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
+    result
+
 }
 
 const SYNC_PLAN_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -5884,6 +5904,10 @@ fn destructive_confirmation_error(count:usize) -> JsonRpcError {
 }
 
 async fn sync_target_fingerprint(state: &AppState, target: &crate::sync::SyncTarget) -> Result<String, JsonRpcError> {
+
+
+    let mut lifecycle = crate::sync_logging::Step::current("configuration_validation");
+    let result = async {
     let servers = state.server_manager.read().await;
     let (_, connection_revision) = state.device_manager.get_basket_target(&target.manifest.device_id).await.ok_or_else(|| stale_plan_error("Sync destination disconnected"))?;
     let mut config = format!("{}|{:?}|{:?}|{:?}", connection_revision, servers.selected_server_id, servers.servers, load_selected_transcoding_profile(target.manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?);
@@ -5893,9 +5917,18 @@ async fn sync_target_fingerprint(state: &AppState, target: &crate::sync::SyncTar
         }
     }
     crate::sync_plan::target_fingerprint(target, &config).map_err(sync_plan_error)
+    }.await;
+    lifecycle.finish(if result.is_err() { "failed" } else { "success" }, 0);
+
+    result
+
 }
 
 async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest, params: &Value) -> Result<Value, JsonRpcError> {
+
+
+    let mut lifecycle = crate::sync_logging::Step::current("plan_publication");
+    let result = async {
     if music_setup_pending(&manifest.device_id).await { return Err(stale_plan_error("Finish the existing music scan before syncing")); }
     let (profile, preferred)=preview_media_profile(state,manifest).await?;
     let force=params.get("force").and_then(Value::as_bool).unwrap_or(false);
@@ -5940,9 +5973,15 @@ async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, 
     {
         let mut pending=state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
         if state.sync_operation_manager.is_pipeline_cancelled() || state.sync_operation_manager.is_shutdown_committed() {return Err(sync_cancelled_error());}
-        *pending=Some(crate::sync_plan::PreparedPlan {id,plan,fingerprint,force,created_at:std::time::Instant::now(),_expiry:expiry});
+        crate::sync_logging::Run::current().link("plan_id", &id);
+        *pending=Some(crate::sync_plan::PreparedPlan {log_run: crate::sync_logging::Run::current(),id,plan,fingerprint,force,created_at:std::time::Instant::now(),_expiry:expiry});
     }
     Ok(summary)
+    }.await;
+    lifecycle.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
+
+    result
+
 }
 
 async fn handle_sync_plan_details(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
@@ -6798,6 +6837,10 @@ pub(crate) async fn expand_auto_fill_slot(
     pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
     params: crate::auto_fill::AutoFillParams,
 ) -> anyhow::Result<Vec<crate::auto_fill::AutoFillItem>> {
+
+
+    let mut lifecycle = crate::sync_logging::Step::current("auto_fill_slot");
+    let result = async {
     if provider.library_role() == Some(crate::providers::ProviderLibraryRole::Podcast) {
         return expand_podcast_auto_fill(provider, pipeline, params).await;
     }
@@ -6810,6 +6853,11 @@ pub(crate) async fn expand_auto_fill_slot(
         }
         _ => crate::auto_fill::run_auto_fill_provider(provider, params).await,
     }
+    }.await;
+    lifecycle.finish(match &result { Err(_) => "failed", Ok(items) if items.is_empty() => "noop", _ => "success" }, result.as_ref().map(Vec::len).unwrap_or(0));
+
+    result
+
 }
 
 async fn expand_audiobook_auto_fill(
@@ -7393,9 +7441,13 @@ async fn multi_provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
+
+    let mut phases = crate::sync_logging::Phases::default();
+    let result = async {
     // Items carry the portable serverId (Story 2.13); group + route by portable id
     // and fall back to the selected server's portable id for untagged items so
     // manifest tags are always portable.
+    phases.next("provider_resolution");
     let selected_id = current_server_portable_id(state)?;
     let basket_items = basket_items_from_params_or_manifest(params, manifest);
     let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
@@ -7435,7 +7487,10 @@ async fn multi_provider_calculate_delta(
     let mut seen_ids = HashSet::new();
 
     for (server_id, ids) in &groups {
+        phases.next("provider_resolution");
         let provider = get_provider_by_server_id_for(state, server_id).await?;
+        phases.next("basket_expansion");
+        let group_start = desired_items.len();
         for id in ids {
             if let Some(basket_item) = favorite_basket_by_id.get(id) {
                 let tracks =
@@ -7462,8 +7517,10 @@ async fn multi_provider_calculate_delta(
                 }
             }
         }
+        phases.finish("success", desired_items.len() - group_start);
     }
 
+    if !parse_auto_fill_descriptors(params).is_empty() { phases.next("auto_fill_preparation"); }
     // Auto-fill: one slot per server (Story 12.3, AC2/AC3/AC4). Each descriptor
     // expands against its OWN provider (routed by portable serverId), tagging its
     // items with that server's id. Manual items already own their ids in
@@ -7650,6 +7707,7 @@ async fn multi_provider_calculate_delta(
         playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
+    phases.finish("success", af_item_ids.len());
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
@@ -7671,12 +7729,31 @@ async fn multi_provider_calculate_delta(
     crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
     finish_sync_delta(state, delta, manifest, params).await
+    }.await;
+    phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) || state.sync_operation_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
+    result
+
 }
 
 async fn handle_sync_calculate_delta(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
+
+    let run = crate::sync_logging::Run::current();
+    run.scope(async {
+        let mut lifecycle = crate::sync_logging::Step::current("preparation");
+        let result = handle_sync_calculate_delta_logged(state, params).await;
+        lifecycle.finish(if result.as_ref().is_err_and(|e| e.code == ERR_SYNC_CANCELLED) { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
+        result
+    }).await
+}
+
+async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+
+    let mut phases = crate::sync_logging::Phases::default();
+    let result = async {
+    phases.next("target_validation");
     // Claim the pipeline lock for the full duration of this call (auto-fill can run for
     // several seconds; without this, a concurrent auto-sync would double-paginate the library).
     let _pipeline_guard =
@@ -7726,6 +7803,7 @@ async fn handle_sync_calculate_delta(
     // its originating provider. Single-server baskets keep the existing dispatch
     // unchanged (AC21). Item/auto-fill serverIds are portable (Story 2.13), so the
     // routing decision compares against the selected server's portable id.
+    phases.next("provider_resolution");
     let selected_id = current_server_portable_id(state)?;
     // Story 12.3: every auto-fill slot counts toward the routing decision. Resolve
     // each enabled descriptor's serverId (selected-server fallback for `None`), so
@@ -7744,6 +7822,7 @@ async fn handle_sync_calculate_delta(
     if configured_pipeline_applies
         || sync_needs_provider_routing(&item_specs, selected_id.as_deref(), &auto_fill_servers)
     {
+        phases.finish("success", 0);
         let result = multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
         if state.sync_operation_manager.is_pipeline_cancelled() {
             return Err(sync_cancelled_error());
@@ -7752,6 +7831,7 @@ async fn handle_sync_calculate_delta(
     }
 
     if let Some(provider) = active_non_jellyfin_provider(state).await {
+        phases.finish("success", 0);
         let result = provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
         if state.sync_operation_manager.is_pipeline_cancelled() {
             return Err(sync_cancelled_error());
@@ -7822,6 +7902,7 @@ async fn handle_sync_calculate_delta(
 
     // Fetch item details from Jellyfin in chunks to avoid URL length limits.
     // Container items (playlist/album/artist) are expanded to individual tracks.
+    phases.next("basket_expansion");
     let basket_items = basket_items_from_params_or_manifest(&params, &manifest);
     let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
         .into_iter()
@@ -8066,6 +8147,8 @@ async fn handle_sync_calculate_delta(
         }
     }
 
+    phases.finish("success", desired_items.len());
+    if !parse_auto_fill_descriptors(&params).is_empty() { phases.next("auto_fill_slot"); }
     // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
     // run the priority algorithm now and merge results with manual items.
     // Story 12.3: normalize both the legacy single object and the array form
@@ -8151,6 +8234,7 @@ async fn handle_sync_calculate_delta(
         playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
+    phases.finish("success", af_item_ids.len());
     // Story 2.13: tag untagged items with the selected server's portable id.
     tag_untagged_with_selected_portable(state, &mut desired_items)?;
 
@@ -8204,6 +8288,10 @@ async fn handle_sync_calculate_delta(
         return Err(sync_cancelled_error());
     }
     finish_sync_delta(state, delta, &manifest, &params).await
+    }.await;
+    phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) || state.sync_operation_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
+    result
+
 }
 
 async fn handle_sync_detect_changes(
@@ -8441,6 +8529,21 @@ async fn handle_sync_execute(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
+
+    let run = params.as_ref().and_then(|p| p.get("planId")).and_then(Value::as_str)
+        .and_then(|id| state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e| e.into_inner())
+            .as_ref().filter(|p| p.id == id).map(|p| p.log_run.clone()))
+        .unwrap_or_else(crate::sync_logging::Run::new);
+    run.scope(handle_sync_execute_logged(state, params)).await
+}
+
+async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+
+
+    let mut lifecycle = crate::sync_logging::Step::current("execution_admission");
+    let mut phases = crate::sync_logging::Phases::default();
+    let result = async {
+    phases.next("target_validation");
     let params = params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing params".to_string(),
@@ -8474,6 +8577,7 @@ async fn handle_sync_execute(
             data: None,
         })?
         .into();
+    phases.finish("success", 0);
     let plan = if let Some(id) = params.get("planId").and_then(Value::as_str) {
         let prepared = {
             let mut pending = state.sync_operation_manager.pending_plan.lock().unwrap_or_else(|e|e.into_inner());
@@ -8532,6 +8636,7 @@ async fn handle_sync_execute(
         });
     }
 
+    phases.next("provider_resolution");
     // Multi-server execute (AC28/AC29): when the delta's adds belong to a server
     // other than the selected one — whether they span multiple servers or sit on a
     // single non-selected server — route each server's items to its own provider.
@@ -8552,8 +8657,10 @@ async fn handle_sync_execute(
         Some(require_provider(state).await?)
     };
 
+    phases.finish("success", add_servers.len());
     // Create the operation only after single-server provider resolution succeeds.
     let operation_id = uuid::Uuid::new_v4().to_string();
+    crate::sync_logging::Run::current().link("operation_id", &operation_id);
     let total_files = delta.adds.len() + delta.deletes.len();
     state
         .device_manager
@@ -8572,6 +8679,7 @@ async fn handle_sync_execute(
 
     // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
     // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
+    let mut dirty_log = crate::sync_logging::Step::current("dirty_manifest_persistence");
     if let Err(e) = state
         .device_manager
         .update_manifest_for_connection(&manifest.device_id, target.observation, &target.io, |m| {
@@ -8580,6 +8688,7 @@ async fn handle_sync_execute(
         })
         .await
     {
+        dirty_log.finish("failed", 0);
         fail_sync_operation(
             &state.sync_operation_manager,
             &operation_id,
@@ -8594,11 +8703,13 @@ async fn handle_sync_execute(
         });
     }
 
+    dirty_log.finish("success", 0);
     crate::sync_plan::compact_target(&mut target);
     drop(params);
 
     if needs_provider_routing {
         // Resolve every group's provider up front so connection errors surface here.
+        phases.next("provider_resolution");
         let mut group_providers: Vec<(String, Arc<dyn MediaProvider>)> = Vec::new();
         for sid in &add_servers {
             let provider = match get_provider_by_server_id_for(state, sid).await {
@@ -8617,6 +8728,7 @@ async fn handle_sync_execute(
             group_providers.push((sid.clone(), provider));
         }
 
+        phases.finish("success", group_providers.len());
         let op_manager = state.sync_operation_manager.clone();
         let op_id = operation_id.clone();
         let device_manager = state.device_manager.clone();
@@ -8625,7 +8737,9 @@ async fn handle_sync_execute(
         let protection_observer = state.playback.sync_protection_observer();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
-        tokio::spawn(async move {
+        let log_run = crate::sync_logging::Run::current();
+        tokio::spawn(async move { log_run.scope(async move {
+            let mut execution = crate::sync_logging::Step::current("execution");
             let _pipeline_guard = pipeline_guard;
             let sync_manifest = &target.manifest;
             let transcoding_profile = match load_selected_transcoding_profile(
@@ -8640,6 +8754,7 @@ async fn handle_sync_execute(
                         format!("Failed to load transcoding profile: {}", e),
                     )
                     .await;
+                    execution.finish("failed", 1);
                     let _ = state_tx.send(crate::DaemonState::Error);
                     return;
                 }
@@ -8699,6 +8814,7 @@ async fn handle_sync_execute(
                         .await
                 })
                 .await;
+            execution.finish(crate::sync_logging::status(&outcome), final_errors.len());
             if outcome == crate::sync::SyncStatus::Complete {
                 record_autofill_history_after_plan_sync(
                     &db,
@@ -8710,7 +8826,7 @@ async fn handle_sync_execute(
                 drop(tokio::task::spawn_blocking(send_sync_complete_notification));
             }
             let _ = state_tx.send(crate::DaemonState::Idle);
-        });
+        }).await });
 
         return Ok(serde_json::json!({ "operationId": operation_id }));
     }
@@ -8725,7 +8841,9 @@ async fn handle_sync_execute(
         let protection_observer = state.playback.sync_protection_observer();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
-        tokio::spawn(async move {
+        let log_run = crate::sync_logging::Run::current();
+        tokio::spawn(async move { log_run.scope(async move {
+            let mut execution = crate::sync_logging::Step::current("execution");
             let _pipeline_guard = pipeline_guard;
             let sync_manifest = &target.manifest;
             let transcoding_profile = match load_selected_transcoding_profile(
@@ -8741,6 +8859,7 @@ async fn handle_sync_execute(
                         format!("Failed to load transcoding profile: {}", e),
                     )
                     .await;
+                    execution.finish("failed", 1);
                     let _ = state_tx.send(crate::DaemonState::Error);
                     return;
                 }
@@ -8782,7 +8901,8 @@ async fn handle_sync_execute(
                                 .await
                         })
                         .await;
-                    if outcome == crate::sync::SyncStatus::Complete {
+                    execution.finish(crate::sync_logging::status(&outcome), final_errors.len());
+            if outcome == crate::sync::SyncStatus::Complete {
                         record_autofill_history_after_plan_sync(
                             &db,
                             sync_manifest,
@@ -8804,15 +8924,22 @@ async fn handle_sync_execute(
                         });
                         op_manager.update_operation(&op_id, operation).await;
                     }
+                    execution.finish("failed", 1);
                     let _ = state_tx.send(crate::DaemonState::Error);
                 }
             }
-        });
+        }).await });
 
         return Ok(serde_json::json!({
             "operationId": operation_id
         }));
     }
+    }.await;
+    phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) { "cancelled" } else if result.is_err() { "failed" } else { "success" }, 0);
+    lifecycle.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) { "cancelled" } else if result.is_err() { "failed" } else { "admitted" }, 0);
+
+    result
+
 }
 
 async fn handle_sync_get_operation_status(
@@ -17095,6 +17222,7 @@ mod tests {
     // --- Fake provider for browse handler tests ---
 
     struct FakeBrowseProvider {
+        album_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
         modes: Vec<crate::providers::BrowseMode>,
         genres: Vec<crate::domain::models::Genre>,
         albums: HashMap<String, crate::domain::models::AlbumWithTracks>,
@@ -17112,6 +17240,7 @@ mod tests {
             genres: Vec<crate::domain::models::Genre>,
         ) -> Arc<Self> {
             Arc::new(Self {
+                album_gate: None,
                 modes,
                 genres,
                 albums: HashMap::new(),
@@ -17131,6 +17260,7 @@ mod tests {
             let mut genre_tracks = HashMap::new();
             genre_tracks.insert(genre_id.to_string(), tracks);
             Arc::new(Self {
+                album_gate: None,
                 modes: vec![crate::providers::BrowseMode::Genres],
                 genres: vec![],
                 albums: HashMap::new(),
@@ -17147,6 +17277,7 @@ mod tests {
             let mut songs = HashMap::new();
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
+                album_gate: None,
                 modes: vec![],
                 genres: vec![],
                 albums: HashMap::new(),
@@ -17168,6 +17299,7 @@ mod tests {
             let mut songs = HashMap::new();
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
+                album_gate: None,
                 modes: vec![],
                 genres: vec![],
                 albums,
@@ -17187,6 +17319,7 @@ mod tests {
                 .map(|album| (album.album.id.clone(), album))
                 .collect();
             Arc::new(Self {
+                album_gate: None,
                 modes: vec![crate::providers::BrowseMode::Authors],
                 genres: vec![],
                 albums,
@@ -17201,6 +17334,7 @@ mod tests {
 
         fn with_song_auth_error(message: &str) -> Arc<Self> {
             Arc::new(Self {
+                album_gate: None,
                 modes: vec![],
                 genres: vec![],
                 albums: HashMap::new(),
@@ -17215,6 +17349,7 @@ mod tests {
 
         fn with_tracks(tracks: Vec<crate::domain::models::Song>) -> Arc<Self> {
             Arc::new(Self {
+                album_gate: None,
                 modes: vec![crate::providers::BrowseMode::Tracks],
                 genres: vec![],
                 albums: HashMap::new(),
@@ -17433,6 +17568,10 @@ mod tests {
             &self,
             album_id: &str,
         ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            if let Some(gate) = &self.album_gate {
+                gate.0.notify_one();
+                gate.1.notified().await;
+            }
             self.albums
                 .get(album_id)
                 .cloned()
@@ -17558,7 +17697,7 @@ mod tests {
             })
         }
         fn server_type(&self) -> crate::providers::ServerType {
-            crate::providers::ServerType::Jellyfin
+            if self.album_gate.is_some() { crate::providers::ServerType::Subsonic } else { crate::providers::ServerType::Jellyfin }
         }
         fn capabilities(&self) -> crate::providers::Capabilities {
             crate::providers::Capabilities {
@@ -18125,6 +18264,145 @@ mod tests {
         // AC11: provider auth failures map to ERR_UNAUTHORIZED so the UI can re-auth.
         assert_eq!(err.code, ERR_UNAUTHORIZED);
         assert_eq!(err.message, "auth failed");
+    }
+
+    #[tokio::test]
+    async fn sync_step_preparation_start_precedes_blocked_provider_and_pairs_outcomes() {
+        let _lock = credential_test_lock();
+        let config = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(config.path().join("missing.json"));
+        for scenario in ["ready", "failed", "cancelled"] {
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let root = tempfile::tempdir().unwrap();
+            let manifest = crate::device::DeviceManifest { device_id: "log-fixture".into(), managed_paths: vec!["Music".into()], ..Default::default() };
+            state.device_manager.handle_device_detected(root.path().into(), manifest,
+                Arc::new(crate::device_io::MscBackend::new(root.path().into()))).await.unwrap();
+            let mut provider = if scenario == "failed" { FakeBrowseProvider::with_song_auth_error("fixture failure") }
+                else { FakeBrowseProvider::with_song(make_fake_song("song1", "Track")) };
+            let gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+            Arc::get_mut(&mut provider).unwrap().album_gate = Some(gate.clone());
+            state.server_manager.write().await.set_test_provider(provider);
+            let run = crate::sync_logging::Run::new();
+            let future = run.scope(handle_sync_calculate_delta(&state, Some(json!({"itemIds":["song1"]}))));
+            tokio::pin!(future);
+            tokio::select! {
+                _ = gate.0.notified() => {},
+                result = &mut future => panic!("finished before provider gate: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("provider was not reached"),
+            }
+            let events = run.events();
+            assert!(events.iter().any(|e| e.contains("event=start") && e.contains("stage=preparation")));
+            assert!(events.iter().any(|e| e.contains("event=start") && e.contains("stage=basket_expansion")));
+            assert!(!events.iter().any(|e| e.contains("event=end") && e.contains("stage=basket_expansion")));
+            if scenario == "cancelled" { state.sync_operation_manager.request_pipeline_cancel(); }
+            gate.1.notify_one();
+            let result = future.await;
+            assert_eq!(result.is_ok(), scenario == "ready");
+            let events = run.events();
+            let ends: Vec<_> = events.iter().filter(|e| e.contains("event=end") && e.contains("stage=preparation ")).collect();
+            assert_eq!(ends.len(), 1);
+            assert!(ends[0].contains(&format!("outcome={scenario}")), "{}", ends[0]);
+            assert_eq!(events.iter().filter(|e|e.contains("event=start")).count(), events.iter().filter(|e|e.contains("event=end")).count());
+            assert!(!events.iter().any(|e|e.contains("outcome=interrupted")));
+            if scenario == "ready" {
+                assert!(events.iter().any(|e|e.contains("stage=reconciliation ") && e.contains("outcome=skipped")));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_step_prepared_plan_links_execution_and_auto_skip() {
+        let _lock = credential_test_lock();
+        let config = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(config.path().join("missing.json"));
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let root = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest { device_id: "log-empty".into(), managed_paths: vec!["Music".into()], ..Default::default() };
+        state.device_manager.handle_device_detected(root.path().into(), manifest,
+            Arc::new(crate::device_io::MscBackend::new(root.path().into()))).await.unwrap();
+        let mut provider = FakeBrowseProvider::new(vec![], vec![]);
+        Arc::get_mut(&mut provider).unwrap().album_gate = Some(Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new())));
+        state.server_manager.write().await.set_test_provider(provider.clone());
+        let run = crate::sync_logging::Run::new();
+        let prepared = run.scope(handle_sync_calculate_delta(&state, Some(json!({"itemIds":[], "prepared":true})))).await.unwrap();
+        assert!(!run.events().iter().any(|e| e.contains("stage=execution ")));
+        let response = handle_sync_execute(&state, Some(json!({"planId":prepared["planId"]}))).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.sync_operation_manager.is_pipeline_active() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let events = run.events();
+        assert!(events.iter().any(|e|e.contains("event=link") && e.contains("plan_id=")));
+        assert!(events.iter().any(|e|e.contains("event=link") && e.contains(response["operationId"].as_str().unwrap())));
+        assert!(events.iter().any(|e|e.contains("stage=execution ") && e.contains("outcome=success")), "{events:?}");
+        assert_eq!(events.iter().filter(|e|e.contains("event=start")).count(), events.iter().filter(|e|e.contains("event=end")).count());
+        assert!(!events.iter().any(|e|e.contains("outcome=interrupted")));
+        let auto_run = crate::sync_logging::Run::new();
+        auto_run.scope(crate::run_auto_sync_via_provider(provider, None, state.device_manager.clone(),
+            state.sync_operation_manager.clone(), state.state_tx.clone(), "log-empty".into(),
+            state.playback.sync_protection_observer())).await.unwrap();
+        let events = auto_run.events();
+        assert!(events.iter().any(|e|e.contains("stage=preparation ") && e.contains("outcome=skipped")));
+        assert!(!events.iter().any(|e|e.contains("stage=execution")));
+    }
+
+    #[tokio::test]
+    async fn sync_step_auto_failed_basket_is_failed_preparation() {
+        let _lock = credential_test_lock();
+        let config = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(config.path().join("missing.json"));
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let root = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "log-failed-basket".into(), managed_paths: vec!["Music".into()],
+            basket_items: vec![crate::device::BasketItem {
+                id: "missing".into(), name: "Missing".into(), item_type: "Album".into(),
+                server_id: None, artist: None, child_count: 1, size_ticks: 0, size_bytes: 0,
+            }], ..Default::default()
+        };
+        state.device_manager.handle_device_detected(root.path().into(), manifest,
+            Arc::new(crate::device_io::MscBackend::new(root.path().into()))).await.unwrap();
+        let run = crate::sync_logging::Run::new();
+        // This path intentionally still returns Ok and does not admit execution.
+        run.scope(crate::run_auto_sync_via_provider(FakeBrowseProvider::with_song_auth_error("fixture failure"),
+            None, state.device_manager.clone(), state.sync_operation_manager.clone(), state.state_tx.clone(),
+            "log-failed-basket".into(), state.playback.sync_protection_observer())).await.unwrap();
+        let events = run.events();
+        for stage in ["basket_expansion", "preparation"] {
+            assert!(events.iter().any(|e|e.contains(&format!("stage={stage} ")) && e.contains("outcome=failed")), "{events:?}");
+        }
+        assert!(!events.iter().any(|e|e.contains("stage=execution")));
+        assert!(!state.sync_operation_manager.has_active_operation().await);
+    }
+
+    #[tokio::test]
+    async fn sync_step_multi_provider_basket_counts_are_per_group() {
+        let _lock = credential_test_lock();
+        let config = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(config.path().join("missing.json"));
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let first = FakeBrowseProvider::with_song(make_fake_song("one", "First"));
+        let mut second = FakeBrowseProvider::with_song(make_fake_song("two", "Second"));
+        Arc::get_mut(&mut second).unwrap().songs.insert("three".into(), make_fake_song("three", "Third"));
+        {
+            let mut servers = state.server_manager.write().await;
+            servers.set_test_provider(first);
+            servers.servers[0].server_id = Some("portable-one".into());
+            let mut record = servers.servers[0].clone();
+            record.id = "second-server".into();
+            record.server_id = Some("portable-two".into());
+            record.selected = false;
+            servers.servers.push(record);
+            servers.providers.insert("second-server".into(), second);
+        }
+        let run = crate::sync_logging::Run::new();
+        run.scope(multi_provider_calculate_delta(&state,
+            &[("one".into(), Some("portable-one".into())), ("two".into(), Some("portable-two".into())), ("three".into(), Some("portable-two".into()))],
+            &crate::device::DeviceManifest::default(), &json!({}))).await.unwrap();
+        let events = run.events();
+        let basket_ends: Vec<_> = events.iter().filter(|e|e.contains("event=end") && e.contains("stage=basket_expansion ")).collect();
+        assert_eq!(basket_ends.len(), 2);
+        assert!(basket_ends[0].ends_with("count=1"), "{}", basket_ends[0]);
+        assert!(basket_ends[1].ends_with("count=2"), "{}", basket_ends[1]);
     }
 
     #[tokio::test]

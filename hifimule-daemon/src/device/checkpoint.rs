@@ -24,6 +24,7 @@ struct BufferedState {
 }
 
 struct SessionState {
+    log_run: crate::sync_logging::Run,
     manager: Arc<DeviceManager>,
     device_id: String,
     path: PathBuf,
@@ -97,6 +98,7 @@ impl SyncManifestSession {
                 .ok_or_else(|| anyhow::anyhow!("Sync connection changed"))?
         };
         let inner = Arc::new(SessionState {
+            log_run: crate::sync_logging::Run::current(),
             manager,
             device_id: device_id.into(),
             path,
@@ -243,6 +245,9 @@ impl SyncManifestSession {
     }
 
     pub(crate) async fn finish(mut self, outcome: &str) -> Result<()> {
+
+        let mut lifecycle = crate::sync_logging::Step::new(self.inner.log_run.clone(), "checkpoint_finalization");
+        let result = async {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -257,6 +262,10 @@ impl SyncManifestSession {
             anyhow::bail!("Checkpoint failed: {error}");
         }
         Ok(())
+        }.await;
+        lifecycle.finish(if result.is_err() { "failed" } else { "success" }, 0);
+        result
+
     }
 }
 
@@ -280,6 +289,11 @@ impl SessionState {
     }
 
     async fn flush(&self, buffered: &mut BufferedState, reason: &str) -> Result<()> {
+
+        let mut lifecycle = crate::sync_logging::Step::new(self.log_run.clone(), "manifest_checkpoint");
+        let count = buffered.updates;
+        let changed = buffered.changed;
+        let result = async {
         if !buffered.changed {
             return Ok(());
         }
@@ -355,5 +369,9 @@ impl SessionState {
             buffered.previous = Instant::now();
         }
         result
+        }.await;
+        lifecycle.finish(if result.is_err() { "failed" } else if !changed { "noop" } else { "success" }, count);
+        result
+
     }
 }

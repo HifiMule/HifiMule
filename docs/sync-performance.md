@@ -58,3 +58,22 @@ Daemon logs include a `[Sync] Performance` line showing the effective five setti
 5. Keep a change only if the improvement is repeatable. Restore defaults if memory/disk use or recovery costs outweigh the benefit.
 
 Temporary-directory correctness tests do not establish USB performance gains; measure with the actual memory stick.
+
+## Follow a sync through the log
+
+`daemon.log` includes `[SyncStep]` records without enabling debug logging. A start is written before each measured operation, including provider/device work during preparation. For example:
+
+```text
+[SyncStep] event=start run_id=<uuid> step_id=3 stage=basket_expansion
+[SyncStep] event=end run_id=<uuid> step_id=3 stage=basket_expansion elapsed_ms=1250 outcome=success count=240
+[SyncStep] event=link run_id=<uuid> plan_id=<uuid>
+[SyncStep] event=link run_id=<uuid> operation_id=<uuid>
+```
+
+Match starts and ends using `run_id` and `step_id`. Stage names stay stable across manual, direct and automatic sync. Repeated stages (such as auto-fill slots or checkpoint writes) have distinct step IDs. Link records associate prepared plans and operations with the same run; IDs are generated internally. Credentials, configuration payloads and manifest fingerprints are excluded.
+
+`elapsed_ms` uses a monotonic clock and measures wall-clock time, including waits. `count` is the available stage aggregate (resolved items for basket expansion, changed items for delta calculation, checkpoint updates, or errors for terminal execution); zero also means no aggregate is available. Outcomes are `success`, `ready` (preparation only), `admitted`, `failed`, `cancelled`, `skipped`, `noop`, or `interrupted`. A dropped future/scope reports `interrupted`, never invented success. Abrupt process termination cannot guarantee an end record.
+
+The latest unmatched start identifies work still in progress. Preparation and execution have separate timers, so waiting for confirmation does not inflate execution time. Execution ends only after checkpoint and operation finalization, and file failures inside an otherwise successful executor result still report failure.
+
+Compare the same stages across equivalent workloads. Durations overlap: preparation includes its child stages, transfer includes concurrent downloads and writes, managed deletions overlap transfer, and checkpoint timers can run during other work. **Do not sum overlapping stage durations.** Use `preparation` and `execution` for phase totals, then child timings and existing throughput summaries to locate bottlenecks. Optional reconciliation emits `skipped` when disabled; work not entered (for example forced-sync reconciliation or absent auto-fill slots) has no execution pair. Zero-count bulk stages may still report success when their empty work completed normally.

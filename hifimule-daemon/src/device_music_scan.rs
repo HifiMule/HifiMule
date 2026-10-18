@@ -377,13 +377,16 @@ pub async fn reconcile(
     profile: Option<&serde_json::Value>,
     manager: Option<&Arc<crate::sync::SyncOperationManager>>,
 ) -> Result<()> {
+    let mut lifecycle = crate::sync_logging::Step::current("reconciliation");
     if !manifest.reconcile_before_sync {
+        lifecycle.finish("skipped", 0);
         return Ok(());
     }
     let mut summary = ReconciliationSummary::default();
     crate::daemon_log!("[Sync] Reconciliation started: device={}", manifest.device_id);
     let result = reconcile_enabled(delta, manifest, io, profile, manager, &mut summary).await;
     crate::daemon_log!("{}", summary.terminal_message(&manifest.device_id, &result, manager.is_some_and(|m| m.is_pipeline_cancelled())));
+    lifecycle.finish(if manager.is_some_and(|m| m.is_pipeline_cancelled()) { "cancelled" } else if result.is_err() { "failed" } else { "success" }, summary.reused);
     result
 }
 

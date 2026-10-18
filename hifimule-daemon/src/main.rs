@@ -91,6 +91,7 @@ mod rpc;
 mod scrobbler;
 mod server_manager;
 mod sync;
+mod sync_logging;
 mod sync_tags;
 mod sync_performance;
 mod sync_plan;
@@ -1854,6 +1855,25 @@ async fn run_auto_sync_via_provider(
     device_id: String,
     protection_observer: sync::protection::Observer,
 ) -> anyhow::Result<()> {
+
+    let run = crate::sync_logging::Run::current();
+    run.scope(run_auto_sync_logged(provider, server_id, device_manager, sync_op_manager, state_tx, device_id, protection_observer)).await
+}
+
+async fn run_auto_sync_logged(
+    provider: Arc<dyn providers::MediaProvider>,
+    server_id: Option<String>,
+    device_manager: Arc<device::DeviceManager>,
+    sync_op_manager: Arc<sync::SyncOperationManager>,
+    state_tx: std::sync::mpsc::Sender<DaemonState>,
+    device_id: String,
+    protection_observer: sync::protection::Observer,
+) -> anyhow::Result<()> {
+    let mut preparation = sync_logging::Step::current("preparation");
+    let mut phases = sync_logging::Phases::default();
+    let mut terminal = "skipped";
+    let result = async {
+    phases.next("target_validation");
     if rpc::music_setup_pending(&device_id).await { return Ok(()); }
     let _ = state_tx.send(DaemonState::Syncing);
 
@@ -1897,14 +1917,18 @@ async fn run_auto_sync_via_provider(
         }
     }
 
+    phases.finish("success", 0);
+    let mut basket_failures = 0;
     // Resolve basket items (always, even when auto-fill is also enabled).
     if !manifest.basket_items.is_empty() {
-        let (items, playlists) =
+        let (items, playlists, failures) =
             resolve_provider_basket_items(provider.clone(), &manifest.basket_items).await;
+        basket_failures = failures;
         desired_items = items;
         playlist_sync_items = playlists;
     }
 
+    if manifest.auto_fill.enabled_for(server_id.as_deref()) { phases.next("auto_fill_preparation"); }
     let mut auto_fill_ids = std::collections::HashSet::new();
     // Auto-fill: fill remaining space after basket items (or fill entirely when basket is empty).
     if manifest.auto_fill.enabled_for(server_id.as_deref()) {
@@ -1917,6 +1941,7 @@ async fn run_auto_sync_via_provider(
             match target.io.free_space().await {
                 Ok(free_bytes) => free_bytes.saturating_add(synced_bytes),
                 Err(_) => {
+                    terminal = "failed";
                     daemon_log!("[AutoSync] Cannot determine device capacity for auto-fill");
                     let _ = state_tx.send(DaemonState::Idle);
                     return Ok(());
@@ -1947,6 +1972,7 @@ async fn run_auto_sync_via_provider(
             let pipeline = manifest.auto_fill.resolve_pipeline(server_id.as_deref());
             match rpc::expand_auto_fill_slot(provider.clone(), pipeline, fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {
+                    if basket_failures > 0 { terminal = "failed"; }
                     daemon_log!("[AutoSync] Provider auto-fill returned no items, skipping");
                     let _ = state_tx.send(DaemonState::Idle);
                     return Ok(());
@@ -1970,6 +1996,7 @@ async fn run_auto_sync_via_provider(
                     );
                 }
                 Err(e) => {
+                    terminal = "failed";
                     daemon_log!("[AutoSync] Provider auto-fill failed: {}", e);
                     let _ = state_tx.send(DaemonState::Error);
                     return Ok(());
@@ -1978,6 +2005,7 @@ async fn run_auto_sync_via_provider(
         }
     }
 
+    phases.finish("success", auto_fill_ids.len());
     let mut seen_ids = std::collections::HashSet::new();
     desired_items.retain(|item| seen_ids.insert(item.jellyfin_id.clone()));
     let media_role = device::MediaRole::from_library_role(provider.library_role());
@@ -1986,6 +2014,7 @@ async fn run_auto_sync_via_provider(
     }
 
     if desired_items.is_empty() && !manifest.basket_items.is_empty() {
+        if basket_failures > 0 { terminal = "failed"; }
         daemon_log!("[AutoSync] No downloadable items resolved from basket, skipping");
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
@@ -1997,11 +2026,13 @@ async fn run_auto_sync_via_provider(
     let total_files = delta.adds.len() + delta.deletes.len();
 
     if !auto_sync_delta_has_work(&delta, total_files) {
+        terminal = "noop";
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
     }
     if sync_op_manager.is_pipeline_cancelled() {
+        terminal = "cancelled";
         daemon_log!("[AutoSync] Cancelled before sync execution");
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
@@ -2036,6 +2067,8 @@ async fn run_auto_sync_via_provider(
     delta.validate()?;
     let pending_ids = delta.pending_ids()?;
     let operation_id = uuid::Uuid::new_v4().to_string();
+    sync_logging::Run::current().link("operation_id", &operation_id);
+    phases.next("execution_admission");
     device_manager
         .admit_sync_operation(
             &sync_op_manager,
@@ -2046,6 +2079,8 @@ async fn run_auto_sync_via_provider(
         .await?;
 
 
+    phases.finish("admitted", total_files);
+    phases.next("dirty_manifest_persistence");
     if let Err(error) = device_manager
         .update_manifest_for_connection(&manifest.device_id, target.observation, &target.io, |m| {
             m.dirty = true;
@@ -2067,6 +2102,9 @@ async fn run_auto_sync_via_provider(
         return Err(error);
     }
 
+    phases.finish("success", 0);
+    preparation.finish("ready", 0);
+    let mut execution = sync_logging::Step::current("execution");
     drop(desired_items);
     drop(auto_fill_ids);
     drop(seen_ids);
@@ -2106,6 +2144,8 @@ async fn run_auto_sync_via_provider(
                         .await
                 })
                 .await;
+            terminal = sync_logging::status(&outcome);
+            execution.finish(terminal, final_errors.len());
             if outcome == sync::SyncStatus::Complete {
                 daemon_log!("[AutoSync] Sync completed successfully");
                 drop(tokio::task::spawn_blocking(|| {
@@ -2140,6 +2180,7 @@ async fn run_auto_sync_via_provider(
             }
         }
         Err(e) => {
+            terminal = "failed";
             daemon_log!("[AutoSync] Sync failed: {}", e);
             if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
                 operation.status = sync::SyncStatus::Failed;
@@ -2152,6 +2193,7 @@ async fn run_auto_sync_via_provider(
                     .update_operation(&operation_id, operation)
                     .await;
             }
+            execution.finish("failed", 1);
             let error_msg = format!("Sync failed: {}", e);
             drop(tokio::task::spawn_blocking(move || {
                 if let Err(e) = notifications::new_notification()
@@ -2167,13 +2209,22 @@ async fn run_auto_sync_via_provider(
     }
 
     Ok(())
+    }.await;
+    let terminal = if result.is_err() && sync_op_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { terminal };
+    phases.finish(terminal, 0);
+    preparation.finish(terminal, 0);
+    result
+
 }
 
 /// Resolves a list of BasketItems to DesiredItems + PlaylistSyncItems using the MediaProvider.
 async fn resolve_provider_basket_items(
     provider: Arc<dyn providers::MediaProvider>,
     basket_items: &[device::BasketItem],
-) -> (Vec<sync::DesiredItem>, Vec<sync::PlaylistSyncItem>) {
+) -> (Vec<sync::DesiredItem>, Vec<sync::PlaylistSyncItem>, usize) {
+
+    let mut lifecycle = sync_logging::Step::current("basket_expansion");
+    let mut failures = 0;
     let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -2193,6 +2244,7 @@ async fn resolve_provider_basket_items(
                 }
             }
             Err(e) => {
+                failures += 1;
                 daemon_log!(
                     "[AutoSync] Failed to resolve favorite item {}: {}",
                     basket_item.id,
@@ -2215,6 +2267,7 @@ async fn resolve_provider_basket_items(
                 }
             }
             Err(e) => {
+                failures += 1;
                 daemon_log!(
                     "[AutoSync] Failed to resolve item {}: {}",
                     basket_item.id,
@@ -2224,7 +2277,8 @@ async fn resolve_provider_basket_items(
         }
     }
 
-    (desired_items, playlist_sync_items)
+    lifecycle.finish(if failures > 0 { "failed" } else if desired_items.is_empty() { "noop" } else { "success" }, desired_items.len());
+    (desired_items, playlist_sync_items, failures)
 }
 
 async fn resolve_provider_favorite_item(

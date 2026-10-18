@@ -14,6 +14,7 @@ use std::{
 pub const PAGE_SIZE: usize = 500;
 
 pub struct PreparedPlan {
+    pub log_run: crate::sync_logging::Run,
     pub id: String,
     pub plan: SyncPlan,
     pub fingerprint: String,
@@ -238,6 +239,9 @@ pub struct SyncPlan {
 
 impl SyncPlan {
     pub fn from_delta(delta: SyncDelta, manifest: &DeviceManifest) -> Result<Self> {
+
+        let mut lifecycle = crate::sync_logging::Step::current("plan_construction");
+        let result = (|| {
         let total_bytes = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
             + delta.id_changes.iter().filter(|a|a.reason_code.as_deref()!=Some("device-file-reused")).map(|a| a.size_bytes).sum::<u64>();
         let destructive_cleanup_count = destructive_cleanup_count(&delta, manifest);
@@ -407,6 +411,10 @@ impl SyncPlan {
             change_reasons,
             expected_rows: rows,
         })
+        })();
+        lifecycle.finish(if result.is_err() { "failed" } else { "success" }, 0);
+        result
+
     }
 
     pub fn validate(&self) -> Result<()> {

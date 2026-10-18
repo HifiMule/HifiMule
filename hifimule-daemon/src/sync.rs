@@ -1198,6 +1198,9 @@ impl SyncOperationManager {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
+
+        let mut lifecycle = crate::sync_logging::Step::current("finalization");
+        let result = async {
         let _finalization = self.finalization_gate.lock().await;
         let Some(existing) = self.get_operation(operation_id).await else {
             return (SyncStatus::Failed, errors);
@@ -1235,6 +1238,10 @@ impl SyncOperationManager {
             operation.errors = errors.clone();
         }
         (status, errors)
+        }.await;
+        lifecycle.finish(crate::sync_logging::status(&result.0), result.1.len());
+        result
+
     }
 
     pub async fn modify_operation(
@@ -2885,6 +2892,11 @@ async fn execute_plan_sync_with_settings(
     protection_observer: Option<protection::Observer>,
     settings: crate::sync_performance::SyncPerformance,
 ) -> Result<(usize, Vec<SyncFileError>)> {
+
+    let mut lifecycle = crate::sync_logging::Step::current("transfer_and_metadata");
+    let manager_for_log = Arc::clone(&operation_manager);
+    let operation_for_log = operation_id.clone();
+    let result = async {
     crate::daemon_log!(
         "[Sync] Performance copy_buffer_kib={} staging_max_tracks={} staging_max_mib={} checkpoint_track_updates={} checkpoint_interval_seconds={}",
         settings.copy_buffer_bytes / 1024,
@@ -2934,6 +2946,11 @@ async fn execute_plan_sync_with_settings(
         }
     }
     result
+    }.await;
+    let failures = result.as_ref().map(|(_, errors)| errors.len()).unwrap_or(1);
+    lifecycle.finish(crate::sync_logging::outcome(failures > 0, manager_for_log.is_cancelled(&operation_for_log).await), failures);
+    result
+
 }
 
 async fn execute_plan_sync_buffered(
@@ -2947,6 +2964,14 @@ async fn execute_plan_sync_buffered(
     checkpoint: &crate::device::SyncManifestSession,
     settings: crate::sync_performance::SyncPerformance,
 ) -> Result<(usize, Vec<SyncFileError>)> {
+
+    let mut setup_log = crate::sync_logging::Phases::default();
+    let mut transfer_log = crate::sync_logging::Phases::default();
+    let mut deletion_log = crate::sync_logging::Phases::default();
+    let manager_for_log = Arc::clone(&operation_manager);
+    let operation_for_log = operation_id.clone();
+    let result = async {
+    setup_log.next("transfer_setup");
     delta.validate()?;
     let device_path = target.path.as_path();
     let device_io = Arc::clone(&target.io);
@@ -3850,6 +3875,10 @@ async fn execute_plan_sync_buffered(
             error_message: format!("Failed to begin device sync job: {}", e),
         });
     }
+    setup_log.finish(crate::sync_logging::outcome(!errors.is_empty(), operation_manager.is_cancelled(&operation_id).await), delta.adds.len());
+    transfer_log.next("transfer");
+    deletion_log.next("managed_deletions");
+    let mut deletion_errors = 0;
     let mut producers = Vec::new();
     for (server_id, count, manual, adds) in producer_groups {
         let group_provider = server_id
@@ -3997,6 +4026,7 @@ async fn execute_plan_sync_buffered(
                         device_path, &managed_path, managed_subfolder_for_delete.as_deref(), is_mtp,
                         &owned_manifest_paths, &device_io, &operation_manager, &operation_id).await {
                         cleanup_failed = true;
+                        deletion_errors += 1;
                         errors.push(error);
                     }
                 }
@@ -4160,6 +4190,7 @@ async fn execute_plan_sync_buffered(
                     .await
                 {
                     replacement_cleanup_failed = true;
+                    deletion_errors += 1;
                     errors.push(error);
                 }
                 let id_to_replace = staged.add_item.jellyfin_id.clone();
@@ -4232,6 +4263,7 @@ async fn execute_plan_sync_buffered(
                                     )
                                     .await
                                     {
+                                        deletion_errors += 1;
                                         errors.push(error);
                                     }
                                 }
@@ -4325,6 +4357,7 @@ async fn execute_plan_sync_buffered(
         );
     }
 
+    transfer_log.finish(crate::sync_logging::outcome(!errors.is_empty(), operation_manager.is_cancelled(&operation_id).await), synced_count);
     crate::daemon_log!(
         "[Sync] Post-transfer metadata begin deletes={} id_changes={}",
         delta.deletes.len(),
@@ -4354,19 +4387,28 @@ async fn execute_plan_sync_buffered(
         )
         .await
         {
+            deletion_errors += 1;
             errors.push(error);
         }
     }
 
+    deletion_log.finish(crate::sync_logging::outcome(deletion_errors > 0, operation_manager.is_cancelled(&operation_id).await), delta.deletes.len());
     let managed_subfolder = managed_path
         .strip_prefix(device_path)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     crate::daemon_log!("[Sync] Post-transfer directory cleanup begin");
-    if !operation_manager.is_cancelled(&operation_id).await
-        && let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await
-    {
-        eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
+    let mut cleanup_log = crate::sync_logging::Step::current("directory_cleanup");
+    if operation_manager.is_cancelled(&operation_id).await {
+        cleanup_log.finish("cancelled", 0);
+    } else {
+        match device_io.cleanup_empty_subdirs(&managed_subfolder).await {
+            Ok(()) => cleanup_log.finish("success", 0),
+            Err(e) => {
+                cleanup_log.finish("failed", 0);
+                eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
+            }
+        }
     }
     crate::daemon_log!("[Sync] Post-transfer directory cleanup end");
 
@@ -4374,6 +4416,8 @@ async fn execute_plan_sync_buffered(
         "[Sync] Post-transfer ID updates begin count={}",
         delta.id_changes.len()
     );
+    let mut identity_log = crate::sync_logging::Step::current("identity_updates");
+    let identity_errors_before = errors.len();
     let id_changes = match delta.id_changes.iter() {
         Ok(cursor) => Some(cursor),
         Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; None},
@@ -4471,6 +4515,9 @@ async fn execute_plan_sync_buffered(
         "[Sync] Post-transfer ID updates end count={}",
         delta.id_changes.len()
     );
+    identity_log.finish(crate::sync_logging::outcome(errors.len() > identity_errors_before, operation_manager.is_cancelled(&operation_id).await), delta.id_changes.len());
+    let mut provenance_log = crate::sync_logging::Step::current("provenance_updates");
+    let provenance_errors_before = errors.len();
     let provenance = if delta.provenance.len() == 0 {
         delta.provenance.iter().map(|cursor| (cursor, None))
     } else {
@@ -4521,6 +4568,9 @@ async fn execute_plan_sync_buffered(
         }
     }
 
+    provenance_log.finish(crate::sync_logging::outcome(errors.len() > provenance_errors_before, operation_manager.is_cancelled(&operation_id).await), delta.provenance.len());
+    let mut playlists_log = crate::sync_logging::Step::current("playlists");
+    let playlist_errors_before = errors.len();
     crate::daemon_log!(
         "[Sync] Post-transfer playlists begin count={}",
         delta.playlists.len()
@@ -4562,6 +4612,9 @@ async fn execute_plan_sync_buffered(
         }
     }
 
+    playlists_log.finish(crate::sync_logging::outcome(errors.len() > playlist_errors_before, operation_manager.is_cancelled(&operation_id).await), delta.playlists.len());
+    let mut cleanup_log = crate::sync_logging::Step::current("device_finalization");
+    let cleanup_errors_before = errors.len();
     crate::daemon_log!("[Sync] Post-transfer playlists end");
     crate::daemon_log!("[Sync] Post-transfer metadata end");
     let mut device_warnings = sync_warnings;
@@ -4596,7 +4649,16 @@ async fn execute_plan_sync_buffered(
             .await;
     }
 
+    cleanup_log.finish(crate::sync_logging::outcome(errors.len() > cleanup_errors_before, operation_manager.is_cancelled(&operation_id).await), 0);
     Ok((synced_count, errors))
+    }.await;
+    let failures = result.as_ref().map(|(_, errors)| errors.len()).unwrap_or(1);
+    let outcome = crate::sync_logging::outcome(failures > 0, manager_for_log.is_cancelled(&operation_for_log).await);
+    setup_log.finish(outcome, 0);
+    transfer_log.finish(outcome, 0);
+    deletion_log.finish(outcome, 0);
+    result
+
 }
 
 async fn wait_for_protection_admission(
@@ -4774,6 +4836,10 @@ pub async fn augment_delta_with_existence_check(
     manifest: &crate::device::DeviceManifest,
     device_io: &dyn crate::device_io::DeviceIO,
 ) -> anyhow::Result<()> {
+
+
+    let mut lifecycle = crate::sync_logging::Step::current("existence_check");
+    let result = async {
     let already_in_delta: HashSet<String> = delta
         .adds
         .iter()
@@ -4826,6 +4892,11 @@ pub async fn augment_delta_with_existence_check(
     delta.adds.extend(to_add);
     delta.unchanged = delta.unchanged.saturating_sub(recovered);
     Ok(())
+    }.await;
+    lifecycle.finish(if result.is_err() { "failed" } else { "success" }, 0);
+
+    result
+
 }
 
 /// Generates, regenerates, or cleans up .m3u files for playlists in the sync basket.
@@ -4946,6 +5017,9 @@ async fn generate_m3u_files(
 /// (name, album, artist) metadata, it's treated as an ID reassignment rather than
 /// a separate add+delete.
 pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta {
+
+    let mut lifecycle = crate::sync_logging::Step::current("delta_calculation");
+    let result = (|| {
     let profile_dirty = manifest.needs_transcoding_profile_rewrite();
     let media_folder = |role| {
         manifest
@@ -5219,6 +5293,10 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         playlists: vec![],
         pity_fired_servers: vec![],
     }
+    })();
+    lifecycle.finish("success", result.adds.len() + result.deletes.len() + result.id_changes.len());
+    result
+
 }
 
 #[cfg(test)]
@@ -10859,6 +10937,7 @@ mod tests {
         for scenario in [
             "prior-failed",
             "cancelled-errors",
+            "cancelled",
             "commit-failed",
             "complete",
         ] {
@@ -10901,10 +10980,13 @@ mod tests {
             } else if scenario == "cancelled-errors" {
                 operations.request_cancel(&id).await;
                 final_errors.push(error());
+            } else if scenario == "cancelled" {
+                operations.request_cancel(&id).await;
             } else if scenario == "commit-failed" {
                 io.reject_manifest.store(true, Ordering::Release);
             }
-            let (status, errors) = operations
+            let log_run = crate::sync_logging::Run::new();
+            let (status, errors) = log_run.scope(operations
                 .finalize_operation(&id, final_errors, || async {
                     devices
                         .update_manifest(|m| {
@@ -10912,14 +10994,19 @@ mod tests {
                             m.pending_item_ids.clear();
                         })
                         .await
-                })
+                }))
                 .await;
             let expected = if scenario == "complete" {
                 SyncStatus::Complete
+            } else if scenario == "cancelled" {
+                SyncStatus::Cancelled
             } else {
                 SyncStatus::Failed
             };
             assert_eq!(status, expected, "{scenario}");
+            let events = log_run.events();
+            assert_eq!(events.len(), 2);
+            assert!(events[1].contains(&format!("outcome={}", crate::sync_logging::status(&expected))));
             let persisted = read_persisted_manifest(root.path());
             assert_eq!(persisted.dirty, scenario != "complete", "{scenario}");
             assert_eq!(
@@ -10931,7 +11018,7 @@ mod tests {
                 devices.get_current_device().await.unwrap().dirty,
                 persisted.dirty
             );
-            assert_eq!(errors.is_empty(), scenario == "complete");
+            assert_eq!(errors.is_empty(), scenario == "complete" || scenario == "cancelled");
             operations.update_operation(&id, stale.clone()).await;
             let mut stale_complete = stale;
             stale_complete.status = SyncStatus::Complete;
