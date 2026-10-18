@@ -202,7 +202,6 @@ export class BasketSidebar {
     private syncErrorMessages: string[] | null = null;
     private isDirtyManifest: boolean = false;
     private lastHydratedDeviceId: string | null = null;
-    private serverType: string | null = null;
     private artwork?: BasketArtwork;
     private currentServerId: string | null = null;
     // Server metadata for read-only basket group labels (Story 2.11 AC35).
@@ -348,7 +347,6 @@ export class BasketSidebar {
 
         if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
             const state = daemonStateResult.value as any;
-            this.serverType = state.serverType ?? null;
             // Story 2.13: currentServerId is the PORTABLE id (used to tag items and
             // build sync payloads) so the daemon can route by portable id and own
             // items never render locked.
@@ -872,7 +870,6 @@ export class BasketSidebar {
 
                 const currentDevice = daemonStateResult?.currentDevice;
                 this.currentDevice = currentDevice ?? null;
-                this.serverType = daemonStateResult?.serverType ?? null;
                 const newSupportsPlaylist = daemonStateResult?.supportsPlaylistWrite === true;
                 if (newSupportsPlaylist !== this.supportsPlaylistWrite) {
                     this.supportsPlaylistWrite = newSupportsPlaylist;
@@ -1406,22 +1403,12 @@ export class BasketSidebar {
 
         // Build delta request params. Each item carries its originating serverId so
         // the daemon can route the download to the correct provider (AC27).
-        const serverIdById = new Map<string, string | undefined>();
-        for (const it of currentItems) {
-            if (!isAutoFillSlotId(it.id)) serverIdById.set(it.id, it.serverId);
-        }
-        // Incremental change detection is best-effort: if the sync token is stale
-        // or the server doesn't support it, fall back to syncing all basket items.
-        let syncItemIds: string[];
-        try {
-            syncItemIds = await this.itemIdsWithIncrementalChanges(manualIds);
-        } catch (e) {
-            console.warn('[Sync] Incremental change detection failed, falling back to full sync:', e);
-            syncItemIds = manualIds;
-        }
-        const syncItems = syncItemIds.map(id => ({
-            id,
-            serverId: serverIdById.get(id) ?? this.currentServerId ?? undefined,
+        // Preparation resolves the current selections and auto-fill sources afresh.
+        // Library change events must not become manual selections: a Subsonic
+        // fallback can report thousands of unrelated songs and bypass auto-fill.
+        const syncItems = currentItems.filter(it => !isAutoFillSlotId(it.id)).map(it => ({
+            id: it.id,
+            serverId: it.serverId ?? this.currentServerId ?? undefined,
         }));
         const deltaParams: Record<string, unknown> = {
             itemIds: syncItems,
@@ -1599,42 +1586,6 @@ export class BasketSidebar {
             }, { once: true });
             customElements.whenDefined('sl-dialog').then(() => dialog.show());
         });
-    }
-
-    private isSubsonicServer(): boolean {
-        return this.serverType === 'subsonic' || this.serverType === 'openSubsonic';
-    }
-
-    private syncTokenStorageKey(): string | null {
-        return this.lastHydratedDeviceId
-            ? `hifimule-subsonic-sync-token:${this.lastHydratedDeviceId}`
-            : null;
-    }
-
-    private async itemIdsWithIncrementalChanges(manualIds: string[]): Promise<string[]> {
-        if (!this.isSubsonicServer()) return manualIds;
-        const key = this.syncTokenStorageKey();
-        if (!key) return manualIds;
-        const syncToken = localStorage.getItem(key);
-        if (!syncToken) return manualIds;
-
-        const changes = await rpcCall('sync_detect_changes', { syncToken }) as Array<{
-            id?: string;
-            itemType?: string;
-            changeType?: string;
-        }>;
-        const merged = new Set(manualIds);
-        for (const change of changes) {
-            if (
-                change.itemType === 'song'
-                && (change.changeType === 'created' || change.changeType === 'updated')
-                && typeof change.id === 'string'
-                && change.id.length > 0
-            ) {
-                merged.add(change.id);
-            }
-        }
-        return Array.from(merged);
     }
 
     private startPolling() {
@@ -1980,11 +1931,6 @@ export class BasketSidebar {
         this.syncErrorMessages = null;
         this.syncPreviewCleanupDevicePath = null;
         this.etaText = t('basket.sync.calculating');
-        const tokenKey = this.syncTokenStorageKey();
-        if (this.isSubsonicServer() && tokenKey) {
-            localStorage.setItem(tokenKey, Date.now().toString());
-        }
-
         // Reset dirty if current items match snapshot (no mid-sync changes)
         const currentIds = basketStore.getItems().filter(i => !isAutoFillSlotId(i.id)).map(i => i.id).sort();
         if (JSON.stringify(currentIds) === JSON.stringify(this.syncSnapshotIds)) {

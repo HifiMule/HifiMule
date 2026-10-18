@@ -18,7 +18,7 @@ pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
 const MAX_FILE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB hard cap
 const MAX_PROVIDER_STAGING_COMPONENT_CHARS: usize = 80;
 #[cfg(test)]
-const PROVIDER_READY_QUEUE_MAX_TRACKS: usize = 2;
+const PROVIDER_READY_QUEUE_MAX_TRACKS: usize = 8;
 
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)

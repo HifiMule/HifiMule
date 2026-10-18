@@ -16,7 +16,7 @@ impl Default for SyncPerformance {
     fn default() -> Self {
         Self {
             copy_buffer_bytes: 1024 * 1024,
-            staging_max_tracks: 2,
+            staging_max_tracks: 8,
             staging_max_bytes: 2048 * 1024 * 1024,
             checkpoint_track_updates: 1000,
             checkpoint_interval: Duration::from_secs(600),
@@ -68,7 +68,7 @@ impl SyncPerformance {
                 .checked_mul(1024)
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(defaults.copy_buffer_bytes),
-            staging_max_tracks: field("staging_max_tracks", 1, 32, 2) as usize,
+            staging_max_tracks: field("staging_max_tracks", 1, 32,8) as usize,
             staging_max_bytes: mib
                 .checked_mul(1024 * 1024)
                 .unwrap_or(defaults.staging_max_bytes),
