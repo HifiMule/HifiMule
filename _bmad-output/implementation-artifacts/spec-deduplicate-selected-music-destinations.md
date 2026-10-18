@@ -76,6 +76,8 @@ Use `rtk node scripts/build-daemon.mjs test -p hifimule-daemon sync::tests -- --
 
 Final destination coalescing occurs after source staging, so duplicate candidates can still incur download/staging work and its existing failures. Preparation estimates remain conservative and can show the existing overridable UI capacity confirmation or reduce autofill budget. Daemon execution has no aggregate-estimate rejection; its actual destination-space check occurs after duplicate skipping. Transport atomicity guarantees are unchanged; no hardware MTP validation was performed. Independent review and the read-only source investigation are tracked separately by the parent workflow.
 
+2026-10-18 follow-up: `spec-avoid-repeated-duplicate-music-downloads.md` addresses the download/staging limitation with an early writer-owned reuse decision. Deterministic destinations are checked before audio URL resolution; uncertain output formats retain response validation and are checked before full staging. The one-file policy and durable ownership model above remain unchanged.
+
 ## Independent Review Patches
 
 - Coalesced ID changes checkpoint removal of the superseded ID instead of leaving stale duplicate ownership.

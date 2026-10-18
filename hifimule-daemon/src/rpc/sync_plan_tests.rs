@@ -1118,7 +1118,7 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
         let audio = include_bytes!("../../tests/fixtures/generated-seek-mp3.mp3");
         let download = server.mock("GET", "/rest/download.view")
             .match_query(mockito::Matcher::Any).with_status(200)
-            .with_header("content-type", "audio/mpeg").with_body(audio).expect(2)
+            .with_header("content-type", "audio/mpeg").with_body(audio).expect(1)
             .create_async().await;
         let provider = crate::providers::subsonic::SubsonicProvider::from_stored_config(
             ProviderCredentials { server_url: server.url(), credential: CredentialKind::Password {
@@ -1140,6 +1140,7 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
                 {"jellyfinId":"track-2","name":"The Sign (radio edit)","album":"The Sign","artist":"Ace of Base","trackNumber":1,"sizeBytes":100,"providerSuffix":"mp3","providerContentType":"audio/mpeg"}
             ], "deletes":[],"idChanges":[],"unchanged":0,"playlists":[]
         })).unwrap();
+        let repeat_add = delta.adds[1].clone();
         let summary = finish_sync_delta(&state, delta, &manifest, &json!({"prepared":true,"force":force})).await.unwrap();
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"unrecognized old audio");
         assert!(state.device_manager.get_current_device().await.unwrap().synced_items.is_empty());
@@ -1160,6 +1161,27 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
         assert!(manifest.synced_items.iter().all(|i| i.local_path != format!("{folder}/unrelated.mp3")));
         let durable: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(&tokio::fs::read(root.path().join(".hifimule.json.zst")).await.unwrap()).unwrap();
         assert_eq!(durable.synced_items.len(), 1);
+        // The alternate source ID remains an addition on the next normal plan,
+        // but its resident destination must be reused without another request.
+        let repeat_delta = crate::sync::SyncDelta {
+            adds: vec![repeat_add], deletes: vec![], id_changes: vec![], unchanged: 1,
+            playlists: vec![], provenance_updates: Default::default(), blocked: vec![],
+            pity_fired_servers: vec![],
+        };
+        let repeat_summary = finish_sync_delta(&state, repeat_delta, &manifest, &json!({"prepared":true})).await.unwrap();
+        let repeat_started = handle_sync_execute(&state, Some(json!({"planId":repeat_summary["planId"]}))).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while state.sync_operation_manager.has_active_operation().await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let repeat_operation = state.sync_operation_manager.get_operation(repeat_started["operationId"].as_str().unwrap()).await.unwrap();
+        assert_eq!(repeat_operation.status, crate::sync::SyncStatus::Complete, "{:?}", repeat_operation.errors);
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), audio);
+        let repeat_manifest = state.device_manager.get_current_device().await.unwrap();
+        assert_eq!(repeat_manifest.synced_items.len(), 1);
+        assert_eq!(repeat_manifest.synced_items[0].jellyfin_id, manifest.synced_items[0].jellyfin_id);
+        assert_eq!(repeat_operation.bytes_transferred, 0);
         download.assert_async().await;
     }
 }
