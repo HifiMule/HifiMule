@@ -1389,7 +1389,7 @@ export class BasketSidebar {
         // Check daemon for a sync started outside this window (e.g. auto-sync on connect).
         // If one is already running, attach to it instead of starting a new one.
         try {
-            if (await this.attachToRunningSync()) return;
+            if (await this.attachToRunningSync(true)) return;
         } catch {
             // Ignore — if daemon state can't be fetched, let the sync attempt proceed and
             // the server-side guard will reject it if a concurrent sync is truly running.
@@ -1521,11 +1521,12 @@ export class BasketSidebar {
         }
     }
 
-    private async attachToRunningSync(): Promise<boolean> {
+    private async attachToRunningSync(logSyncStart = false): Promise<boolean> {
         while (!this.isDestroyed) {
             let daemonState: any;
             try {
-                daemonState = await rpcCall('get_daemon_state') as any;
+                daemonState = await rpcCall('get_daemon_state', logSyncStart ? { syncStart: true } : undefined) as any;
+                logSyncStart = false;
             } catch {
                 return false;
             }

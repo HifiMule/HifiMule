@@ -104,3 +104,28 @@ test('a rejected page request after Continue or Cancel cannot repaint the closed
         assert.equal(dialog.removed, true);
     }
 });
+
+
+test('sync click logs its first blocked state check while repeat and recovery polling stay quiet', async () => {
+    const calls = [];
+    let releaseFirst;
+    const firstResponse = new Promise(resolve => { releaseFirst = resolve; });
+    const rpcCall = async (method, params) => {
+        calls.push({ method, params });
+        if (calls.length === 1) return firstResponse;
+        return { activeOperationId: 'already-running' };
+    };
+    const window = { setTimeout: resolve => resolve() };
+    const { BasketSidebar } = new Function('rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'window', `${script}\nreturn { BasketSidebar };`)(rpcCall, { getItems: () => [] }, () => false, key => key, window);
+    const sidebar = Object.create(BasketSidebar.prototype);
+    Object.assign(sidebar, { isSyncing: false, isDestroyed: false, render() {}, startPolling() {} });
+    const starting = sidebar.handleStartSync();
+    assert.deepEqual(calls, [{ method: 'get_daemon_state', params: { syncStart: true } }]);
+    assert.equal(sidebar.currentOperationId, null);
+    releaseFirst({ syncPipelineActive: true });
+    await starting;
+    assert.equal(sidebar.currentOperationId, 'already-running');
+    assert.deepEqual(calls[1], { method: 'get_daemon_state', params: undefined });
+    await sidebar.attachToRunningSync();
+    assert.deepEqual(calls[2], { method: 'get_daemon_state', params: undefined });
+});

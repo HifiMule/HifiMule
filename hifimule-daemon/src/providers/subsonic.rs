@@ -84,6 +84,9 @@ impl SubsonicProvider {
     }
 
     async fn full_song_dump_changes(&self) -> Result<Vec<ChangeEvent>, ProviderError> {
+
+        let mut lifecycle = crate::sync_logging::Step::current("subsonic_full_song_dump");
+        let result: Result<Vec<ChangeEvent>, ProviderError> = async {
         let mut changes = Vec::new();
         let mut offset = 0usize;
         let mut pages_fetched = 0usize;
@@ -107,12 +110,19 @@ impl SubsonicProvider {
             offset += SONG_CHANGE_PAGE_SIZE;
         }
         Ok(changes)
+        }.await;
+        lifecycle.finish(if result.is_err() { "failed" } else { "success" }, result.as_ref().map_or(0, Vec::len));
+        result
+
     }
 
     async fn album_fallback_changes(
         &self,
         context: &ProviderChangeContext,
     ) -> Result<Vec<ChangeEvent>, ProviderError> {
+
+        let mut lifecycle = crate::sync_logging::Step::current("subsonic_album_fallback");
+        let result: Result<Vec<ChangeEvent>, ProviderError> = async {
         let mut by_album: HashMap<String, Vec<&ProviderSyncedSong>> = HashMap::new();
         for song in &context.synced_songs {
             if let Some(album_id) = song.album_id.as_deref().filter(|id| !id.is_empty()) {
@@ -137,6 +147,10 @@ impl SubsonicProvider {
             ));
         }
         Ok(changes)
+        }.await;
+        lifecycle.finish(if result.is_err() { "failed" } else { "success" }, result.as_ref().map_or(0, Vec::len));
+        result
+
     }
 
     fn change_metadata_from_version(version: Option<&str>) -> Option<ProviderChangeMetadata> {
@@ -1563,12 +1577,19 @@ impl SubsonicClient {
         &self,
         if_modified_since: Option<i64>,
     ) -> Result<IndexesBody, ProviderError> {
+
+        let mut lifecycle = crate::sync_logging::Step::current("subsonic_indexes");
+        let result: Result<IndexesBody, ProviderError> = async {
         let if_modified_since = if_modified_since.map(|value| value.to_string());
         let mut params = Vec::new();
         if let Some(value) = if_modified_since.as_deref() {
             params.push(("ifModifiedSince", value));
         }
         self.get("getIndexes", &params).await
+        }.await;
+        lifecycle.finish(if result.is_err() { "failed" } else { "success" }, result.as_ref().map_or(0, |body| body.indexes.index.iter().map(|index| index.artist.len()).sum()));
+        result
+
     }
 
     async fn get_genres(&self) -> Result<GenresBody, ProviderError> {

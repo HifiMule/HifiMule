@@ -126,3 +126,7 @@ Bulk stages may complete with zero counts. Optional work that is never entered i
 
 - Explain fields, unfinished stages, and overlapping wall-clock measurements.
   [sync-performance.md:62](../../docs/sync-performance.md#L62)
+
+## Follow-up: pre-preparation coverage
+
+The user identified missing logs before preparation. The UI first checks for an existing pipeline and may then request incremental changes; the original tests stubbed both operations. Added a one-time `sync_start_check` on the initial state request, plus incremental detection and Subsonic bulk-stage timing. Repeated state polling stays quiet. Added blocked state/provider regressions; 6 lifecycle fixtures, 2 detection tests, 11 Subsonic tests, 7 UI contract tests and UI build passed. See `investigations/preparation-start-log-gap-investigation.md` for the confirmed call chain.

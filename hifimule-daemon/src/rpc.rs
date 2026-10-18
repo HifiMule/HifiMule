@@ -4341,6 +4341,29 @@ async fn handle_get_daemon_state_params(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
+
+    if params.as_ref().and_then(|p| p.get("syncStart")).and_then(Value::as_bool) != Some(true) {
+        return handle_get_daemon_state_snapshot(state, params).await;
+    }
+    let run = crate::sync_logging::Run::current();
+    run.scope(async {
+        let mut lifecycle = crate::sync_logging::Step::current("sync_start_check");
+        let result = handle_get_daemon_state_snapshot(state, params).await;
+        let outcome = match &result {
+            Err(_) => "failed",
+            Ok(snapshot) if snapshot.get("activeOperationId").and_then(Value::as_str).is_some() => "attached",
+            Ok(snapshot) if snapshot.get("syncPipelineActive").and_then(Value::as_bool) == Some(true) => "waiting",
+            Ok(_) => "ready",
+        };
+        lifecycle.finish(outcome, 0);
+        result
+    }).await
+}
+
+async fn handle_get_daemon_state_snapshot(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
     let include_manifest = params
         .as_ref()
         .and_then(|p| p.get("includeManifest"))
@@ -8298,6 +8321,13 @@ async fn handle_sync_detect_changes(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
+
+    let run = crate::sync_logging::Run::current();
+    run.scope(async {
+        let mut lifecycle = crate::sync_logging::Step::current("incremental_change_detection");
+        let mut phases = crate::sync_logging::Phases::default();
+        let result: Result<Value, JsonRpcError> = async {
+    phases.next("target_validation");
     let params = params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing params".to_string(),
@@ -8332,7 +8362,9 @@ async fn handle_sync_detect_changes(
             data: None,
         })?;
 
+    phases.next("provider_resolution");
     let provider = require_provider(state).await?;
+    phases.next("provider_change_fetch");
 
     let context = manifest.provider_change_context();
     let changes = match provider
@@ -8345,6 +8377,7 @@ async fn handle_sync_detect_changes(
         // an empty delta — the UI will fall back to a full-basket sync, which
         // is always safe.  Any other error is a genuine failure worth surfacing.
         Err(crate::providers::ProviderError::NotFound { .. }) => {
+            phases.finish("fallback", 0);
             eprintln!(
                 "[SyncDetect] Sync token stale or not found — returning empty changes (full sync required)"
             );
@@ -8359,6 +8392,8 @@ async fn handle_sync_detect_changes(
         }
     };
 
+    phases.finish("success", changes.len());
+    phases.next("change_enrichment");
     // Enrich each change with metadata parsed from the Subsonic version string
     // ("subsonic:{id}|{size}|{contentType}|{suffix}"), so callers can populate
     // provider_content_type/provider_suffix in SyncAddItems without extra API calls.
@@ -8417,7 +8452,16 @@ async fn handle_sync_detect_changes(
         })
         .collect();
 
+    phases.finish("success", enriched.len());
     Ok(serde_json::to_value(enriched).unwrap())
+        }.await;
+        let outcome = if result.is_err() { "failed" } else { "success" };
+        let count = result.as_ref().ok().and_then(Value::as_array).map_or(0, Vec::len);
+        phases.finish(outcome, count);
+        lifecycle.finish(outcome, count);
+        result
+    }).await
+
 }
 
 fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest) {
@@ -17222,6 +17266,8 @@ mod tests {
     // --- Fake provider for browse handler tests ---
 
     struct FakeBrowseProvider {
+        change_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+        change_outcome: &'static str,
         album_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
         modes: Vec<crate::providers::BrowseMode>,
         genres: Vec<crate::domain::models::Genre>,
@@ -17240,6 +17286,8 @@ mod tests {
             genres: Vec<crate::domain::models::Genre>,
         ) -> Arc<Self> {
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes,
                 genres,
@@ -17260,6 +17308,8 @@ mod tests {
             let mut genre_tracks = HashMap::new();
             genre_tracks.insert(genre_id.to_string(), tracks);
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes: vec![crate::providers::BrowseMode::Genres],
                 genres: vec![],
@@ -17277,6 +17327,8 @@ mod tests {
             let mut songs = HashMap::new();
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes: vec![],
                 genres: vec![],
@@ -17299,6 +17351,8 @@ mod tests {
             let mut songs = HashMap::new();
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes: vec![],
                 genres: vec![],
@@ -17319,6 +17373,8 @@ mod tests {
                 .map(|album| (album.album.id.clone(), album))
                 .collect();
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes: vec![crate::providers::BrowseMode::Authors],
                 genres: vec![],
@@ -17334,6 +17390,8 @@ mod tests {
 
         fn with_song_auth_error(message: &str) -> Arc<Self> {
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes: vec![],
                 genres: vec![],
@@ -17349,6 +17407,8 @@ mod tests {
 
         fn with_tracks(tracks: Vec<crate::domain::models::Song>) -> Arc<Self> {
             Arc::new(Self {
+                change_gate: None,
+                change_outcome: "success",
                 album_gate: None,
                 modes: vec![crate::providers::BrowseMode::Tracks],
                 genres: vec![],
@@ -17627,7 +17687,14 @@ mod tests {
             _: Option<&str>,
             _: &crate::providers::ProviderChangeContext,
         ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
-            unimplemented!()
+            let gate = self.change_gate.as_ref().expect("change detection fixture configured");
+            gate.0.notify_one();
+            gate.1.notified().await;
+            match self.change_outcome {
+                "failed" => Err(ProviderError::Auth("https://example.invalid/?token=fixture-secret".into())),
+                "stale" => Err(ProviderError::NotFound { item_type: "sync-token".into(), id: "fixture-secret".into() }),
+                _ => Ok(vec![]),
+            }
         }
         async fn scrobble(
             &self,
@@ -18264,6 +18331,78 @@ mod tests {
         // AC11: provider auth failures map to ERR_UNAUTHORIZED so the UI can re-auth.
         assert_eq!(err.code, ERR_UNAUTHORIZED);
         assert_eq!(err.message, "auth failed");
+    }
+
+    #[tokio::test]
+    async fn sync_step_start_check_logs_before_blocked_snapshot_and_ordinary_polls_stay_quiet() {
+        for scenario in ["ready", "waiting", "attached"] {
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let _pipeline = if scenario == "waiting" { state.sync_operation_manager.try_start_pipeline() } else { None };
+            if scenario == "attached" { state.sync_operation_manager.create_operation("fixture-operation".into(), 0).await; }
+            let snapshot_lock = state.server_manager.write().await;
+            let run = crate::sync_logging::Run::new();
+            let future = run.scope(handle_get_daemon_state_params(&state, Some(json!({"syncStart":true}))));
+            tokio::pin!(future);
+            tokio::select! {
+                result = &mut future => panic!("snapshot lock did not block: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+            }
+            let events = run.events();
+            assert_eq!(events.len(), 1);
+            assert!(events[0].contains("event=start") && events[0].ends_with("stage=sync_start_check"));
+            drop(snapshot_lock);
+            future.await.unwrap();
+            let events = run.events();
+            assert_eq!(events.len(), 2);
+            assert!(events[1].contains(&format!("outcome={scenario}")), "{}", events[1]);
+            run.scope(handle_get_daemon_state_params(&state, None)).await.unwrap();
+            assert_eq!(run.events().len(), 2, "ordinary polling must not add lifecycle logs");
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_step_change_detection_logs_before_provider_and_pairs_fallback_and_failure() {
+        let _lock = credential_test_lock();
+        let config = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(config.path().join("missing.json"));
+        for scenario in ["success", "failed", "stale"] {
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let root = tempfile::tempdir().unwrap();
+            let manifest = crate::device::DeviceManifest { device_id: "detect-log".into(), ..Default::default() };
+            state.device_manager.handle_device_detected(root.path().into(), manifest,
+                Arc::new(crate::device_io::MscBackend::new(root.path().into()))).await.unwrap();
+            let gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+            let mut provider = FakeBrowseProvider::new(vec![], vec![]);
+            let fixture = Arc::get_mut(&mut provider).unwrap();
+            fixture.change_gate = Some(gate.clone());
+            fixture.change_outcome = scenario;
+            state.server_manager.write().await.set_test_provider(provider);
+            let run = crate::sync_logging::Run::new();
+            let future = run.scope(handle_sync_detect_changes(&state, Some(json!({"syncToken":"fixture-secret"}))));
+            tokio::pin!(future);
+            tokio::select! {
+                _ = gate.0.notified() => {},
+                result = &mut future => panic!("finished before change provider gate: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("change provider not reached"),
+            }
+            let events = run.events();
+            for stage in ["incremental_change_detection", "provider_change_fetch"] {
+                assert!(events.iter().any(|e|e.contains("event=start") && e.ends_with(&format!("stage={stage}"))));
+                assert!(!events.iter().any(|e|e.contains("event=end") && e.contains(&format!("stage={stage} "))));
+            }
+            gate.1.notify_one();
+            let result = future.await;
+            if scenario == "failed" { assert!(result.is_err()); }
+            else { assert_eq!(result.unwrap(), json!([])); }
+            let events = run.events();
+            assert_eq!(events.iter().filter(|e|e.contains("event=start")).count(), events.iter().filter(|e|e.contains("event=end")).count());
+            let expected = if scenario == "failed" { "failed" } else { "success" };
+            assert!(events.iter().any(|e|e.contains("stage=incremental_change_detection ") && e.contains(&format!("outcome={expected}"))));
+            if scenario == "stale" {
+                assert!(events.iter().any(|e|e.contains("stage=provider_change_fetch ") && e.contains("outcome=fallback")));
+            }
+            assert!(!events.iter().any(|e|e.contains("fixture-secret") || e.contains("example.invalid") || e.contains("outcome=interrupted")));
+        }
     }
 
     #[tokio::test]
