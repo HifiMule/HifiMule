@@ -769,7 +769,8 @@ async fn rpc_proxy(
         .json(&body);
     if method == "daemon.health" {
         request = request.timeout(hifimule_lifecycle::HEALTH_TIMEOUT);
-    } else if method == "get_daemon_state" {
+    } else if method == "get_daemon_state" || method == "sync_get_operation_status" {
+        // Polling requests must settle so single-flight retries can recover.
         request = request.timeout(std::time::Duration::from_secs(15));
     }
     let response = request

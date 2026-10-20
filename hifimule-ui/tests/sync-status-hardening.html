@@ -40,9 +40,10 @@ const live=sidebar.syncAnnouncement;
 const op={status:'running',filesCompleted:1,filesTotal:10,totalBytes:1000,bytesTransferred:100,startedAt:new Date().toISOString(),currentFile:'Album/Track.flac',errors:[]};
 sidebar.currentOperation=op;
 sidebar.renderSyncProgress();
-let tick;
-const originalInterval=window.setInterval,originalClear=window.clearInterval;
-window.setInterval=callback=>{tick=callback;return 999999;};window.clearInterval=()=>{};
+let tick,now=performance.now();
+const originalInterval=window.setInterval,originalClear=window.clearInterval,originalNow=Object.getOwnPropertyDescriptor(performance,'now');
+Object.defineProperty(performance,'now',{configurable:true,value:()=>now});
+window.setInterval=callback=>{tick=async(milliseconds=500)=>{now+=milliseconds;await callback();};return 999999;};window.clearInterval=()=>{};
 try {
  const cancel=basket.querySelector('#cancel-sync-btn');await cancel.updateComplete;cancel.focus();
  response=()=>{throw new Error('Fixture connection lost');};
@@ -53,13 +54,22 @@ try {
  check(live.isConnected&&live.textContent===t('basket.sync.status_unavailable_help'),'Persistent live region announces lost monitoring');
  let resolve;
  response=()=>new Promise(r=>resolve=r);
- const retry=basket.querySelector('#sync-status-retry');retry.click();
- const before=requests,pending=tick();await tick();
+ const retry=basket.querySelector('#sync-status-retry'),before=requests;retry.click();
+ check(requests===before+1,'Check state bypasses backoff immediately');
+ await tick();await tick();
  check(requests===before+1,'Status checks cannot overlap while a request is pending');
- resolve(op);await pending;await settle();
+ resolve(op);await settle();
  check(!sidebar.syncMonitoringUnavailable&&basket.querySelector('#sync-progress-bar'),'Retry reconciles the same operation and restores progress');
  check(document.activeElement===basket.querySelector('#cancel-sync-btn'),'Recovery preserves focus on the restored controls');
  check(sidebar.syncAnnouncement===live&&live.textContent===t('basket.sync.status_restored'),'Recovery reuses the mounted live region');
+ response=()=>{throw new Error('Fixture connection lost again');};
+ await tick();await tick();await tick();await settle();
+ const automaticRetry=basket.querySelector('#sync-status-retry'),beforeRecovery=requests;
+ response=()=>op;await tick(1500);await settle();
+ check(requests===beforeRecovery&&basket.querySelector('#sync-status-retry')===automaticRetry,'Background backoff keeps the warning and focused control mounted');
+ await tick();await settle();
+ check(!sidebar.syncMonitoringUnavailable&&basket.querySelector('#sync-progress-bar'),'Monitoring recovers automatically after backoff');
+ check(document.activeElement===basket.querySelector('#cancel-sync-btn')&&sidebar.syncAnnouncement===live&&live.textContent===t('basket.sync.status_restored'),'Automatic recovery preserves keyboard focus and live announcements');
  response=()=>({...op,status:'complete',filesCompleted:10});await tick();await settle();
  check(live.textContent.includes(t('basket.sync.complete')),'Completion is announced');
  check(document.activeElement===basket.querySelector('#sync-done-btn'),'Completion restores focus to Done');
@@ -72,9 +82,9 @@ try {
  resolve({...op,status:'failed',errors:[]});await stale;
  check(sidebar.currentOperationId==='operation-2'&&sidebar.isSyncing,'Stopped polling ignores late responses');
  sidebar.syncMonitoringUnavailable=true;sidebar.renderSyncUnavailable();await settle();
- response=()=>{throw new Error('Still offline');};basket.querySelector('#sync-status-retry').click();await tick();await tick();await tick();
- check(basket.querySelector('#sync-status-retry').getAttribute('aria-busy') !== 'true','A failed status retry remains retryable');
-} finally {window.setInterval=originalInterval;window.clearInterval=originalClear;}
+ response=()=>{throw new Error('Still offline');};sidebar.startPolling();basket.querySelector('#sync-status-retry').click();await settle();
+ check(basket.querySelector('#sync-status-retry').getAttribute('aria-busy') !== 'true','One failed status retry promptly re-enables Check state');
+} finally {sidebar.stopPolling();window.setInterval=originalInterval;window.clearInterval=originalClear;if(originalNow)Object.defineProperty(performance,'now',originalNow);else delete performance.now;}
 const card=MediaCard.create({id:'album',name:'Fixture album',type:'MusicAlbum'},'items',true,()=>{},false);
 document.querySelector('#cards').append(card);
 check(card.querySelector('.card-open').textContent.includes(t('library.media.synced')),'Synced status belongs to the card button accessible name');

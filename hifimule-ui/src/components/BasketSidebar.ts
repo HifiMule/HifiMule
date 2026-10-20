@@ -289,6 +289,7 @@ export class BasketSidebar {
     private focusedDestinationKey?: string;
     private syncMonitoringUnavailable = false;
     private syncPollRevision = 0;
+    private requestSyncStatusCheck: (() => Promise<void>) | null = null;
     private syncAnnouncement?: HTMLElement;
 
     private ensureSyncAnnouncement(): HTMLElement {
@@ -331,13 +332,13 @@ export class BasketSidebar {
             </div>`;
         this.container.querySelector('#sync-status-retry')?.addEventListener('click', () => {
             const button = this.container.querySelector('#sync-status-retry') as any;
-            if (button.getAttribute('aria-busy') === 'true') return;
+            if (button.getAttribute('aria-busy') === 'true' || !this.requestSyncStatusCheck) return;
             // Keep the focused button mounted and focusable during reconciliation.
             button.setAttribute('aria-busy', 'true');
             button.setAttribute('aria-disabled', 'true');
             button.textContent = t('basket.sync.checking_status');
             this.announceSync(t('basket.sync.checking_status'));
-            this.startPolling();
+            void this.requestSyncStatusCheck();
         });
         this.announceSync(t('basket.sync.status_unavailable_help'));
         this.restoreSyncFocus(focused, '#sync-status-retry');
@@ -1663,20 +1664,26 @@ export class BasketSidebar {
 
     private startPolling() {
         this.stopPolling();
+        const operationId = this.currentOperationId;
+        if (this.isDestroyed || !operationId) return;
         const revision = this.syncPollRevision;
+        const current = () => !this.isDestroyed && revision === this.syncPollRevision && operationId === this.currentOperationId;
         if (!this.syncMonitoringUnavailable) this.announceSync('');
         let consecutiveFailures = 0;
+        let nextAttemptAt = 0;
         let inFlight = false;
-        this.pollingInterval = window.setInterval(async () => {
-            if (inFlight || this.isDestroyed) return;
-            const operationId = this.currentOperationId;
-            if (!operationId) { this.stopPolling(); return; }
-            const current = () => !this.isDestroyed && revision === this.syncPollRevision && operationId === this.currentOperationId;
+        const checkStatus = async (immediate = false) => {
+            if (!current()) {
+                if (revision === this.syncPollRevision) this.stopPolling();
+                return;
+            }
+            if (inFlight || (!immediate && performance.now() < nextAttemptAt)) return;
             inFlight = true;
             try {
                 const op = await rpcCall('sync_get_operation_status', { operationId }) as SyncOperation;
                 if (!current()) return;
                 consecutiveFailures = 0;
+                nextAttemptAt = 0;
                 const recovered = this.syncMonitoringUnavailable;
                 this.syncMonitoringUnavailable = false;
                 this.currentOperation = op;
@@ -1696,8 +1703,10 @@ export class BasketSidebar {
             } catch (err) {
                 if (!current()) return;
                 console.error('[Sync] Progress poll failed:', err);
-                if (++consecutiveFailures >= 3) {
-                    this.stopPolling();
+                consecutiveFailures++;
+                if (consecutiveFailures >= 3 || this.syncMonitoringUnavailable) {
+                    const retryDelay = Math.min(2000 * 2 ** Math.min(Math.max(consecutiveFailures - 3, 0), 4), 30000);
+                    nextAttemptAt = performance.now() + retryDelay;
                     // A lost connection is not evidence that device writes stopped.
                     this.syncMonitoringUnavailable = true;
                     this.render();
@@ -1712,11 +1721,14 @@ export class BasketSidebar {
             } finally {
                 inFlight = false;
             }
-        }, 500);
+        };
+        this.requestSyncStatusCheck = () => checkStatus(true);
+        this.pollingInterval = window.setInterval(() => checkStatus(), 500);
     }
 
     private stopPolling() {
         this.syncPollRevision = (this.syncPollRevision ?? 0) + 1;
+        this.requestSyncStatusCheck = null;
         if (this.pollingInterval !== null) {
             clearInterval(this.pollingInterval);
             this.pollingInterval = null;
