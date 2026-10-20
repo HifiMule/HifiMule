@@ -34,6 +34,7 @@ impl Progress {
 }
 #[derive(Clone, Debug)]
 pub struct Tags {
+    pub source_audio: crate::domain::models::SourceAudioProperties,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -134,6 +135,14 @@ pub async fn probe(io: &dyn DeviceIO, file: &FileEntry, progress: Arc<Progress>)
         };
         let number = |s: String| s.split('/').next().and_then(|s| s.parse::<u32>().ok());
         Ok(Tags {
+            source_audio: crate::domain::models::SourceAudioProperties {
+                sample_rate_hz: Some(decoder.rate()).filter(|v| *v > 0),
+                channels: Some(u32::from(decoder.channels())).filter(|v| *v > 0),
+                // Sample storage format may be 32 bits for a 24-bit FLAC;
+                // only the stream's actual raw precision is a depth constraint.
+                bit_depth: u32::try_from(unsafe { (*stream.parameters().as_ptr()).bits_per_raw_sample }).ok().filter(|v| *v > 0),
+                ..Default::default()
+            },
             title: tag("title"),
             artist: tag("artist"),
             album: tag("album"),
@@ -181,12 +190,13 @@ pub async fn scan(
         };
         progress.scanned.fetch_add(1, Ordering::Relaxed);
         let ext = file.path.rsplit('.').next().unwrap_or("");
-        if !crate::sync::scanned_audio_compatible(
+        if !crate::sync::scanned_audio_compatible_with_properties(
             profile,
             io.preferred_audio_container(),
             ext,
             &tags.codec,
             tags.bitrate,
+            tags.source_audio,
         ) {
             result.incompatible += 1;
             continue;
@@ -516,12 +526,13 @@ async fn reconcile_enabled(
             },
             Err(error) => return Err(error),
         };
-        if !crate::sync::scanned_audio_compatible(
+        if !crate::sync::scanned_audio_compatible_with_properties(
             profile,
             io.preferred_audio_container(),
             file.path.rsplit('.').next().unwrap_or(""),
             &tags.codec,
             tags.bitrate,
+            tags.source_audio,
         ) {
             summary.incompatible += 1;
             crate::daemon_log!("[Sync] Cannot reuse '{}': encoding is incompatible with selected profile", file.path);
@@ -785,6 +796,7 @@ pub(crate) mod tests {
     }
     fn tags() -> Tags {
         Tags {
+            source_audio: Default::default(),
             title: "Track".into(),
             artist: "Artist".into(),
             album: "Album".into(),
@@ -857,13 +869,13 @@ pub(crate) mod tests {
         s.duration_seconds = 240;
         assert_eq!(
             crate::sync::planned_song_bytes(&s, Some(&p), None),
-            5_998_336
+            5_883_136
         );
         s.suffix = Some("mp3".into());
         s.bitrate_kbps = Some(320);
         assert_eq!(
             crate::sync::planned_song_bytes(&s, Some(&p), None),
-            5_998_336
+            5_883_136
         );
         s.bitrate_kbps = Some(128);
         assert_eq!(
@@ -871,11 +883,13 @@ pub(crate) mod tests {
             50_000_000
         );
         assert_eq!(crate::sync::planned_song_bytes(&s, None, None), 50_000_000);
-        assert!(crate::sync::planned_song_bytes(&s, Some(&p), Some(96)) < 5_998_336);
+        assert!(crate::sync::planned_song_bytes(&s, Some(&p), Some(96)) < 5_883_136);
         s.duration_seconds = 0;
         s.bitrate_kbps = Some(320);
         s.size_bytes = Some(1);
-        assert!(crate::sync::planned_song_bytes(&s, Some(&p), None) > 80_000_000);
+        // One original byte at 320 kbps implies less than one second; round
+        // conservatively to one second instead of reserving an unknown hour.
+        assert_eq!(crate::sync::planned_song_bytes(&s, Some(&p), None), 89_776);
     }
     pub(crate) async fn fixture() -> (tempfile::TempDir, crate::device_io::MscBackend, FileEntry) {
         let root = tempfile::tempdir().unwrap();

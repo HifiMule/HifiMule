@@ -112,7 +112,7 @@ pub struct JellyfinView {
 }
 
 /// A single stream inside a `MediaSource` (audio, video, subtitle, …).
-/// We only need `Type` and `BitRate`; all other fields are ignored.
+/// Audio encoding evidence used by sync compatibility and capacity planning.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaStream {
@@ -121,6 +121,12 @@ pub struct MediaStream {
     /// Bitrate in bps (Jellyfin already reports bps here).
     #[serde(default)]
     pub bit_rate: Option<u32>,
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    #[serde(default)]
+    pub bit_depth: Option<u32>,
+    #[serde(default)]
+    pub channels: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -135,6 +141,34 @@ pub struct MediaSource {
     pub bitrate: Option<u32>,
     #[serde(default)]
     pub media_streams: Option<Vec<MediaStream>>,
+}
+
+impl JellyfinItem {
+    fn audio_stream(&self) -> Option<&MediaStream> {
+        self.media_sources.as_ref()?.first()?.media_streams.as_ref()?
+            .iter().find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+    }
+
+    /// Audio bitrate excludes cover/container overhead, which is not an audio quality upgrade.
+    pub fn audio_bitrate_bps(&self) -> Option<u32> {
+        self.audio_stream().and_then(|stream| stream.bit_rate).filter(|value| *value > 0)
+            .or_else(|| self.media_sources.as_ref()?.first()?.bitrate.filter(|value| *value > 0))
+            .or(self.bitrate.filter(|value| *value > 0))
+    }
+
+    pub fn source_audio_properties(&self) -> crate::domain::models::SourceAudioProperties {
+        let stream = self.audio_stream();
+        let source = self.media_sources.as_ref().and_then(|sources| sources.first());
+        crate::domain::models::SourceAudioProperties {
+            transcode_limits_supported: true,
+            sample_rate_hz: stream.and_then(|s| s.sample_rate).filter(|v| *v > 0),
+            bit_depth: stream.and_then(|s| s.bit_depth).filter(|v| *v > 0),
+            channels: stream.and_then(|s| s.channels).filter(|v| *v > 0),
+            original_size_bytes: source.and_then(|s| s.size).and_then(|v| u64::try_from(v).ok()).filter(|v| *v > 0),
+            audio_bitrate_bps: self.audio_bitrate_bps(),
+            average_bitrate_bps: source.and_then(|s| s.bitrate).or(self.bitrate).filter(|v| *v > 0).or_else(|| self.audio_bitrate_bps()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1097,29 +1131,45 @@ impl JellyfinClient {
         // PlaybackInfo gave no usable URL. If the profile targets a specific container,
         // use the Jellyfin audio stream endpoint to force server-side transcoding rather
         // than silently serving the original file via /Download.
-        if let Some(container) = device_profile["TranscodingProfiles"]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|p| p["Container"].as_str())
-        {
-            let bitrate_kbps = device_profile["MusicStreamingTranscodingBitrate"]
-                .as_u64()
-                .unwrap_or(320000)
-                / 1000;
-            let codec = device_profile["TranscodingProfiles"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|p| p["AudioCodec"].as_str())
-                .unwrap_or(container);
-            let url = format!(
-                "{}/Audio/{}/stream.{}?userId={}&audioCodec={}&audioBitRate={}&static=false",
-                base_url.trim_end_matches('/'),
-                item_id,
-                container,
-                user_id,
-                codec,
-                bitrate_kbps,
-            );
+        if let Some(profile) = crate::sync::transcode_profile_from_device_profile(device_profile) {
+            let audio = json["MediaSources"].as_array().and_then(|sources| sources.first())
+                .and_then(|source| source["MediaStreams"].as_array())
+                .and_then(|streams| streams.iter().find(|stream| stream["Type"].as_str() == Some("Audio")));
+            let property = |key: &str| audio.and_then(|stream| stream[key].as_u64())
+                .and_then(|value| u32::try_from(value).ok()).filter(|value| *value > 0);
+            let source = crate::domain::models::SourceAudioProperties {
+                sample_rate_hz: property("SampleRate"), bit_depth: property("BitDepth"),
+                channels: property("Channels"), transcode_limits_supported: true,
+                ..Default::default()
+            };
+            let profile = profile.normalized_for_source(source);
+            let container = profile.container.as_deref().unwrap_or("mp3");
+            let codec = profile.audio_codec.as_deref().unwrap_or(container);
+            let mut url = reqwest::Url::parse(&format!("{}/Audio/{}/stream.{}",
+                base_url.trim_end_matches('/'), item_id, container))?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("userId", user_id).append_pair("audioCodec", codec)
+                    .append_pair("static", "false");
+                // Jellyfin expects bits/s here; Subsonic's maxBitRate uses kbps.
+                if let Some(kbps) = profile.max_bitrate_kbps {
+                    query.append_pair("audioBitRate", &u64::from(kbps).saturating_mul(1000).to_string());
+                }
+                if let Some(mut rate) = profile.max_sample_rate_hz {
+                    if codec.eq_ignore_ascii_case("mp3") {
+                        rate = [8_000,11_025,12_000,16_000,22_050,24_000,32_000,44_100,48_000]
+                            .into_iter().filter(|candidate| *candidate <= rate).next_back().unwrap_or(8_000);
+                    }
+                    query.append_pair("audioSampleRate", &rate.to_string());
+                }
+                if let Some(depth) = profile.max_bit_depth {
+                    query.append_pair("maxAudioBitDepth", &depth.to_string());
+                }
+                if let Some(channels) = profile.max_channels {
+                    query.append_pair("maxAudioChannels", &channels.to_string());
+                }
+            }
+            let url = url.to_string();
             eprintln!(
                 "[StreamUrl] item={} → case 4: forced audio stream endpoint: {}",
                 item_id, url
@@ -3276,5 +3326,74 @@ mod tests {
         assert_eq!(user_id.as_deref(), Some("legacy-user"));
         let creds = CredentialManager::get_server_credential(&id).unwrap();
         assert_eq!(creds.token_or_password, "legacy-tok");
+    }
+}
+
+
+#[cfg(test)]
+mod forced_audio_stream_tests {
+    use super::*;
+    use mockito::{Matcher, Server};
+
+    async fn resolve(profile: serde_json::Value, response: serde_json::Value) -> reqwest::Url {
+        let mut server = Server::new_async().await;
+        let playback = server.mock("POST", "/Items/track/PlaybackInfo")
+            .match_query(Matcher::UrlEncoded("userId".into(), "fixture".into()))
+            .with_status(200).with_header("content-type", "application/json")
+            .with_body(response.to_string()).create_async().await;
+        let (url, transcoded) = JellyfinClient::new()
+            .resolve_stream_url(&server.url(), "fixture-token", "fixture", "track", &profile)
+            .await.unwrap();
+        assert!(transcoded);
+        playback.assert_async().await;
+        reqwest::Url::parse(&url).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forced_stream_uses_bps_and_shared_codec_defaults() {
+        for (fields, expected) in [
+            (serde_json::json!({"MusicStreamingTranscodingBitrate":192000}), "192000"),
+            (serde_json::json!({"MaxStreamingBitrate":256000}), "256000"),
+            (serde_json::json!({}), "320000"),
+        ] {
+            let mut profile = fields;
+            profile["DirectPlayProfiles"] = serde_json::json!([]);
+            profile["TranscodingProfiles"] = serde_json::json!([
+                {"Type":"Video","Container":"mp4"},
+                {"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}
+            ]);
+            let url = resolve(profile, serde_json::json!({"MediaSources":[]})).await;
+            assert_eq!(url.path(), "/Audio/track/stream.mp3");
+            let query: std::collections::HashMap<_,_> = url.query_pairs().collect();
+            assert_eq!(query.get("audioBitRate").map(|value| value.as_ref()), Some(expected));
+            assert_eq!(query.get("audioCodec").map(|value| value.as_ref()), Some("mp3"));
+            assert_eq!(query.get("static").map(|value| value.as_ref()), Some("false"));
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_stream_retains_resolution_limits_without_upsampling_known_source() {
+        let response = serde_json::json!({"MediaSources":[{"SupportsDirectPlay":true,
+            "MediaStreams":[{"Type":"Audio","SampleRate":44100,"BitDepth":16,"Channels":2}]}]});
+        let profile = serde_json::json!({"MaxAudioSampleRate":192000,"MaxAudioBitDepth":24,"MaxAudioChannels":2,
+            "DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        let url = resolve(profile, response).await;
+        let query: std::collections::HashMap<_,_> = url.query_pairs().collect();
+        assert_eq!(query.get("audioSampleRate").map(|value| value.as_ref()), Some("44100"));
+        assert_eq!(query.get("maxAudioBitDepth").map(|value| value.as_ref()), Some("16"));
+        assert_eq!(query.get("maxAudioChannels").map(|value| value.as_ref()), Some("2"));
+        assert!(!query.contains_key("audioBitRate"));
+    }
+
+    #[tokio::test]
+    async fn forced_low_rate_mp3_uses_the_same_codec_ceiling_as_estimation() {
+        let response = serde_json::json!({"MediaSources":[{"SupportsDirectPlay":false,
+            "MediaStreams":[{"Type":"Audio","SampleRate":22050,"Channels":2}]}]});
+        let profile = serde_json::json!({"MusicStreamingTranscodingBitrate":320000,
+            "DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+        let url = resolve(profile, response).await;
+        let query: std::collections::HashMap<_,_> = url.query_pairs().collect();
+        assert_eq!(query.get("audioBitRate").map(|value| value.as_ref()), Some("160000"));
+        assert_eq!(query.get("audioSampleRate").map(|value| value.as_ref()), Some("22050"));
     }
 }

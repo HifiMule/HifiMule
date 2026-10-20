@@ -13,7 +13,8 @@ import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../state/libraryCache';
 import { formatServerIdentity } from '../serverIdentity';
 import type { ServerSummary, PodcastShow } from '../rpc';
-import { plannedSelectionBytes, syncCapacity, type SyncedCapacityItem, type SyncedCapacityTotals } from '../state/syncCapacity';
+import { plannedSelectionSize, selectionSize, syncCapacity, type SelectionSize, type SyncedCapacityItem, type SyncedCapacityTotals } from '../state/syncCapacity';
+import { BasketEstimateCache, basketEstimateKey, type BasketEstimate } from '../state/basketEstimate';
 
 interface StorageInfo {
     totalBytes: number;
@@ -90,7 +91,20 @@ function formatSize(bytes: number): string {
     return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
-function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: number, syncedItems: SyncedCapacityItem[] | SyncedCapacityTotals = []): string {
+function formatReserveSize(bytes: number): string {
+    return bytes > 0 && bytes < 1024 * 1024 ? `${Math.max(1, Math.ceil(bytes / 1024))} KB` : formatSize(bytes);
+}
+
+function renderSizeReserve(size: SelectionSize): string {
+    return size.reserveBytes && size.reserveBytes > 0
+        ? `<div class="basket-size-reserve">${t('basket.size.reserve', { size: formatReserveSize(size.reserveBytes) })}</div>` : '';
+}
+
+function displaySelectionSize(size: SelectionSize): string {
+    return size.expectedBytes === undefined ? t('basket.size.reserved', { size: formatSize(size.selectedBytes) }) : formatSize(size.expectedBytes);
+}
+
+function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: number, syncedItems: SyncedCapacityItem[] | SyncedCapacityTotals = [], size?: SelectionSize): string {
     if (!storageInfo) {
         // No device state (AC #5)
         if (projectedBytes > 0) {
@@ -149,7 +163,9 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     const projectedColor = zone === 'green' ? 'var(--accent)'
         : zone === 'amber' ? 'var(--amber-warn)'
             : 'var(--sl-color-danger-500)';
-    const barDescription = [t('basket.capacity.selection', { size: formatSize(projectedBytes) }), autofillMessage, statusMessage]
+    const barDescription = [t('basket.capacity.selection', { size: formatSize(projectedBytes) }),
+        size?.expectedBytes !== undefined ? t('basket.size.expected', { size: formatSize(size.expectedBytes) }) : '',
+        size?.reserveBytes !== undefined ? t('basket.size.reserve', { size: formatReserveSize(size.reserveBytes) }) : '', autofillMessage, statusMessage]
         .filter(Boolean).join('; ').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     return `
@@ -176,13 +192,55 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
 
 export class BasketSidebar {
 
-    private preparedCapacity: { key: string; bytes: number } | null = null;
+    private preparedCapacity: { key: string; size: SelectionSize } | null = null;
+    private estimateCache = new BasketEstimateCache();
     private capacityRevision(): string {
-        return JSON.stringify([this.currentDevice?.device_id, this.currentDevice?.reconcileBeforeSync ?? false, this.currentDevice?.transcoding_profile_id, this.currentDevice?.transcodingProfileId, basketStore.getItems()]);
+        return JSON.stringify([this.selectedDevicePath, basketEstimateKey(this.currentDevice, this.currentServerId, basketStore.getItems(), this.forceSyncMode)]);
     }
-    private plannedManualBytes() {
-        if (this.preparedCapacity?.key === this.capacityRevision()) return this.preparedCapacity.bytes;
-        return plannedSelectionBytes(basketStore.getItems().filter(item => !isAutoFillSlotId(item.id)), this.currentDevice?.plannedBitrateKbps);
+    private plannedManualSize(): SelectionSize {
+        if (this.preparedCapacity?.key === this.capacityRevision()) return this.preparedCapacity.size;
+        const estimate = this.estimateCache?.get(this.capacityRevision());
+        if (estimate) return selectionSize(estimate.selectedBytes, estimate.expectedBytes, estimate.reserveBytes);
+        return plannedSelectionSize(basketStore.getItems().filter(item => !isAutoFillSlotId(item.id)), this.currentDevice?.plannedBitrateKbps);
+    }
+    private plannedManualBytes(): number {
+        return this.plannedManualSize().selectedBytes;
+    }
+    private plannedItemSize(item: BasketItem): SelectionSize {
+        const estimate = this.estimateCache?.get(this.capacityRevision())?.items.find(estimate =>
+            estimate.id === item.id && estimate.serverId === (item.serverId ?? this.currentServerId));
+        return estimate ? selectionSize(estimate.plannedBytes, estimate.expectedBytes, estimate.reserveBytes)
+            : plannedSelectionSize([item], this.currentDevice?.plannedBitrateKbps);
+    }
+    private async refreshCapacityEstimate(refreshCached = false): Promise<void> {
+        const targetDeviceId = this.getCurrentDeviceId(this.currentDevice);
+        if (!targetDeviceId) {
+            this.estimateCache.clear();
+            return;
+        }
+        const key = this.capacityRevision();
+        // Playlist/favorite membership may have changed on the server without
+        // changing the local basket identity. Revalidate on an explicit sync,
+        // while sharing any request that is already in flight.
+        if (refreshCached) {
+            this.preparedCapacity = null;
+            if (this.estimateCache.get(key)) this.estimateCache.clear();
+        }
+        const basketItems = basketStore.getItems().filter(item => !isAutoFillSlotId(item.id));
+        const wasCached = this.estimateCache.get(key) !== undefined;
+        const estimate = await this.estimateCache.load(key, () => rpcCall('basket.estimate', {
+            targetDeviceId, basketItems, force: this.forceSyncMode,
+            expectedProfileId: this.currentDevice?.transcoding_profile_id ?? this.currentDevice?.transcodingProfileId ?? null,
+            expectedProfileRevision: this.currentDevice?.plannedProfileRevision,
+        }) as Promise<BasketEstimate>);
+        if (!estimate || this.isDestroyed || key !== this.capacityRevision()) return;
+        // Repair legacy persisted metadata in memory without marking the basket
+        // dirty or starting another manifest save.
+        basketStore.applyEstimatedMetadata(estimate.items);
+        if (!wasCached) {
+            this.syncSlotsFromPipelines();
+            this.render();
+        }
     }
     private selectedCapacity() {
         return syncCapacity(this.storageInfo, this.plannedManualBytes(), this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? []);
@@ -416,6 +474,7 @@ export class BasketSidebar {
             }
         }
 
+        void this.refreshCapacityEstimate().catch(error => console.warn('[Basket] Estimate unavailable:', error));
         this.render();
     }
 
@@ -907,6 +966,7 @@ export class BasketSidebar {
                 basketStore.setPhysicalTargetAvailable(this.selectedDevicePath !== null);
                 this.pendingDevicePath = newPendingPath;
                 this.pendingDeviceFriendlyName = daemonStateResult?.pendingDeviceFriendlyName ?? undefined;
+                void this.refreshCapacityEstimate().catch(error => console.warn('[Basket] Estimate unavailable:', error));
 
                 if (newDirty !== this.isDirtyManifest || pendingDeviceChanged || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
                     this.isDirtyManifest = newDirty;
@@ -1229,7 +1289,8 @@ export class BasketSidebar {
         }
 
         const totalTracks = items.reduce((sum, item) => sum + item.childCount, 0);
-        const totalSizeBytes = this.plannedManualBytes();
+        const totalSize = this.plannedManualSize();
+        const totalSizeBytes = totalSize.selectedBytes;
         const capacity = this.selectedCapacity();
         const isOverLimit = false; // Preparation resolves reusable files and exact transfer policy before admission.
         const overAmount = capacity?.overBytes ?? 0;
@@ -1255,10 +1316,11 @@ export class BasketSidebar {
             <div class="basket-footer">
                  ${this.renderDestinationChooserHost()}
                  <div class="basket-summary">
-                    <span>${t('basket.summary.tracks_size', { count: totalTracks, size: formatSize(totalSizeBytes) })}</span>
+                    <span>${t('basket.summary.tracks_size', { count: totalTracks, size: displaySelectionSize(totalSize) })}</span>
                 </div>
+                ${renderSizeReserve(totalSize)}
                 ${this.currentDevice?.plannedBitrateKbps ? `<p style="font-size:0.75rem;color:var(--ink-dim)">${t('device.scan.estimate')}</p>` : ''}
-                ${renderCapacityBar(this.storageInfo, totalSizeBytes, this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? [])}
+                ${renderCapacityBar(this.storageInfo, totalSizeBytes, this.currentDevice?.syncedByteTotals ?? this.currentDevice?.synced_items ?? [], totalSize)}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
                 ${this.renderDeviceFolders()}
@@ -1392,6 +1454,13 @@ export class BasketSidebar {
             // the server-side guard will reject it if a concurrent sync is truly running.
         }
 
+        // Resolve output sizes before assigning any Auto-Fill ceiling. A coarse
+        // source/container estimate must not silently leave the device empty.
+        try {
+            await this.refreshCapacityEstimate(true);
+        } catch (error) {
+            console.warn('[Basket] Estimate unavailable; preparation will resolve capacity:', error);
+        }
         const currentItems = basketStore.getItems();
 
         // Detect and extract the auto-fill slots (one per server — Story 12.6).
@@ -1418,11 +1487,15 @@ export class BasketSidebar {
             // Story 12.6 (AC14): emit an array of per-server auto-fill descriptors targeting the
             // shipped Story 12.3 `parse_auto_fill_descriptors` contract. Budget is fresh from
             // current storage state (each slot's recorded sizeBytes may be stale).
-            const availableBytes = this.selectedCapacity()?.autofillCapacityBytes;
+            // If metadata could not be refreshed, let preparation derive the
+            // ceiling from expanded tracks rather than cap it with a coarse UI guess.
+            const authoritative = this.estimateCache.get(this.capacityRevision())
+                || this.preparedCapacity?.key === this.capacityRevision();
+            const availableBytes = authoritative ? this.selectedCapacity()?.autofillCapacityBytes : undefined;
             deltaParams.autoFill = autoFillSlots.map(slot => {
                 const serverId = slot.serverId ?? this.currentServerId ?? undefined;
                 const pipeline = slot.serverId ? this.autoFillPipelines.get(slot.serverId) : undefined;
-                const ceiling = pipeline?.budget.maxBytes ?? (slot.sizeBytes > 0 ? slot.sizeBytes : undefined);
+                const ceiling = pipeline?.budget.maxBytes;
                 const maxBytes = availableBytes === undefined ? ceiling
                     : Math.min(ceiling ?? availableBytes, availableBytes);
                 // This server's manual ids being synced — the per-server exclude set (the daemon's
@@ -1441,7 +1514,7 @@ export class BasketSidebar {
             const delta = await rpcCall('sync_prepare', deltaParams);
             pendingPlanId = (delta as any).planId as string;
             if (typeof delta.selectedBytes === 'number') {
-                this.preparedCapacity = { key: this.capacityRevision(), bytes: delta.selectedBytes };
+                this.preparedCapacity = { key: this.capacityRevision(), size: selectionSize(delta.selectedBytes, delta.selectedExpectedBytes, delta.selectedReserveBytes) };
                 this.render();
             }
             if (typeof delta.availableBytes === 'number' && delta.totalBytes > delta.availableBytes
@@ -2071,7 +2144,8 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: formatSize(plannedSelectionBytes([item], this.currentDevice?.plannedBitrateKbps)) })}
+                        ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: displaySelectionSize(this.plannedItemSize(item)) })}
+                        ${renderSizeReserve(this.plannedItemSize(item))}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}
@@ -2088,7 +2162,8 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: formatSize(plannedSelectionBytes([item], this.currentDevice?.plannedBitrateKbps)) })}
+                        ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: displaySelectionSize(this.plannedItemSize(item)) })}
+                        ${renderSizeReserve(this.plannedItemSize(item))}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}
@@ -2154,7 +2229,8 @@ export class BasketSidebar {
                         ${this.escapeHtml(item.name)}
                     </div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: formatSize(plannedSelectionBytes([item], this.currentDevice?.plannedBitrateKbps)) })}
+                        ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: displaySelectionSize(this.plannedItemSize(item)) })}
+                        ${renderSizeReserve(this.plannedItemSize(item))}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}

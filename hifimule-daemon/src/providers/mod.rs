@@ -1018,11 +1018,67 @@ pub struct TrackListPage {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscodeProfile {
     pub container: Option<String>,
     pub audio_codec: Option<String>,
     pub max_bitrate_kbps: Option<u32>,
+    #[serde(default)]
+    pub max_sample_rate_hz: Option<u32>,
+    #[serde(default)]
+    pub max_bit_depth: Option<u32>,
+    #[serde(default)]
+    pub max_channels: Option<u32>,
+}
+
+impl TranscodeProfile {
+    pub fn is_lossless(&self) -> bool {
+        let codec = self.audio_codec.as_deref().unwrap_or("").to_ascii_lowercase();
+        codec.starts_with("pcm_") || matches!(codec.as_str(), "flac" | "alac")
+            || matches!(self.container.as_deref().unwrap_or("").to_ascii_lowercase().as_str(), "flac" | "alac" | "wav" | "wave" | "aiff" | "aif")
+    }
+
+    pub fn pcm_bit_depth(&self) -> Option<u32> {
+        let codec = self.audio_codec.as_deref()?.strip_prefix("pcm_")?;
+        let digits: String = codec.chars().skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<u32>().ok().filter(|depth| *depth > 0)
+    }
+
+    /// The same codec-valid rate is reserved and sent to the provider. A server
+    /// may impose a lower limit; that cannot be inferred from a source bitrate.
+    pub fn normalized_for_source(&self, source: crate::domain::models::SourceAudioProperties) -> Self {
+        let mut profile = self.clone();
+        let codec = self.audio_codec.as_deref().or(self.container.as_deref())
+            .unwrap_or("mp3").to_ascii_lowercase();
+        let bounded = |a: Option<u32>, b: Option<u32>| match (a.filter(|v| *v > 0), b.filter(|v| *v > 0)) {
+            (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
+        };
+        profile.max_sample_rate_hz = bounded(self.max_sample_rate_hz, source.sample_rate_hz);
+        // One-bit DSD precision is not a PCM output depth. Treat it as
+        // unknown instead of requesting/reserving an invalid one-bit FLAC.
+        profile.max_bit_depth = bounded(self.max_bit_depth, source.bit_depth.filter(|depth| *depth >= 4));
+        profile.max_channels = bounded(self.max_channels, source.channels);
+        if codec == "raw" {
+            // OpenSubsonic's original-file route is not an encoder target.
+            profile.max_bitrate_kbps = self.max_bitrate_kbps;
+        } else if self.is_lossless() {
+            profile.max_bitrate_kbps = None;
+        } else if codec == "mp3" {
+            profile.max_sample_rate_hz = bounded(profile.max_sample_rate_hz, Some(48_000));
+            let low_rate = profile.max_sample_rate_hz.is_some_and(|rate| rate <= 24_000);
+            let rates: &[u32] = if low_rate {
+                &[8,16,24,32,40,48,56,64,80,96,112,128,144,160]
+            } else { &[32,40,48,56,64,80,96,112,128,160,192,224,256,320] };
+            let requested = self.max_bitrate_kbps.filter(|v| *v > 0).unwrap_or(320);
+            profile.max_bitrate_kbps = Some(rates.iter().copied().filter(|rate| *rate <= requested)
+                .next_back().unwrap_or(rates[0]));
+        } else {
+            profile.max_bitrate_kbps = Some(self.max_bitrate_kbps.filter(|v| *v > 0)
+                .unwrap_or(if codec == "opus" || codec == "vorbis" { 192 } else { 256 }));
+        }
+        profile
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]

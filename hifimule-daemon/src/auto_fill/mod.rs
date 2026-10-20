@@ -32,6 +32,11 @@ pub use fetch::*;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFillItem {
+    /// The goal-derived bitrate used to reserve this item; execution must reuse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bitrate_override_kbps: Option<u32>,
+    #[serde(default)]
+    pub source_audio: crate::domain::models::SourceAudioProperties,
     #[serde(default)]
     pub disc_number: Option<u32>,
     #[serde(default)]
@@ -62,6 +67,7 @@ pub struct AutoFillItem {
 
 #[derive(Debug)]
 pub struct AutoFillParams {
+    pub preferred_audio_container: Option<String>,
     pub output_profile: Option<serde_json::Value>,
     /// IDs of manually selected items — these are excluded from auto-fill results.
     pub exclude_item_ids: Vec<String>,
@@ -125,6 +131,7 @@ pub async fn run_auto_fill(
         exclude_item_ids,
         max_fill_bytes,
         output_profile,
+        preferred_audio_container,
         ..
     } = params;
     let exclude_count = exclude_item_ids.len();
@@ -139,6 +146,8 @@ pub async fn run_auto_fill(
     // Capture total_record_count from the first page only; re-reading it each page
     // can cause premature termination or missed pages if the library changes mid-fetch.
     let mut total_record_count: Option<u32> = None;
+    let mut seen_ids = HashSet::new();
+    if max_fill_bytes == 0 { return Ok(result); }
 
     'pages: loop {
         let page_num = start_index / PAGE_SIZE + 1;
@@ -227,13 +236,14 @@ pub async fn run_auto_fill(
         let total = *total_record_count.get_or_insert(page.total_record_count);
 
         // Filter already-selected items client-side to keep the request URL short.
+        let prior_seen = seen_ids.len();
         let page_items: Vec<JellyfinItem> = page
             .items
             .into_iter()
-            .filter(|item| !exclude_set.contains(&item.id))
+            .filter(|item| seen_ids.insert(item.id.clone()) && !exclude_set.contains(&item.id))
             .collect();
         let remaining_budget = max_fill_bytes.saturating_sub(cumulative_bytes);
-        let (new_items, capacity_reached) = rank_and_truncate_with_profile(page_items, remaining_budget, output_profile.as_ref());
+        let (new_items, capacity_reached) = rank_and_truncate_with_profile(page_items, remaining_budget, output_profile.as_ref(), preferred_audio_container.as_deref());
         cumulative_bytes += new_items.iter().map(|i| i.size_bytes).sum::<u64>();
         result.extend(new_items);
 
@@ -242,6 +252,7 @@ pub async fn run_auto_fill(
         // solely on fetched < PAGE_SIZE (partial page = end of results).
         let total_known = total > 0;
         if capacity_reached
+            || (prior_seen == seen_ids.len() && fetched > 0)
             || fetched < PAGE_SIZE
             || (total_known && start_index + fetched >= total)
             || page_num >= MAX_PAGES
@@ -255,34 +266,36 @@ pub async fn run_auto_fill(
 }
 
 /// Capacity-truncation of a pre-sorted track list — extracted for unit-testability.
-/// Assumes tracks arrive in priority order (server-sorted). Stops at the first track
-/// that would exceed the remaining capacity budget.
+/// Assumes tracks arrive in priority order (server-sorted). Skips tracks that do not
+/// fit so smaller later candidates can use the remaining capacity.
 /// Returns `(items, capacity_reached)`.
 pub fn rank_and_truncate(
     tracks: Vec<JellyfinItem>,
     max_fill_bytes: u64,
 ) -> (Vec<AutoFillItem>, bool) {
-    rank_and_truncate_with_profile(tracks, max_fill_bytes, None)
+    rank_and_truncate_with_profile(tracks, max_fill_bytes, None, None)
 }
 
 fn rank_and_truncate_with_profile(
     tracks: Vec<JellyfinItem>,
     max_fill_bytes: u64,
     profile: Option<&serde_json::Value>,
+    preferred: Option<&str>,
 ) -> (Vec<AutoFillItem>, bool) {
     let mut result = Vec::new();
     let mut cumulative_bytes: u64 = 0;
 
+    if max_fill_bytes == 0 { return (result, true); }
     for track in tracks {
         let song = crate::providers::jellyfin::song_from_item(track.clone());
-        let size_bytes = crate::sync::planned_song_bytes(&song, profile, None);
+        let size_bytes = crate::sync::planned_song_bytes_with_preferred(&song, profile, preferred, None);
 
         if size_bytes == 0 {
             continue;
         }
 
-        if cumulative_bytes + size_bytes > max_fill_bytes {
-            return (result, true);
+        if size_bytes > max_fill_bytes.saturating_sub(cumulative_bytes) {
+            continue;
         }
 
         let is_favorite = track
@@ -301,8 +314,8 @@ fn rank_and_truncate_with_profile(
         };
 
         cumulative_bytes += size_bytes;
-        result.push(AutoFillItem {disc_number: track.parent_index_number,
-            original_bitrate: song.bitrate_kbps.map(|b| b.saturating_mul(1000)),
+        result.push(AutoFillItem {max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: track.parent_index_number,
+            original_bitrate: crate::sync::song_audio_bitrate_bps(&song),
             duration_seconds: (track.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
         id: track.id,
             name: track.name,
@@ -331,11 +344,13 @@ fn rank_and_truncate_with_profile(
         });
     }
 
-    (result, false)
+    let full = cumulative_bytes >= max_fill_bytes;
+    (result, full)
 }
 
 /// Accumulates auto-fill items for the provider path, tracking budget and dedup state.
 struct ProviderFillState {
+    preferred_audio_container: Option<String>,
     output_profile: Option<serde_json::Value>,
     exclude_set: HashSet<String>,
     seen_ids: HashSet<String>,
@@ -348,6 +363,7 @@ impl ProviderFillState {
     fn new(exclude_set: HashSet<String>, max_fill_bytes: u64) -> Self {
         Self {
             output_profile: None,
+            preferred_audio_container: None,
             exclude_set,
             seen_ids: HashSet::new(),
             result: Vec::new(),
@@ -361,16 +377,17 @@ impl ProviderFillState {
         if self.exclude_set.contains(&song.id) || !self.seen_ids.insert(song.id.clone()) {
             return true; // skip duplicate/excluded, budget still open
         }
-        let size_bytes = crate::sync::planned_song_bytes(&song,self.output_profile.as_ref(),None);
+        let size_bytes = crate::sync::planned_song_bytes_with_preferred(&song, self.output_profile.as_ref(), self.preferred_audio_container.as_deref(), None);
         if size_bytes == 0 {
             return true; // skip unknown-size song
         }
-        if self.cumulative_bytes + size_bytes > self.max_fill_bytes {
-            return false; // budget full
+        if self.cumulative_bytes >= self.max_fill_bytes { return false; }
+        if size_bytes > self.max_fill_bytes.saturating_sub(self.cumulative_bytes) {
+            return true; // skip this candidate; smaller later tracks may still fit
         }
         self.cumulative_bytes += size_bytes;
-        self.result.push(AutoFillItem {disc_number: song.disc_number,
-            original_bitrate: song.bitrate_kbps.map(|b|b.saturating_mul(1000)),
+        self.result.push(AutoFillItem {max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: song.disc_number,
+            original_bitrate: crate::sync::song_audio_bitrate_bps(&song),
             duration_seconds: song.duration_seconds,
         id: song.id,
             name: song.title,
@@ -407,7 +424,6 @@ pub async fn run_auto_fill_provider(
     provider: Arc<dyn MediaProvider>,
     params: AutoFillParams,
 ) -> Result<Vec<AutoFillItem>> {
-    const MAX_PER_LIST: u32 = 2000;
     const PAGE_SIZE: u32 = 500;
     // Guard against runaway pagination if the server never returns a partial page.
     const MAX_BULK_PAGES: u32 = 200;
@@ -420,74 +436,38 @@ pub async fn run_auto_fill_provider(
     let exclude_set: HashSet<String> = exclude_item_ids.into_iter().collect();
     let mut state = ProviderFillState::new(exclude_set, max_fill_bytes);
     state.output_profile = params.output_profile;
+    state.preferred_audio_container = params.preferred_audio_container;
+    if max_fill_bytes == 0 { return Ok(Vec::new()); }
 
-    // Phase 1: Priority lists (favorites → frequently played → recently played).
-    // These are small targeted lists; fetch them all at once then consume in order.
-    let mut priority_songs: Vec<(crate::domain::models::Song, String)> = Vec::new();
-
-    match provider.list_favorites(None, 0, MAX_PER_LIST).await {
-        Ok((songs, _)) => {
-            crate::daemon_log!("[AutoFill] list_favorites returned {} songs", songs.len());
-            for s in songs {
-                priority_songs.push((s, "favorite".to_string()));
+    // Stream priority pages until capacity is truly exhausted. Oversized tracks
+    // are skipped, while accepted tracks retain provider priority order.
+    for kind in [fetch::PriorityList::Favorites, fetch::PriorityList::Frequent, fetch::PriorityList::Recent] {
+        let mut offset = 0u32;
+        let mut seen = HashSet::new();
+        for _ in 0..MAX_BULK_PAGES {
+            let (songs, total) = match fetch::priority_page(provider.as_ref(), kind, offset).await {
+                Ok(page) => page,
+                Err(ProviderError::UnsupportedCapability(_)) => break,
+                Err(error) if matches!(kind, fetch::PriorityList::Favorites) => return Err(error.into()),
+                Err(error) => {
+                    crate::daemon_log!("[AutoFill] priority fetch failed (non-fatal): {}", error);
+                    break;
+                }
+            };
+            let count = songs.len() as u32;
+            let before = seen.len();
+            for song in songs {
+                if !seen.insert(song.id.clone()) { continue; }
+                let reason = match kind {
+                    fetch::PriorityList::Favorites => "favorite".to_string(),
+                    fetch::PriorityList::Frequent => format!("playCount:{}", song.play_count.unwrap_or(0)),
+                    fetch::PriorityList::Recent => "recentlyPlayed".to_string(),
+                };
+                state.try_add(song, reason);
+                if state.cumulative_bytes >= max_fill_bytes { return Ok(state.into_result()); }
             }
-        }
-        Err(ProviderError::UnsupportedCapability(_)) => {
-            crate::daemon_log!("[AutoFill] list_favorites: UnsupportedCapability, skipping");
-        }
-        Err(e) => {
-            crate::daemon_log!("[AutoFill] list_favorites failed: {}", e);
-            return Err(e.into());
-        }
-    }
-
-    match provider.list_frequently_played(None, 0, MAX_PER_LIST).await {
-        Ok((songs, _)) => {
-            crate::daemon_log!(
-                "[AutoFill] list_frequently_played returned {} songs",
-                songs.len()
-            );
-            for s in songs {
-                let reason = format!("playCount:{}", s.play_count.unwrap_or(0));
-                priority_songs.push((s, reason));
-            }
-        }
-        Err(ProviderError::UnsupportedCapability(_)) => {
-            crate::daemon_log!(
-                "[AutoFill] list_frequently_played: UnsupportedCapability, skipping"
-            );
-        }
-        Err(e) => crate::daemon_log!(
-            "[AutoFill] list_frequently_played failed (non-fatal): {}",
-            e
-        ),
-    }
-
-    match provider.list_recently_played(None, 0, MAX_PER_LIST).await {
-        Ok((songs, _)) => {
-            crate::daemon_log!(
-                "[AutoFill] list_recently_played returned {} songs",
-                songs.len()
-            );
-            for s in songs {
-                priority_songs.push((s, "recentlyPlayed".to_string()));
-            }
-        }
-        Err(ProviderError::UnsupportedCapability(_)) => {
-            crate::daemon_log!("[AutoFill] list_recently_played: UnsupportedCapability, skipping");
-        }
-        Err(e) => crate::daemon_log!("[AutoFill] list_recently_played failed (non-fatal): {}", e),
-    }
-
-    crate::daemon_log!(
-        "[AutoFill] priority candidates: {}, max_fill_bytes: {}",
-        priority_songs.len(),
-        max_fill_bytes
-    );
-
-    for (song, reason) in priority_songs {
-        if !state.try_add(song, reason) {
-            break; // budget full
+            offset = offset.saturating_add(count);
+            if count == 0 || seen.len() == before || (total == 0 && count < fetch::MAX_PER_LIST) || (total > 0 && offset >= total) { break; }
         }
     }
 
@@ -496,6 +476,7 @@ pub async fn run_auto_fill_provider(
     // Songs already consumed in phase 1 are skipped via seen_ids.
     let mut offset = 0u32;
     let mut pages_fetched = 0u32;
+    let mut bulk_seen = HashSet::new();
     'bulk: loop {
         match provider.list_all_songs_page(None, offset, PAGE_SIZE).await {
             Ok((songs, _)) => {
@@ -506,13 +487,15 @@ pub async fn run_auto_fill_provider(
                     page_count,
                     offset
                 );
+                let prior_seen = bulk_seen.len();
                 for song in songs {
+                    if !bulk_seen.insert(song.id.clone()) { continue; }
                     if !state.try_add(song, "library".to_string()) {
                         break 'bulk; // budget full
                     }
                 }
                 pages_fetched += 1;
-                if page_count < PAGE_SIZE || pages_fetched >= MAX_BULK_PAGES {
+                if page_count < PAGE_SIZE || pages_fetched >= MAX_BULK_PAGES || prior_seen == bulk_seen.len() {
                     break 'bulk;
                 }
                 offset += PAGE_SIZE;
@@ -563,6 +546,7 @@ mod tests {
         let result = run_auto_fill(
             &JellyfinClient::new(),
             AutoFillParams {
+                preferred_audio_container: None,
                 output_profile: None,
                 exclude_item_ids: vec![],
                 max_fill_bytes: 1000,
@@ -708,22 +692,22 @@ mod tests {
     }
 
     #[test]
-    fn test_stops_after_first_oversized() {
-        // With break semantics: after the first track that exceeds remaining budget,
-        // smaller tracks later in the list are NOT included.
+    fn test_skips_oversized_preserving_remaining_priority() {
+        // A high-priority oversized track must not block later fitting tracks.
         let tracks = vec![
             make_track("a", false, 0, "2024-01-01", 1_000_000), // 1MB — fits
-            make_track("b", false, 0, "2024-01-01", 4_000_000), // 4MB — exceeds remaining 2MB → break
-            make_track("c", false, 0, "2024-01-01", 500_000),   // 0.5MB — never reached
+            make_track("b", false, 0, "2024-01-01", 4_000_000), // 4MB — exceeds remaining 2MB → skip
+            make_track("c", false, 0, "2024-01-01", 500_000),   // 0.5MB — fits the remaining space
         ];
         let (result, capacity_reached) = rank_and_truncate(tracks, 3_000_000);
         assert_eq!(
             result.len(),
-            1,
-            "only 'a' fits; break stops at 'b', 'c' never considered"
+            2,
+            "a and the later fitting c should be selected"
         );
         assert_eq!(result[0].id, "a");
-        assert!(capacity_reached);
+        assert_eq!(result[1].id, "c");
+        assert!(!capacity_reached);
     }
 }
 
@@ -736,13 +720,18 @@ mod output_capacity_tests {
             "Container":"flac", "MediaSources":[{"Size":50000000,"Container":"flac","Bitrate":1600000}]
         })).unwrap();
         let profile = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],"MusicStreamingTranscodingBitrate":192000});
-        let (encoded, full) = super::rank_and_truncate_with_profile(vec![track.clone()], 7000000, Some(&profile));
+        let (encoded, full) = super::rank_and_truncate_with_profile(vec![track.clone()], 7000000, Some(&profile), None);
         assert!(!full);
         assert_eq!(encoded.len(), 1);
         assert!(encoded[0].size_bytes < 7000000);
         assert_eq!(encoded[0].original_bitrate, Some(1600000));
+        assert_eq!(encoded[0].size_bytes, 5_883_136);
+        let (payload_only, _) = super::rank_and_truncate_with_profile(vec![track.clone()], 5_760_001, Some(&profile), None);
+        assert!(payload_only.is_empty(), "capacity must include one percent plus fixed overhead");
+        let (full_reservation, _) = super::rank_and_truncate_with_profile(vec![track.clone()], 5_883_136, Some(&profile), None);
+        assert_eq!(full_reservation.len(), 1);
         let (direct, full) = super::rank_and_truncate(vec![track], 7000000);
-        assert!(full);
+        assert!(!full, "an oversized candidate does not exhaust a nonempty budget");
         assert!(direct.is_empty());
     }
 }

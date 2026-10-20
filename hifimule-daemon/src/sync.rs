@@ -68,6 +68,7 @@ fn provider_source_label(server_id: Option<String>) -> String {
 /// An item desired for sync (from the UI basket / Jellyfin API).
 #[derive(Debug, Clone)]
 pub struct DesiredItem {
+    pub source_audio: crate::domain::models::SourceAudioProperties,
     pub disc_number: Option<u32>,
     pub duration_seconds: u32,
     pub media_role: crate::device::MediaRole,
@@ -91,6 +92,8 @@ pub struct DesiredItem {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncAddItem {
+    #[serde(default)]
+    pub source_audio: crate::domain::models::SourceAudioProperties,
     #[serde(default)]
     pub disc_number: Option<u32>,
     #[serde(default)]
@@ -435,6 +438,8 @@ fn compatible_optional_eq<T: PartialEq>(left: &Option<T>, right: &Option<T>) -> 
 
 fn id_change_candidate_matches(add: &SyncAddItem, old: &SyncedItem) -> bool {
     add.media_role == old.media_role
+        && compatible_optional_eq(&add.server_id, &old.server_id)
+        && bitrate_stale_reason(add.original_bitrate, old.original_bitrate).is_none()
         && compatible_optional_eq(&add.provider_album_id, &old.provider_album_id)
         && compatible_optional_eq(&add.provider_content_type, &old.provider_content_type)
         && compatible_optional_eq(&add.provider_suffix, &old.provider_suffix)
@@ -1484,6 +1489,7 @@ struct AudioCompatibilityProfile {
     direct_formats: Vec<AudioFormatRequirement>,
     output_formats: Vec<AudioFormatRequirement>,
     transcode_profile: Option<TranscodeProfile>,
+    limits: TranscodeProfile,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1605,6 +1611,7 @@ fn audio_compatibility_profile(
             direct_formats,
             output_formats,
             transcode_profile,
+            limits: audio_limits_from_device_profile(profile),
         };
     }
 
@@ -1617,7 +1624,7 @@ fn audio_compatibility_profile(
         return AudioCompatibilityProfile {
             direct_formats: direct_requirement,
             output_formats,
-            transcode_profile: Some(TranscodeProfile {
+            transcode_profile: Some(TranscodeProfile {max_sample_rate_hz: None, max_bit_depth: None, max_channels: None,
                 container: Some(container.to_string()),
                 audio_codec: Some(container.to_string()),
                 max_bitrate_kbps: Some(if container.eq_ignore_ascii_case("mp3") {
@@ -1626,61 +1633,263 @@ fn audio_compatibility_profile(
                     256
                 }),
             }),
+            limits: TranscodeProfile::default(),
         };
     }
 
     AudioCompatibilityProfile::default()
 }
 
-/// A bitrate ceiling applies to direct formats too: MP3 320 -> MP3 192 is a transcode.
-fn direct_for_bitrate(compatibility: &AudioCompatibilityProfile, format: &AudioFormat, source_bps: Option<u32>, override_kbps: Option<u32>) -> bool {
-    compatibility.source_is_direct_compatible(format)
-        && compatibility.transcode_profile.as_ref().and_then(|p| override_kbps.or(p.max_bitrate_kbps))
-            .is_none_or(|ceiling| source_bps.is_none_or(|bps| bps <= ceiling.saturating_mul(1000)))
+/// Compare only verified source properties; absent evidence never invents a conversion.
+fn source_within_limits(source: crate::domain::models::SourceAudioProperties, profile: &TranscodeProfile) -> bool {
+    let within = |value: Option<u32>, max: Option<u32>| max.is_none_or(|max| value.is_none_or(|v| v <= max));
+    within(source.sample_rate_hz, profile.max_sample_rate_hz)
+        && within(source.bit_depth, profile.max_bit_depth)
+        && within(source.channels, profile.max_channels)
 }
 
-/// Conservative output reservation: 3% mux/tag allowance plus 64 KiB. Unknown
-/// durations reserve one hour; unconstrained variable/lossless output reserves
-/// 24-bit/192 kHz stereo PCM. Source bytes are used only for direct copies.
-pub fn planned_audio_bytes(item: &SyncAddItem, profile: Option<&serde_json::Value>, preferred: Option<&str>) -> u64 {
-    if item.media_role != crate::device::MediaRole::Music { return item.size_bytes; }
+fn direct_for_bitrate(compatibility: &AudioCompatibilityProfile, format: &AudioFormat, source_bps: Option<u32>, override_kbps: Option<u32>, source: crate::domain::models::SourceAudioProperties) -> bool {
+    compatibility.source_is_direct_compatible(format)
+        && source_within_limits(source, &compatibility.limits)
+        && compatibility.transcode_profile.as_ref().is_none_or(|profile| {
+            let mut requested = profile.clone();
+            requested.max_bitrate_kbps = override_kbps.or(profile.max_bitrate_kbps);
+            let effective = requested.normalized_for_source(source);
+            source_within_limits(source, profile)
+                && effective.max_bitrate_kbps.is_none_or(|ceiling| source_bps.is_none_or(|bps| bps <= ceiling.saturating_mul(1000)))
+        })
+}
+
+pub fn song_audio_bitrate_bps(song: &crate::domain::models::Song) -> Option<u32> {
+    song.provider_metadata.source_audio.audio_bitrate_bps.filter(|value| *value > 0)
+        .or_else(|| song.bitrate_kbps.and_then(|value| value.checked_mul(1000)).filter(|value| *value > 0))
+}
+
+pub fn source_audio_for_song(song: &crate::domain::models::Song) -> crate::domain::models::SourceAudioProperties {
+    let mut source = song.provider_metadata.source_audio;
+    source.original_size_bytes = source.original_size_bytes.or(song.size_bytes.filter(|v| *v > 0));
+    source.audio_bitrate_bps = song_audio_bitrate_bps(song);
+    source.average_bitrate_bps = source.average_bitrate_bps.or_else(|| song.bitrate_kbps.and_then(|v| v.checked_mul(1000)).filter(|v| *v > 0));
+    source
+}
+
+fn planned_duration_seconds(item: &SyncAddItem) -> u64 {
+    effective_duration_seconds(item.duration_seconds, item.source_audio)
+}
+
+pub fn effective_duration_seconds(duration: u32, source: crate::domain::models::SourceAudioProperties) -> u64 {
+    if duration > 0 { return u64::from(duration); }
+    // Never infer from size_bytes: publication has already replaced it on a
+    // second planning pass. Original evidence makes this operation idempotent.
+    match (source.original_size_bytes, source.average_bitrate_bps) {
+        (Some(bytes), Some(bps)) if bytes > 0 && bps > 0 =>
+            (u128::from(bytes) * 8).div_ceil(u128::from(bps)).min(u128::from(u64::MAX)) as u64,
+        _ => 3600,
+    }
+}
+
+/// Expected output and its full capacity reservation. The difference is the
+/// safety reserve; deriving it after saturation keeps all three values coherent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutputSizeEstimate {
+    pub expected_bytes: u64,
+    pub reserved_bytes: u64,
+}
+
+impl OutputSizeEstimate {
+    pub fn exact(bytes: u64) -> Self { Self { expected_bytes: bytes, reserved_bytes: bytes } }
+
+    fn converted(payload: u64) -> Self {
+        Self { expected_bytes: payload, reserved_bytes: payload.saturating_add(payload / 100).saturating_add(65_536) }
+    }
+
+    pub fn reserve_bytes(self) -> u64 { self.reserved_bytes - self.expected_bytes }
+
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self { expected_bytes: self.expected_bytes.saturating_add(other.expected_bytes),
+            reserved_bytes: self.reserved_bytes.saturating_add(other.reserved_bytes) }
+    }
+}
+
+/// Converted output reserves one percent of payload plus 64 KiB per track.
+/// Lossless expected bytes use effective PCM (a conservative upper bound, not a
+/// compression prediction). Missing resolution uses the configured maximum or
+/// 24/192 stereo. Direct copies and nonmusic retain exact bytes without reserve.
+pub fn planned_audio_size(item: &SyncAddItem, profile: Option<&serde_json::Value>, preferred: Option<&str>) -> OutputSizeEstimate {
+    if item.media_role != crate::device::MediaRole::Music { return OutputSizeEstimate::exact(item.size_bytes); }
     let compatibility = audio_compatibility_profile(profile, preferred);
     let format = provider_audio_format(item.provider_suffix.as_deref(), item.provider_content_type.as_deref());
-    if direct_for_bitrate(&compatibility, &format, item.original_bitrate, item.max_bitrate_override_kbps) { return item.size_bytes; }
-    let duration = if item.duration_seconds > 0 { u64::from(item.duration_seconds) } else { 3600 };
-    let bitrate = item.max_bitrate_override_kbps.or_else(|| compatibility.transcode_profile.as_ref().and_then(|p| p.max_bitrate_kbps)).unwrap_or(9216);
-    duration.saturating_mul(u64::from(bitrate)).saturating_mul(125).saturating_mul(103) / 100 + 65_536
+    if direct_for_bitrate(&compatibility, &format, item.original_bitrate, item.max_bitrate_override_kbps, item.source_audio) {
+        return OutputSizeEstimate::exact(item.source_audio.original_size_bytes.unwrap_or(item.size_bytes));
+    }
+    let duration = planned_duration_seconds(item);
+    let mut target = compatibility.transcode_profile.clone().unwrap_or_default();
+    target.max_bitrate_kbps = item.max_bitrate_override_kbps.or(target.max_bitrate_kbps);
+    let target = target.normalized_for_source(item.source_audio);
+    let payload = if target.is_lossless() {
+        // A legacy Subsonic server may preserve the original resolution even
+        // when the device profile asks for a lower maximum. Never reserve only
+        // that maximum unless the provider can actually request it.
+        let (rate, depth, channels) = if item.source_audio.transcode_limits_supported {
+            (target.max_sample_rate_hz, target.max_bit_depth, target.max_channels)
+        } else { (item.source_audio.sample_rate_hz, item.source_audio.bit_depth.filter(|depth| *depth >= 4), item.source_audio.channels) };
+        u128::from(duration).saturating_mul(u128::from(rate.unwrap_or(192_000)))
+            .saturating_mul(u128::from(target.pcm_bit_depth().or(depth).unwrap_or(24)))
+            .saturating_mul(u128::from(channels.unwrap_or(2))).div_ceil(8)
+    } else {
+        u128::from(duration).saturating_mul(u128::from(target.max_bitrate_kbps.unwrap_or(320))).saturating_mul(125)
+    };
+    OutputSizeEstimate::converted(payload.min(u128::from(u64::MAX)) as u64)
 }
 
-pub fn planned_song_bytes(song:&crate::domain::models::Song,profile:Option<&serde_json::Value>,override_kbps:Option<u32>)->u64 {
-    let item=SyncAddItem {disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:song.bitrate_kbps.map(|b|b.saturating_mul(1000)),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
-    planned_audio_bytes(&item,profile,None)
+pub fn planned_audio_bytes(item: &SyncAddItem, profile: Option<&serde_json::Value>, preferred: Option<&str>) -> u64 {
+    planned_audio_size(item, profile, preferred).reserved_bytes
 }
 
-pub fn planned_selection_bytes(items:&[DesiredItem],manifest:&DeviceManifest,profile:Option<&serde_json::Value>,preferred:Option<&str>)->u64 {
-    let resident:std::collections::HashMap<_,_>=manifest.synced_items.iter().map(|s|((s.jellyfin_id.as_str(),s.server_id.as_deref()),s.size_bytes)).collect();
-    calculate_delta(items,&DeviceManifest::default()).adds.iter().map(|a| {
-        if !manifest.needs_transcoding_profile_rewrite() {
-            if let Some(size)=resident.get(&(a.jellyfin_id.as_str(),a.server_id.as_deref())) {return *size;}
+pub fn planned_song_bytes(song: &crate::domain::models::Song, profile: Option<&serde_json::Value>, override_kbps: Option<u32>) -> u64 {
+    planned_song_bytes_with_preferred(song, profile, None, override_kbps)
+}
+
+pub fn planned_song_bytes_with_preferred(song: &crate::domain::models::Song, profile: Option<&serde_json::Value>, preferred: Option<&str>, override_kbps: Option<u32>) -> u64 {
+    let item = SyncAddItem {source_audio: source_audio_for_song(song), disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:crate::sync::song_audio_bitrate_bps(&song),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
+    planned_audio_bytes(&item, profile, preferred)
+}
+
+pub fn planned_selection_bytes(items: &[DesiredItem], manifest: &DeviceManifest, profile: Option<&serde_json::Value>, preferred: Option<&str>) -> u64 {
+    planned_selection_size(items, manifest, profile, preferred).reserved_bytes
+}
+
+pub fn planned_selection_size(items: &[DesiredItem], manifest: &DeviceManifest, profile: Option<&serde_json::Value>, preferred: Option<&str>) -> OutputSizeEstimate {
+    let resident: std::collections::HashMap<_,_> = manifest.synced_items.iter().map(|s| ((s.jellyfin_id.as_str(),s.server_id.as_deref()),s)).collect();
+    let mut unique_resident = HashMap::new();
+    for item in &manifest.synced_items {
+        unique_resident.entry(item.jellyfin_id.as_str()).and_modify(|value| *value = None).or_insert(Some(item));
+    }
+    let mut owners = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for item in items {
+        if let Some(previous) = owners.insert(item.jellyfin_id.as_str(), item.server_id.as_deref())
+            && previous != item.server_id.as_deref() { ambiguous.insert(item.jellyfin_id.as_str()); }
+    }
+    let metadata_key = |name: &str, album: &Option<String>, artist: &Option<String>|
+        (name.to_lowercase(), album.as_ref().map(|v| v.to_lowercase()), artist.as_ref().map(|v| v.to_lowercase()));
+    let mut rekeys: HashMap<_, Vec<&SyncedItem>> = HashMap::new();
+    if !manifest.needs_transcoding_profile_rewrite() {
+        for old in &manifest.synced_items {
+            if !owners.contains_key(old.jellyfin_id.as_str())
+                && device_path_in_or_equal(&old.local_path,
+                    &manifest.media_path(old.media_role).map(normalized_device_folder).unwrap_or_default()) {
+                rekeys.entry(metadata_key(&old.name, &old.album, &old.artist)).or_default().push(old);
+            }
         }
-        planned_audio_bytes(a,profile,preferred)
-    }).fold(0,u64::saturating_add)
+    }
+    let mut used_rekeys = HashSet::new();
+    let mut seen = HashSet::new();
+    items.iter().filter(|item| seen.insert((item.jellyfin_id.as_str(), item.server_id.as_deref())))
+        .map(|i| {
+            if !manifest.needs_transcoding_profile_rewrite() {
+                let measured = resident.get(&(i.jellyfin_id.as_str(), i.server_id.as_deref())).copied()
+                    .or_else(|| unique_resident.get(i.jellyfin_id.as_str()).copied().flatten()
+                        .filter(|item| !ambiguous.contains(i.jellyfin_id.as_str())
+                            && (i.server_id.is_none() || item.server_id.is_none())));
+                if let Some(item) = measured
+                    && item.media_role == i.media_role
+                    && bitrate_stale_reason(i.original_bitrate, item.original_bitrate).is_none()
+                    && device_path_in_or_equal(&item.local_path,
+                        &manifest.media_path(i.media_role).map(normalized_device_folder).unwrap_or_default()) {
+                    return OutputSizeEstimate::exact(item.size_bytes);
+                }
+            }
+            let item = add_from_desired(i);
+            if let Some(old) = rekeys.get(&metadata_key(&i.name, &i.album, &i.artist)).and_then(|candidates|
+                candidates.iter().find(|old| !used_rekeys.contains(&(old.jellyfin_id.as_str(), old.server_id.as_deref()))
+                    && id_change_candidate_matches(&item, old))) {
+                used_rekeys.insert((old.jellyfin_id.as_str(), old.server_id.as_deref()));
+                return OutputSizeEstimate::exact(old.size_bytes);
+            }
+            planned_audio_size(&item, profile, preferred)
+        }).fold(OutputSizeEstimate::default(), OutputSizeEstimate::saturating_add)
+}
+
+pub async fn capacity_manifest_with_existing_files(manifest: &DeviceManifest, io: &dyn crate::device_io::DeviceIO)
+    -> anyhow::Result<DeviceManifest> {
+    let mut verified = manifest.clone();
+    let mut present = Vec::with_capacity(manifest.synced_items.len());
+    for item in &manifest.synced_items {
+        if io.file_length(&item.local_path).await?.is_some() { present.push(item.clone()); }
+    }
+    verified.synced_items = present;
+    Ok(verified)
+}
+
+fn add_from_desired(item: &DesiredItem) -> SyncAddItem {
+    SyncAddItem {
+        source_audio: item.source_audio, disc_number: item.disc_number, duration_seconds: item.duration_seconds,
+        media_role: item.media_role, jellyfin_id: item.jellyfin_id.clone(), name: item.name.clone(),
+        album: item.album.clone(), artist: item.artist.clone(), size_bytes: item.size_bytes, etag: item.etag.clone(),
+        provider_album_id: item.provider_album_id.clone(), provider_content_type: item.provider_content_type.clone(),
+        provider_suffix: item.provider_suffix.clone(), original_bitrate: item.original_bitrate, track_number: item.track_number,
+        reason_code: None, reason: None, server_id: item.server_id.clone(), tier: None, is_auto_fill: false,
+        max_bitrate_override_kbps: None,
+    }
 }
 
 pub fn estimate_delta_outputs(delta: &mut SyncDelta, profile: Option<&serde_json::Value>, preferred: Option<&str>) {
     for item in &mut delta.adds { item.size_bytes = planned_audio_bytes(item, profile, preferred); }
 }
 
+/// Goal encoding may reserve less than a retained file actually occupies. In
+/// that case replace the file; keeping it would violate the selection budget.
+pub fn replace_oversized_goal_residents(delta: &mut SyncDelta, desired: &[DesiredItem], manifest: &DeviceManifest,
+    overrides: &HashMap<(String, Option<String>), u32>) {
+    let existing: HashSet<_> = delta.adds.iter().map(|item| (item.jellyfin_id.clone(), item.server_id.clone())).collect();
+    for item in desired {
+        let key = (item.jellyfin_id.clone(), item.server_id.clone());
+        if !overrides.contains_key(&key) || existing.contains(&key) { continue; }
+        let rekey = delta.id_changes.iter().find(|change| change.new_jellyfin_id == item.jellyfin_id
+            && compatible_optional_eq(&change.source_server_id, &item.server_id));
+        let old_id = rekey.map(|change| change.old_jellyfin_id.as_str()).unwrap_or(&item.jellyfin_id);
+        let resident = manifest.synced_items.iter().find(|old| old.jellyfin_id == old_id
+            && compatible_optional_eq(&old.server_id, &item.server_id));
+        if resident.is_none_or(|old| old.size_bytes <= item.size_bytes) { continue; }
+        let mut replacement = add_from_desired(item);
+        replacement.is_auto_fill = true;
+        replacement.max_bitrate_override_kbps = overrides.get(&key).copied();
+        delta.adds.push(annotate_add(replacement, "encoding-budget-change"));
+        let old = resident.expect("resident size was checked above");
+        if !delta.deletes.iter().any(|delete| delete.local_path == old.local_path) {
+            delta.deletes.push(annotate_delete(SyncDeleteItem {
+                jellyfin_id: old.jellyfin_id.clone(), local_path: old.local_path.clone(), name: old.name.clone(),
+                reason_code: None, reason: None,
+            }, "encoding-budget-change"));
+        }
+        if rekey.is_none() { delta.unchanged = delta.unchanged.saturating_sub(1); }
+    }
+}
+
 pub fn scanned_audio_compatible(profile: Option<&serde_json::Value>, preferred: Option<&str>, extension: &str, codec: &str, bitrate: Option<u32>) -> bool {
+    scanned_audio_compatible_with_properties(profile, preferred, extension, codec, bitrate, Default::default())
+}
+
+pub fn scanned_audio_compatible_with_properties(profile: Option<&serde_json::Value>, preferred: Option<&str>, extension: &str, codec: &str, bitrate: Option<u32>, source: crate::domain::models::SourceAudioProperties) -> bool {
     let compatibility = audio_compatibility_profile(profile, preferred);
     let mut format = provider_audio_format(Some(extension), None);
     format.codecs = [codec.to_ascii_lowercase()].into_iter().collect();
     compatibility.output_is_compatible(&format)
-        && compatibility.transcode_profile.as_ref().and_then(|p|p.max_bitrate_kbps)
-            .is_none_or(|ceiling|bitrate.is_some_and(|bps|bps <= ceiling.saturating_mul(1050)))
+        && source_within_limits(source, &compatibility.limits)
+        && compatibility.transcode_profile.as_ref().is_none_or(|p| {
+            source_within_limits(source, p) && p.normalized_for_source(source).max_bitrate_kbps
+                .is_none_or(|ceiling| bitrate.is_some_and(|bps| bps <= ceiling.saturating_mul(1050)))
+        })
 }
 
-fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<TranscodeProfile> {
+fn audio_limits_from_device_profile(profile: &serde_json::Value) -> TranscodeProfile {
+    let value = |key: &str| profile[key].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0);
+    TranscodeProfile { max_sample_rate_hz: value("MaxAudioSampleRate"), max_bit_depth: value("MaxAudioBitDepth"),
+        max_channels: value("MaxAudioChannels"), ..Default::default() }
+}
+
+pub(crate) fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<TranscodeProfile> {
     let transcode = profile["TranscodingProfiles"]
         .as_array()?
         .iter()
@@ -1700,6 +1909,7 @@ fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<
         container,
         audio_codec,
         max_bitrate_kbps: target_bitrate_kbps(profile),
+        ..audio_limits_from_device_profile(profile)
     })
 }
 
@@ -1708,9 +1918,9 @@ pub fn target_bitrate_kbps(profile: &serde_json::Value) -> Option<u32> {
         .as_u64()
         .or_else(|| profile["MaxStreamingBitrate"].as_u64())?;
     if bitrate >= 1000 {
-        Some((bitrate / 1000) as u32)
+        u32::try_from(bitrate / 1000).ok().filter(|v| *v > 0)
     } else {
-        Some(bitrate as u32)
+        u32::try_from(bitrate).ok().filter(|v| *v > 0)
     }
 }
 
@@ -3289,7 +3499,7 @@ async fn execute_plan_sync_buffered(
                 )
             };
             let source_direct_compatible =
-                direct_for_bitrate(&producer_compatibility, &source_format, add_item.original_bitrate, add_item.max_bitrate_override_kbps);
+                direct_for_bitrate(&producer_compatibility, &source_format, add_item.original_bitrate, add_item.max_bitrate_override_kbps, add_item.source_audio);
             if direct_media.is_some() && !source_direct_compatible {
                 warnings.push(format!(
                     "[Sync] Skipped '{}' ({}): direct format is incompatible and no verified file transcode is available",
@@ -3304,7 +3514,7 @@ async fn execute_plan_sync_buffered(
                         if let Some(kbps) = add_item.max_bitrate_override_kbps {
                             profile.max_bitrate_kbps = Some(kbps);
                         }
-                        Some(profile)
+                        Some(profile.normalized_for_source(add_item.source_audio))
                     }
                     None => {
                         warnings.push(format!(
@@ -4976,33 +5186,19 @@ pub async fn augment_delta_with_existence_check(
             continue;
         };
         if device_io.file_length(&item.local_path).await?.is_none() {
-            to_add.push(annotate_add(
-                SyncAddItem {disc_number: None,
-                    duration_seconds: desired.duration_seconds,
-                    media_role: desired.media_role,
-                    jellyfin_id: desired.jellyfin_id.clone(),
-                    name: desired.name.clone(),
-                    album: desired.album.clone(),
-                    artist: desired.artist.clone(),
-                    size_bytes: desired.size_bytes,
-                    etag: desired.etag.clone(),
-                    provider_album_id: desired.provider_album_id.clone(),
-                    provider_content_type: desired.provider_content_type.clone(),
-                    provider_suffix: desired.provider_suffix.clone(),
-                    original_bitrate: desired.original_bitrate,
-                    track_number: desired.track_number,
-                    reason_code: None,
-                    reason: None,
-                    server_id: desired.server_id.clone(),
-                    tier: None,
-                    is_auto_fill: false,
-                    max_bitrate_override_kbps: None,
-                },
-                "device-file-missing",
-            ));
+            to_add.push(annotate_add(add_from_desired(desired), "device-file-missing"));
         }
     }
     let recovered = to_add.len();
+    for change in &delta.id_changes {
+        if delta.adds.iter().any(|add| add.jellyfin_id == change.new_jellyfin_id) { continue; }
+        if device_io.file_length(&change.old_local_path).await?.is_none()
+            && let Some(desired) = desired_by_id.get(change.new_jellyfin_id.as_str()) {
+            // Keep old/new linkage so replacement cleanup stays safe, just as
+            // Force Sync does for an ID reassignment with a new audio output.
+            to_add.push(annotate_add(add_from_desired(desired), "device-file-missing"));
+        }
+    }
     delta.adds.extend(to_add);
     delta.unchanged = delta.unchanged.saturating_sub(recovered);
     Ok(())
@@ -5202,7 +5398,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 })
                 .unwrap_or("new-selection");
             annotate_add(
-                SyncAddItem {disc_number: i.disc_number,
+                SyncAddItem {source_audio: i.source_audio, disc_number: i.disc_number,
                     duration_seconds: i.duration_seconds,
                     media_role: i.media_role,
                     jellyfin_id: i.jellyfin_id.clone(),
@@ -5321,7 +5517,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             add.artist.as_ref().map(|a| a.to_lowercase()),
         );
 
-        if let Some(del_indices) = delete_by_metadata.get(&key) {
+        if !profile_dirty && let Some(del_indices) = delete_by_metadata.get(&key) {
             // Find the first unmatched delete for this metadata
             if let Some(&del_idx) = del_indices.iter().find(|&&idx| {
                 if matched_delete_indices.contains(&idx) || relocation_delete_indices.contains(&idx)
@@ -6323,7 +6519,7 @@ mod tests {
         album: Option<&str>,
         artist: Option<&str>,
     ) -> DesiredItem {
-        DesiredItem {disc_number: None,
+        DesiredItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -7002,7 +7198,7 @@ mod tests {
         content_type: &str,
         size_bytes: u64,
     ) -> SyncAddItem {
-        SyncAddItem {disc_number: None,
+        SyncAddItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -7095,11 +7291,15 @@ mod tests {
             .collect()
     }
 
+    // These tests assert ordering and bounded capacity, not disk/network speed.
+    // Leave loaded parallel runners time to reach their explicit progress gates.
+    const PIPELINE_TEST_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+
     async fn wait_for_provider_staged_files(
         operation_id: &str,
         min_count: usize,
     ) -> Vec<std::path::PathBuf> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + PIPELINE_TEST_PROGRESS_TIMEOUT;
         loop {
             let files = provider_staged_files_for_operation(operation_id);
             if files.len() >= min_count || std::time::Instant::now() >= deadline {
@@ -7147,14 +7347,38 @@ mod tests {
         }
 
         async fn wait_for_first_write(&self) -> bool {
-            tokio::time::timeout(Duration::from_secs(2), self.first_write_started.notified())
+            tokio::time::timeout(PIPELINE_TEST_PROGRESS_TIMEOUT, self.first_write_started.notified())
                 .await
                 .is_ok()
         }
 
         fn release_first_write(&self) {
-            self.release_first_write.notify_waiters();
+            self.release_first_write.notify_one();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pipeline_write_gate_tolerates_slow_start_and_early_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.flac");
+        std::fs::write(&source, b"audio").unwrap();
+        std::fs::create_dir(dir.path().join("Music")).unwrap();
+        let io = BlockingFirstWriteDeviceIo::new(Arc::new(crate::device_io::MscBackend::new(dir.path().into())));
+        // The release can arrive before the writer reaches its gate. Keep it
+        // pending instead of requiring the two test tasks to run in lockstep.
+        io.release_first_write();
+        let writer = Arc::clone(&io);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            crate::device_io::DeviceIO::write_with_verify_from_path(writer.as_ref(), "Music/Track.flac", &source).await
+        });
+        assert!(io.wait_for_first_write().await, "slow startup must not be mistaken for a pipeline deadlock");
+        // The filesystem uses real blocking workers; restore real time before
+        // waiting for its I/O completion rather than auto-advancing past it.
+        tokio::time::resume();
+        tokio::time::timeout(PIPELINE_TEST_PROGRESS_TIMEOUT, task).await
+            .expect("the early release must let the writer finish").unwrap().unwrap();
+        assert_eq!(std::fs::read(dir.path().join("Music/Track.flac")).unwrap(), b"audio");
     }
 
     #[async_trait::async_trait]
@@ -8365,7 +8589,7 @@ mod tests {
             assert_eq!(provider_staged_files_for_operation(&id).len(), track_cap);
             assert_eq!(blocked.copy_buffer.load(Ordering::SeqCst), 64 * 1024);
             blocked.release_first_write();
-            let (count, errors) = tokio::time::timeout(Duration::from_secs(5), task)
+            let (count, errors) = tokio::time::timeout(PIPELINE_TEST_PROGRESS_TIMEOUT, task)
                 .await
                 .unwrap()
                 .unwrap()
@@ -8480,7 +8704,8 @@ mod tests {
             );
             blocking_io.release_first_write();
 
-            let (synced, errors) = handle.await.unwrap().unwrap();
+            let (synced, errors) = tokio::time::timeout(PIPELINE_TEST_PROGRESS_TIMEOUT, handle).await
+                .expect("pipeline should finish after releasing its first write").unwrap().unwrap();
             assert!(errors.is_empty(), "{errors:?}");
             assert_eq!(synced.len(), 2);
             assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
@@ -8570,7 +8795,8 @@ mod tests {
         );
         blocking_io.release_first_write();
 
-        let (synced, errors) = handle.await.unwrap().unwrap();
+        let (synced, errors) = tokio::time::timeout(PIPELINE_TEST_PROGRESS_TIMEOUT, handle).await
+            .expect("pipeline should drain after releasing backpressure").unwrap().unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(synced.len(), 3);
         assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
@@ -8758,7 +8984,8 @@ mod tests {
         assert!(operation_manager.request_cancel(&operation_id).await);
         blocking_io.release_first_write();
 
-        let (_synced, errors) = handle.await.unwrap().unwrap();
+        let (_synced, errors) = tokio::time::timeout(PIPELINE_TEST_PROGRESS_TIMEOUT, handle).await
+            .expect("cancelled pipeline should clean up and finish").unwrap().unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
         let manifest = manager.get_current_device().await.unwrap();
@@ -9640,7 +9867,7 @@ mod tests {
 
     #[test]
     fn test_calculate_delta_cleans_up_tracks_outside_current_music_folder() {
-        let desired = vec![DesiredItem {disc_number: None,
+        let desired = vec![DesiredItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "t1".to_string(),
@@ -9704,7 +9931,7 @@ mod tests {
 
     #[test]
     fn test_calculate_delta_does_not_convert_relocation_to_id_change() {
-        let desired = vec![DesiredItem {disc_number: None,
+        let desired = vec![DesiredItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "new-id".to_string(),
@@ -10090,7 +10317,7 @@ mod tests {
             provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![annotate_add(
-                SyncAddItem {disc_number: None,
+                SyncAddItem {source_audio: Default::default(), disc_number: None,
                     duration_seconds: 0,
                     media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "track-1".to_string(),
@@ -11349,4 +11576,290 @@ mod tests {
         assert!(manager.try_admit_mutation().is_none());
         assert!(!manager.request_quit_retry());
     }
+}
+
+#[cfg(test)]
+mod source_audio_planning_tests {
+    use super::*;
+    use crate::domain::models::SourceAudioProperties;
+
+    fn item(suffix: &str, duration: u32, size: u64) -> SyncAddItem {
+        serde_json::from_value(serde_json::json!({"jellyfinId":"track", "name":"Track", "sizeBytes":size,
+            "durationSeconds":duration,"providerSuffix":suffix,"originalBitrate":1_600_000})).unwrap()
+    }
+    fn mp3() -> serde_json::Value {
+        serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],
+            "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]})
+    }
+    fn source(rate: u32, depth: u32) -> SourceAudioProperties {
+        SourceAudioProperties { sample_rate_hz: Some(rate), bit_depth: Some(depth), channels: Some(2), ..Default::default() }
+    }
+
+    #[test]
+    fn converted_breakdown_keeps_payload_separate_from_one_percent_and_fixed_reserve() {
+        let track = item("flac", 240, 50_000_000);
+        let size = planned_audio_size(&track, Some(&mp3()), None);
+        assert_eq!(size.expected_bytes, 9_600_000);
+        assert_eq!(size.reserve_bytes(), 96_000 + 65_536);
+        assert_eq!(size.reserved_bytes, planned_audio_bytes(&track, Some(&mp3()), None));
+        let tiny = OutputSizeEstimate::converted(99);
+        assert_eq!(tiny.reserve_bytes(), 65_536, "percentage rounds down per converted track");
+        let mut direct = item("mp3", 240, 123);
+        direct.original_bitrate = Some(128_000);
+        assert_eq!(planned_audio_size(&direct, Some(&mp3()), None), OutputSizeEstimate::exact(123));
+        direct.media_role = crate::device::MediaRole::Podcast;
+        direct.provider_suffix = Some("flac".into());
+        assert_eq!(planned_audio_size(&direct, Some(&mp3()), None), OutputSizeEstimate::exact(123));
+    }
+
+    #[test]
+    fn breakdown_saturates_payload_and_reservation_without_inventing_extra_bytes() {
+        let mut track = item("aiff", 0, 1);
+        track.source_audio = SourceAudioProperties { original_size_bytes: Some(u64::MAX), average_bitrate_bps: Some(1), ..source(192_000, 24) };
+        let profile = serde_json::json!({"TranscodingProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        let size = planned_audio_size(&track, Some(&profile), None);
+        assert_eq!(size, OutputSizeEstimate::exact(u64::MAX));
+        assert_eq!(size.reserve_bytes(), 0);
+        let near_max = OutputSizeEstimate::converted(u64::MAX - 10);
+        assert_eq!(near_max.reserve_bytes(), 10);
+        let total = near_max.saturating_add(OutputSizeEstimate::exact(7));
+        assert_eq!(total.expected_bytes, u64::MAX - 3);
+        assert_eq!(total.reserve_bytes(), 3);
+        assert_eq!(total.expected_bytes + total.reserve_bytes(), total.reserved_bytes);
+        assert_eq!(total.saturating_add(OutputSizeEstimate::exact(3)), OutputSizeEstimate::exact(u64::MAX));
+    }
+
+    #[test]
+    fn mp3_defaults_and_low_rate_normalization_match_the_requested_plan() {
+        let mut track = item("flac", 240, 50_000_000);
+        track.source_audio = source(192_000, 24);
+        assert_eq!(planned_audio_bytes(&track, Some(&mp3()), None), 9_761_536);
+        track.source_audio = source(44_100, 16);
+        assert_eq!(planned_audio_bytes(&track, Some(&mp3()), None), 9_761_536);
+        track.source_audio = source(22_050, 16);
+        let target = transcode_profile_from_device_profile(&mp3()).unwrap().normalized_for_source(track.source_audio);
+        assert_eq!(target.max_bitrate_kbps, Some(160));
+        assert_eq!(target.max_sample_rate_hz, Some(22_050));
+        assert_eq!(planned_audio_bytes(&track, Some(&mp3()), None), 4_913_536);
+    }
+
+    #[test]
+    fn lossless_uses_known_pcm_resolution_and_direct_copies_keep_original_bytes() {
+        let mut track = item("aiff", 240, 50_000_000);
+        track.source_audio = source(44_100, 16);
+        let profile = serde_json::json!({"MusicStreamingTranscodingBitrate":9_216_000,
+            "MaxAudioSampleRate":192_000,"MaxAudioBitDepth":24,"MaxAudioChannels":2,
+            "TranscodingProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        assert_eq!(planned_audio_bytes(&track, Some(&profile), None), 42_824_896);
+        let mut direct = profile.clone();
+        direct["DirectPlayProfiles"] = serde_json::json!([{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]);
+        track.provider_suffix = Some("flac".into());
+        track.source_audio.original_size_bytes = Some(23_000_000);
+        assert_eq!(planned_audio_bytes(&track, Some(&direct), None), 23_000_000);
+    }
+
+    #[test]
+    fn lossless_does_not_assume_legacy_server_enforces_resolution_limits() {
+        let mut track = item("aiff", 60, 50_000_000);
+        track.source_audio = SourceAudioProperties { sample_rate_hz: Some(96_000), bit_depth: Some(24), channels: Some(6), ..Default::default() };
+        let profile = serde_json::json!({"MaxAudioSampleRate":48_000,"MaxAudioBitDepth":16,"MaxAudioChannels":2,
+            "TranscodingProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        assert_eq!(planned_audio_bytes(&track, Some(&profile), None), 60 * 96_000 * 24 * 6 / 8 * 101 / 100 + 65_536);
+        track.source_audio.transcode_limits_supported = true;
+        assert_eq!(planned_audio_bytes(&track, Some(&profile), None), 60 * 48_000 * 16 * 2 / 8 * 101 / 100 + 65_536);
+        let float_pcm = serde_json::json!({"TranscodingProfiles":[{"Type":"Audio","Container":"wav","AudioCodec":"pcm_f32le"}]});
+        track.source_audio = source(44_100, 16);
+        assert_eq!(planned_audio_bytes(&track, Some(&float_pcm), None), 60 * 44_100 * 32 * 2 / 8 * 101 / 100 + 65_536);
+    }
+
+    #[test]
+    fn unknown_duration_uses_original_evidence_and_is_idempotent_after_publication() {
+        let mut track = item("flac", 0, 12_000_000);
+        track.source_audio.original_size_bytes = Some(12_000_000);
+        track.source_audio.average_bitrate_bps = Some(1_600_000);
+        let expected = 60 * 320 * 125 * 101 / 100 + 65_536;
+        assert_eq!(planned_audio_bytes(&track, Some(&mp3()), None), expected);
+        for _ in 0..3 {
+            track.size_bytes = planned_audio_bytes(&track, Some(&mp3()), None);
+            assert_eq!(track.size_bytes, expected);
+        }
+        let round_trip: SyncAddItem = serde_json::from_value(serde_json::to_value(&track).unwrap()).unwrap();
+        assert_eq!(round_trip.source_audio, track.source_audio);
+        assert_eq!(planned_audio_bytes(&round_trip, Some(&mp3()), None), expected);
+        let mut legacy = item("flac", 0, 12_000_000);
+        let conservative = planned_audio_bytes(&legacy, Some(&mp3()), None);
+        legacy.size_bytes = conservative;
+        assert_eq!(planned_audio_bytes(&legacy, Some(&mp3()), None), conservative);
+        assert_eq!(legacy.source_audio, SourceAudioProperties::default());
+    }
+
+    #[test]
+    fn one_bit_source_precision_is_not_a_pcm_output_depth() {
+        let profile = serde_json::json!({"MaxAudioSampleRate":192_000,"MaxAudioBitDepth":24,
+            "TranscodingProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
+        let mut track = item("dsf", 60, 50_000_000);
+        for supported in [false, true] {
+            track.source_audio = source(2_822_400, 24);
+            track.source_audio.transcode_limits_supported = supported;
+            let pcm_reservation = planned_audio_bytes(&track, Some(&profile), None);
+            track.source_audio.bit_depth = Some(1);
+            assert_eq!(planned_audio_bytes(&track, Some(&profile), None), pcm_reservation);
+        }
+    }
+
+    #[test]
+    fn resident_measurements_are_used_only_when_delta_keeps_the_file() {
+        let desired = DesiredItem {
+            source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
+            media_role: crate::device::MediaRole::Music, jellyfin_id: "track".into(), name: "Track".into(),
+            album: None, artist: None, size_bytes: 50_000_000, etag: None, provider_album_id: None,
+            provider_content_type: None, provider_suffix: Some("flac".into()),
+            original_bitrate: Some(1_600_000), track_number: None, server_id: Some("source".into()),
+        };
+        let mut manifest = DeviceManifest::default();
+        manifest.managed_paths = vec!["Music".into()];
+        manifest.synced_items = serde_json::from_value(serde_json::json!([{
+            "providerItemId":"track","name":"Track","sizeBytes":5_000_000,
+            "localPath":"Music/Track.mp3","syncedAt":"before","originalBitrate":1_600_000,
+            "serverId":"source"
+        }])).unwrap();
+        let kept = calculate_delta(&[desired.clone()], &manifest);
+        assert_eq!(kept.unchanged, 1);
+        assert_eq!(planned_selection_bytes(&[desired.clone()], &manifest, Some(&mp3()), None), 5_000_000);
+        for upgrade in [false, true] {
+            manifest.synced_items[0].local_path = if upgrade { "Music/Track.mp3" } else { "Old/Track.mp3" }.into();
+            manifest.synced_items[0].original_bitrate = Some(if upgrade { 128_000 } else { 1_600_000 });
+            let mut delta = calculate_delta(&[desired.clone()], &manifest);
+            assert_eq!(delta.adds.len(), 1);
+            estimate_delta_outputs(&mut delta, Some(&mp3()), None);
+            assert_eq!(planned_selection_bytes(&[desired.clone()], &manifest, Some(&mp3()), None), delta.adds[0].size_bytes);
+        }
+        manifest.synced_items[0].original_bitrate = desired.original_bitrate;
+        manifest.synced_items[0].server_id = None;
+        assert_eq!(planned_selection_bytes(&[desired], &manifest, Some(&mp3()), None), 5_000_000,
+            "a unique untagged legacy entry is retained by delta calculation");
+    }
+
+    #[test]
+    fn known_resolution_bounds_prevent_direct_copy_and_scanned_reuse() {
+        let mut profile = mp3();
+        profile["MaxAudioSampleRate"] = serde_json::json!(48_000);
+        profile["MaxAudioChannels"] = serde_json::json!(2);
+        let mut track = item("mp3", 240, 100_000_000);
+        track.original_bitrate = Some(320_000);
+        track.source_audio = source(96_000, 16);
+        assert_eq!(planned_audio_bytes(&track, Some(&profile), None), 9_761_536);
+        assert!(!scanned_audio_compatible_with_properties(Some(&profile), None, "mp3", "mp3", Some(320_000), track.source_audio));
+        track.source_audio = source(44_100, 16);
+        assert_eq!(planned_audio_bytes(&track, Some(&profile), None), 100_000_000);
+        assert!(scanned_audio_compatible_with_properties(Some(&profile), None, "mp3", "mp3", Some(320_000), track.source_audio));
+    }
+
+    #[test]
+    fn selection_identity_includes_server_and_deduplicates_only_same_owner() {
+        let make = |server: &str, size| DesiredItem { source_audio: Default::default(), disc_number: None,
+            duration_seconds: 240, media_role: crate::device::MediaRole::Music, jellyfin_id:"same".into(), name:"Track".into(),
+            album:None, artist:None, size_bytes:size, etag:None, provider_album_id:None, provider_content_type:None,
+            provider_suffix:Some("mp3".into()), original_bitrate:Some(128_000), track_number:None, server_id:Some(server.into()) };
+        let items = vec![make("a", 100), make("b", 200), make("a", 100)];
+        assert_eq!(planned_selection_bytes(&items, &DeviceManifest::default(), None, None), 300);
+    }
+    fn review_desired(id: &str) -> DesiredItem {
+        DesiredItem { source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
+            media_role: crate::device::MediaRole::Music, jellyfin_id: id.into(), name: "Track".into(),
+            album: None, artist: None, size_bytes: 50_000_000, etag: None, provider_album_id: None,
+            provider_content_type: None, provider_suffix: Some("flac".into()), original_bitrate: Some(1_600_000),
+            track_number: None, server_id: Some("source".into()) }
+    }
+    fn review_manifest() -> DeviceManifest {
+        let mut manifest = DeviceManifest::default();
+        manifest.managed_paths = vec!["Music".into()];
+        manifest.synced_items = serde_json::from_value(serde_json::json!([{
+            "providerItemId":"old","name":"Track","sizeBytes":5_000_000,"localPath":"Music/Track.mp3",
+            "syncedAt":"before","originalBitrate":1_600_000,"serverId":"source","providerSuffix":"flac"
+        }])).unwrap();
+        manifest
+    }
+    #[test]
+    fn metadata_rekeys_share_estimates_without_reusing_an_old_file_twice() {
+        let desired = vec![review_desired("new"), review_desired("other")];
+        let manifest = review_manifest();
+        let mut delta = calculate_delta(&desired, &manifest);
+        assert_eq!(delta.id_changes.len(), 1);
+        assert_eq!(delta.adds.len(), 1);
+        estimate_delta_outputs(&mut delta, Some(&mp3()), None);
+        assert_eq!(planned_selection_bytes(&desired, &manifest, Some(&mp3()), None),
+            delta.id_changes[0].size_bytes + delta.adds[0].size_bytes);
+        let size = planned_selection_size(&[desired.clone(), vec![desired[0].clone()]].concat(), &manifest, Some(&mp3()), None);
+        assert_eq!(size.expected_bytes, 5_000_000 + 9_600_000);
+        assert_eq!(size.reserve_bytes(), 96_000 + 65_536);
+        assert_eq!(size.reserved_bytes, delta.id_changes[0].size_bytes + delta.adds[0].size_bytes);
+    }
+    #[test]
+    fn metadata_rekeys_respect_server_quality_and_profile_rewrites() {
+        for incompatible in ["owner", "quality", "profile"] {
+            let mut desired = review_desired("new");
+            let mut manifest = review_manifest();
+            match incompatible {
+                "owner" => desired.server_id = Some("other-source".into()),
+                "quality" => manifest.synced_items[0].original_bitrate = Some(128_000),
+                _ => manifest.transcoding_profile_dirty = true,
+            }
+            let mut delta = calculate_delta(&[desired.clone()], &manifest);
+            assert_eq!(delta.id_changes.len(), 0, "{incompatible}");
+            assert_eq!(delta.adds.len(), 1);
+            estimate_delta_outputs(&mut delta, Some(&mp3()), None);
+            assert_eq!(planned_selection_bytes(&[desired], &manifest, Some(&mp3()), None), delta.adds[0].size_bytes);
+        }
+        let mut legacy = review_manifest();
+        legacy.synced_items[0].server_id = None;
+        assert_eq!(calculate_delta(&[review_desired("new")], &legacy).id_changes.len(), 1);
+    }
+    #[test]
+    fn smaller_goal_reservations_replace_oversized_retained_outputs() {
+        for rekey in [false, true] {
+            let mut manifest = review_manifest();
+            manifest.synced_items[0].local_path = "Music/Imported/Track.flac".into();
+            let mut desired = review_desired(if rekey { "new" } else { "old" });
+            desired.size_bytes = 2_004_736; // 240 seconds at 64 kbps with allowances.
+            let overrides = HashMap::from([((desired.jellyfin_id.clone(), desired.server_id.clone()), 64)]);
+            let mut delta = calculate_delta(&[desired.clone()], &manifest);
+            replace_oversized_goal_residents(&mut delta, &[desired.clone()], &manifest, &overrides);
+            replace_oversized_goal_residents(&mut delta, &[desired], &manifest, &overrides);
+            assert_eq!(delta.adds.len(), 1);
+            assert_eq!(delta.unchanged, 0);
+            assert_eq!(delta.deletes.len(), 1, "reclaim the old file after the replacement is safely written");
+            assert_eq!(delta.deletes[0].local_path, "Music/Imported/Track.flac");
+            assert_eq!(delta.adds[0].max_bitrate_override_kbps, Some(64));
+            estimate_delta_outputs(&mut delta, Some(&mp3()), None);
+            let plan = crate::sync_plan::SyncPlan::from_delta(delta, &manifest).unwrap();
+            assert_eq!(plan.total_bytes, 2_004_736);
+        }
+        let mut manifest = review_manifest();
+        manifest.synced_items[0].size_bytes = 1_000_000;
+        let mut desired = review_desired("old");
+        desired.size_bytes = 2_004_736;
+        let mut delta = calculate_delta(&[desired.clone()], &manifest);
+        replace_oversized_goal_residents(&mut delta, &[desired.clone()], &manifest,
+            &HashMap::from([((desired.jellyfin_id, desired.server_id), 64)]));
+        assert!(delta.adds.is_empty(), "a smaller retained output already fits the ceiling");
+    }
+
+    #[tokio::test]
+    async fn missing_rekey_sources_become_linked_audio_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let io = crate::device_io::MscBackend::new(root.path().to_path_buf());
+        let manifest = review_manifest();
+        let desired = review_desired("new");
+        let mut delta = calculate_delta(&[desired.clone()], &manifest);
+        assert_eq!(delta.id_changes.len(), 1);
+        augment_delta_with_existence_check(&mut delta, &[desired], &manifest, &io).await.unwrap();
+        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(delta.id_changes.len(), 1, "retain cleanup linkage");
+        assert_eq!(delta.adds[0].reason_code.as_deref(), Some("device-file-missing"));
+        estimate_delta_outputs(&mut delta, Some(&mp3()), None);
+        let plan = crate::sync_plan::SyncPlan::from_delta(delta, &manifest).unwrap();
+        assert_eq!(plan.total_bytes, 9_761_536, "missing rekey source is a single new audio output");
+    }
+
 }

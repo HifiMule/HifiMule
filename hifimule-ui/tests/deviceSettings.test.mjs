@@ -4,6 +4,8 @@ import test from 'node:test';
 import ts from 'typescript';
 const source = readFileSync(new URL('../src/components/BasketSidebar.ts', import.meta.url), 'utf8');
 const script = ts.transpile(source.replace(/^import .*;\r?\n/gm, '').replace(/export class /g, 'class '), { target: ts.ScriptTarget.ES2022 });
+const estimateScript = ts.transpile(readFileSync(new URL('../src/state/basketEstimate.ts', import.meta.url), 'utf8').replace(/^import .*;\r?\n/gm, '').replace(/export /g, ''), { target: ts.ScriptTarget.ES2022 });
+const { basketEstimateKey } = new Function(`${estimateScript}\nreturn { basketEstimateKey };`)();
 class Element {
     children = new Map(); listeners = new Map(); style = {}; checked = false; value = ''; loading = false;
     set innerHTML(html) {
@@ -24,7 +26,7 @@ class Element {
 async function setup(selected, current = {}) {
     const calls = []; const dialog = new Element();
     const rpc = async (method, params) => { calls.push({ method, params }); return method === 'device_profiles.list' ? [] : {}; };
-    const { BasketSidebar } = new Function('rpcCall', 'basketStore', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(rpc, { getItems: () => [] }, key => key, { createElement: () => dialog, body: { appendChild() {} } }, { whenDefined: async () => {} });
+    const { BasketSidebar } = new Function('basketEstimateKey', 'rpcCall', 'basketStore', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(basketEstimateKey, rpc, { getItems: () => [] }, key => key, { createElement: () => dialog, body: { appendChild() {} } }, { whenDefined: async () => {} });
     const sidebar = Object.create(BasketSidebar.prototype);
     Object.assign(sidebar, { currentDevice: current, selectedDeviceSummary: () => ({ deviceId: 'device', ...selected }), escapeHtml: value => value, iconLabel: value => value, refreshAndRender: async () => {} });
     await sidebar.openDeviceSettings();

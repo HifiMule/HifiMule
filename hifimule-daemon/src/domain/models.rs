@@ -170,6 +170,7 @@ pub enum CreditRole {
 /// It is not serialized into RPC payloads or persisted as an authenticated URL.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderItemMetadata {
+    pub source_audio: SourceAudioProperties,
     /// Private provider-verified music recording identity for Radio.
     pub recording: Option<crate::playback::recording::RecordingEvidence>,
     /// A provider reported more than one music artist for this track.
@@ -183,6 +184,23 @@ pub struct ProviderItemMetadata {
     pub cover_reference: Option<String>,
     pub part_identities: Vec<ProviderPartIdentity>,
     pub credits: Vec<Credit>,
+}
+
+/// Original audio evidence, kept separate from mutable output-size reservations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SourceAudioProperties {
+    /// Provider contract can request maximum rate/depth/channels for a transcode.
+    /// Legacy Subsonic exposes format/bitrate only, so this defaults to false.
+    pub transcode_limits_supported: bool,
+    pub sample_rate_hz: Option<u32>,
+    pub bit_depth: Option<u32>,
+    pub channels: Option<u32>,
+    pub original_size_bytes: Option<u64>,
+    /// Exact audio stream bitrate, without rounding through the browse kbps field.
+    pub audio_bitrate_bps: Option<u32>,
+    /// Container average bitrate, including overhead; used only to infer duration.
+    pub average_bitrate_bps: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

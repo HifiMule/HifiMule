@@ -235,6 +235,18 @@ class BasketStore extends EventTarget {
         this.targetDeviceId=targetDeviceId;this.basketHash=basketHash;
     }
 
+    /** Observational refresh from expanded tracks. Keep original source sizes;
+     * profile-specific output totals live in the estimate cache, not manifests. */
+    public applyEstimatedMetadata(estimates: { id: string; serverId?: string; childCount: number; sizeTicks: number; sizeBytes: number }[]): void {
+        for (const estimate of estimates) {
+            const item = this.items.get(estimate.id);
+            if (!item || (item.serverId ?? this.activeServerId) !== estimate.serverId) continue;
+            item.childCount = estimate.childCount;
+            item.sizeTicks = estimate.sizeTicks;
+            item.sizeBytes = estimate.sizeBytes;
+        }
+    }
+
     public hydrateFromDaemon(items: BasketItem[]) {
         if (this._syncingFromDaemon) return;
         this._syncingFromDaemon = true;

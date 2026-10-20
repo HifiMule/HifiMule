@@ -125,7 +125,7 @@ fn derive_last_played(song: &Song, now: i64) -> Option<i64> {
 
 /// Fetch bounds, mirrored verbatim from `run_auto_fill_provider` so the configurable path never
 /// re-derives different constants (Story 12.4 task note).
-const MAX_PER_LIST: u32 = 2000;
+pub(super) const MAX_PER_LIST: u32 = 2000;
 const PAGE_SIZE: u32 = 500;
 const MAX_BULK_PAGES: u32 = 200;
 
@@ -370,12 +370,23 @@ pub async fn expand_with_pipeline(
         }
     }
 
-    if let Some(profile)=params.output_profile.as_ref() {
-        let override_kbps=super::pipeline::target_bitrate_kbps(&normalized.budget);
-        for candidates in pools.values_mut() { for candidate in candidates {candidate.song.size_bytes=Some(crate::sync::planned_song_bytes(&candidate.song,Some(profile),override_kbps));} }
-        // Size metadata now describes the planned transfer. Do not shrink twice.
-        normalized.budget.encoding_from_goals=false;
+    // Derive encoding once from the normalized device/headroom ceiling. Preserve
+    // source evidence before publishing planned bytes onto candidates.
+    let override_kbps = if params.output_profile.is_some() || params.preferred_audio_container.is_some() {
+        super::pipeline::target_bitrate_kbps(&normalized.budget)
+    } else { None };
+    for candidates in pools.values_mut() {
+        for candidate in candidates {
+            candidate.song.provider_metadata.source_audio = crate::sync::source_audio_for_song(&candidate.song);
+            candidate.song.duration_seconds = crate::sync::effective_duration_seconds(candidate.song.duration_seconds,
+                candidate.song.provider_metadata.source_audio).min(u64::from(u32::MAX)) as u32;
+            candidate.song.size_bytes = Some(crate::sync::planned_song_bytes_with_preferred(
+                &candidate.song, params.output_profile.as_ref(), params.preferred_audio_container.as_deref(), override_kbps,
+            ));
+        }
     }
+    // Candidate bytes already describe the transfer, including passthrough.
+    normalized.budget.encoding_from_goals = false;
     let input = PipelineInput {
         pools,
         history,
@@ -387,6 +398,7 @@ pub async fn expand_with_pipeline(
     };
 
     let mut items = run_pipeline(&input, &normalized);
+    for item in &mut items { item.max_bitrate_override_kbps = override_kbps; }
     // Tag each emitted track with its source tier index (string) for sync-completion recording.
     if !tier_of.is_empty() {
         for item in &mut items {
@@ -490,34 +502,52 @@ async fn resolve_genre_membership(
 async fn materialize_pool(provider: &dyn MediaProvider, key: &SourceKey) -> Vec<Song> {
     match key.kind {
         SourceKind::Library => fetch_library(provider).await,
-        SourceKind::Favorites => fetch_priority_list(
-            provider.list_favorites(None, 0, MAX_PER_LIST).await,
-            "list_favorites",
-        ),
-        SourceKind::History => fetch_priority_list(
-            provider.list_recently_played(None, 0, MAX_PER_LIST).await,
-            "list_recently_played",
-        ),
+        SourceKind::Favorites => fetch_priority_songs(provider, PriorityList::Favorites).await.unwrap_or_else(|error| {
+            crate::daemon_log!("[AutoFill] favorites source unavailable: {}", error);
+            Vec::new()
+        }),
+        SourceKind::History => fetch_priority_songs(provider, PriorityList::Recent).await.unwrap_or_else(|error| {
+            crate::daemon_log!("[AutoFill] history source unavailable: {}", error);
+            Vec::new()
+        }),
         SourceKind::Playlist => fetch_playlist(provider, key.ref_id.as_deref()).await,
     }
 }
 
-/// Unwrap a `(songs, total)` priority-list result into a pool, mapping unsupported/error to empty.
-fn fetch_priority_list(
-    result: std::result::Result<(Vec<Song>, u32), ProviderError>,
-    method: &str,
-) -> Vec<Song> {
-    match result {
-        Ok((songs, _)) => songs,
-        Err(ProviderError::UnsupportedCapability(_)) => {
-            crate::daemon_log!("[AutoFill] {}: UnsupportedCapability, empty pool", method);
-            Vec::new()
-        }
-        Err(e) => {
-            crate::daemon_log!("[AutoFill] {} failed (non-fatal): {}", method, e);
-            Vec::new()
-        }
+#[derive(Clone, Copy)]
+pub(super) enum PriorityList { Favorites, Frequent, Recent }
+
+pub(super) async fn priority_page(provider: &dyn MediaProvider, kind: PriorityList, offset: u32) -> std::result::Result<(Vec<Song>, u32), ProviderError> {
+    match kind {
+        PriorityList::Favorites => provider.list_favorites(None, offset, MAX_PER_LIST).await,
+        PriorityList::Frequent => provider.list_frequently_played(None, offset, MAX_PER_LIST).await,
+        PriorityList::Recent => provider.list_recently_played(None, offset, MAX_PER_LIST).await,
     }
+}
+
+/// Enumerate complete priority sources instead of silently stopping at 2000.
+/// Some servers ignore offsets: an all-duplicate page terminates safely.
+pub(super) async fn fetch_priority_songs(provider: &dyn MediaProvider, kind: PriorityList) -> std::result::Result<Vec<Song>, ProviderError> {
+    let mut all = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = 0u32;
+    for _ in 0..MAX_BULK_PAGES {
+        let result = priority_page(provider, kind, offset).await;
+        let (songs, total) = match result {
+            Ok(page) => page,
+            Err(error) if all.is_empty() => return Err(error),
+            Err(error) => {
+                crate::daemon_log!("[AutoFill] priority pagination stopped after {} songs: {}", all.len(), error);
+                break;
+            }
+        };
+        let count = songs.len() as u32;
+        let before = all.len();
+        all.extend(songs.into_iter().filter(|song| seen.insert(song.id.clone())));
+        offset = offset.saturating_add(count);
+        if count == 0 || all.len() == before || (total == 0 && count < MAX_PER_LIST) || (total > 0 && offset >= total) { break; }
+    }
+    Ok(all)
 }
 
 /// Paginate the full library into a single pool, bounded by the shared `PAGE_SIZE`/`MAX_BULK_PAGES`
@@ -526,13 +556,15 @@ async fn fetch_library(provider: &dyn MediaProvider) -> Vec<Song> {
     let mut all = Vec::new();
     let mut offset = 0u32;
     let mut pages = 0u32;
+    let mut seen = HashSet::new();
     loop {
         match provider.list_all_songs_page(None, offset, PAGE_SIZE).await {
             Ok((songs, _)) => {
                 let count = songs.len() as u32;
-                all.extend(songs);
+                let before = all.len();
+                all.extend(songs.into_iter().filter(|song| seen.insert(song.id.clone())));
                 pages += 1;
-                if count < PAGE_SIZE || pages >= MAX_BULK_PAGES {
+                if count < PAGE_SIZE || pages >= MAX_BULK_PAGES || all.len() == before {
                     break;
                 }
                 offset += PAGE_SIZE;
@@ -615,6 +647,10 @@ mod tests {
         genre_unsupported_at_runtime: bool,
         genre_error_at_runtime: bool,
         unsupported_recently_played: bool,
+        repeat_priority_page: bool,
+        repeat_library_page: bool,
+        favorite_calls: std::sync::atomic::AtomicUsize,
+        library_calls: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
@@ -736,17 +772,20 @@ mod tests {
         async fn list_favorites(
             &self,
             _library_id: Option<&str>,
-            _offset: u32,
-            _limit: u32,
+            offset: u32,
+            limit: u32,
         ) -> Result<(Vec<Song>, u32), ProviderError> {
-            Ok((self.favorites.clone(), self.favorites.len() as u32))
+            self.favorite_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let offset = if self.repeat_priority_page { 0 } else { offset };
+            let total = if self.repeat_priority_page { u32::MAX } else { self.favorites.len() as u32 };
+            Ok((self.favorites.iter().skip(offset as usize).take(limit as usize).cloned().collect(), total))
         }
 
         async fn list_recently_played(
             &self,
             _library_id: Option<&str>,
-            _offset: u32,
-            _limit: u32,
+            offset: u32,
+            limit: u32,
         ) -> Result<(Vec<Song>, u32), ProviderError> {
             if self.unsupported_recently_played {
                 return Err(ProviderError::UnsupportedCapability(
@@ -754,7 +793,7 @@ mod tests {
                 ));
             }
             Ok((
-                self.recently_played.clone(),
+                self.recently_played.iter().skip(offset as usize).take(limit as usize).cloned().collect(),
                 self.recently_played.len() as u32,
             ))
         }
@@ -765,6 +804,8 @@ mod tests {
             offset: u32,
             limit: u32,
         ) -> Result<(Vec<Song>, u32), ProviderError> {
+            self.library_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let offset = if self.repeat_library_page { 0 } else { offset };
             let start = offset as usize;
             let end = (start + limit as usize).min(self.library.len());
             let page = if start >= self.library.len() {
@@ -834,6 +875,7 @@ mod tests {
 
     fn params(max_fill_bytes: u64) -> AutoFillParams {
         AutoFillParams {
+            preferred_audio_container: None,
             output_profile: None,
             exclude_item_ids: Vec::new(),
             max_fill_bytes,
@@ -856,6 +898,7 @@ mod tests {
         rotation_cursor: i64,
     ) -> AutoFillParams {
         AutoFillParams {
+            preferred_audio_container: None,
             output_profile: None,
             exclude_item_ids: Vec::new(),
             max_fill_bytes,
@@ -2001,4 +2044,118 @@ mod tests {
             "playlist still fills despite unsupported history"
         );
     }
+    #[tokio::test]
+    async fn configured_priority_sources_include_tracks_beyond_first_2000() {
+        for kind in [SourceKind::Favorites, SourceKind::History] {
+            let songs: Vec<_> = (0..2101).map(|i| song(&format!("t{i}"), 1)).collect();
+            let provider = MockProvider { favorites: songs.clone(), recently_played: songs, ..Default::default() };
+            let pipeline = AutoFillPipeline { sources: vec![SourceEntry::new(kind)], ..Default::default() };
+            let items = expand_with_pipeline(Arc::new(provider), &pipeline, params(100_000)).await.unwrap();
+            assert_eq!(items.len(), 2101, "complete {kind:?} pool should be considered");
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_provider_continues_after_oversized_priority_and_library_pages() {
+        for priority in [true, false] {
+            let count = if priority { 2000 } else { 500 };
+            let mut songs: Vec<_> = (0..count).map(|i| song(&format!("large{i}"), 100)).collect();
+            songs.push(song("fits", 1));
+            let provider = Arc::new(if priority {
+                MockProvider { favorites: songs, ..Default::default() }
+            } else { MockProvider { library: songs, ..Default::default() } });
+            let items = super::super::run_auto_fill_provider(provider.clone(), params(2)).await.unwrap();
+            assert_eq!(items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["fits"]);
+            let calls = if priority { &provider.favorite_calls } else { &provider.library_calls };
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_provider_stops_fetching_when_budget_is_exhausted() {
+        let provider = Arc::new(MockProvider {
+            favorites: (0..10_000).map(|i| song(&format!("t{i}"), 100)).collect(),
+            ..Default::default()
+        });
+        let items = super::super::run_auto_fill_provider(provider.clone(), params(100)).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(provider.favorite_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(provider.library_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_pages_stop_without_duplicate_materialization() {
+        let provider = MockProvider {
+            favorites: (0..2000).map(|i| song(&format!("f{i}"), 1)).collect(),
+            library: (0..500).map(|i| song(&format!("l{i}"), 1)).collect(),
+            repeat_priority_page: true, repeat_library_page: true,
+            ..Default::default()
+        };
+        assert_eq!(fetch_priority_songs(&provider, PriorityList::Favorites).await.unwrap().len(), 2000);
+        assert_eq!(provider.favorite_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(fetch_library(&provider).await.len(), 500);
+        assert_eq!(provider.library_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn goal_encoding_survives_capacity_clipping_and_item_serialization() {
+        for max_bytes in [None, Some(20_000_000)] {
+            for preferred in [false, true] {
+                let mut source = song("flac", 50_000_000);
+                source.suffix = Some("flac".into()); source.content_type = Some("audio/flac".into());
+                let provider = MockProvider { library: vec![source.clone()], ..Default::default() };
+                let pipeline = AutoFillPipeline {
+                    budget: BudgetStage { max_bytes, headroom_bytes: Some(1_000_000), target_duration_secs: Some(600), encoding_from_goals: true },
+                    ..Default::default()
+                };
+                let mut request = params(5_000_000);
+                if preferred { request.preferred_audio_container = Some("mp3".into()); }
+                else { request.output_profile = Some(serde_json::json!({
+                    "DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],
+                    "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],
+                    "MusicStreamingTranscodingBitrate":192000
+                })); }
+                let expected = crate::sync::planned_song_bytes_with_preferred(&source, request.output_profile.as_ref(), request.preferred_audio_container.as_deref(), Some(53));
+                let items = expand_with_pipeline(Arc::new(provider), &pipeline, request).await.unwrap();
+                assert_eq!(items.len(), 1);
+                let item: AutoFillItem = serde_json::from_value(serde_json::to_value(&items[0]).unwrap()).unwrap();
+                assert_eq!(item.max_bitrate_override_kbps, Some(53), "derive from 4MB effective capacity, not the original cap");
+                assert_eq!(item.size_bytes, expected);
+                assert_eq!(item.source_audio.original_size_bytes, Some(50_000_000));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_encoding_without_output_policy_preserves_passthrough_bytes() {
+        let provider = MockProvider { library: vec![song("direct", 2_000_000)], ..Default::default() };
+        let pipeline = AutoFillPipeline {
+            budget: BudgetStage { target_duration_secs: Some(600), encoding_from_goals: true, ..Default::default() },
+            ..Default::default()
+        };
+        let items = expand_with_pipeline(Arc::new(provider), &pipeline, params(5_000_000)).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].size_bytes, 2_000_000);
+        assert_eq!(items[0].max_bitrate_override_kbps, None);
+    }
+
+    #[tokio::test]
+    async fn recovered_source_durations_are_enforced_by_the_selector() {
+        let songs = ["one", "two"].into_iter().map(|id| {
+            let mut track = song(id, 12_000_000);
+            track.duration_seconds = 0;
+            track.bitrate_kbps = Some(1600);
+            track.suffix = Some("flac".into());
+            track
+        }).collect();
+        let provider = MockProvider { library: songs, ..Default::default() };
+        let pipeline = AutoFillPipeline {
+            budget: BudgetStage { target_duration_secs: Some(60), ..Default::default() },
+            ..Default::default()
+        };
+        let items = expand_with_pipeline(Arc::new(provider), &pipeline, params(50_000_000)).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].duration_seconds, 60);
+    }
+
 }

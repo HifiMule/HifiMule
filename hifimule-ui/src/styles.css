@@ -476,6 +476,33 @@ body {
   font-size: 0.9rem;
 }
 
+.basket-actions #start-sync-btn {
+  min-width: 0;
+}
+
+.basket-actions #start-sync-btn::part(base) {
+  min-width: 0;
+  height: auto;
+  min-height: var(--sl-input-height-medium);
+}
+
+.basket-actions #start-sync-btn::part(label) {
+  white-space: normal;
+  line-height: 1.4;
+  padding-block: var(--space-xs);
+}
+
+.basket-size-reserve {
+  color: var(--ink-dim);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.basket-footer > .basket-size-reserve {
+  margin-top: calc(-1 * var(--space-2xs));
+}
+
 /* Only present in the DOM when the basket is dirty (collapses otherwise). */
 .basket-status-zone {
   display: flex;

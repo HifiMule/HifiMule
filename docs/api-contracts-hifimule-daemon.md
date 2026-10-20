@@ -280,6 +280,20 @@ Updates the device's provider profile ID and optional sync rules.
 
 ---
 
+### `basket.estimate`
+
+Returns read-only, device-aware manual-selection estimates using the same expanded tracks and output planning as sync preparation. Auto-Fill slots are excluded. This method neither writes the manifest nor downloads audio.
+
+**Params:** `{ "targetDeviceId": string, "basketItems": BasketItem[], "force"?: boolean, "expectedProfileId"?: string | null, "expectedProfileRevision"?: string }`
+
+**Returns:** `{ "targetDeviceId": string, "selectedBytes": number, "expectedBytes": number, "reserveBytes": number, "trackCount": number, "items": Array<{ "id": string, "serverId": string, "childCount": number, "sizeTicks": number, "sizeBytes": number, "plannedBytes": number, "expectedBytes": number, "reserveBytes": number }> }`
+
+`selectedBytes` deduplicates server-qualified track identities across selections and credits measured resident files unless force/profile changes require replacement. It remains the full capacity reservation, as does per-item `plannedBytes`. `expectedBytes` describes predicted output payload; `reserveBytes` is the additional safety allowance. Converted music reserves `floor(payload / 100) + 65536` bytes per track. Direct copies, measured resident/rekey reuse and nonmusic have exact expected bytes and zero reserve. Expected and reserved totals saturate at the integer limit; reserve is their difference so the breakdown always sums to the reserved total. Lossless expected bytes remain a conservative PCM upper bound, and unknown durations retain the conservative fallback policy.
+
+Per-item `sizeTicks` sums the expanded tracks' whole-second durations, rather than trusting container aggregates. `sizeBytes` describes original sources and is not overwritten with output predictions. Clients should display expected bytes with the safety reserve separately, while budgeting full reserved bytes for capacity and Auto-Fill. Older daemon responses may omit the additive breakdown fields; clients must preserve their authoritative reserved totals without inferring a breakdown.
+
+The destination, connection and profile are checked before publication; disconnected or changed targets return an error. Clients cache by basket/device/profile revision, reject stale responses and revalidate before explicit sync. `currentDevice.plannedProfileRevision` identifies the selected profile contents independently of its ID.
+
 ### `device.set_transcoding_profile`
 
 Updates the current device's transcoding profile.
@@ -617,6 +631,8 @@ Behavior:
   "playlists": Array<PlaylistSyncItem>
 }
 ```
+
+When requested with `prepared: true`, sync preparation returns a stored-plan summary instead of the raw delta. Its `selectedBytes` remains the full reserved manual-selection size. Additive `selectedExpectedBytes` and `selectedReserveBytes` use the exact same filtered manual additions, metadata rekeys and retained residents, excluding Auto-Fill. Converted additions carry the same expected/reserve policy as `basket.estimate`; measured and exact outputs receive no additional reserve. `selectedExpectedBytes + selectedReserveBytes` equals `selectedBytes`, including saturated totals. These fields describe selection planning, while transfer progress and completed file sizes continue to report actual bytes.
 
 ---
 

@@ -635,6 +635,7 @@ async fn handler(
         }
         "jellyfin_get_item_counts" => handle_jellyfin_get_item_counts(&state, payload.params).await,
         "jellyfin_get_item_sizes" => handle_jellyfin_get_item_sizes(&state, payload.params).await,
+        "basket.estimate" => handle_basket_estimate(&state, payload.params).await,
         "device_get_storage_info" => handle_device_get_storage_info(&state).await,
         "device_list_root_folders" => handle_device_list_root_folders(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
@@ -4376,7 +4377,9 @@ async fn handle_get_daemon_state_snapshot(
     if let Some(device)=device.as_mut() {
         let profile_id=device["transcoding_profile_id"].as_str().or(device["transcodingProfileId"].as_str());
         if let Ok(Some(profile))=load_selected_transcoding_profile(profile_id) {
+            use sha2::Digest;
             device["plannedBitrateKbps"] = serde_json::json!(crate::sync::target_bitrate_kbps(&profile).unwrap_or(9216));
+            device["plannedProfileRevision"] = serde_json::json!(format!("{:x}", sha2::Sha256::digest(profile.to_string().as_bytes())));
         }
     }
     let mapping = if let Some(ref d) = device {
@@ -4628,6 +4631,105 @@ async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcEr
         "targetDeviceId": device.as_ref().map(|manifest| manifest.device_id.clone()),
         "basketHash": device.as_ref().map(|manifest| crate::device::canonical_basket_hash(&manifest.basket_items)),
     }))
+}
+
+/// Resolve selection metadata once per meaningful basket/profile change. This is
+/// deliberately separate from polling: large containers must not be expanded
+/// every time free space or a sync progress counter changes.
+async fn verified_capacity_manifest(state: &AppState, manifest: &crate::device::DeviceManifest)
+    -> Result<crate::device::DeviceManifest, JsonRpcError> {
+    if let Some((_, _, io, _)) = state.device_manager.get_sync_target_for_device(&manifest.device_id).await {
+        return crate::sync::capacity_manifest_with_existing_files(manifest, io.as_ref()).await.map_err(sync_plan_error);
+    }
+    Ok(manifest.clone())
+}
+
+async fn handle_basket_estimate(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| stale_plan_error("Missing basket estimate parameters"))?;
+    let target_id = params.get("targetDeviceId").and_then(Value::as_str)
+        .ok_or_else(|| stale_plan_error("Missing basket estimate destination"))?;
+    let (mut manifest, connection) = state.device_manager.get_basket_target(target_id).await
+        .ok_or_else(|| stale_plan_error("Basket estimate destination disconnected"))?;
+    let items: Vec<crate::device::BasketItem> = serde_json::from_value(
+        params.get("basketItems").cloned().ok_or_else(|| stale_plan_error("Missing basket items"))?
+    ).map_err(|error| stale_plan_error(&format!("Invalid basket items: {error}")))?;
+    let (profile, preferred) = preview_media_profile(state, &manifest).await?;
+    if params.get("expectedProfileId").is_some_and(|expected|
+        expected.as_str() != manifest.transcoding_profile_id.as_deref()) {
+        return Err(stale_plan_error("Basket estimate profile changed; refresh destination"));
+    }
+    if let Some(expected) = params.get("expectedProfileRevision").and_then(Value::as_str) {
+        use sha2::Digest;
+        let revision = profile.as_ref().map(|profile|
+            format!("{:x}", sha2::Sha256::digest(profile.to_string().as_bytes())));
+        if revision.as_deref() != Some(expected) {
+            return Err(stale_plan_error("Basket estimate profile changed; refresh destination"));
+        }
+    }
+    let profile_id = manifest.transcoding_profile_id.clone();
+    let profile_dirty = manifest.needs_transcoding_profile_rewrite();
+    manifest = verified_capacity_manifest(state, &manifest).await?;
+    if params.get("force").and_then(Value::as_bool) == Some(true) {
+        manifest.synced_items.clear();
+    }
+    let selected_server = current_server_portable_id(state)?;
+    let mut providers: HashMap<String, Arc<dyn MediaProvider>> = HashMap::new();
+    let mut desired = Vec::new();
+    let mut seen = HashSet::new();
+    let mut estimates = Vec::new();
+    for item in items.iter().filter(|item| !crate::device::is_auto_fill_slot_id(&item.id)) {
+        let server_id = item.server_id.clone().or_else(|| selected_server.clone())
+            .ok_or_else(|| stale_plan_error("Basket item has no originating server"))?;
+        let provider = if let Some(provider) = providers.get(&server_id) {
+            provider.clone()
+        } else {
+            let provider = get_provider_by_server_id_for(state, &server_id).await?;
+            providers.insert(server_id.clone(), provider.clone());
+            provider
+        };
+        let mut tracks = if matches!(item.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum") {
+            provider_favorite_sync_items_for_basket_item(provider.clone(), item).await?
+        } else {
+            provider_sync_items_for_id(provider.clone(), &item.id).await?.0
+        };
+        let mut item_seen = HashSet::new();
+        tracks.retain(|track| item_seen.insert(track.jellyfin_id.clone()));
+        for track in &mut tracks {
+            track.server_id = Some(server_id.clone());
+            track.media_role = provider_media_role(provider.as_ref());
+        }
+        estimates.push(basket_item_estimate(&item.id, &server_id, &tracks, &manifest, profile.as_ref(), preferred));
+        desired.extend(tracks.into_iter().filter(|track|
+            seen.insert((track.server_id.clone(), track.jellyfin_id.clone()))));
+    }
+    let selected_size = crate::sync::planned_selection_size(&desired, &manifest, profile.as_ref(), preferred);
+    let (current, current_connection) = state.device_manager.get_basket_target(target_id).await
+        .ok_or_else(|| stale_plan_error("Basket estimate destination disconnected"))?;
+    let (current_profile, current_preferred) = preview_media_profile(state, &current).await?;
+    if connection != current_connection || current.transcoding_profile_id != profile_id
+        || current.needs_transcoding_profile_rewrite() != profile_dirty
+        || current.last_sync_at != manifest.last_sync_at
+        || profile != current_profile || preferred != current_preferred {
+        return Err(stale_plan_error("Basket estimate configuration changed; estimate again"));
+    }
+    Ok(serde_json::json!({
+        "targetDeviceId": target_id, "selectedBytes": selected_size.reserved_bytes,
+        "expectedBytes": selected_size.expected_bytes, "reserveBytes": selected_size.reserve_bytes(),
+        "trackCount": desired.len(), "items": estimates,
+    }))
+}
+
+fn basket_item_estimate(id: &str, server_id: &str, tracks: &[crate::sync::DesiredItem],
+    manifest: &crate::device::DeviceManifest, profile: Option<&Value>, preferred: Option<&str>) -> Value {
+    let ticks = tracks.iter().fold(0_u64, |total, track|
+        total.saturating_add(u64::from(track.duration_seconds).saturating_mul(JELLYFIN_TICKS_PER_SECOND)));
+    let source_bytes = tracks.iter().fold(0_u64, |total, track| total.saturating_add(track.size_bytes));
+    let size = crate::sync::planned_selection_size(tracks, manifest, profile, preferred);
+    serde_json::json!({
+        "id": id, "serverId": server_id, "childCount": tracks.len(),
+        "sizeTicks": ticks, "sizeBytes": source_bytes,
+        "plannedBytes": size.reserved_bytes, "expectedBytes": size.expected_bytes, "reserveBytes": size.reserve_bytes(),
+    })
 }
 
 async fn handle_manifest_save_basket(
@@ -4997,7 +5099,7 @@ fn provider_track_size(track: &Song) -> u64 {
 }
 
 fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
-    crate::sync::DesiredItem {disc_number: song.disc_number,
+    crate::sync::DesiredItem {source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
         duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
@@ -5009,7 +5111,7 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
         provider_album_id: song.album_id.clone(),
         provider_content_type: song.content_type.clone(),
         provider_suffix: song.suffix.clone(),
-        original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
+        original_bitrate: crate::sync::song_audio_bitrate_bps(song),
         track_number: song.track_number,
         server_id: None,
     }
@@ -5213,7 +5315,7 @@ fn podcast_episode_to_desired(
 ) -> crate::sync::DesiredItem {
     // Episode catalog details do not expose a byte size. Reserve 128 kbit/s,
     // using one hour when duration is missing; transfer checks actual capacity.
-    crate::sync::DesiredItem {disc_number: None,
+    crate::sync::DesiredItem {source_audio: Default::default(), disc_number: None,
         duration_seconds: 0,
         media_role: crate::device::MediaRole::Podcast,
         jellyfin_id: episode.id.clone(),
@@ -5610,6 +5712,17 @@ async fn free_bytes_for_sync_device(state: &AppState, device_id: &str) -> Option
     io.free_space().await.ok()
 }
 
+fn planned_manual_selection_bytes(items: &[crate::sync::DesiredItem], manifest: &crate::device::DeviceManifest,
+    profile: Option<&Value>, preferred: Option<&str>, force: bool) -> u64 {
+    if force {
+        let mut replacement_manifest = manifest.clone();
+        replacement_manifest.synced_items.clear();
+        crate::sync::planned_selection_bytes(items, &replacement_manifest, profile, preferred)
+    } else {
+        crate::sync::planned_selection_bytes(items, manifest, profile, preferred)
+    }
+}
+
 async fn provider_calculate_delta(
     _state: &AppState,
     provider: Arc<dyn MediaProvider>,
@@ -5665,6 +5778,8 @@ async fn provider_calculate_delta(
         }
     }
 
+    tag_untagged_with_selected_portable(_state, &mut desired_items)?;
+    for item in &mut desired_items { item.media_role = media_role; }
     phases.finish("success", desired_items.len());
     if auto_fill_enabled { phases.next("auto_fill_preparation"); }
     // Step 2: If auto-fill is enabled, fill remaining space after basket items.
@@ -5677,7 +5792,7 @@ async fn provider_calculate_delta(
     // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
     // track, patched onto delta.adds below (mirrors `af_tier_map`). Only populated when a transcode
     // profile is active for the slot — passthrough tracks never get a forced re-encode.
-    let mut af_bitrate_map: std::collections::HashMap<String, u32> =
+    let mut af_bitrate_map: std::collections::HashMap<(String, Option<String>), u32> =
         std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run
     // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
@@ -5688,41 +5803,20 @@ async fn provider_calculate_delta(
         // If the UI provided maxBytes, use it directly — it already represents the intended
         // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
         // compute server-side as (free + existing synced - basket).
-        let auto_fill_budget: u64 = if let Some(mb) =
-            auto_fill_descriptor.as_ref().and_then(|d| d.max_bytes)
-        {
-            crate::daemon_log!(
-                "[AutoFill] budget from UI maxBytes: {} bytes ({:.1} GB)",
-                mb,
-                mb as f64 / 1_073_741_824.0
-            );
-            mb
-        } else {
-            let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
-            let basket_size: u64 = crate::sync::planned_selection_bytes(&desired_items,manifest,load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?.as_ref(),None);
-            match free_bytes_for_sync_device(_state, &manifest.device_id).await {
-                Some(free_bytes) => {
-                    crate::daemon_log!(
-                        "[AutoFill] no maxBytes from UI — server fallback: free={} synced={} basket_est={} -> budget={}",
-                        free_bytes,
-                        synced_bytes,
-                        basket_size,
-                        free_bytes
-                            .saturating_add(synced_bytes)
-                            .saturating_sub(basket_size)
-                    );
-                    free_bytes
-                        .saturating_add(synced_bytes)
-                        .saturating_sub(basket_size)
-                }
-                None => {
-                    return Err(JsonRpcError {
-                        code: ERR_CONNECTION_FAILED,
-                        message: "Cannot determine device capacity for auto-fill".to_string(),
-                        data: None,
-                    });
-                }
-            }
+        let capacity_manifest = verified_capacity_manifest(_state, manifest).await?;
+        let (profile, preferred) = preview_media_profile(_state, manifest).await?;
+        let basket_size = planned_manual_selection_bytes(&desired_items, &capacity_manifest, profile.as_ref(), preferred,
+            params.get("force").and_then(Value::as_bool) == Some(true));
+        let ceiling = free_bytes_for_sync_device(_state, &manifest.device_id).await.map(|free|
+            free.saturating_add(capacity_manifest.synced_items.iter().map(|item| item.size_bytes).fold(0, u64::saturating_add))
+                .saturating_sub(basket_size));
+        let requested = auto_fill_descriptor.as_ref().and_then(|descriptor| descriptor.max_bytes);
+        let auto_fill_budget = match (requested, ceiling) {
+            (Some(requested), Some(ceiling)) => requested.min(ceiling),
+            (Some(requested), None) => requested,
+            (None, Some(ceiling)) => ceiling,
+            (None, None) => return Err(JsonRpcError { code: ERR_CONNECTION_FAILED,
+                message: "Cannot determine device capacity for auto-fill".into(), data: None }),
         };
         crate::daemon_log!(
             "[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes",
@@ -5753,6 +5847,7 @@ async fn provider_calculate_delta(
                 ),
             };
             let fill_params = crate::auto_fill::AutoFillParams {
+                preferred_audio_container: preview_media_profile(_state, manifest).await?.1.map(str::to_string),
                 output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: auto_fill_budget,
@@ -5770,14 +5865,9 @@ async fn provider_calculate_delta(
             let pipeline_ref = selected_portable
                 .as_deref()
                 .and_then(|id| manifest.auto_fill.pipeline_for(id));
-            // Story 13.5 #20: derive the encoding-from-goals per-slot transcode bitrate (only when a
-            // transcode profile is active), and in passthrough clear the flag so the byte estimate
-            // stays source-based. The override travels onto each emitted track via `af_bitrate_map`.
-            let transcode_active =
-                transcode_profile_active(manifest.transcoding_profile_id.as_deref());
-            let af_bitrate_override = encoding_override_kbps(pipeline_ref, transcode_active);
-            let encoding_cleared = encoding_passthrough_clear(pipeline_ref, transcode_active);
-            let pipeline_opt = encoding_cleared.as_ref().or(pipeline_ref);
+            // The fetch layer derives encoding from the actual capacity/headroom ceiling
+            // and returns that decision on each selected item.
+            let pipeline_opt = pipeline_ref;
             // Story 13.4 review: record whether the pity reserve genuinely fired for this slot
             // (same gate the engine uses, with this run's budget) so the recorder resets the
             // dry-streak only on a real fire.
@@ -5807,14 +5897,14 @@ async fn provider_calculate_delta(
                 }
                 // Story 13.5 #20: stamp the slot's derived bitrate onto this auto-fill track so the
                 // sync transcode applies it to this item only (manual items carry nothing).
-                if let Some(kbps) = af_bitrate_override {
-                    af_bitrate_map.insert(item.id.clone(), kbps);
+                if let Some(kbps) = item.max_bitrate_override_kbps {
+                    af_bitrate_map.insert((item.id.clone(), selected_portable.clone()), kbps);
                 }
                 let item_id = item.id.clone();
                 if seen_ids.insert(item_id) {
                     af_item_ids.insert(item.id.clone());
                     autofill_playlist_tracks.push(autofill_playlist_track(&item));
-                    desired_items.push(crate::sync::DesiredItem {disc_number: item.disc_number,
+                    desired_items.push(crate::sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
                         duration_seconds: item.duration_seconds,
                         media_role: crate::device::MediaRole::Music,
                         jellyfin_id: item.id,
@@ -5850,7 +5940,12 @@ async fn provider_calculate_delta(
         desired_items.len(),
         playlist_sync_items.len()
     );
+    ensure_unambiguous_sync_track_owners(manifest, &desired_items)?;
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    if params.get("force").and_then(Value::as_bool) == Some(true) {
+        apply_force_sync_with_desired(&mut delta, manifest, &desired_items);
+    }
+    crate::sync::replace_oversized_goal_residents(&mut delta, &desired_items, manifest, &af_bitrate_map);
     patch_delta_tiers(&mut delta, &af_tier_map);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
@@ -5902,6 +5997,7 @@ async fn provider_calculate_delta(
             );
         }
     }
+    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
@@ -5947,6 +6043,23 @@ async fn sync_target_fingerprint(state: &AppState, target: &crate::sync::SyncTar
 
 }
 
+fn prepared_manual_selection_size(delta: &crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest,
+    profile: Option<&Value>, preferred: Option<&str>) -> crate::sync::OutputSizeEstimate {
+    let transferred: HashSet<_> = delta.adds.iter().map(|a| a.jellyfin_id.as_str())
+        .chain(delta.id_changes.iter().map(|a| a.old_jellyfin_id.as_str()))
+        .chain(delta.deletes.iter().map(|d| d.jellyfin_id.as_str())).collect();
+    let added: HashSet<_> = delta.adds.iter()
+        .map(|item| (item.jellyfin_id.as_str(), item.server_id.as_deref())).collect();
+    delta.adds.iter().filter(|a| !a.is_auto_fill)
+        .map(|a| crate::sync::planned_audio_size(a, profile, preferred))
+        .chain(delta.id_changes.iter().filter(|a| !a.is_auto_fill.unwrap_or(false)
+            && !added.contains(&(a.new_jellyfin_id.as_str(), a.source_server_id.as_deref())))
+            .map(|a| crate::sync::OutputSizeEstimate::exact(a.size_bytes)))
+        .chain(manifest.synced_items.iter().filter(|i| !i.is_auto_fill && !transferred.contains(i.jellyfin_id.as_str()))
+            .map(|i| crate::sync::OutputSizeEstimate::exact(i.size_bytes)))
+        .fold(crate::sync::OutputSizeEstimate::default(), crate::sync::OutputSizeEstimate::saturating_add)
+}
+
 async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest, params: &Value) -> Result<Value, JsonRpcError> {
 
 
@@ -5973,15 +6086,14 @@ async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, 
     if params.get("preparationFingerprint").and_then(Value::as_str).is_some_and(|expected|expected != fingerprint) {
         return Err(stale_plan_error("Sync configuration changed during preparation; prepare sync again"));
     }
-    let transferred:HashSet<_>=delta.adds.iter().map(|a|a.jellyfin_id.as_str()).chain(delta.id_changes.iter().map(|a|a.old_jellyfin_id.as_str())).chain(delta.deletes.iter().map(|d|d.jellyfin_id.as_str())).collect();
-    let selected_bytes=delta.adds.iter().filter(|a|!a.is_auto_fill).map(|a|a.size_bytes)
-        .chain(delta.id_changes.iter().filter(|a|!a.is_auto_fill.unwrap_or(false)).map(|a|a.size_bytes))
-        .chain(manifest.synced_items.iter().filter(|i|!i.is_auto_fill && !transferred.contains(i.jellyfin_id.as_str())).map(|i|i.size_bytes)).fold(0,u64::saturating_add);
+    let selected_size = prepared_manual_selection_size(&delta, manifest, profile.as_ref(), preferred);
     let plan = crate::sync_plan::SyncPlan::from_delta(delta, manifest).map_err(sync_plan_error)?;
     plan.validate().map_err(sync_plan_error)?;
     let id = uuid::Uuid::new_v4().to_string();
     let mut summary = plan.summary(&id);
-    summary["selectedBytes"] = serde_json::json!(selected_bytes);
+    summary["selectedBytes"] = serde_json::json!(selected_size.reserved_bytes);
+    summary["selectedExpectedBytes"] = serde_json::json!(selected_size.expected_bytes);
+    summary["selectedReserveBytes"] = serde_json::json!(selected_size.reserve_bytes());
     summary["availableBytes"] = serde_json::json!(target.io.free_space().await.ok());
     summary["outputSizeEstimated"] = serde_json::json!(profile.is_some());
     let manager = Arc::downgrade(&state.sync_operation_manager);
@@ -6079,24 +6191,9 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         .and_then(|sources| sources.first())
         .and_then(|source| source.container.clone())
         .or_else(|| item.container.clone());
-    let original_bitrate = item
-        .media_sources
-        .as_ref()
-        .and_then(|sources| sources.first())
-        .and_then(|s| {
-            // Prefer the container-level bitrate; fall back to the audio stream's
-            // BitRate, which Jellyfin populates even when the container field is
-            // absent (common for M4A/AAC files).
-            s.bitrate.or_else(|| {
-                s.media_streams
-                    .as_ref()?
-                    .iter()
-                    .find(|ms| ms.stream_type == "Audio")
-                    .and_then(|ms| ms.bit_rate)
-            })
-        })
-        .or(item.bitrate);
-    crate::sync::DesiredItem {disc_number: item.parent_index_number,
+    let original_bitrate = item.audio_bitrate_bps();
+        let source_audio = item.source_audio_properties();
+    crate::sync::DesiredItem {source_audio, disc_number: item.parent_index_number,
         duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0) / 10_000_000) as u32,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: item.id,
@@ -6534,7 +6631,7 @@ async fn handle_jellyfin_get_item_counts(
                                     "id": id,
                                     "recursiveItemCount": response.items.len() as u64,
                                     "cumulativeRunTimeTicks": response.items.iter()
-                                        .filter_map(|t| t.run_time_ticks)
+                                        .map(|t| (t.run_time_ticks.unwrap_or(0) / JELLYFIN_TICKS_PER_SECOND) * JELLYFIN_TICKS_PER_SECOND)
                                         .sum::<u64>(),
                                 })),
                                 Err(e) => {
@@ -6542,11 +6639,27 @@ async fn handle_jellyfin_get_item_counts(
                                     None
                                 }
                             }
+                        } else if matches!(item.item_type.as_str(), "Playlist" | "MusicAlbum" | "MusicArtist") {
+                            // Parent duration can be stale (notably for edited playlists).
+                            // Match provider Song's per-track whole-second duration.
+                            match client.get_child_items_with_sizes(url, token, user_id, id).await {
+                                Ok(tracks) => Some(serde_json::json!({
+                                    "id": id,
+                                    "recursiveItemCount": tracks.len(),
+                                    "cumulativeRunTimeTicks": tracks.iter().map(|track|
+                                        (track.run_time_ticks.unwrap_or(0) / JELLYFIN_TICKS_PER_SECOND) * JELLYFIN_TICKS_PER_SECOND
+                                    ).sum::<u64>(),
+                                })),
+                                Err(error) => {
+                                    println!("Warning: Failed to fetch child metadata for {}: {}", id, error);
+                                    None
+                                }
+                            }
                         } else {
                             Some(serde_json::json!({
                                 "id": item.id,
                                 "recursiveItemCount": item.recursive_item_count.unwrap_or(0),
-                                "cumulativeRunTimeTicks": item.cumulative_run_time_ticks.unwrap_or(0),
+                                "cumulativeRunTimeTicks": item.run_time_ticks.or(item.cumulative_run_time_ticks).unwrap_or(0),
                             }))
                         }
                     },
@@ -6805,7 +6918,7 @@ fn push_fill_items_dedup(
         if seen_ids.insert(item.id.clone()) {
             let size = item.size_bytes;
             autofill_playlist_tracks.push(autofill_playlist_track(&item));
-            desired_items.push(crate::sync::DesiredItem {disc_number: item.disc_number,
+            desired_items.push(crate::sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
                 duration_seconds: item.duration_seconds,
                 media_role,
                 jellyfin_id: item.id,
@@ -6910,7 +7023,7 @@ async fn expand_audiobook_auto_fill(
                 continue;
             }
             for part in parts {
-                result.push(crate::auto_fill::AutoFillItem {disc_number: None,
+                result.push(crate::auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
                     original_bitrate: None,
                     duration_seconds: 0,
         id: part.id.clone(),
@@ -7004,7 +7117,7 @@ async fn expand_podcast_auto_fill(
             candidates.push((
                 podcast_published_at(&episode.published_at),
                 episode.id.clone(),
-                crate::auto_fill::AutoFillItem {disc_number: None,
+                crate::auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
                     original_bitrate: None,
                     duration_seconds: 0,
         id: episode.id,
@@ -7087,44 +7200,6 @@ pub(crate) fn now_civil() -> crate::auto_fill::CivilTime {
     }
 }
 
-/// Story 13.5 #20: whether the device's selected transcoding profile implies a real (non-passthrough)
-/// transcode — i.e. there is something to re-encode and a per-slot bitrate override can take effect.
-fn transcode_profile_active(profile_id: Option<&str>) -> bool {
-    profile_id.is_some_and(|id| !id.is_empty() && id != "passthrough")
-}
-
-/// Story 13.5 #20: a cloned pipeline with `encoding_from_goals` cleared when the flag is set but no
-/// transcode profile is active (passthrough). Returns `None` (keep the original borrow) otherwise.
-/// Suppressing the flag in passthrough keeps the engine's bitrate-aware byte estimate aligned with
-/// reality — there is nothing to re-encode, so the estimate must stay source-based (AC 9 caveat).
-fn encoding_passthrough_clear(
-    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
-    transcode_active: bool,
-) -> Option<crate::auto_fill::AutoFillPipeline> {
-    match pipeline {
-        Some(p) if p.budget.encoding_from_goals && !transcode_active => {
-            let mut cleared = p.clone();
-            cleared.budget.encoding_from_goals = false;
-            Some(cleared)
-        }
-        _ => None,
-    }
-}
-
-/// Story 13.5 #20: the derived per-slot max-bitrate (kbps) to override on the transcode profile for a
-/// slot's auto-fill downloads — `None` unless the pipeline enabled encoding-from-goals (with both a
-/// byte ceiling and a positive duration goal) AND a transcode profile is active (passthrough can't
-/// re-encode). Best-effort and per-slot: it never mutates the device-wide `transcoding_profile_id`.
-fn encoding_override_kbps(
-    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
-    transcode_active: bool,
-) -> Option<u32> {
-    if !transcode_active {
-        return None;
-    }
-    pipeline.and_then(|p| crate::auto_fill::pipeline::target_bitrate_kbps(&p.budget))
-}
-
 /// Story 13.1: build the DB-sourced auto-fill history snapshot + rotation cursor for a
 /// `(device, portable server)` pair. Best-effort: a DB read error yields an empty snapshot so the
 /// Memory stage becomes inert rather than aborting the slot.
@@ -7184,19 +7259,19 @@ fn patch_delta_tiers(
 }
 
 /// Story 13.5 #20: copy the encoding-from-goals derived per-slot max-bitrate (kbps) onto the matching
-/// `delta.adds` entries (keyed by provider track id), so the sync transcode applies it to those
+/// `delta.adds` entries (keyed by server and provider track id), so the sync transcode applies it to those
 /// auto-fill downloads only. Mirrors [`patch_delta_tiers`]. Manual items are never in the map, so the
 /// override is naturally scoped to the slot's auto-fill items and never touches manual selections or
 /// the device-wide profile.
 fn patch_delta_bitrate_overrides(
     delta: &mut crate::sync::SyncDelta,
-    kbps_by_track: &std::collections::HashMap<String, u32>,
+    kbps_by_track: &std::collections::HashMap<(String, Option<String>), u32>,
 ) {
     if kbps_by_track.is_empty() {
         return;
     }
     for add in &mut delta.adds {
-        if let Some(kbps) = kbps_by_track.get(&add.jellyfin_id) {
+        if let Some(kbps) = kbps_by_track.get(&(add.jellyfin_id.clone(), add.server_id.clone())) {
             add.max_bitrate_override_kbps = Some(*kbps);
         }
     }
@@ -7454,6 +7529,47 @@ fn sync_needs_provider_routing(
     }
 }
 
+/// The delta/manifest machinery still indexes tracks by bare provider ID. Fail
+/// explicitly when known owners collide rather than silently drop a selection
+/// or attribute a resident file to the wrong source. Untagged legacy entries
+/// remain compatible with a single known owner.
+fn register_sync_track_owner(owners: &mut HashMap<String, String>, id: &str, server_id: Option<&str>) -> Result<(), JsonRpcError> {
+    let Some(server_id) = server_id else { return Ok(()); };
+    if let Some(owner) = owners.get(id) {
+        if owner != server_id {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: format!("Cannot prepare sync: track ID '{id}' belongs to different servers. Remove the conflicting selection or sync removal of the existing copy first."),
+                data: Some(serde_json::json!({"code": "AMBIGUOUS_PROVIDER_ITEM_ID", "itemId": id})),
+            });
+        }
+    } else {
+        owners.insert(id.to_string(), server_id.to_string());
+    }
+    Ok(())
+}
+
+fn sync_track_owners(manifest: &crate::device::DeviceManifest) -> Result<HashMap<String, String>, JsonRpcError> {
+    let mut owners = HashMap::new();
+    for item in &manifest.synced_items {
+        register_sync_track_owner(&mut owners, &item.jellyfin_id, item.server_id.as_deref())?;
+    }
+    Ok(owners)
+}
+
+pub(crate) fn ensure_unambiguous_sync_track_owners(manifest: &crate::device::DeviceManifest, desired: &[crate::sync::DesiredItem]) -> Result<(), JsonRpcError> {
+    let mut owners = sync_track_owners(manifest)?;
+    for item in desired {
+        register_sync_track_owner(&mut owners, &item.jellyfin_id, item.server_id.as_deref())?;
+    }
+    Ok(())
+}
+
+fn autofill_exclusions_for_server(desired: &[crate::sync::DesiredItem], server_id: &str, explicit: &[String]) -> Vec<String> {
+    desired.iter().filter(|item| item.server_id.as_deref().is_none_or(|owner| owner == server_id))
+        .map(|item| item.jellyfin_id.clone()).chain(explicit.iter().cloned()).collect()
+}
+
 /// Resolves a mixed-server basket by routing each item to its originating
 /// provider (AC28). Each resolved DesiredItem is tagged with its `server_id` so
 /// execute can download from the correct server. Works for any provider type
@@ -7508,6 +7624,7 @@ async fn multi_provider_calculate_delta(
     let mut desired_items: Vec<crate::sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items = Vec::new();
     let mut seen_ids = HashSet::new();
+    let mut track_owners = sync_track_owners(manifest)?;
 
     for (server_id, ids) in &groups {
         phases.next("provider_resolution");
@@ -7520,6 +7637,7 @@ async fn multi_provider_calculate_delta(
                     provider_favorite_sync_items_for_basket_item(provider.clone(), basket_item)
                         .await?;
                 for mut item in tracks {
+                    register_sync_track_owner(&mut track_owners, &item.jellyfin_id, Some(server_id))?;
                     if seen_ids.insert(item.jellyfin_id.clone()) {
                         item.server_id = Some(server_id.clone());
                         item.media_role = provider_media_role(provider.as_ref());
@@ -7533,6 +7651,7 @@ async fn multi_provider_calculate_delta(
                 playlist_sync_items.push(playlist);
             }
             for mut item in tracks {
+                register_sync_track_owner(&mut track_owners, &item.jellyfin_id, Some(server_id))?;
                 if seen_ids.insert(item.jellyfin_id.clone()) {
                     item.server_id = Some(server_id.clone());
                     item.media_role = provider_media_role(provider.as_ref());
@@ -7557,7 +7676,7 @@ async fn multi_provider_calculate_delta(
     let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
     // track across all slots, patched onto delta.adds (mirrors `af_tier_map`).
-    let mut af_bitrate_map: std::collections::HashMap<String, u32> =
+    let mut af_bitrate_map: std::collections::HashMap<(String, Option<String>), u32> =
         std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
     let mut af_pity_fired: Vec<String> = Vec::new();
@@ -7568,11 +7687,14 @@ async fn multi_provider_calculate_delta(
         // rpc.rs:2599-2616). `None` when device storage is unavailable; that is
         // tolerated only for slots that supply their own `maxBytes` — matching the
         // pre-12.3 multi path, which used the UI `maxBytes` without querying storage.
-        let selected_bytes: u64 = crate::sync::planned_selection_bytes(&desired_items,manifest,load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?.as_ref(),None);
+        let capacity_manifest = verified_capacity_manifest(state, manifest).await?;
+        let (profile, preferred) = preview_media_profile(state, manifest).await?;
+        let selected_bytes = planned_manual_selection_bytes(&desired_items, &capacity_manifest, profile.as_ref(), preferred,
+            params.get("force").and_then(Value::as_bool) == Some(true));
         let mut remaining: Option<u64> =
             match free_bytes_for_sync_device(state, &manifest.device_id).await {
                 Some(free_bytes) => {
-                    let synced: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+                    let synced: u64 = capacity_manifest.synced_items.iter().map(|s| s.size_bytes).fold(0, u64::saturating_add);
                     Some(
                         free_bytes
                             .saturating_add(synced)
@@ -7632,18 +7754,15 @@ async fn multi_provider_calculate_delta(
                     continue;
                 }
             };
-            // Exclude every already-selected id (manual items + earlier slots) plus
-            // any ids the descriptor explicitly excludes.
-            let mut exclude_ids: Vec<String> = desired_items
-                .iter()
-                .map(|i| i.jellyfin_id.clone())
-                .collect();
-            exclude_ids.extend(desc.exclude_item_ids.iter().cloned());
+            // Exclusions belong to this source. Cross-source equal IDs must
+            // remain visible so the ownership guard can report the ambiguity.
+            let exclude_ids = autofill_exclusions_for_server(&desired_items, &af_server, &desc.exclude_item_ids);
             // Story 13.1: DB-sourced history snapshot + rotation cursor for this slot's server.
             let now = now_unix_secs();
             let (history, rotation_cursor, pity_streak) =
                 build_autofill_history(&state.db, &manifest.device_id, &af_server, now);
             let fill_params = crate::auto_fill::AutoFillParams {
+                preferred_audio_container: preview_media_profile(state, manifest).await?.1.map(str::to_string),
                 output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: budget,
@@ -7660,13 +7779,9 @@ async fn multi_provider_calculate_delta(
             // Story 12.4: route this slot through the shared seam — the configurable engine
             // when this server has a non-default pipeline, else the default fast path.
             let pipeline_ref = manifest.auto_fill.pipeline_for(&af_server);
-            // Story 13.5 #20: derive this slot's encoding-from-goals transcode bitrate (only when a
-            // transcode profile is active) and gate the bitrate-aware estimate in passthrough.
-            let transcode_active =
-                transcode_profile_active(manifest.transcoding_profile_id.as_deref());
-            let af_bitrate_override = encoding_override_kbps(pipeline_ref, transcode_active);
-            let encoding_cleared = encoding_passthrough_clear(pipeline_ref, transcode_active);
-            let pipeline_opt = encoding_cleared.as_ref().or(pipeline_ref);
+            // The fetch layer derives encoding from the actual capacity/headroom ceiling
+            // and returns that decision on each selected item.
+            let pipeline_opt = pipeline_ref;
             // Story 13.4 review: did the pity reserve genuinely fire for this slot (same gate the
             // engine uses, with this slot's budget)? Drives the dry-streak reset at sync completion.
             if let Some(pipeline) = pipeline_opt
@@ -7700,13 +7815,14 @@ async fn multi_provider_calculate_delta(
                     }
                 };
             for item in &fill_items {
+                register_sync_track_owner(&mut track_owners, &item.id, Some(&af_server))?;
                 if let Some(tier) = item.tier.clone() {
                     af_tier_map.insert(item.id.clone(), tier);
                 }
                 // Story 13.5 #20: stamp the slot's derived bitrate onto each auto-fill track (manual
                 // items carry nothing), so the sync transcode applies it to these items only.
-                if let Some(kbps) = af_bitrate_override {
-                    af_bitrate_map.insert(item.id.clone(), kbps);
+                if let Some(kbps) = item.max_bitrate_override_kbps {
+                    af_bitrate_map.insert((item.id.clone(), Some(af_server.clone())), kbps);
                 }
             }
             let first_added = desired_items.len();
@@ -7731,7 +7847,12 @@ async fn multi_provider_calculate_delta(
     }
 
     phases.finish("success", af_item_ids.len());
+    ensure_unambiguous_sync_track_owners(manifest, &desired_items)?;
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    if params.get("force").and_then(Value::as_bool) == Some(true) {
+        apply_force_sync_with_desired(&mut delta, manifest, &desired_items);
+    }
+    crate::sync::replace_oversized_goal_residents(&mut delta, &desired_items, manifest, &af_bitrate_map);
     patch_delta_tiers(&mut delta, &af_tier_map);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
@@ -7749,6 +7870,7 @@ async fn multi_provider_calculate_delta(
         )
         .await.map_err(sync_plan_error)?;
     }
+    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
     finish_sync_delta(state, delta, manifest, params).await
@@ -7885,21 +8007,9 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
             .and_then(|sources| sources.first())
             .and_then(|source| source.container.clone())
             .or_else(|| item.container.clone());
-        let original_bitrate = item
-            .media_sources
-            .as_ref()
-            .and_then(|sources| sources.first())
-            .and_then(|s| {
-                s.bitrate.or_else(|| {
-                    s.media_streams
-                        .as_ref()?
-                        .iter()
-                        .find(|ms| ms.stream_type == "Audio")
-                        .and_then(|ms| ms.bit_rate)
-                })
-            })
-            .or(item.bitrate);
-        crate::sync::DesiredItem {disc_number: item.parent_index_number,
+        let original_bitrate = item.audio_bitrate_bps();
+        let source_audio = item.source_audio_properties();
+        crate::sync::DesiredItem {source_audio, disc_number: item.parent_index_number,
             duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: item.id,
@@ -8170,6 +8280,7 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
         }
     }
 
+    tag_untagged_with_selected_portable(state, &mut desired_items)?;
     phases.finish("success", desired_items.len());
     if !parse_auto_fill_descriptors(&params).is_empty() { phases.next("auto_fill_slot"); }
     // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
@@ -8181,24 +8292,26 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
     let mut autofill_playlist_tracks = Vec::new();
     let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(desc) = parse_auto_fill_descriptors(&params).into_iter().next() {
-        let max_fill_bytes = if let Some(mb) = desc.max_bytes {
-            mb
-        } else {
-            match free_bytes_for_sync_device(state, &manifest.device_id).await {
-                Some(free_bytes) => free_bytes,
-                None => {
-                    return Err(JsonRpcError {
-                        code: ERR_CONNECTION_FAILED,
-                        message: "Auto-fill: could not determine device free space".to_string(),
-                        data: None,
-                    });
-                }
-            }
+        let capacity_manifest = verified_capacity_manifest(state, &manifest).await?;
+        let (profile, preferred) = preview_media_profile(state, &manifest).await?;
+        let manual_bytes = planned_manual_selection_bytes(&desired_items, &capacity_manifest,
+            profile.as_ref(), preferred, params.get("force").and_then(Value::as_bool) == Some(true));
+        let ceiling = free_bytes_for_sync_device(state, &manifest.device_id).await.map(|free|
+            free.saturating_add(capacity_manifest.synced_items.iter().map(|item| item.size_bytes).fold(0, u64::saturating_add))
+                .saturating_sub(manual_bytes));
+        let max_fill_bytes = match (desc.max_bytes, ceiling) {
+            (Some(requested), Some(ceiling)) => requested.min(ceiling),
+            (Some(requested), None) => requested,
+            (None, Some(ceiling)) => ceiling,
+            (None, None) => return Err(JsonRpcError { code: ERR_CONNECTION_FAILED,
+                message: "Cannot determine device capacity for auto-fill".into(), data: None }),
         };
         let exclude_ids: Vec<String> = desc.exclude_item_ids;
-        let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+        let mut expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+        expanded_excludes.extend(seen_ids.iter().cloned());
         // Legacy Jellyfin fast path: Memory features don't apply (Story 13.1/13.4 fields are inert).
         let fill_params = crate::auto_fill::AutoFillParams {
+            preferred_audio_container: preview_media_profile(state, &manifest).await?.1.map(str::to_string),
             output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
             exclude_item_ids: expanded_excludes,
             max_fill_bytes,
@@ -8225,7 +8338,7 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
                     if seen_ids.insert(item_id) {
                         af_item_ids.insert(item.id.clone());
                         autofill_playlist_tracks.push(autofill_playlist_track(&item));
-                        desired_items.push(crate::sync::DesiredItem {disc_number: item.disc_number,
+                        desired_items.push(crate::sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
                             duration_seconds: item.duration_seconds,
                             media_role: crate::device::MediaRole::Music,
                             jellyfin_id: item.id,
@@ -8266,7 +8379,11 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
         desired_items.len(),
         manifest.synced_items.len(),
     );
+    ensure_unambiguous_sync_track_owners(&manifest, &desired_items)?;
     let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
+    if params.get("force").and_then(Value::as_bool) == Some(true) {
+        apply_force_sync_with_desired(&mut delta, &manifest, &desired_items);
+    }
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
         "[Sync] Delta computed: {} adds, {} deletes, {} id-changes, {} unchanged, reasons={}",
@@ -8464,6 +8581,45 @@ async fn handle_sync_detect_changes(
 
 }
 
+fn apply_force_sync_with_desired(delta: &mut crate::sync::SyncDelta,
+    manifest: &crate::device::DeviceManifest, desired: &[crate::sync::DesiredItem]) {
+    apply_force_sync(delta, manifest);
+    // Resolve while the original selection metadata is available. Resident
+    // encoded bytes cannot recover a source duration or its audio properties.
+    let by_owner: HashMap<_, _> = desired.iter().map(|item|
+        ((item.jellyfin_id.as_str(), item.server_id.as_deref()), item)).collect();
+    let mut by_id: HashMap<&str, Option<&crate::sync::DesiredItem>> = HashMap::new();
+    for item in desired {
+        by_id.entry(item.jellyfin_id.as_str()).and_modify(|existing| {
+            if existing.is_some_and(|old| old.server_id != item.server_id) { *existing = None; }
+        }).or_insert(Some(item));
+    }
+    for change in &mut delta.id_changes {
+        if change.source_server_id.is_none() {
+            if let Some(Some(source)) = by_id.get(change.new_jellyfin_id.as_str()) {
+                change.source_server_id = source.server_id.clone();
+            }
+        }
+    }
+    for add in delta.adds.iter_mut().filter(|add| add.reason_code.as_deref() == Some("force-sync")) {
+        let source = by_owner.get(&(add.jellyfin_id.as_str(), add.server_id.as_deref())).copied()
+            .or_else(|| if add.server_id.is_none() {
+                by_id.get(add.jellyfin_id.as_str()).copied().flatten()
+            } else { None });
+        if let Some(source) = source {
+            add.source_audio = source.source_audio;
+            add.duration_seconds = source.duration_seconds;
+            add.disc_number = source.disc_number;
+            add.track_number = source.track_number;
+            add.original_bitrate = source.original_bitrate;
+            add.provider_suffix = source.provider_suffix.clone();
+            add.provider_content_type = source.provider_content_type.clone();
+            add.size_bytes = source.size_bytes;
+            add.server_id = source.server_id.clone();
+        }
+    }
+}
+
 fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest) {
         let blocked_ids: HashSet<&str> = delta.blocked.iter().map(|item|item.provider_item_id.as_str()).collect();
         let delete_ids: std::collections::HashSet<String> = delta
@@ -8484,12 +8640,13 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
             .map(|item| item.jellyfin_id.as_str())
             .collect();
         for change in &delta.id_changes {
-            if blocked_ids.contains(change.new_jellyfin_id.as_str()) {continue;}
+            if blocked_ids.contains(change.new_jellyfin_id.as_str())
+                || already_added_ids.contains(change.new_jellyfin_id.as_str()) {continue;}
             let previous = manifest
                 .synced_items
                 .iter()
                 .find(|item| item.jellyfin_id == change.old_jellyfin_id);
-            force_adds.push(crate::sync::SyncAddItem {disc_number: None,
+            force_adds.push(crate::sync::SyncAddItem {source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: change.media_role,
                 jellyfin_id: change.new_jellyfin_id.clone(),
@@ -8528,7 +8685,7 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
             {
                 continue;
             }
-            force_adds.push(crate::sync::SyncAddItem {disc_number: None,
+            force_adds.push(crate::sync::SyncAddItem {source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: item.media_role,
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -10268,6 +10425,10 @@ async fn handle_basket_auto_fill(
         let (history, rotation_cursor, pity_streak) =
             build_autofill_history(&state.db, &device_id, &server_id, now);
         let fill_params = crate::auto_fill::AutoFillParams {
+            preferred_audio_container: match state.device_manager.get_current_device().await {
+                Some(manifest) => preview_media_profile(state, &manifest).await?.1.map(str::to_string),
+                None => None,
+            },
             output_profile: load_selected_transcoding_profile(state.device_manager.get_current_device().await.as_ref().and_then(|m|m.transcoding_profile_id.as_deref())).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
             exclude_item_ids,
             max_fill_bytes,
@@ -10319,6 +10480,10 @@ async fn handle_basket_auto_fill(
 
     // Legacy Jellyfin preview (no serverId): Memory features don't apply (13.1/13.4 fields inert).
     let fill_params = crate::auto_fill::AutoFillParams {
+        preferred_audio_container: match state.device_manager.get_current_device().await {
+            Some(manifest) => preview_media_profile(state, &manifest).await?.1.map(str::to_string),
+            None => None,
+        },
         output_profile: load_selected_transcoding_profile(state.device_manager.get_current_device().await.as_ref().and_then(|m|m.transcoding_profile_id.as_deref())).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
         exclude_item_ids: expanded_exclude_ids,
         max_fill_bytes,
@@ -10847,7 +11012,7 @@ mod tests {
     // ---- Story 13.5 #20: encoding-from-goals per-slot transcode override (RPC-level). ----
 
     fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
-        crate::sync::SyncAddItem {disc_number: None,
+        crate::sync::SyncAddItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -10880,6 +11045,7 @@ mod tests {
                 add_item("manual-1", Some("srv")),
                 add_item("af-1", Some("srv")),
                 add_item("af-2", Some("srv")),
+                add_item("af-1", Some("other-srv")),
             ],
             deletes: Vec::new(),
             id_changes: Vec::new(),
@@ -10888,8 +11054,8 @@ mod tests {
             pity_fired_servers: Vec::new(),
         };
         let mut map = std::collections::HashMap::new();
-        map.insert("af-1".to_string(), 96u32);
-        map.insert("af-2".to_string(), 96u32);
+        map.insert(("af-1".to_string(), Some("srv".into())), 96u32);
+        map.insert(("af-2".to_string(), Some("srv".into())), 96u32);
         patch_delta_bitrate_overrides(&mut delta, &map);
 
         let by_id = |id: &str| {
@@ -10911,6 +11077,8 @@ mod tests {
             None,
             "manual item on the same server is untouched"
         );
+
+        assert_eq!(delta.adds[3].max_bitrate_override_kbps, None, "equal IDs on a different server cannot inherit the override");
 
         // An empty map is a no-op (nothing stamped).
         let mut delta2 = crate::sync::SyncDelta {
@@ -10951,44 +11119,6 @@ mod tests {
 
         assert!(!delta.adds[0].is_auto_fill);
         assert!(delta.adds[1].is_auto_fill);
-    }
-
-    #[test]
-    fn encoding_override_gated_on_active_transcode_profile() {
-        use crate::auto_fill::AutoFillPipeline;
-        use crate::auto_fill::pipeline::BudgetStage;
-        let mut enc = AutoFillPipeline::default_legacy(Some(8_000_000));
-        enc.budget = BudgetStage {
-            max_bytes: Some(8_000_000),
-            target_duration_secs: Some(600),
-            headroom_bytes: None,
-            encoding_from_goals: true,
-        };
-
-        // Passthrough / no profile ⇒ no override AND the flag is cleared so the estimate stays source-based.
-        assert!(!transcode_profile_active(None));
-        assert!(!transcode_profile_active(Some("passthrough")));
-        assert_eq!(
-            encoding_override_kbps(Some(&enc), false),
-            None,
-            "no transcode ⇒ no override"
-        );
-        let cleared =
-            encoding_passthrough_clear(Some(&enc), false).expect("flag cleared in passthrough");
-        assert!(!cleared.budget.encoding_from_goals);
-
-        // Active profile ⇒ derive the override (8MB/600s ⇒ 106 kbps) and keep the flag.
-        assert!(transcode_profile_active(Some("profile-aac-128")));
-        assert_eq!(encoding_override_kbps(Some(&enc), true), Some(106));
-        assert!(
-            encoding_passthrough_clear(Some(&enc), true).is_none(),
-            "flag is preserved when a transcode profile is active"
-        );
-
-        // A pipeline that didn't enable encoding-from-goals never derives an override.
-        let plain = AutoFillPipeline::default_legacy(Some(8_000_000));
-        assert_eq!(encoding_override_kbps(Some(&plain), true), None);
-        assert!(encoding_passthrough_clear(Some(&plain), false).is_none());
     }
 
     pub(super) fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
@@ -13504,7 +13634,7 @@ mod tests {
                 .get_selected_sync_target()
                 .await
                 .unwrap();
-            let desired = vec![crate::sync::DesiredItem {disc_number: None,
+            let desired = vec![crate::sync::DesiredItem {source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song1".into(),
@@ -14622,7 +14752,7 @@ mod tests {
             size: u64,
             track_number: Option<u32>,
         ) -> crate::auto_fill::AutoFillItem {
-            crate::auto_fill::AutoFillItem {disc_number: None,
+            crate::auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
                 original_bitrate: None,
                 duration_seconds: 0,
         id: id.to_string(),
@@ -14640,7 +14770,7 @@ mod tests {
         }
 
         // Manual item "m1" (100 bytes) already resolved on server s1.
-        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {disc_number: None,
+        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "m1".to_string(),
@@ -15051,9 +15181,10 @@ mod tests {
     }
 
     /// When both `MediaSource.Bitrate` and an audio stream `BitRate` are present,
-    /// the container-level bitrate must take precedence.
+    /// compatibility uses the audio stream; original container average is
+    /// retained separately for deriving missing duration from file size.
     #[test]
-    fn test_jellyfin_item_original_bitrate_prefers_media_source_bitrate() {
+    fn test_jellyfin_item_original_bitrate_prefers_audio_stream_bitrate() {
         let json = serde_json::json!({
             "Id": "flac-track-1",
             "Name": "FLAC Track",
@@ -15070,9 +15201,10 @@ mod tests {
         let desired = jellyfin_item_to_desired_item(item);
         assert_eq!(
             desired.original_bitrate,
-            Some(1411200),
-            "container-level bitrate should take precedence over audio stream bitrate"
+            Some(1200000),
+            "audio stream bitrate determines audio compatibility"
         );
+        assert_eq!(desired.source_audio.average_bitrate_bps, Some(1411200));
     }
 
     /// When no bitrate is available at any level, `original_bitrate` must be `None` —
@@ -17763,6 +17895,10 @@ mod tests {
                 limit: filter.limit,
             })
         }
+        async fn list_all_songs_page(&self, _: Option<&str>, offset: u32, limit: u32)
+            -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
+            Ok((self.tracks.iter().skip(offset as usize).take(limit as usize).cloned().collect(), self.tracks.len() as u32))
+        }
         fn server_type(&self) -> crate::providers::ServerType {
             if self.album_gate.is_some() { crate::providers::ServerType::Subsonic } else { crate::providers::ServerType::Jellyfin }
         }
@@ -18111,6 +18247,7 @@ mod tests {
         pipeline.podcast_retention.recent_count = 1;
         pipeline.podcast_retention.unplayed_only = true;
         let params = crate::auto_fill::AutoFillParams {
+            preferred_audio_container: None,
             output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 1_000_000,
@@ -18139,6 +18276,7 @@ mod tests {
             FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Podcasts], vec![]);
         Arc::get_mut(&mut provider).unwrap().podcast_complete = true;
         let params = || crate::auto_fill::AutoFillParams {
+            preferred_audio_container: None,
             output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 1_000_000,
@@ -18203,6 +18341,7 @@ mod tests {
             },
         );
         let params = crate::auto_fill::AutoFillParams {
+            preferred_audio_container: None,
             output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 1_000_000,
@@ -18225,6 +18364,7 @@ mod tests {
         );
 
         let tight = crate::auto_fill::AutoFillParams {
+            preferred_audio_container: None,
             output_profile: None,
             exclude_item_ids: vec![],
             max_fill_bytes: 700_000,
@@ -18542,6 +18682,81 @@ mod tests {
         assert_eq!(basket_ends.len(), 2);
         assert!(basket_ends[0].ends_with("count=1"), "{}", basket_ends[0]);
         assert!(basket_ends[1].ends_with("count=2"), "{}", basket_ends[1]);
+    }
+
+    fn collision_test_desired(server: Option<&str>) -> crate::sync::DesiredItem {
+        let mut desired = provider_song_to_desired_item(&make_fake_song("shared-id", "Shared"));
+        desired.server_id = server.map(str::to_string);
+        desired
+    }
+
+    #[test]
+    fn sync_track_owner_guard_rejects_cross_source_collisions_and_allows_legacy_owners() {
+        let a = collision_test_desired(Some("server-a"));
+        let b = collision_test_desired(Some("server-b"));
+        let legacy = collision_test_desired(None);
+        let empty = crate::device::DeviceManifest::default();
+        let error = ensure_unambiguous_sync_track_owners(&empty, &[a.clone(), b.clone()]).unwrap_err();
+        assert_eq!(error.code, ERR_INVALID_PARAMS);
+        assert_eq!(error.data.unwrap()["code"], "AMBIGUOUS_PROVIDER_ITEM_ID");
+        ensure_unambiguous_sync_track_owners(&empty, &[a.clone(), a.clone()]).unwrap();
+        ensure_unambiguous_sync_track_owners(&empty, &[legacy.clone(), a.clone(), legacy]).unwrap();
+        let resident = serde_json::from_value(json!({
+            "providerItemId": "shared-id", "name": "Resident", "localPath": "Music/resident.mp3",
+            "sizeBytes": 100, "syncedAt": "2026-10-19", "serverId": "server-a"
+        })).unwrap();
+        let mut manifest = crate::device::DeviceManifest { synced_items: vec![resident], ..Default::default() };
+        assert!(ensure_unambiguous_sync_track_owners(&manifest, &[b]).is_err());
+        ensure_unambiguous_sync_track_owners(&manifest, &[a.clone()]).unwrap();
+        manifest.synced_items[0].server_id = None;
+        ensure_unambiguous_sync_track_owners(&manifest, &[a]).unwrap();
+    }
+
+    #[test]
+    fn sync_track_owner_guard_keeps_cross_source_autofill_candidates_visible() {
+        let desired = vec![collision_test_desired(Some("server-a"))];
+        assert!(autofill_exclusions_for_server(&desired, "server-b", &[]).is_empty());
+        assert_eq!(autofill_exclusions_for_server(&desired, "server-a", &[]), vec!["shared-id"]);
+        assert_eq!(autofill_exclusions_for_server(&desired, "server-b", &["explicit".into()]), vec!["explicit"]);
+        assert_eq!(autofill_exclusions_for_server(&[collision_test_desired(None)], "server-a", &[]), vec!["shared-id"]);
+    }
+
+    #[tokio::test]
+    async fn sync_track_owner_guard_rejects_manual_and_autofill_before_bare_id_dedup() {
+        let _lock = credential_test_lock();
+        let config = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(config.path().join("missing.json"));
+        for autofill in [false, true] {
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let mut song = make_fake_song("shared-id", "Shared");
+            song.duration_seconds = 60;
+            song.size_bytes = Some(100);
+            song.suffix = Some("mp3".into());
+            {
+                let mut servers = state.server_manager.write().await;
+                servers.set_test_provider(FakeBrowseProvider::with_song(song.clone()));
+                servers.servers[0].server_id = Some("portable-a".into());
+                let mut record = servers.servers[0].clone();
+                record.id = "second-server".into();
+                record.server_id = Some("portable-b".into());
+                record.selected = false;
+                servers.servers.push(record);
+                let second = if autofill { FakeBrowseProvider::with_tracks(vec![song]) }
+                    else { FakeBrowseProvider::with_song(song) };
+                servers.providers.insert("second-server".into(), second);
+            }
+            let mut specs = vec![("shared-id".into(), Some("portable-a".into()))];
+            let params = if autofill {
+                json!({"autoFill": [{"serverId": "portable-b", "enabled": true, "maxBytes": 1000}]})
+            } else {
+                specs.push(("shared-id".into(), Some("portable-b".into())));
+                json!({})
+            };
+            let error = multi_provider_calculate_delta(&state, &specs,
+                &crate::device::DeviceManifest::default(), &params).await.unwrap_err();
+            assert_eq!(error.data.unwrap()["code"], "AMBIGUOUS_PROVIDER_ITEM_ID", "autofill={autofill}");
+            assert!(!state.sync_operation_manager.has_active_operation().await);
+        }
     }
 
     #[tokio::test]

@@ -242,8 +242,12 @@ impl SyncPlan {
 
         let mut lifecycle = crate::sync_logging::Step::current("plan_construction");
         let result = (|| {
-        let total_bytes = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
-            + delta.id_changes.iter().filter(|a|a.reason_code.as_deref()!=Some("device-file-reused")).map(|a| a.size_bytes).sum::<u64>();
+        let added: std::collections::HashSet<_> = delta.adds.iter().map(|item|
+            (item.jellyfin_id.as_str(), item.server_id.as_deref())).collect();
+        let total_bytes = delta.adds.iter().map(|a| a.size_bytes)
+            .chain(delta.id_changes.iter().filter(|a| a.reason_code.as_deref()!=Some("device-file-reused")
+                && !added.contains(&(a.new_jellyfin_id.as_str(), a.source_server_id.as_deref())))
+                .map(|a| a.size_bytes)).fold(0_u64, u64::saturating_add);
         let destructive_cleanup_count = destructive_cleanup_count(&delta, manifest);
         let change_reasons = change_reason_summary(&delta);
         let path = Arc::new(

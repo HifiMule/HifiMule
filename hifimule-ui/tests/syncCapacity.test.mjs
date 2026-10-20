@@ -5,7 +5,9 @@ import ts from 'typescript';
 
 const sidebarSource = readFileSync(new URL('../src/components/BasketSidebar.ts', import.meta.url), 'utf8');
 const helperScript = ts.transpile(readFileSync(new URL('../src/state/syncCapacity.ts', import.meta.url), 'utf8').replace(/export /g, ''), { target: ts.ScriptTarget.ES2022 });
-const { syncCapacity, plannedSelectionBytes } = new Function(`${helperScript}\nreturn { syncCapacity, plannedSelectionBytes };`)();
+const { syncCapacity, plannedSelectionBytes, plannedSelectionSize, selectionSize } = new Function(`${helperScript}\nreturn { syncCapacity, plannedSelectionBytes, plannedSelectionSize, selectionSize };`)();
+const estimateScript = ts.transpile(readFileSync(new URL("../src/state/basketEstimate.ts", import.meta.url), "utf8").replace(/^import .*;\r?\n/gm, "").replace(/export /g, ""), { target: ts.ScriptTarget.ES2022 });
+const { basketEstimateKey } = new Function(`${estimateScript}\nreturn { basketEstimateKey };`)();
 const basketSource = readFileSync(new URL('../src/state/basket.ts', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '')
     .replace('const basketStore = new BasketStore();', '');
@@ -13,7 +15,7 @@ const basketScript = ts.transpile(basketSource, { target: ts.ScriptTarget.ES2022
 const { BasketStore } = new Function(`${basketScript}\nreturn { BasketStore };`)();
 // Exercise the capacity renderer without mounting its browser event handlers.
 const script = ts.transpile(sidebarSource.replace(/^import .*;\r?\n/gm, '').replace(/export class /g, 'class '), { target: ts.ScriptTarget.ES2022 });
-const { renderCapacityBar } = new Function('t', 'syncCapacity', `${script}\nreturn { renderCapacityBar };`)((key, params) => `${key}:${params?.size ?? ''}`, syncCapacity);
+const { renderCapacityBar, renderSizeReserve, displaySelectionSize } = new Function('t', 'syncCapacity', `${script}\nreturn { renderCapacityBar, renderSizeReserve, displaySelectionSize };`)((key, params) => `${key}:${params?.size ?? ''}`, syncCapacity);
 
 test('selected content can reclaim existing managed autofill without double counting selected files', () => {
     const storage = { totalBytes: 20 * 2 ** 30, freeBytes: 2 ** 30, usedBytes: 19 * 2 ** 30 };
@@ -125,7 +127,7 @@ test('compact daemon byte totals preserve capacity and rendering without library
     assert.deepEqual(syncCapacity(storage,4,totals),syncCapacity(storage,4,records));
     assert.equal(renderCapacityBar(storage,4,totals),renderCapacityBar(storage,4,records));
     const basket={getManualSizeBytes:()=>4,getItems:()=>[{id:'track',sizeBytes:4,sizeTicks:1,childCount:1}]};
-    const {BasketSidebar}=new Function('plannedSelectionBytes','isAutoFillSlotId','t','syncCapacity','basketStore',`${script}\nreturn {BasketSidebar};`)(plannedSelectionBytes, id => id.startsWith('__auto_fill_slot__'),()=>'',syncCapacity,basket);
+    const {BasketSidebar}=new Function('basketEstimateKey','plannedSelectionSize', 'selectionSize','isAutoFillSlotId','t','syncCapacity','basketStore',`${script}\nreturn {BasketSidebar};`)(basketEstimateKey,plannedSelectionSize,selectionSize, id => id.startsWith('__auto_fill_slot__'),()=>'',syncCapacity,basket);
     const sidebar=Object.create(BasketSidebar.prototype);
     sidebar.storageInfo=storage;sidebar.currentDevice={syncedItemCount:40000,syncedByteTotals:totals};
     assert.deepEqual(sidebar.selectedCapacity(),syncCapacity(storage,4,records));
@@ -164,7 +166,7 @@ test('multiple autofill ceilings and other-server selections share manual admiss
         ['slot-b', { id: '__auto_fill_slot__:b', sizeBytes: 100 }],
     ]);
     assert.equal(basket.getManualSizeBytes(), 4);
-    const { BasketSidebar } = new Function('plannedSelectionBytes', 'isAutoFillSlotId', 't', 'syncCapacity', 'basketStore', `${script}\nreturn { BasketSidebar };`)(plannedSelectionBytes, id => id.startsWith('__auto_fill_slot__'), () => '', syncCapacity, basket);
+    const { BasketSidebar } = new Function('basketEstimateKey','plannedSelectionSize', 'selectionSize', 'isAutoFillSlotId', 't', 'syncCapacity', 'basketStore', `${script}\nreturn { BasketSidebar };`)(basketEstimateKey,plannedSelectionSize,selectionSize, id => id.startsWith('__auto_fill_slot__'), () => '', syncCapacity, basket);
     const sidebar = Object.create(BasketSidebar.prototype);
     sidebar.storageInfo = { totalBytes: 20, freeBytes: 1, usedBytes: 19 };
     sidebar.currentDevice = { synced_items: [{ sizeBytes: 2 }, { sizeBytes: 7, isAutoFill: true }] };
@@ -175,8 +177,50 @@ test('multiple autofill ceilings and other-server selections share manual admiss
 
  test('profile estimates depend on duration and output bitrate, never original bytes',()=> {
     const item={sizeBytes:50_000_000,sizeTicks:240*10_000_000,childCount:1};
-    assert.equal(plannedSelectionBytes([item],192),5_998_336);
-    assert.equal(plannedSelectionBytes([{...item,sizeBytes:100}],192),5_998_336);
+    assert.equal(plannedSelectionBytes([item],192),5_883_136);
+    assert.equal(plannedSelectionBytes([{...item,sizeBytes:100}],192),5_883_136);
     assert.equal(plannedSelectionBytes([item]),50_000_000);
     assert.ok(plannedSelectionBytes([{...item,sizeTicks:0}],192)>80_000_000);
+});
+
+
+test('Alchemy fallback separates payload, one percent and the fixed converted-track allowance', () => {
+    const size = plannedSelectionSize([{ sizeBytes: 9e9, sizeTicks: 27682 * 10_000_000, childCount: 99 }], 192);
+    assert.deepEqual(size, { expectedBytes: 664368000, reserveBytes: 13131744, selectedBytes: 677499744 });
+    const capacity = syncCapacity({ totalBytes: 1e9, freeBytes: 670e6, usedBytes: 330e6 }, size.selectedBytes);
+    assert.equal(capacity.zone, 'red', 'capacity between payload and reservation must warn');
+    assert.equal(capacity.autofillCapacityBytes, 0);
+    const html = renderCapacityBar({ totalBytes: 1e9, freeBytes: 670e6, usedBytes: 330e6 }, size.selectedBytes, [], size);
+    assert.match(html, /basket.size.expected:634 MB/);
+    assert.match(html, /basket.size.reserve:13 MB/);
+    assert.equal(segmentGeometry(html, 'projected').width, 0.67);
+});
+
+test('measured mixed selections use the authoritative split rather than a global percentage', () => {
+    const measured = selectionSize(637 * 2 ** 20, 637 * 2 ** 20, 0);
+    assert.equal(displaySelectionSize(measured), '637 MB');
+    assert.equal(renderSizeReserve(measured), '');
+    const mixed = selectionSize(637 * 2 ** 20 + 677499744, 637 * 2 ** 20 + 664368000, 13131744);
+    assert.equal(mixed.reserveBytes, 13131744);
+    assert.match(renderSizeReserve(mixed), /basket.size.reserve:13 MB/);
+    const legacy = selectionSize(677499744);
+    assert.equal(displaySelectionSize(legacy), 'basket.size.reserved:646 MB');
+    assert.equal(renderSizeReserve(legacy), '');
+    assert.deepEqual(selectionSize(100, 90, 20), { selectedBytes: 100 }, 'incoherent pairs never replace the capacity total');
+    assert.deepEqual(selectionSize(0, 1, 0), { selectedBytes: 0 }, 'tiny incoherent pairs remain unknown');
+});
+
+test('tiny positive reserves stay legible, and empty or saturated fallbacks stay finite', () => {
+    assert.match(renderSizeReserve(selectionSize(101, 100, 1)), /basket.size.reserve:1 KB/);
+    assert.deepEqual(plannedSelectionSize([]), { selectedBytes: 0, expectedBytes: 0, reserveBytes: 0 });
+    const saturated = plannedSelectionSize([{ sizeBytes: 1, sizeTicks: Number.MAX_VALUE, childCount: 99 }], 192);
+    assert.equal(saturated.selectedBytes, Number.MAX_SAFE_INTEGER);
+    assert.equal(saturated.expectedBytes + saturated.reserveBytes, saturated.selectedBytes);
+    assert.ok(Number.isFinite(saturated.selectedBytes));
+});
+
+
+test('nonmusic fallback remains exact when a music encoding profile is selected', () => {
+    const items = ['Book', 'BookPart', 'PodcastEpisode', 'PodcastShow'].map(type => ({ type, sizeBytes: 1000000, sizeTicks: 240 * 10_000_000, childCount: 1 }));
+    assert.deepEqual(plannedSelectionSize(items, 192), { selectedBytes: 4000000, expectedBytes: 4000000, reserveBytes: 0 });
 });

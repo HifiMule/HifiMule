@@ -997,6 +997,8 @@ async fn normal_existing_audio_is_reused_but_force_schedules_replacement() {
     assert_eq!(tokio::fs::read(root.path().join("Music/existing.mp3")).await.unwrap(), before);
     let summary = finish_sync_delta(&state, delta, &manifest, &json!({"prepared":true})).await.unwrap();
     assert_eq!(summary["selectedBytes"], before.len() as u64);
+    assert_eq!(summary["selectedExpectedBytes"], before.len() as u64);
+    assert_eq!(summary["selectedReserveBytes"], 0);
     let started = handle_sync_execute(&state, Some(json!({"planId":summary["planId"]}))).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while state.sync_operation_manager.has_active_operation().await {
@@ -1184,4 +1186,235 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
         assert_eq!(repeat_operation.bytes_transferred, 0);
         download.assert_async().await;
     }
+}
+
+
+#[test]
+fn basket_estimate_uses_expanded_tracks_instead_of_inconsistent_parent_duration() {
+    let desired: Vec<_> = (0..91).map(|index| {
+        let mut song = make_fake_song(&format!("track-{index}"), "Track");
+        song.duration_seconds = if index == 90 { 385 } else { 250 };
+        song.bitrate_kbps = Some(1600);
+        song.size_bytes = Some(50_000_000);
+        song.suffix = Some("flac".into());
+        let mut item = provider_song_to_desired_item(&song);
+        item.server_id = Some("source".into());
+        item
+    }).collect();
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    let estimate = basket_item_estimate("playlist", "source", &desired, &Default::default(), Some(&profile), None);
+    assert_eq!(estimate["childCount"], 91);
+    assert_eq!(estimate["sizeTicks"], 228850000000_u64);
+    assert_eq!(estimate["expectedBytes"], 549240000_u64);
+    assert_eq!(estimate["reserveBytes"], 11456176_u64);
+    assert_eq!(estimate["plannedBytes"], 560696176_u64);
+    assert_eq!((estimate["plannedBytes"].as_u64().unwrap() as f64 / 1048576.0).round(), 535.0);
+}
+
+#[test]
+fn alchemy_99_track_breakdown_matches_one_percent_plus_per_track_overhead() {
+    let tracks: Vec<_> = (0..99).map(|index| {
+        let mut song = make_fake_song(&format!("track-{index}"), "Track");
+        song.duration_seconds = if index == 98 { 242 } else { 280 };
+        song.bitrate_kbps = Some(1600);
+        song.size_bytes = Some(50_000_000);
+        song.suffix = Some("flac".into());
+        provider_song_to_desired_item(&song)
+    }).collect();
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    let estimate = basket_item_estimate("alchemy", "source", &tracks, &Default::default(), Some(&profile), None);
+    assert_eq!(estimate["expectedBytes"], 664368000_u64);
+    assert_eq!(estimate["reserveBytes"], 13131744_u64);
+    assert_eq!(estimate["plannedBytes"], 677499744_u64);
+}
+
+#[test]
+fn prepared_manual_breakdown_uses_same_add_rekey_and_resident_filters_as_reserved_total() {
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    let mut manifest = crate::device::DeviceManifest::default();
+    manifest.synced_items = serde_json::from_value(json!([
+        {"providerItemId":"resident","name":"Resident","localPath":"Music/resident.mp3","sizeBytes":100,"syncedAt":"before"},
+        {"providerItemId":"old","name":"Rekey","localPath":"Music/old.mp3","sizeBytes":200,"syncedAt":"before"},
+        {"providerItemId":"deleted","name":"Deleted","localPath":"Music/deleted.mp3","sizeBytes":999,"syncedAt":"before"},
+        {"providerItemId":"autofill","name":"Auto","localPath":"Music/auto.mp3","sizeBytes":999,"syncedAt":"before","isAutoFill":true}
+    ])).unwrap();
+    let mut delta: crate::sync::SyncDelta = serde_json::from_value(json!({
+        "adds":[
+            {"jellyfinId":"converted","name":"Converted","durationSeconds":240,"providerSuffix":"flac","sizeBytes":50000000},
+            {"jellyfinId":"direct","name":"Direct","mediaRole":"podcast","sizeBytes":300},
+            {"jellyfinId":"auto-new","name":"Auto","durationSeconds":240,"providerSuffix":"flac","sizeBytes":50000000,"isAutoFill":true}
+        ],
+        "idChanges":[{"oldJellyfinId":"old","newJellyfinId":"rekey","oldLocalPath":"Music/old.mp3","name":"Rekey","sizeBytes":200,"etag":null}],
+        "deletes":[{"jellyfinId":"deleted","localPath":"Music/deleted.mp3","name":"Deleted"}],"unchanged":1,"playlists":[]
+    })).unwrap();
+    crate::sync::estimate_delta_outputs(&mut delta, Some(&profile), None);
+    let size = prepared_manual_selection_size(&delta, &manifest, Some(&profile), None);
+    assert_eq!(size.expected_bytes, 5_760_000 + 100 + 200 + 300);
+    assert_eq!(size.reserve_bytes(), 57_600 + 65_536);
+    assert_eq!(size.reserved_bytes, 5_883_136 + 600);
+    // Force replaces the rekey: its measured bytes must no longer be counted.
+    let mut replacement = delta.adds[0].clone();
+    replacement.jellyfin_id = "rekey".into();
+    delta.adds.push(replacement);
+    let forced = prepared_manual_selection_size(&delta, &manifest, Some(&profile), None);
+    assert_eq!(forced.expected_bytes, 2 * 5_760_000 + 100 + 300);
+    assert_eq!(forced.reserve_bytes(), 2 * (57_600 + 65_536));
+    assert_eq!(forced.reserved_bytes, 2 * 5_883_136 + 400);
+}
+
+#[tokio::test]
+async fn basket_estimate_rejects_wrong_destination_and_changed_profile_without_fetching_sources() {
+    let _guard = credential_test_lock();
+    let (_dir, state) = sync_plan_test_state().await;
+    let error = handle_basket_estimate(&state, Some(json!({"targetDeviceId":"disconnected","basketItems":[]})))
+        .await.unwrap_err();
+    assert!(error.message.contains("disconnected"));
+    let error = handle_basket_estimate(&state, Some(json!({"targetDeviceId":"prepared-plan-device",
+        "expectedProfileId":"changed-profile","basketItems":[]}))).await.unwrap_err();
+    assert!(error.message.contains("profile changed"));
+    let empty = handle_basket_estimate(&state, Some(json!({"targetDeviceId":"prepared-plan-device",
+        "expectedProfileId":null,"basketItems":[]}))).await.unwrap();
+    assert_eq!(empty["selectedBytes"], 0);
+    assert_eq!(empty["expectedBytes"], 0);
+    assert_eq!(empty["reserveBytes"], 0);
+    assert_eq!(empty["trackCount"], 0);
+    assert_eq!(empty["items"], json!([]));
+}
+
+#[test]
+fn force_estimation_retains_desired_duration_source_and_is_idempotent() {
+    let mut song = make_fake_song("song", "Track");
+    song.duration_seconds = 240;
+    song.bitrate_kbps = Some(1600);
+    song.size_bytes = Some(50_000_000);
+    song.suffix = Some("flac".into());
+    let item = provider_song_to_desired_item(&song);
+    let mut manifest = crate::device::DeviceManifest::default();
+    manifest.managed_paths = vec!["Music".into()];
+    manifest.synced_items = serde_json::from_value(json!([{"providerItemId":"song","name":"Track",
+        "localPath":"Music/Track.mp3","sizeBytes":5500000,"syncedAt":"before","providerSuffix":"flac",
+        "originalBitrate":1600000}])).unwrap();
+    let mut delta = crate::sync::calculate_delta(&[item.clone()], &manifest);
+    assert_eq!(delta.unchanged, 1, "exercise retained-file force expansion, not an existing addition");
+    assert!(delta.adds.is_empty());
+    apply_force_sync_with_desired(&mut delta, &manifest, &[item]);
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    crate::sync::estimate_delta_outputs(&mut delta, Some(&profile), None);
+    assert_eq!(delta.adds.len(), 1);
+    assert_eq!(delta.adds[0].duration_seconds, 240);
+    assert_eq!(delta.adds[0].source_audio.original_size_bytes, Some(50_000_000));
+    assert_eq!(delta.adds[0].size_bytes, 5_883_136);
+    apply_force_sync(&mut delta, &manifest);
+    crate::sync::estimate_delta_outputs(&mut delta, Some(&profile), None);
+    assert_eq!(delta.adds.len(), 1);
+    assert_eq!(delta.adds[0].size_bytes, 5_883_136);
+}
+
+
+#[test]
+fn force_id_reassignment_counts_replacement_output_once_and_preserves_source_metadata() {
+    let mut song = make_fake_song("new", "Track");
+    song.duration_seconds = 240;
+    song.size_bytes = Some(50_000_000);
+    song.bitrate_kbps = Some(1600);
+    song.suffix = Some("flac".into());
+    let mut desired = provider_song_to_desired_item(&song);
+    desired.server_id = Some("source".into());
+    let mut manifest = crate::device::DeviceManifest::default();
+    manifest.synced_items = serde_json::from_value(json!([{"providerItemId":"old","name":"Track",
+        "localPath":"Music/old.mp3","sizeBytes":5500000,"syncedAt":"before"}])).unwrap();
+    let mut delta = crate::sync::calculate_delta(&[], &Default::default());
+    delta.id_changes = serde_json::from_value(json!([{"oldJellyfinId":"old","newJellyfinId":"new",
+        "oldLocalPath":"Music/old.mp3","name":"Track","sizeBytes":5500000,"etag":null}])).unwrap();
+    apply_force_sync_with_desired(&mut delta, &manifest, &[desired]);
+    apply_force_sync(&mut delta, &manifest);
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    crate::sync::estimate_delta_outputs(&mut delta, Some(&profile), None);
+    assert_eq!(delta.adds.len(), 1);
+    assert_eq!(delta.adds[0].duration_seconds, 240);
+    assert_eq!(delta.adds[0].server_id.as_deref(), Some("source"));
+    assert_eq!(delta.id_changes.len(), 1, "retain old/new linkage for safe blocked-file handling");
+    let plan = crate::sync_plan::SyncPlan::from_delta(delta, &manifest).unwrap();
+    assert_eq!(plan.total_bytes, 5_883_136, "metadata rekey is not a second audio output");
+}
+
+
+#[test]
+fn backend_manual_budget_distinguishes_retained_bytes_from_force_replacements() {
+    let mut song = make_fake_song("song", "Track");
+    song.duration_seconds = 240;
+    song.bitrate_kbps = Some(1600);
+    song.size_bytes = Some(50_000_000);
+    song.suffix = Some("flac".into());
+    let mut desired = provider_song_to_desired_item(&song);
+    desired.server_id = Some("source".into());
+    let mut manifest = crate::device::DeviceManifest::default();
+    manifest.managed_paths = vec!["Music".into()];
+    manifest.synced_items = serde_json::from_value(json!([{"providerItemId":"song","name":"Track",
+        "localPath":"Music/Track.mp3","sizeBytes":5000000,"syncedAt":"before","originalBitrate":1600000,
+        "serverId":"source"}])).unwrap();
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    assert_eq!(planned_manual_selection_bytes(&[desired.clone()], &manifest, Some(&profile), None, false), 5_000_000);
+    assert_eq!(planned_manual_selection_bytes(&[desired], &manifest, Some(&profile), None, true), 5_883_136);
+    assert_eq!(manifest.synced_items.len(), 1, "budgeting must preserve the real cleanup manifest");
+}
+
+
+#[tokio::test]
+async fn missing_resident_files_are_not_credited_as_reusable_or_reclaimable_capacity() {
+    let _guard = credential_test_lock();
+    let (dir, state) = sync_plan_test_state().await;
+    tokio::fs::create_dir_all(dir.path().join("Music")).await.unwrap();
+    tokio::fs::write(dir.path().join("Music/present.mp3"), b"present").await.unwrap();
+    let mut manifest = state.device_manager.get_current_device().await.unwrap();
+    manifest.synced_items = serde_json::from_value(json!([
+        {"providerItemId":"song","name":"Track","localPath":"Music/missing.mp3","sizeBytes":5000000,
+            "syncedAt":"before","originalBitrate":1600000,"serverId":"source"},
+        {"providerItemId":"present","name":"Present","localPath":"Music/present.mp3","sizeBytes":1000000,"syncedAt":"before"}
+    ])).unwrap();
+    let verified = verified_capacity_manifest(&state, &manifest).await.unwrap();
+    assert_eq!(verified.synced_items.len(), 1);
+    assert_eq!(verified.synced_items[0].jellyfin_id, "present");
+    let mut song = make_fake_song("song", "Track");
+    song.duration_seconds = 240;
+    song.bitrate_kbps = Some(1600);
+    song.size_bytes = Some(50_000_000);
+    song.suffix = Some("flac".into());
+    let mut desired = provider_song_to_desired_item(&song);
+    desired.server_id = Some("source".into());
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,"DirectPlayProfiles":[],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    assert_eq!(planned_manual_selection_bytes(&[desired], &verified, Some(&profile), None, false), 5_883_136);
+    assert_eq!(verified.synced_items.iter().map(|item| item.size_bytes).sum::<u64>(), 1_000_000);
+    assert_eq!(manifest.synced_items.len(), 2, "verification must not alter cleanup provenance");
+}
+
+#[test]
+fn exact_audio_bitrate_survives_the_song_adapter_at_transcode_boundaries() {
+    let item: crate::api::JellyfinItem = serde_json::from_value(json!({"Id":"track","Name":"Track","Type":"Audio",
+        "RunTimeTicks":2400000000_u64,"MediaSources":[{"Container":"mp3","Size":12000000,
+        "Bitrate":200000,"MediaStreams":[{"Type":"Audio","BitRate":192500}]}]})).unwrap();
+    let raw = jellyfin_item_to_desired_item(item.clone());
+    let mut song = make_fake_song("track", "Track");
+    song.duration_seconds = 240;
+    song.bitrate_kbps = Some(192);
+    song.size_bytes = Some(12_000_000);
+    song.suffix = Some("mp3".into());
+    song.provider_metadata.source_audio = item.source_audio_properties();
+    let adapted = provider_song_to_desired_item(&song);
+    assert_eq!(adapted.original_bitrate, Some(192500));
+    assert_eq!(adapted.original_bitrate, raw.original_bitrate);
+    let profile = json!({"MusicStreamingTranscodingBitrate":192000,
+        "DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],
+        "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+    let expected = crate::sync::planned_selection_bytes(&[raw], &Default::default(), Some(&profile), None);
+    assert_eq!(crate::sync::planned_selection_bytes(&[adapted], &Default::default(), Some(&profile), None), expected);
+    assert_eq!(crate::sync::planned_song_bytes(&song, Some(&profile), None), expected);
+    assert_eq!(expected, 5_883_136);
 }

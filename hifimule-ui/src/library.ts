@@ -1181,7 +1181,7 @@ async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ add
                 serverId: item.serverId,
                 artist: item.subtitle ?? undefined,
                 childCount: info.recursiveItemCount ?? 0,
-                sizeTicks: item.sizeTicks || (info.cumulativeRunTimeTicks ?? 0),
+                sizeTicks: info.cumulativeRunTimeTicks ?? item.sizeTicks ?? 0,
                 sizeBytes: sizeInfo.totalSizeBytes ?? 0,
             });
         } else {

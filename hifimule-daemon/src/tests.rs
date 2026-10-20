@@ -154,7 +154,7 @@ async fn manifest_migration_regression_auto_finalization_preserves_profile_histo
             assert!(durable.last_sync_at.is_some());
             durable.set_transcoding_profile(None);
             let item = &durable.synced_items[0];
-            let desired = sync::DesiredItem {disc_number: None,
+            let desired = sync::DesiredItem {source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: item.media_role.clone(),
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -531,4 +531,32 @@ async fn test_device_detection_auto_sync_disabled() {
     } else {
         panic!("Expected DeviceRecognized, got {:?}", state);
     }
+}
+
+
+#[tokio::test]
+async fn auto_sync_capacity_io_failure_exits_syncing_before_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = device::DeviceManifest {
+        device_id: "auto-capacity-error".into(), version: "1.1".into(),
+        auto_fill: device::AutoFillConfig { legacy: Some(device::AutoFillPrefs { enabled: true, max_bytes: None }),
+            ..Default::default() },
+        ..Default::default()
+    };
+    let manager = Arc::new(device::DeviceManager::new(Arc::new(db::Database::memory().unwrap())));
+    manager.handle_device_detected(dir.path().into(), manifest.clone(),
+        Arc::new(device_io::MscBackend::new(dir.path().into()))).await.unwrap();
+    tokio::fs::remove_dir_all(dir.path()).await.unwrap();
+    let provider = Arc::new(providers::jellyfin::JellyfinProvider::new(api::JellyfinClient::new(),
+        "http://127.0.0.1:1", "unused", "unused"));
+    let operations = Arc::new(sync::SyncOperationManager::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let protection = sync::protection::Publisher::default();
+    let result = run_auto_sync_via_provider(provider, None, manager, operations.clone(), tx,
+        manifest.device_id, protection.observer()).await;
+    assert!(result.is_err());
+    let states: Vec<_> = rx.try_iter().collect();
+    assert!(matches!(states.first(), Some(DaemonState::Syncing)));
+    assert!(matches!(states.last(), Some(DaemonState::Error)));
+    assert!(operations.get_all_operations().await.is_empty());
 }

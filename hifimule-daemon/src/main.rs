@@ -1593,7 +1593,7 @@ fn push_auto_fill_items(
                     run_time_seconds: -1,
                 });
             }
-            desired_items.push(sync::DesiredItem {disc_number: item.disc_number,
+            desired_items.push(sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
                 duration_seconds: item.duration_seconds,
                 media_role,
                 jellyfin_id: item.id,
@@ -1683,7 +1683,7 @@ mod auto_sync_tests {
     }
 
     fn fill_item(id: &str, track_number: Option<u32>) -> auto_fill::AutoFillItem {
-        auto_fill::AutoFillItem {disc_number: None,
+        auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
             original_bitrate: None,
             duration_seconds: 0,
         id: id.to_string(),
@@ -1702,7 +1702,7 @@ mod auto_sync_tests {
 
     #[test]
     fn push_auto_fill_items_dedups_and_writes_playlist() {
-        let mut desired_items = vec![sync::DesiredItem {disc_number: None,
+        let mut desired_items = vec![sync::DesiredItem {source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "manual".to_string(),
@@ -1930,32 +1930,22 @@ async fn run_auto_sync_logged(
 
     if manifest.auto_fill.enabled_for(server_id.as_deref()) { phases.next("auto_fill_preparation"); }
     let mut auto_fill_ids = std::collections::HashSet::new();
+    let mut auto_fill_bitrate_overrides = std::collections::HashMap::new();
     // Auto-fill: fill remaining space after basket items (or fill entirely when basket is empty).
     if manifest.auto_fill.enabled_for(server_id.as_deref()) {
-        let (selected_bytes, autofill_bytes) = manifest.synced_byte_totals();
-        let synced_bytes = selected_bytes.saturating_add(autofill_bytes);
-        let total_budget = if let Some(mb) = manifest.auto_fill.max_bytes_for(server_id.as_deref())
-        {
-            mb
-        } else {
-            match target.io.free_space().await {
-                Ok(free_bytes) => free_bytes.saturating_add(synced_bytes),
-                Err(_) => {
-                    terminal = "failed";
-                    daemon_log!("[AutoSync] Cannot determine device capacity for auto-fill");
-                    let _ = state_tx.send(DaemonState::Idle);
-                    return Ok(());
-                }
-            }
-        };
-        let basket_size: u64 = sync::planned_selection_bytes(&desired_items,manifest,transcoding_profile.as_ref(),target.io.preferred_audio_container());
-        let auto_fill_budget = total_budget.saturating_sub(basket_size);
+        for item in &mut desired_items { if item.server_id.is_none() { item.server_id = server_id.clone(); } }
+        let capacity_manifest = sync::capacity_manifest_with_existing_files(manifest, target.io.as_ref()).await?;
+        let synced_bytes = capacity_manifest.synced_items.iter().map(|item| item.size_bytes).fold(0, u64::saturating_add);
+        let basket_size = sync::planned_selection_bytes(&desired_items, &capacity_manifest, transcoding_profile.as_ref(), target.io.preferred_audio_container());
+        let available = target.io.free_space().await?.saturating_add(synced_bytes).saturating_sub(basket_size);
+        let auto_fill_budget = manifest.auto_fill.max_bytes_for(server_id.as_deref()).map(|limit| limit.min(available)).unwrap_or(available);
         if auto_fill_budget > 0 {
             let exclude_item_ids: Vec<String> = desired_items
                 .iter()
                 .map(|i| i.jellyfin_id.clone())
                 .collect();
             let fill_params = auto_fill::AutoFillParams {
+                preferred_audio_container: target.io.preferred_audio_container().map(str::to_string),
                 output_profile: transcoding_profile.clone(),
                 exclude_item_ids,
                 max_fill_bytes: auto_fill_budget,
@@ -1982,6 +1972,11 @@ async fn run_auto_sync_logged(
                         "[AutoSync] Provider auto-fill resolved {} items",
                         items.len()
                     );
+                    for item in &items {
+                        if let Some(kbps) = item.max_bitrate_override_kbps {
+                            auto_fill_bitrate_overrides.insert(item.id.clone(), kbps);
+                        }
+                    }
                     let first_fill = desired_items.len();
                     push_auto_fill_items(
                         items,
@@ -2011,7 +2006,10 @@ async fn run_auto_sync_logged(
     let media_role = device::MediaRole::from_library_role(provider.library_role());
     for item in &mut desired_items {
         item.media_role = media_role;
+        if item.server_id.is_none() { item.server_id = server_id.clone(); }
     }
+    rpc::ensure_unambiguous_sync_track_owners(manifest, &desired_items)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
 
     if desired_items.is_empty() && !manifest.basket_items.is_empty() {
         if basket_failures > 0 { terminal = "failed"; }
@@ -2021,6 +2019,13 @@ async fn run_auto_sync_logged(
     }
 
     let mut delta = sync::calculate_delta(&desired_items, manifest);
+    let qualified_overrides = desired_items.iter().filter_map(|item| auto_fill_bitrate_overrides.get(&item.jellyfin_id)
+        .map(|kbps| ((item.jellyfin_id.clone(), item.server_id.clone()), *kbps))).collect();
+    sync::replace_oversized_goal_residents(&mut delta, &desired_items, manifest, &qualified_overrides);
+    sync::augment_delta_with_existence_check(&mut delta,&desired_items,manifest,target.io.as_ref()).await?;
+    for add in &mut delta.adds {
+        add.max_bitrate_override_kbps = auto_fill_bitrate_overrides.get(&add.jellyfin_id).copied();
+    }
     sync::classify_provenance(&mut delta, &desired_items, manifest, &auto_fill_ids);
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
@@ -2060,7 +2065,6 @@ async fn run_auto_sync_logged(
         delta.id_changes.len()
     );
 
-    sync::augment_delta_with_existence_check(&mut delta,&desired_items,manifest,target.io.as_ref()).await?;
     device_music_scan::reconcile(&mut delta,manifest,target.io.as_ref(),transcoding_profile.as_ref(),Some(&sync_op_manager)).await?;
     sync::estimate_delta_outputs(&mut delta,transcoding_profile.as_ref(),target.io.preferred_audio_container());
     let delta = sync_plan::SyncPlan::from_delta(delta, manifest)?;
@@ -2211,6 +2215,9 @@ async fn run_auto_sync_logged(
     Ok(())
     }.await;
     let terminal = if result.is_err() && sync_op_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { terminal };
+    if result.is_err() {
+        let _ = state_tx.send(if terminal == "cancelled" { DaemonState::Idle } else { DaemonState::Error });
+    }
     phases.finish(terminal, 0);
     preparation.finish(terminal, 0);
     result
@@ -2411,7 +2418,7 @@ fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::Desired
         .bitrate_kbps
         .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
         .unwrap_or(0);
-    sync::DesiredItem {disc_number: song.disc_number,
+    sync::DesiredItem {source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
         duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
@@ -2423,7 +2430,7 @@ fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::Desired
         provider_album_id: song.album_id.clone(),
         provider_content_type: song.content_type.clone(),
         provider_suffix: song.suffix.clone(),
-        original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
+        original_bitrate: crate::sync::song_audio_bitrate_bps(song),
         track_number: song.track_number,
         server_id: None,
     }

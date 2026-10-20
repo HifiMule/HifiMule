@@ -1275,9 +1275,8 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         })
     };
     let cover_art_id = cover_art_id(&item);
-    let bitrate = item
-        .bitrate
-        .or_else(|| item.media_sources.as_ref()?.first()?.bitrate)
+    let source_audio = item.source_audio_properties();
+    let bitrate = item.audio_bitrate_bps()
         .map(|bps| u32::from(Kbps::from(Bps(bps))));
     let artist = item.artist_items.as_ref().and_then(|items| items.first());
     let ambiguous_music_artist = item
@@ -1330,6 +1329,7 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         album_loudness: Default::default(),
         track_loudness: Default::default(),
         provider_metadata: crate::domain::models::ProviderItemMetadata {
+            source_audio,
             recording,
             ambiguous_music_artist,
             music_artist_ids: item
@@ -1381,23 +1381,37 @@ fn cover_art_id(item: &JellyfinItem) -> Option<String> {
 }
 
 fn transcode_profile_to_device_profile(profile: &TranscodeProfile) -> serde_json::Value {
+    let profile = profile.normalized_for_source(Default::default());
     let container = profile.container.as_deref().unwrap_or("mp3");
     let audio_codec = profile.audio_codec.as_deref().unwrap_or(container);
+    let mut conditions = Vec::new();
+    for (property, limit) in [("AudioSampleRate", profile.max_sample_rate_hz),
+        ("AudioBitDepth", profile.max_bit_depth), ("AudioChannels", profile.max_channels)] {
+        if let Some(limit) = limit {
+            conditions.push(serde_json::json!({"Condition":"LessThanEqual", "Property":property,
+                "Value":limit.to_string(), "IsRequired":true}));
+        }
+    }
     serde_json::json!({
         "MaxStreamingBitrate": profile.max_bitrate_kbps.map(|kbps| kbps * 1_000),
         "MusicStreamingTranscodingBitrate": profile.max_bitrate_kbps.map(|kbps| kbps * 1_000),
+        "MaxAudioSampleRate": profile.max_sample_rate_hz,
+        "MaxAudioBitDepth": profile.max_bit_depth,
+        "MaxAudioChannels": profile.max_channels,
         "DirectPlayProfiles": [],
         "TranscodingProfiles": [
             {
                 "Container": container,
                 "Type": "Audio",
                 "AudioCodec": audio_codec,
+                "MaxAudioChannels": profile.max_channels.map(|value| value.to_string()),
                 "Protocol": "http",
                 "EstimateContentLength": true,
                 "EnableMpegtsM2TsMode": false
             }
         ],
-        "CodecProfiles": []
+        "CodecProfiles": if conditions.is_empty() { Vec::<serde_json::Value>::new() }
+            else { vec![serde_json::json!({"Type":"Audio", "Codec":audio_codec, "Conditions":conditions})] }
     })
 }
 
@@ -2143,7 +2157,7 @@ mod tests {
             let result = provider
                 .download_url(
                     "song1",
-                    Some(&TranscodeProfile {
+                    Some(&TranscodeProfile {max_sample_rate_hz: None, max_bit_depth: None, max_channels: None,
                         container: Some("mp3".into()),
                         audio_codec: None,
                         max_bitrate_kbps: None,
@@ -2211,7 +2225,7 @@ mod tests {
         let resolved = provider
             .download_url(
                 "song1",
-                Some(&crate::providers::TranscodeProfile {
+                Some(&crate::providers::TranscodeProfile {max_sample_rate_hz: None, max_bit_depth: None, max_channels: None,
                     container: Some("mp3".to_string()),
                     audio_codec: Some("mp3".to_string()),
                     max_bitrate_kbps: Some(320),
@@ -3082,5 +3096,48 @@ fn seek_capability_is_limited_to_verified_jellyfin_original_candidates() {
     );
     for suffix in [None, Some("aac"), Some("alac"), Some("wav?transcoded=true")] {
         assert_eq!(jellyfin_seek_mechanism(suffix), None);
+    }
+}
+
+#[cfg(test)]
+mod source_audio_sync_tests {
+    use super::*;
+
+    #[test]
+    fn song_uses_audio_bitrate_instead_of_container_overhead_and_keeps_resolution() {
+        let item: JellyfinItem = serde_json::from_value(serde_json::json!({"Id":"track","Name":"Track","Type":"Audio",
+            "Bitrate":323634,"RunTimeTicks":2400000000u64,"MediaSources":[{"Size":9709020,"Container":"mp3","Bitrate":323634,
+                "MediaStreams":[{"Type":"Audio","BitRate":320000,"SampleRate":44100,"BitDepth":16,"Channels":2}]}]})).unwrap();
+        let song = song_from_item(item);
+        assert_eq!(song.bitrate_kbps, Some(320));
+        assert_eq!(song.provider_metadata.source_audio.sample_rate_hz, Some(44_100));
+        assert_eq!(song.provider_metadata.source_audio.bit_depth, Some(16));
+        assert_eq!(song.provider_metadata.source_audio.channels, Some(2));
+        assert_eq!(song.provider_metadata.source_audio.average_bitrate_bps, Some(323_634));
+        let profile = serde_json::json!({"MusicStreamingTranscodingBitrate":320000,
+            "DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],
+            "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+        assert_eq!(crate::sync::planned_song_bytes(&song, Some(&profile), None), 9_709_020);
+    }
+
+    #[test]
+    fn stream_only_bitrate_is_available_to_song_and_raw_desired_adapters() {
+        let item: JellyfinItem = serde_json::from_value(serde_json::json!({"Id":"track","Name":"Track","Type":"Audio",
+            "MediaSources":[{"Container":"m4a","MediaStreams":[{"Type":"Audio","BitRate":128000}]}]})).unwrap();
+        assert_eq!(item.audio_bitrate_bps(), Some(128_000));
+        assert_eq!(song_from_item(item).bitrate_kbps, Some(128));
+    }
+
+    #[test]
+    fn requested_profile_retains_effective_audio_limits_as_server_conditions() {
+        let profile = TranscodeProfile { container: Some("flac".into()), audio_codec: Some("flac".into()),
+            max_sample_rate_hz: Some(96_000), max_bit_depth: Some(24), max_channels: Some(2), ..Default::default() };
+        let json = transcode_profile_to_device_profile(&profile);
+        assert_eq!(json["MaxAudioSampleRate"], 96_000);
+        assert_eq!(json["TranscodingProfiles"][0]["MaxAudioChannels"], "2");
+        let conditions = json["CodecProfiles"][0]["Conditions"].as_array().unwrap();
+        for (property, value) in [("AudioSampleRate", "96000"), ("AudioBitDepth", "24"), ("AudioChannels", "2")] {
+            assert!(conditions.iter().any(|c| c["Property"] == property && c["Value"] == value && c["Condition"] == "LessThanEqual"));
+        }
     }
 }

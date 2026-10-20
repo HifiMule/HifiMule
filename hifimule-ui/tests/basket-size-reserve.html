@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Basket size and reserve</title>
+<style>
+body { margin: 0; padding: 24px; overflow: auto !important; }
+main { max-width: 1000px; margin: auto; } h1 { font-size: 1.3rem; } p, label, .fixture-label { color: var(--ink-dim); font-size: .85rem; }
+.fixture-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 20px 0; }
+.fixture-gallery { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.fixture-panel { flex: none; } .fixture-label { margin: 0 0 8px; }
+.fixture-basket { display: flex; flex-direction: column; gap: var(--space-sm); width: 400px; min-height: 420px; padding: var(--space-lg); border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--panel-bg); box-sizing: border-box; }
+.fixture-basket.compact { width: 300px; }
+.fixture-basket .basket-items-list { min-height: 100px; }
+select, button { padding: 8px 12px; color: var(--ink); background: var(--panel-bg); border: 1px solid var(--surface-border); border-radius: 4px; font: inherit; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+</style>
+<main><h1>Basket size and reserve</h1><p>Production basket rendering with fixed daemon responses. Choose a state and apply it to both sidebar widths.</p>
+<div class="fixture-controls"><label for="case">State</label><select id="case"><option value="encoded">Alchemy · encoded estimate</option><option value="measured">Measured resident files · 637 MiB</option><option value="legacy">Older daemon · reserved total only</option><option value="mixed">Mixed measured and converted</option><option value="tiny">Tiny positive reserve</option></select><button id="apply" type="button">Show state</button></div>
+<div class="fixture-gallery"><section class="fixture-panel"><p class="fixture-label">Desktop · 400 px</p><div id="desktop" class="fixture-basket" aria-label="Desktop basket"></div></section><section class="fixture-panel"><p class="fixture-label">Compact · 300 px</p><div id="compact" class="fixture-basket compact" aria-label="Compact basket"></div></section></div></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import { BasketSidebar } from '../src/components/BasketSidebar.ts';
+import { basketStore } from '../src/state/basket.ts';
+import { setLanguage } from '../src/i18n.ts';
+await setLanguage(new URLSearchParams(location.search).get('lang') || 'en');
+let items = [];
+basketStore.getItems = () => items;
+basketStore.hasMultipleServers = () => false;
+basketStore.isItemLocked = () => false;
+// Bypass constructor polling and network artwork, while retaining production
+// renderContent, renderItemsList, item formatting and capacity calculations.
+const sidebars = ['desktop', 'compact'].map(id => {
+  const sidebar = Object.create(BasketSidebar.prototype);
+  Object.assign(sidebar, {
+    container: document.getElementById(id), selectedDevicePath: '/fixture/device', currentServerId: 'fixture', isDestroyed: false,
+    currentDevice: { device_id: 'fixture', plannedBitrateKbps: 192, syncedByteTotals: { selectedBytes: 0, autofillBytes: 0 } },
+    storageInfo: { totalBytes: 4 * 2 ** 30, freeBytes: 670000000, usedBytes: 4 * 2 ** 30 - 670000000 },
+    autoFillPipelines: new Map(), serversById: new Map(),
+    updateDeviceLockState() {}, mountDestinationHub() {}, loadBasketImages() {},
+    bindAutoFillEvents() {}, bindDeviceHubEvents() {},
+    renderDestinationChooserHost: () => '', renderAutoFillControls: () => '', renderStatusZone: () => '', renderDeviceFolders: () => '',
+  });
+  return sidebar;
+});
+function showState() {
+  const state = document.getElementById('case').value;
+  const measured = 637 * 2 ** 20;
+  let expectedBytes = 664368000, reserveBytes = 13131744, selectedBytes = 677499744;
+  if (state === 'measured') { expectedBytes = measured; reserveBytes = 0; selectedBytes = measured; }
+  if (state === 'mixed') { expectedBytes += measured; selectedBytes += measured; }
+  if (state === 'tiny') { expectedBytes = 24000; reserveBytes = 65776; selectedBytes = expectedBytes + reserveBytes; }
+  const row = { id: 'alchemy', serverId: 'fixture', name: state === 'mixed' ? 'Alchemy + resident collection' : 'Alchemy', type: 'Playlist', childCount: state === 'tiny' ? 1 : 99, sizeTicks: 27682 * 10_000_000, sizeBytes: 4e9 };
+  items = [row];
+  const split = state === 'legacy' ? {} : { expectedBytes, reserveBytes };
+  for (const sidebar of sidebars) {
+    sidebar.estimateCache = { get: () => ({ targetDeviceId: 'fixture', selectedBytes, ...split, trackCount: row.childCount, items: [{ ...row, plannedBytes: selectedBytes, ...split }] }) };
+    sidebar.renderContent();
+  }
+}
+document.getElementById('apply').addEventListener('click', showState);
+showState();
+</script></html>

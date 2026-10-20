@@ -31,10 +31,43 @@ export function syncCapacity(storage: SyncStorage | null, selectedBytes: number,
     } as const;
 }
 
+/** A known split always travels with its full capacity reservation. Optional
+ * fields keep older daemon totals authoritative without inventing a split. */
+export interface SelectionSize {
+    selectedBytes: number;
+    expectedBytes?: number;
+    reserveBytes?: number;
+}
+
+export function selectionSize(selectedBytes: number, expectedBytes?: number, reserveBytes?: number): SelectionSize {
+    const valid = (value: number | undefined): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const total = valid(selectedBytes) ? selectedBytes : 0;
+    const sum = Math.min((expectedBytes ?? NaN) + (reserveBytes ?? NaN), 18_446_744_073_709_551_615);
+    const tolerance = Number.isSafeInteger(total) ? 0 : total * Number.EPSILON;
+    return valid(expectedBytes) && valid(reserveBytes) && Math.abs(sum - total) <= tolerance
+        ? { selectedBytes: total, expectedBytes, reserveBytes }
+        : { selectedBytes: total };
+}
+
 /** Coarse profile reservation until preparation resolves actual direct/reused files.
  * Unknown duration reserves an hour per track; never substitute original bytes.
+ * Match the daemon's payload + one percent + 64 KiB per converted track policy.
  */
-export function plannedSelectionBytes(items: {sizeBytes:number;sizeTicks:number;childCount:number}[], targetKbps?:number|null): number {
-    return items.reduce((sum,item) => sum + (targetKbps == null ? item.sizeBytes :
-        Math.ceil((item.sizeTicks > 0 ? item.sizeTicks / 10_000_000 : 3600 * Math.max(item.childCount,1)) * targetKbps * 125 * 1.03) + 65_536 * Math.max(item.childCount,1)),0);
+export function plannedSelectionSize(items: {sizeBytes:number;sizeTicks:number;childCount:number;type?:string}[], targetKbps?:number|null): SelectionSize {
+    const bounded = (value: number) => Number.isFinite(value) ? Math.min(Math.max(value, 0), Number.MAX_SAFE_INTEGER) : value > 0 ? Number.MAX_SAFE_INTEGER : 0;
+    let expectedBytes = 0, reserveBytes = 0;
+    for (const item of items) {
+        const tracks = Math.max(item.childCount || 1, 1);
+        const converted = targetKbps != null && !['Book', 'BookPart', 'PodcastEpisode', 'PodcastShow'].includes(item.type ?? '');
+        const payload = !converted ? bounded(item.sizeBytes)
+            : bounded(Math.ceil((item.sizeTicks > 0 ? item.sizeTicks / 10_000_000 : 3600 * tracks) * targetKbps! * 125));
+        expectedBytes = bounded(expectedBytes + payload);
+        reserveBytes = bounded(reserveBytes + (!converted ? 0 : Math.ceil(payload / 100) + 65_536 * tracks));
+    }
+    reserveBytes = Math.min(reserveBytes, Number.MAX_SAFE_INTEGER - expectedBytes);
+    return { selectedBytes: expectedBytes + reserveBytes, expectedBytes, reserveBytes };
+}
+
+export function plannedSelectionBytes(items: {sizeBytes:number;sizeTicks:number;childCount:number;type?:string}[], targetKbps?:number|null): number {
+    return plannedSelectionSize(items, targetKbps).selectedBytes;
 }

@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
 
+const capacityScript = ts.transpile(readFileSync(new URL('../src/state/syncCapacity.ts', import.meta.url), 'utf8').replace(/export /g, ''), { target: ts.ScriptTarget.ES2022 });
+const { selectionSize } = new Function(`${capacityScript}\nreturn { selectionSize };`)();
+
 const source = readFileSync(new URL('../src/components/BasketSidebar.ts', import.meta.url), 'utf8');
 const script = ts.transpile(source.replace(/^import .*;\r?\n/gm, '').replace(/export class /g, 'class '), { target: ts.ScriptTarget.ES2022 });
 
@@ -13,9 +16,9 @@ test('starting a sync exchanges a prepared token without sending track metadata 
         if (method === 'sync_execute') return { operationId: 'operation-1' };
         return { planId: 'plan-1', blockedCount: 0, destructiveCleanupCount: 0, destructiveCleanupThreshold: 100, changeReasons: [] };
     };
-    const { BasketSidebar } = new Function('rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(rpcCall, { getItems: () => [] }, () => false, key => key);
+    const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key);
     const sidebar = Object.create(BasketSidebar.prototype);
-    Object.assign(sidebar, { isSyncing: false, render() {}, attachToRunningSync: async () => false, itemIdsWithIncrementalChanges: async ids => ids, startPolling() {}, showError(message) { throw new Error(message); } });
+    Object.assign(sidebar, { isSyncing: false, refreshCapacityEstimate: async () => {}, render() {}, attachToRunningSync: async () => false, itemIdsWithIncrementalChanges: async ids => ids, startPolling() {}, showError(message) { throw new Error(message); } });
     await sidebar.handleStartSync();
     assert.equal(calls[0].method, 'sync_prepare');
     assert.equal(calls[1].method, 'sync_execute');
@@ -32,9 +35,9 @@ function sidebarWith(calls, summary, overrides = {}) {
         if (method === 'sync_execute') throw new Error('Prepared sync plan expired; prepare sync again');
         throw new Error(`Unexpected RPC ${method}`);
     };
-    const { BasketSidebar } = new Function('rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(rpcCall, { getItems: () => [] }, () => false, key => key);
+    const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key);
     const sidebar = Object.create(BasketSidebar.prototype);
-    Object.assign(sidebar, { isSyncing: false, render() {}, attachToRunningSync: async () => false, itemIdsWithIncrementalChanges: async ids => ids, stopPolling() {}, startPolling() {}, showError(message) { this.errorMessage = message; }, ...overrides });
+    Object.assign(sidebar, { isSyncing: false, refreshCapacityEstimate: async () => {}, render() {}, attachToRunningSync: async () => false, itemIdsWithIncrementalChanges: async ids => ids, stopPolling() {}, startPolling() {}, showError(message) { this.errorMessage = message; }, ...overrides });
     return sidebar;
 }
 
@@ -91,7 +94,7 @@ test('a rejected page request after Continue or Cancel cannot repaint the closed
         };
         const dialog = { querySelector: selector => node(selector.slice(1)), addEventListener(event, fn) { listeners.set(event, fn); }, hide() { listeners.get('sl-after-hide')(); }, remove() { this.removed = true; }, show() {} };
         const document = { createElement: () => dialog, body: { appendChild() {} } };
-        const { BasketSidebar } = new Function('rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(() => detail, { getItems: () => [] }, () => false, key => key, document, { whenDefined: async () => {} });
+        const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(selectionSize, () => detail, { getItems: () => [] }, () => false, key => key, document, { whenDefined: async () => {} });
         const sidebar = Object.create(BasketSidebar.prototype);
         Object.assign(sidebar, { escapeHtml: value => value, showError(message) { this.errorMessage = message; } });
         const result = sidebar.confirmBlockedMedia([{ name: 'First' }], { planId: 'owned', total: 501, nextOffset: 500 });
@@ -116,7 +119,7 @@ test('sync click logs its first blocked state check while repeat and recovery po
         return { activeOperationId: 'already-running' };
     };
     const window = { setTimeout: resolve => resolve() };
-    const { BasketSidebar } = new Function('rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'window', `${script}\nreturn { BasketSidebar };`)(rpcCall, { getItems: () => [] }, () => false, key => key, window);
+    const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'window', `${script}\nreturn { BasketSidebar };`)(selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key, window);
     const sidebar = Object.create(BasketSidebar.prototype);
     Object.assign(sidebar, { isSyncing: false, isDestroyed: false, render() {}, startPolling() {} });
     const starting = sidebar.handleStartSync();

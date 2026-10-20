@@ -983,7 +983,7 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     }
 
     // Story 13.6 #8 (album/track space ratio): a reserve pre-pass that fills COMPLETE albums (atomic,
-    // `Unit::Album` grouping — a whole album fits or the source stops, exactly as the `Selector` already
+    // `Unit::Album` grouping — a whole album fits or is skipped, exactly as the `Selector` already
     // enforces) FIRST, then the remaining budget fills with the base `unit` as today. Mirrors the
     // stable-core pre-pass (temporary ceiling, `source_caps` split, shared `Selector` ⇒ automatic dedup).
     // `album_track_ratio` is `None`/`0` or the ceiling is unbounded ⇒ no-op (base unit governs everything).
@@ -2024,7 +2024,7 @@ fn coherence_reorder(items: Vec<AutoFillItem>, keys: Vec<CoherenceKey>) -> Vec<A
 
 /// Accumulates the selection across sources: enforces the global ceiling, per-source caps, the
 /// optional duration target, manual-exclude ids, and within-run dedup. Mirrors the
-/// stop-on-first-oversized semantics of the legacy `ProviderFillState`/`rank_and_truncate`.
+/// skip-unfitting semantics of the provider path while preserving accepted priority order.
 struct Selector {
     ceiling: u64,
     duration_target: Option<u64>,
@@ -2069,8 +2069,8 @@ impl Selector {
     }
 
     /// Add units from one source (in order) until the source cap, the global ceiling, or the
-    /// duration target stops us. Units are atomic: a unit whose syncable tracks don't all fit
-    /// stops this source (smaller later units are not back-filled — matching legacy semantics).
+    /// duration target stops us. Units are atomic: a unit whose syncable tracks do not all fit
+    /// is skipped, allowing smaller later units to use remaining capacity.
     fn fill(
         &mut self,
         units: Vec<UnitGroup>,
@@ -2135,7 +2135,7 @@ impl Selector {
                 || exceeds(source_bytes, unit_bytes, cap)
                 || self.would_exceed_duration(unit_secs)
             {
-                break; // would exceed global ceiling or this source's allocation
+                continue; // skip the entire unit; later units may still fit
             }
             for (item, size, key) in staged {
                 self.seen.insert(item.id.clone());
@@ -2169,8 +2169,8 @@ fn exceeds(current: u64, add: u64, ceiling: u64) -> bool {
 }
 
 fn make_item(song: &Song, size_bytes: u64, reason: String) -> AutoFillItem {
-    AutoFillItem {disc_number: song.disc_number,
-        original_bitrate: song.bitrate_kbps.map(|b|b.saturating_mul(1000)),
+    AutoFillItem {max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: song.disc_number,
+        original_bitrate: crate::sync::song_audio_bitrate_bps(&song),
         duration_seconds: song.duration_seconds,
         id: song.id.clone(),
         name: song.title.clone(),
@@ -6048,4 +6048,29 @@ mod tests {
                 .unwrap();
         assert_eq!(wide.promotion.spotlight_share, Some(2.0));
     }
+    #[test]
+    fn oversized_atomic_album_and_artist_do_not_block_later_fitting_units() {
+        for unit in [Unit::Album, Unit::Artist] {
+            let mut large_a = song_sized("large-a", true, 0, "2024-01-01", 4_000_000);
+            let mut large_b = song_sized("large-b", true, 0, "2024-01-01", 4_000_000);
+            large_a.album_id = Some("large".into()); large_b.album_id = Some("large".into());
+            large_a.artist_id = Some("large".into()); large_b.artist_id = Some("large".into());
+            let mut small = song_sized("small", false, 0, "2024-01-01", 1_000_000);
+            small.album_id = Some("small".into()); small.artist_id = Some("small".into());
+            let input = PipelineInput::default().with_pool(SourceKind::Library, None, vec![cand(large_a), cand(large_b), cand(small)]);
+            let pipeline = AutoFillPipeline { unit, budget: BudgetStage { max_bytes: Some(5_000_000), ..Default::default() }, ..Default::default() };
+            let items = run_pipeline(&input, &pipeline);
+            assert_eq!(ids(&items), vec!["small"], "the oversized {unit:?} must remain whole and be skipped");
+        }
+    }
+
+    #[test]
+    fn oversized_duration_unit_does_not_block_shorter_ranked_track() {
+        let mut long = song_sized("long", true, 0, "2024-01-01", 1_000_000); long.duration_seconds = 700;
+        let mut short = song_sized("short", false, 0, "2024-01-01", 1_000_000); short.duration_seconds = 100;
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, vec![cand(long), cand(short)]);
+        let pipeline = AutoFillPipeline { budget: BudgetStage { target_duration_secs: Some(200), ..Default::default() }, ..Default::default() };
+        assert_eq!(ids(&run_pipeline(&input, &pipeline)), vec!["short"]);
+    }
+
 }

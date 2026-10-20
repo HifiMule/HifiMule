@@ -247,7 +247,7 @@ export class MediaCard {
                                     serverId: bi.serverId,
                                     artist: bi.subtitle ?? undefined,
                                     childCount: info.recursiveItemCount,
-                                    sizeTicks: bi.sizeTicks || info.cumulativeRunTimeTicks,
+                                    sizeTicks: info.cumulativeRunTimeTicks ?? bi.sizeTicks ?? 0,
                                     sizeBytes: sizeInfo.totalSizeBytes,
                                 });
                             } catch (err) {

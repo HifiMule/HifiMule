@@ -756,7 +756,7 @@ impl MediaProvider for SubsonicProvider {
             .flatten();
         let url = reqwest::Url::parse(&self.client.stream_url(
             song_id,
-            &TranscodeProfile {
+            &TranscodeProfile {max_sample_rate_hz: None, max_bit_depth: None, max_channels: None,
                 container: Some("raw".into()),
                 audio_codec: None,
                 max_bitrate_kbps: None,
@@ -799,7 +799,7 @@ impl MediaProvider for SubsonicProvider {
         if navidrome && song.bitrate_kbps.is_some_and(|bitrate| bitrate > 192) {
             let transcode_url = reqwest::Url::parse(&self.client.stream_url(
                 song_id,
-                &TranscodeProfile {
+                &TranscodeProfile {max_sample_rate_hz: None, max_bit_depth: None, max_channels: None,
                     container: Some("mp3".into()),
                     audio_codec: Some("mp3".into()),
                     max_bitrate_kbps: Some(192),
@@ -1632,6 +1632,7 @@ impl SubsonicClient {
     }
 
     fn stream_url(&self, id: &str, profile: &TranscodeProfile) -> Result<String, ProviderError> {
+        let profile = profile.normalized_for_source(Default::default());
         let format = profile.container.as_deref().unwrap_or("mp3");
         let max_bit_rate = profile.max_bitrate_kbps.map(|kbps| kbps.to_string());
         let mut params = vec![("id", id), ("format", format)];
@@ -1938,6 +1939,15 @@ fn playlist_from_with_songs_dto(playlist: PlaylistWithSongsDto) -> Playlist {
 }
 
 fn song_from_dto(song: SongDto) -> Song {
+    let source_audio = crate::domain::models::SourceAudioProperties {
+        transcode_limits_supported: false,
+        sample_rate_hz: song.sampling_rate.filter(|v| *v > 0),
+        bit_depth: song.bit_depth.filter(|v| *v > 0),
+        channels: song.channel_count.filter(|v| *v > 0),
+        original_size_bytes: song.size.filter(|v| *v > 0),
+        audio_bitrate_bps: non_negative_i32(song.bit_rate).and_then(|v| v.checked_mul(1000)).filter(|v| *v > 0),
+        average_bitrate_bps: non_negative_i32(song.bit_rate).and_then(|v| v.checked_mul(1000)).filter(|v| *v > 0),
+    };
     let recording = (song.media_type.as_deref() == Some("song")
         && song
             .media_kind
@@ -1998,6 +2008,7 @@ fn song_from_dto(song: SongDto) -> Song {
         album_loudness,
         track_loudness,
         provider_metadata: crate::domain::models::ProviderItemMetadata {
+            source_audio,
             recording,
             ambiguous_music_artist,
             music_artist_ids,
@@ -2474,6 +2485,12 @@ struct SongDto {
     duration: Option<i64>,
     #[serde(rename = "bitRate")]
     bit_rate: Option<i32>,
+    #[serde(default, rename = "samplingRate")]
+    sampling_rate: Option<u32>,
+    #[serde(default, rename = "bitDepth")]
+    bit_depth: Option<u32>,
+    #[serde(default, rename = "channelCount")]
+    channel_count: Option<u32>,
     track: Option<i32>,
     #[serde(rename = "discNumber")]
     disc_number: Option<i32>,
@@ -2631,6 +2648,7 @@ mod tests {
             artist_id: Some("artist-id".to_string()),
             duration: Some(319),
             bit_rate: Some(256),
+            sampling_rate: Some(96_000), bit_depth: Some(24), channel_count: Some(6),
             track: Some(7),
             disc_number: Some(2),
             cover_art: Some("cover-id".to_string()),
@@ -2648,6 +2666,10 @@ mod tests {
         assert_eq!(song.id, "song-id");
         assert_eq!(song.duration_seconds, 319);
         assert_eq!(song.bitrate_kbps, Some(256));
+        assert_eq!(song.provider_metadata.source_audio.sample_rate_hz, Some(96_000));
+        assert_eq!(song.provider_metadata.source_audio.bit_depth, Some(24));
+        assert_eq!(song.provider_metadata.source_audio.channels, Some(6));
+        assert!(!song.provider_metadata.source_audio.transcode_limits_supported);
         assert_eq!(song.album_id.as_deref(), Some("album-id"));
         assert_eq!(song.artist_id.as_deref(), Some("artist-id"));
         assert_eq!(song.cover_art_id.as_deref(), Some("cover-id"));
@@ -2713,6 +2735,7 @@ mod tests {
             artist_id: None,
             duration: None,
             bit_rate: None,
+            sampling_rate: None, bit_depth: None, channel_count: None,
             track: None,
             disc_number: None,
             cover_art: None,
@@ -3511,7 +3534,7 @@ mod tests {
         let stream = provider
             .download_url(
                 "song1",
-                Some(&TranscodeProfile {
+                Some(&TranscodeProfile {max_sample_rate_hz: None, max_bit_depth: None, max_channels: None,
                     container: Some("mp3".to_string()),
                     audio_codec: Some("mp3".to_string()),
                     max_bitrate_kbps: Some(192),
@@ -4007,6 +4030,7 @@ mod tests {
             artist_id: None,
             duration: None,
             bit_rate: None,
+            sampling_rate: None, bit_depth: None, channel_count: None,
             track: None,
             disc_number: None,
             cover_art: None,
