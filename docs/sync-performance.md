@@ -15,7 +15,8 @@ Add this object alongside existing properties (the example shows all defaults):
 {
   "sync_performance": {
     "copy_buffer_kib": 1024,
-    "staging_max_tracks": 8,
+    "local_encoding_workers": 0,
+    "staging_max_tracks": 0,
     "staging_max_mib": 2048,
     "checkpoint_track_updates": 1000,
     "checkpoint_interval_seconds": 600
@@ -32,7 +33,8 @@ All values are integers; KiB is 1,024 bytes and MiB is 1,048,576 bytes.
 | Field | Default | Inclusive range | Meaning |
 | --- | ---: | ---: | --- |
 | `copy_buffer_kib` | 1024 | 8–16384 | Size of each bounded read/write chunk when copying a staged file to mass storage, including USB sticks. MTP/WPD keeps its native transfer behavior. |
-| `staging_max_tracks` | 8 | 1–32 | Maximum tracks admitted to disk staging, including the file being written to the device. |
+| `local_encoding_workers` | 0 | 0–64 | Simultaneous local encoding jobs. `0` automatically selects `max(1, available CPU threads - 1)`; `1`–`64` set an explicit limit. |
+| `staging_max_tracks` | 0 | 0–32 | Maximum tracks admitted to disk staging, including the file being written to the device. `0` automatically selects `max(1, available CPU threads - 1)`; `1`–`32` set an explicit limit. |
 | `staging_max_mib` | 2048 | 2048–32768 | Aggregate temporary-file disk budget. This does **not** allocate that amount of RAM. Each file still has a 2 GiB limit. |
 | `checkpoint_track_updates` | 1000 | 1–5000 | Metadata mutations accumulated before a manifest checkpoint. |
 | `checkpoint_interval_seconds` | 600 | 1–900 | Scheduled time between checkpoint attempts (up to 15 minutes); slow device writes may delay completion. |
@@ -47,7 +49,7 @@ Staging reservations account for expected file sizes, then actual received bytes
 
 Missing fields use defaults silently. Invalid types, nulls, fractions, negative values or numbers outside the ranges default only the affected field; valid neighbors remain effective. A non-object tuning section defaults the whole section without breaking authentication. Unreadable or malformed JSON defaults performance settings and is not rewritten by synchronization; existing credential error handling still applies.
 
-Daemon logs include a `[Sync] Performance` line showing the effective five settings for each execution. Invalid tuning produces a sanitized diagnostic naming the field and allowed range without logging config contents. Transfer summaries show staging and device-write rates, queue depth and waits; checkpoint logs show the reason and duration. Use these to identify where time is spent.
+Daemon logs include a `[Sync] Performance` line at execution start showing all six effective settings. It also includes `configured_staging_max_tracks` and `configured_local_encoding_workers`, so a configured `0` can be compared with its resolved positive limit. Automatic sizing is captured once for the run; both automatic settings use the same CPU count. Explicit overrides are independent and remain unchanged. Automatic limits can exceed the explicit-setting maxima on machines with more CPU threads. Invalid tuning produces a sanitized diagnostic naming the field and allowed range without logging config contents. Transfer summaries show staging and device-write rates, queue depth and waits; checkpoint logs show the reason and duration. Use these to identify where time is spent.
 
 ## Compare on your device
 

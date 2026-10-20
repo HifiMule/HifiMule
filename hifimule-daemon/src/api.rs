@@ -3065,7 +3065,7 @@ mod tests {
                 CredentialManager::sync_performance().copy_buffer_bytes,
                 64 * 1024
             );
-            assert_eq!(CredentialManager::sync_performance().staging_max_tracks, 8);
+            assert_eq!(CredentialManager::sync_performance().staging_max_tracks, 0);
             assert_eq!(CredentialManager::sync_performance().local_encoding_workers, 4);
             CredentialManager::set_config_selected_server("second").unwrap();
             assert_eq!(

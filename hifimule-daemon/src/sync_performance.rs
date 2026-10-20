@@ -3,6 +3,23 @@ use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::time::Duration;
 
+fn parallelism_with_spare_cpu(available: usize) -> usize {
+    available.saturating_sub(1).max(1)
+}
+
+/// Zero uses the same automatic CPU-based limit for staging and encoding.
+pub(crate) fn resolve_parallelism(configured: usize) -> usize {
+    if configured == 0 {
+        parallelism_with_spare_cpu(
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1),
+        )
+    } else {
+        configured
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SyncPerformance {
     pub copy_buffer_bytes: usize,
@@ -18,7 +35,7 @@ impl Default for SyncPerformance {
         Self {
             copy_buffer_bytes: 1024 * 1024,
             local_encoding_workers: 0,
-            staging_max_tracks: 8,
+            staging_max_tracks: 0,
             staging_max_bytes: 2048 * 1024 * 1024,
             checkpoint_track_updates: 1000,
             checkpoint_interval: Duration::from_secs(600),
@@ -27,6 +44,17 @@ impl Default for SyncPerformance {
 }
 
 impl SyncPerformance {
+    pub(crate) fn with_resolved_parallelism(mut self) -> Self {
+        let automatic = resolve_parallelism(0);
+        if self.staging_max_tracks == 0 {
+            self.staging_max_tracks = automatic;
+        }
+        if self.local_encoding_workers == 0 {
+            self.local_encoding_workers = automatic;
+        }
+        self
+    }
+
     #[cfg(test)]
     fn from_json(value: Option<&serde_json::Value>) -> Self {
         let raw = value.map(|v| serde_json::value::to_raw_value(v).unwrap());
@@ -71,7 +99,7 @@ impl SyncPerformance {
                 .checked_mul(1024)
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(defaults.copy_buffer_bytes),
-            staging_max_tracks: field("staging_max_tracks", 1, 32, 8) as usize,
+            staging_max_tracks: field("staging_max_tracks", 0, 32, 0) as usize,
             staging_max_bytes: mib
                 .checked_mul(1024 * 1024)
                 .unwrap_or(defaults.staging_max_bytes),
@@ -92,28 +120,65 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn local_workers_validate_independently() {
-        for valid in [0, 1, 64] {
-            assert_eq!(
-                SyncPerformance::from_json(Some(&json!({"local_encoding_workers":valid})))
-                    .local_encoding_workers,
-                valid
-            );
+    fn parallelism_fields_validate_independently() {
+        for (name, max) in [("local_encoding_workers", 64), ("staging_max_tracks", 32)] {
+            let read = |settings: SyncPerformance| match name {
+                "local_encoding_workers" => settings.local_encoding_workers,
+                _ => settings.staging_max_tracks,
+            };
+            for valid in [0, 1, max] {
+                assert_eq!(
+                    read(SyncPerformance::from_json(Some(&json!({name:valid})))),
+                    valid
+                );
+            }
+            for invalid in [
+                Value::Null,
+                json!(1.5),
+                json!(-1),
+                json!(max + 1),
+                json!("4"),
+                json!(true),
+                json!(1e100),
+            ] {
+                let value = json!({name:invalid,"copy_buffer_kib":64});
+                let actual = SyncPerformance::from_json(Some(&value));
+                assert_eq!(read(actual), 0, "{name}");
+                assert_eq!(actual.copy_buffer_bytes, 65536);
+            }
         }
-        for invalid in [
-            Value::Null,
-            json!(1.5),
-            json!(-1),
-            json!(65),
-            json!("4"),
-            json!(true),
-            json!(1e100),
-        ] {
-            let value = json!({"local_encoding_workers":invalid,"copy_buffer_kib":64});
-            let actual = SyncPerformance::from_json(Some(&value));
-            assert_eq!(actual.local_encoding_workers, 0);
-            assert_eq!(actual.copy_buffer_bytes, 65536);
+    }
+
+    #[test]
+    fn automatic_parallelism_reserves_one_cpu_and_never_returns_zero() {
+        for (available, expected) in [(0, 1), (1, 1), (2, 1), (8, 7), (64, 63)] {
+            assert_eq!(parallelism_with_spare_cpu(available), expected);
         }
+    }
+
+    #[test]
+    fn parallelism_resolves_only_automatic_values_for_execution() {
+        let defaults = SyncPerformance::default();
+        assert_eq!(defaults.staging_max_tracks, 0);
+        let resolved = defaults.with_resolved_parallelism();
+        assert!(resolved.staging_max_tracks >= 1);
+        assert_eq!(resolved.staging_max_tracks, resolved.local_encoding_workers);
+        assert_eq!(defaults.local_encoding_workers, 0);
+        for limit in [1, 16, 32] {
+            let settings = SyncPerformance {
+                staging_max_tracks: limit,
+                local_encoding_workers: 2,
+                ..defaults
+            };
+            assert_eq!(settings.with_resolved_parallelism(), settings);
+        }
+        let mixed = SyncPerformance {
+            local_encoding_workers: 4,
+            ..defaults
+        }
+        .with_resolved_parallelism();
+        assert_eq!(mixed.local_encoding_workers, 4);
+        assert!(mixed.staging_max_tracks >= 1);
     }
 
     #[test]
@@ -145,7 +210,6 @@ mod tests {
     fn bounds_and_invalid_fields_are_independent() {
         let fields = [
             ("copy_buffer_kib", 8, 16384),
-            ("staging_max_tracks", 1, 32),
             ("staging_max_mib", 2048, 32768),
             ("checkpoint_track_updates", 1, 5000),
             ("checkpoint_interval_seconds", 1, 900),

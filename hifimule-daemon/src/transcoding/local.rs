@@ -247,15 +247,7 @@ pub struct Session {
 }
 impl Session {
     pub fn new(workers: usize) -> Arc<Self> {
-        let workers = if workers == 0 {
-            std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(2)
-                .saturating_sub(1)
-                .max(1)
-        } else {
-            workers
-        };
+        let workers = crate::sync_performance::resolve_parallelism(workers);
         let mut state = pool().state.lock().unwrap();
         state.next += 1;
         let id = state.next;

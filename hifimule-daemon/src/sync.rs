@@ -3223,7 +3223,14 @@ pub(crate) async fn execute_provider_sync_with_protection(
     protection_observer: Option<protection::Observer>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
     let plan = crate::sync_plan::SyncPlan::from_delta(delta.clone(), &target.manifest)?;
-    let (_, errors) = execute_plan_sync_with_protection(&plan, target, source, operation_manager, operation_id, Arc::clone(&device_manager), protection_observer).await?;
+    // These gated fixtures require overlapping downloads and encodes even on
+    // single-CPU hosts. Config-policy tests use the production executor directly.
+    let settings = crate::sync_performance::SyncPerformance {
+        staging_max_tracks: 8,
+        local_encoding_workers: 2,
+        ..crate::api::CredentialManager::sync_performance()
+    };
+    let (_, errors) = execute_plan_sync_with_settings(&plan, target, source, operation_manager, operation_id, Arc::clone(&device_manager), protection_observer, settings).await?;
     let ids: HashSet<&str> = delta.adds.iter().map(|a|a.jellyfin_id.as_str()).chain(delta.id_changes.iter().map(|a|a.new_jellyfin_id.as_str())).collect();
     let items = device_manager.get_manifest_for_device(&target.manifest.device_id).await.unwrap().synced_items.into_iter().filter(|i|ids.contains(i.jellyfin_id.as_str())).collect();
     Ok((items, errors))
@@ -3264,17 +3271,22 @@ async fn execute_plan_sync_with_settings(
     settings: crate::sync_performance::SyncPerformance,
 ) -> Result<(usize, Vec<SyncFileError>)> {
 
+    let configured_settings = settings;
+    let settings = settings.with_resolved_parallelism();
     let mut lifecycle = crate::sync_logging::Step::current("transfer_and_metadata");
     let manager_for_log = Arc::clone(&operation_manager);
     let operation_for_log = operation_id.clone();
     let result = async {
     crate::daemon_log!(
-        "[Sync] Performance copy_buffer_kib={} staging_max_tracks={} staging_max_mib={} checkpoint_track_updates={} checkpoint_interval_seconds={}",
+        "[Sync] Performance copy_buffer_kib={} staging_max_tracks={} staging_max_mib={} local_encoding_workers={} checkpoint_track_updates={} checkpoint_interval_seconds={} configured_staging_max_tracks={} configured_local_encoding_workers={}",
         settings.copy_buffer_bytes / 1024,
         settings.staging_max_tracks,
         settings.staging_max_bytes / (1024 * 1024),
+        settings.local_encoding_workers,
         settings.checkpoint_track_updates,
-        settings.checkpoint_interval.as_secs()
+        settings.checkpoint_interval.as_secs(),
+        configured_settings.staging_max_tracks,
+        configured_settings.local_encoding_workers
     );
     let checkpoint = crate::device::SyncManifestSession::for_target(
         Arc::clone(&device_manager),
@@ -9315,8 +9327,9 @@ mod tests {
         let _guard = crate::api::credential_test_lock();
         let config_dir = tempfile::tempdir().unwrap();
         let config_path = config_dir.path().join("config.json");
-        for track_cap in [1, 3] {
-            std::fs::write(&config_path, serde_json::json!({"sync_performance": {"copy_buffer_kib":64,"staging_max_tracks":track_cap,"checkpoint_track_updates":5000,"checkpoint_interval_seconds":900}}).to_string()).unwrap();
+        for configured_cap in [0, 1, 3] {
+            let track_cap = crate::sync_performance::resolve_parallelism(configured_cap).min(3);
+            std::fs::write(&config_path, serde_json::json!({"sync_performance": {"copy_buffer_kib":64,"staging_max_tracks":configured_cap,"checkpoint_track_updates":5000,"checkpoint_interval_seconds":900}}).to_string()).unwrap();
             let mut server = mockito::Server::new_async().await;
             let _download = server
                 .mock("GET", "/rest/download.view")
