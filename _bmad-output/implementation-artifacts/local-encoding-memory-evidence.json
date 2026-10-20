@@ -1,0 +1,107 @@
+{
+  "date": "2026-10-20",
+  "platform": "Darwin arm64",
+  "scope": "Isolated debug-build native encoder processes; simultaneous conversions, not staging-slot or full physical-device sync benchmarks",
+  "runtime": "Controlled FFmpeg 9.0.2",
+  "measurement": "getrusage(RUSAGE_SELF).ru_maxrss; process high-water RSS, not current live allocations",
+  "workload": "10-second stereo 48kHz PCM16 WAV and generated MP3 inputs alternating; MP3 192kbps output; two warm-up waves; 256 measured conversions per process",
+  "command_template": "rtk proxy env HIFIMULE_LOCAL_MEMORY_WORKERS=<8|16> target/debug/deps/hifimule_daemon-<hash> --exact transcoding::local::memory_benchmark::repeated_conversion_memory_benchmark --ignored --nocapture",
+  "ownership_regression": {
+    "before": "failed: input packet retained refcount 2 instead of 1",
+    "after": "passed for successful conversion, capacity failure, and MP3 trailing-metadata handling"
+  },
+  "runs": [
+    {
+      "audio_seconds": 2560,
+      "baseline_peak_rss_bytes": 33210368,
+      "elapsed_seconds": 2.1996875830000002,
+      "final_peak_rss_bytes": 36552704,
+      "measured_conversions": 256,
+      "peak_growth_bytes": 3342336,
+      "peak_rss_samples_bytes": [
+        33210368,
+        33947648,
+        34177024,
+        34521088,
+        35061760,
+        35553280,
+        35553280,
+        35553280,
+        35700736,
+        35782656,
+        35782656,
+        35799040,
+        35799040,
+        35799040,
+        35799040,
+        35815424,
+        36093952,
+        36159488,
+        36323328,
+        36323328,
+        36323328,
+        36323328,
+        36323328,
+        36323328,
+        36323328,
+        36487168,
+        36536320,
+        36536320,
+        36536320,
+        36536320,
+        36536320,
+        36552704,
+        36552704
+      ],
+      "source_bytes": 276663296,
+      "warmup_conversions": 16,
+      "workers": 8
+    },
+    {
+      "audio_seconds": 2560,
+      "baseline_peak_rss_bytes": 51429376,
+      "elapsed_seconds": 1.2661187919999999,
+      "final_peak_rss_bytes": 53198848,
+      "measured_conversions": 256,
+      "peak_growth_bytes": 1769472,
+      "peak_rss_samples_bytes": [
+        51429376,
+        51675136,
+        52133888,
+        52330496,
+        52346880,
+        52412416,
+        52477952,
+        52510720,
+        52510720,
+        52543488,
+        52543488,
+        52576256,
+        52576256,
+        52707328,
+        53051392,
+        53084160,
+        53198848
+      ],
+      "source_bytes": 276663296,
+      "warmup_conversions": 32,
+      "workers": 16
+    }
+  ],
+  "regression_suite": {
+    "unit_passed": 1621,
+    "contract_passed": 5,
+    "unit_ignored": 14,
+    "failed": 0,
+    "command": "rtk npm run build:daemon -- test -p hifimule-daemon",
+    "environment_note": "Local mock-server sockets require unsandboxed execution; sandboxed attempt was invalid due to blocked loopback binds."
+  },
+  "review": {
+    "findings_patched": [
+      "Use distinct fixture output paths for success and capacity-failure cases",
+      "Keep early packet probes plus latest allocation to include trailing metadata"
+    ],
+    "remaining_material_findings": 0,
+    "deferred": 0
+  }
+}

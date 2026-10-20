@@ -910,11 +910,15 @@ fn encode_inner(
         }
         Ok(())
     };
-    let mut packet = ff::Packet::empty();
     loop {
         check()?;
+        // av_read_frame requires an empty packet; its previous buffer must be
+        // released even for skipped streams and tolerated trailing metadata.
+        let mut packet = ff::Packet::empty();
         match packet.read(&mut ictx) {
             Ok(()) => {
+                #[cfg(test)]
+                test_support::observe_input_packet(&packet);
                 if packet.stream() == input_index {
                     if let Err(error) = decoder.send_packet(&packet) {
                         if error == ff::Error::InvalidData
@@ -1038,6 +1042,10 @@ fn encode_inner(
     Ok(std::fs::metadata(output)?.len())
 }
 
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[path = "local_memory_benchmark.rs"]
+mod memory_benchmark;
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1092,7 +1100,11 @@ pub(crate) mod tests {
         let mut bytes = std::fs::read(&clean).unwrap();
         bytes.extend_from_slice(&stacked_mp3_tags());
         std::fs::write(&tagged, bytes).unwrap();
-        encode(&tagged, &output, &pcm, &cancelled, 1_000_000).unwrap_or_else(|e| panic!("{e:#}"));
+        let (result, packets) = test_support::capture_input_packets(|| {
+            encode(&tagged, &output, &pcm, &cancelled, 1_000_000)
+        });
+        result.unwrap_or_else(|e| panic!("{e:#}"));
+        packets.assert_released();
         // Compare decoded PCM, including its length, rather than only accepting
         // an output file: ignoring the trailer must preserve all audio samples.
         let pcm_bytes = |path: &Path| {
@@ -1101,6 +1113,27 @@ pub(crate) mod tests {
             bytes[start + 8..].to_vec()
         };
         assert_eq!(pcm_bytes(&output), pcm_bytes(&reference));
+    }
+
+    #[test]
+    fn input_packet_buffers_are_released_after_conversion_and_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("source.wav");
+        wav(&input, 3);
+        let profile = TranscodeProfile {
+            container: Some("wav".into()),
+            audio_codec: Some("pcm_s16le".into()),
+            ..Default::default()
+        };
+        for (capacity, succeeds) in [(1_000_000, true), (64_000, false)] {
+            let output = temp.path().join(format!("output-{capacity}.wav"));
+            let (result, packets) = test_support::capture_input_packets(|| {
+                encode(&input, &output, &profile, &AtomicBool::new(false), capacity)
+            });
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            packets.assert_released();
+            assert_eq!(output.exists(), succeeds);
+        }
     }
 
     fn stacked_mp3_tags() -> Vec<u8> {
@@ -1615,6 +1648,91 @@ pub(crate) mod tests {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use ff::packet::Ref;
+    use std::cell::RefCell;
+
+    // Retain a bounded set of native references so tests can inspect ownership
+    // after all codec/demux contexts have dropped. Packet::clone() would copy
+    // writable data and hide a leaked reference to the original allocation.
+    #[derive(Default)]
+    pub struct InputPacketBuffers(Vec<*mut ff::ffi::AVBufferRef>);
+
+    impl InputPacketBuffers {
+        pub fn assert_released(&self) {
+            assert!(
+                self.0.len() > 1,
+                "fixture must exercise multiple packet buffers"
+            );
+            for reference in &self.0 {
+                assert_eq!(
+                    unsafe { ff::ffi::av_buffer_get_ref_count(*reference) },
+                    1,
+                    "input packet buffer retained after conversion returned"
+                );
+            }
+        }
+    }
+
+    impl Drop for InputPacketBuffers {
+        fn drop(&mut self) {
+            for reference in &mut self.0 {
+                unsafe { ff::ffi::av_buffer_unref(reference) };
+            }
+        }
+    }
+
+    thread_local! {
+        static INPUT_PACKETS: RefCell<Option<InputPacketBuffers>> = const { RefCell::new(None) };
+    }
+
+    pub fn capture_input_packets<T>(work: impl FnOnce() -> T) -> (T, InputPacketBuffers) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INPUT_PACKETS.with(|slot| slot.borrow_mut().take());
+            }
+        }
+        INPUT_PACKETS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "packet capture must not be nested");
+            *slot = Some(InputPacketBuffers::default());
+        });
+        let _reset = Reset;
+        let result = work();
+        let packets = INPUT_PACKETS.with(|slot| slot.borrow_mut().take().unwrap());
+        (result, packets)
+    }
+
+    pub fn observe_input_packet(packet: &ff::Packet) {
+        INPUT_PACKETS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(packets) = slot.as_mut() else { return };
+            let reference = unsafe { (*packet.as_ptr()).buf };
+            if reference.is_null() {
+                return;
+            }
+            // Several packets may share one allocation. Keep only one probe
+            // per backing buffer so its expected post-conversion refcount is 1.
+            if packets
+                .0
+                .iter()
+                .any(|previous| unsafe { (**previous).buffer == (*reference).buffer })
+            {
+                return;
+            }
+            let retained = unsafe { ff::ffi::av_buffer_ref(reference) };
+            assert!(!retained.is_null(), "cannot retain packet buffer probe");
+            if packets.0.len() == 32 {
+                // Keep early allocations plus the latest one, so the bounded
+                // probe also checks trailing metadata after many audio packets.
+                unsafe { ff::ffi::av_buffer_unref(&mut packets.0[31]) };
+                packets.0[31] = retained;
+            } else {
+                packets.0.push(retained);
+            }
+        });
+    }
+
     // Gate tests must not wait on two permits while a separate one-permit
     // pool test waits on the gated worker. Production scheduling has no gates.
     pub async fn lock_pool() -> tokio::sync::MutexGuard<'static, ()> {
