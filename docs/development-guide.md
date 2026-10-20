@@ -429,3 +429,27 @@ automatically when dirty is detected, or the supported manifest repair RPC metho
 documented in [API Contracts](./api-contracts-hifimule-daemon.md). Preserve pending
 identities until repair completes. Do not manually edit compressed storage or clear
 recovery evidence in a JSON export.
+
+### Building local sync encoders
+
+The controlled runtime also builds pinned LAME 3.100, Ogg 1.3.5, Vorbis 1.3.7 and
+Opus 1.5.2 from hash-verified upstream archives. Unix uses their release configure
+scripts; Windows additionally requires **CMake** on PATH and uses MSVC static
+libraries. They are private static dependencies of the shared FFmpeg libraries,
+so installers retain the existing shared-library closure. The runtime manifest
+and per-target receipts include dependency pins and encoder/muxer switches.
+`THIRD_PARTY_AUDIO_NOTICES.md` includes their full license texts and source URLs.
+
+Run native encoder tests through the controlled wrapper:
+
+```bash
+rtk npm run build:daemon -- test -p hifimule-daemon transcoding::local
+rtk npm run build:daemon -- test -p hifimule-daemon local_encoding_pipeline
+rtk node --test scripts/tests/encoding-audio-runtime.test.mjs
+rtk node --test hifimule-ui/tests/serverTranscoding.test.mjs
+```
+
+The build wrapper verifies required encoder/muxer capabilities as well as ABI
+versions. Local conversion uses linked libraries directly; users do not need an
+external FFmpeg installation. See [sync performance](./sync-performance.md) for
+configuration, pipeline bounds and benchmark guidance.

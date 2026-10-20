@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+import { buildEncodingDependencies, encodingDependencyReceipt } from "./encoding-dependencies.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -33,7 +33,7 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, { cwd: options.cwd, encoding: "utf8", stdio: options.stdio ?? ["ignore", "pipe", "pipe"], env: { ...(options.env ?? process.env), LC_ALL: "C" } });
 }
 function expectedReceipt(target) {
-  return { schemaVersion: 1, targetTriple: target, ffmpegRelease: manifest.ffmpegRelease, sourceSha256: manifest.sourceSha256, configureFlags: ["--disable-autodetect", ...manifest.configureFlags], abiVersions: manifest.abiVersions };
+  return { schemaVersion: 1, targetTriple: target, ffmpegRelease: manifest.ffmpegRelease, sourceSha256: manifest.sourceSha256, encodingDependencies: encodingDependencyReceipt, configureFlags: ["--disable-autodetect", ...manifest.configureFlags], abiVersions: manifest.abiVersions };
 }
 function pcEnv(prefix) {
   return { ...process.env, PKG_CONFIG_PATH: [join(prefix, "lib/pkgconfig"), process.env.PKG_CONFIG_PATH].filter(Boolean).join(":") };
@@ -182,7 +182,8 @@ export function ensureLinuxAudioRuntime(target) {
     try {
       if (!existsSync(archive) || sha(archive) !== manifest.sourceSha256) { rmSync(archive, { force: true }); download(archive); }
       mkdirSync(work); run("tar", ["-xf", archive, "-C", work], { stdio: "inherit" }); mkdirSync(staging);
-      run("./configure", [`--prefix=${staging}`, "--disable-autodetect", ...manifest.configureFlags], { cwd: source, stdio: "inherit" });
+      const env = buildEncodingDependencies({ cache, work, prefix: staging, target });
+      run("./configure", [`--prefix=${staging}`, `--extra-cflags=-I${staging}/include`, `--extra-ldflags=-L${staging}/lib`, "--pkg-config-flags=--static", "--disable-autodetect", ...manifest.configureFlags], { cwd: source, env, stdio: "inherit" });
       run("make", [`-j${Math.min(8, Math.max(1, availableParallelism()))}`], { cwd: source, stdio: "inherit" });
       run("make", ["install"], { cwd: source, stdio: "inherit" });
       writeFileSync(join(staging, receiptName), `${JSON.stringify(expectedReceipt(target), null, 2)}\n`);

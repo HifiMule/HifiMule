@@ -81,3 +81,53 @@ Compare the same stages across equivalent workloads. Durations overlap: preparat
 After the initial daemon-state check, a Subsonic sync with a saved sync token asks the provider for incremental changes before `preparation` starts; other cases skip this request. This request has its own `incremental_change_detection` run, with `target_validation`, `provider_resolution`, `provider_change_fetch`, and `change_enrichment` stages. Subsonic adds bulk `subsonic_indexes`, `subsonic_full_song_dump`, and `subsonic_album_fallback` stages for the applicable path. A stale token produces `fallback` on the fetch stage and a successful empty response, preserving the existing full-basket fallback. Tokens and provider error URLs are excluded from lifecycle records. This pre-preparation request and the later preparation request have separate run IDs; no RPC fields are added to correlate them.
 
 Before change detection, the first state check after clicking Sync sends the optional diagnostic `syncStart: true` parameter on the existing `get_daemon_state` call. It emits `sync_start_check` before awaiting the snapshot, ending with `ready`, `waiting` (another pipeline is preparing), `attached` (an operation already exists), or `failed`. Subsequent polls and recovery checks omit this parameter, keeping routine polling quiet. This is a separate request/run from change detection and preparation, and does not change sync admission or RPC responses.
+
+## Local encoding
+
+Each server’s edit dialog includes **Sync encoding**: **Server (default)** or
+**This computer**. Local encoding downloads original audio and converts it in the
+daemon only when the selected device profile requires conversion. Choose it when
+the local computer encodes faster; it downloads more bytes when the original is
+larger than the converted file. Playback is unaffected. The setting is stored per
+server, applies to manual and automatic sync, and is captured for each admitted
+sync, including mixed-server baskets. Changing location alone does not replace
+compatible device files.
+
+Set the machine’s encoding concurrency alongside other local tuning in the
+app-data `config.json` (merge this property into your existing object):
+
+```json
+{
+  "sync_performance": {
+    "local_encoding_workers": 0
+  }
+}
+```
+
+Omitted or `0` selects `max(1, available CPU threads - 1)`. Integers `1` through
+`64` cap simultaneous encoding jobs. Invalid values fall back to automatic
+independently of other fields; diagnostics never include configuration values.
+Edits apply to the next sync and survive login, server switching and logout.
+Active runs share one daemon-wide CPU budget; overlapping snapshots use the
+strictest active limit. Each decoder and encoder starts with one codec thread.
+
+Downloads, native encoding workers and the serialized device writer overlap.
+Files and their original/output headroom share the staged-track/byte limits;
+output capacity is reserved before downloading to avoid conversion deadlocks.
+A file which cannot fit fails with a staging error. A bounded sample FIFO avoids
+whole-track PCM buffering. Cancellation joins native workers before removing
+temporary files. Completed output is reopened and checked before writer admission.
+
+Supported targets include MP3, AAC in M4A/MP4 or ADTS, FLAC, ALAC in M4A/MP4,
+Vorbis or Opus in Ogg, and PCM16/24/32 or float32 in WAV. Use device-wide
+`MaxAudioSampleRate`, `MaxAudioChannels` and `MaxAudioBitDepth` ceilings.
+Unsupported codec/container combinations and compatibility conditions fail
+preflight with an actionable error; HifiMule never silently switches encoding
+location or codec. Opus files decode at 48 kHz and cannot meet a lower sample-rate
+ceiling. Supported containers retain source tags and attached cover artwork.
+
+Logs report download time, local encoding wait/work time, encoded audio seconds
+per wall second, staged bytes, queue depth and writer idle/write time. Compare
+workers `1`, `2`, `4` and automatic on representative MP3/AAC/FLAC selections;
+use total sync duration and validate the output. More workers may stop helping
+when network throughput, staging headroom or device writes become the bottleneck.

@@ -108,6 +108,7 @@ function fakeRuntime(target = "aarch64-pc-windows-msvc") {
     schemaVersion: 1, targetTriple: target, ffmpegRelease: manifest.ffmpegRelease,
     sourceUrl: manifest.sourceUrl, signatureUrl: manifest.signatureUrl, signingKey: manifest.signingKey,
     sourceSha256: manifest.sourceSha256, configureFlags: [...manifest.configureFlags, ...manifest.windowsConfigureFlags], abiVersions: manifest.abiVersions,
+    encodingDependencies: manifest.encodingDependencies,
   };
   writeFileSync(join(prefix, ".hifimule-audio-runtime.json"), JSON.stringify(receipt));
   for (const [library, version] of Object.entries(manifest.abiVersions)) {

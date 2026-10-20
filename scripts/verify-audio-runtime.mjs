@@ -12,7 +12,7 @@ if (manifest.ffmpegRelease !== '9.0.2' || !/^[a-f0-9]{64}$/.test(manifest.source
 
 export const audioRuntimeVerification = Object.freeze({
   environmentVariable: 'HIFIMULE_FFMPEG_RUNTIME_VERIFIED',
-  value: 'ffmpeg-9-runtime-verified-v2',
+  value: 'ffmpeg-9-runtime-verified-v3',
 });
 
 export function withoutAudioRuntimeVerification(env = process.env) {
@@ -39,6 +39,16 @@ function compareVersions(left, right) {
     if (difference !== 0) return Math.sign(difference);
   }
   return 0;
+}
+
+export function verifyEncodingCapabilities(prefix, options = {}) {
+  const execute = options.execFileSync ?? execFileSync;
+  const executable = resolve(prefix, 'bin', (options.platform ?? process.platform) === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+  for (const [kind, required] of [['encoders', manifest.requiredEncoders], ['muxers', manifest.requiredMuxers]]) {
+    const listing = execute(executable, ['-hide_banner', `-${kind}`], { encoding: 'utf8', env: options.env ?? process.env });
+    const names = new Set(listing.split(/\r?\n/).flatMap(line => line.trim().split(/\s+/)[1]?.split(',') ?? []));
+    for (const name of required) if (!names.has(name)) throw new Error(`Controlled audio runtime is missing required ${kind}: ${name}`);
+  }
 }
 
 export function verifyAudioRuntime(options = {}) {
@@ -105,7 +115,14 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   if (prefixArg >= 0 && !process.argv[prefixArg + 1]) {
     throw new Error('The --prefix option requires a controlled FFmpeg prefix path');
   }
+  if (process.argv.includes('--capabilities-only')) {
+    if (prefixArg < 0) throw new Error('--capabilities-only requires --prefix');
+    verifyEncodingCapabilities(process.argv[prefixArg + 1]);
+    console.log('Verified controlled encoding capabilities');
+    process.exit(0);
+  }
   const result = verifyAudioRuntime({ prefix: prefixArg >= 0 ? process.argv[prefixArg + 1] : undefined });
+  if (result.prefix) verifyEncodingCapabilities(result.prefix);
   const details = Object.entries(result.versions).map(([name, version]) => `${name}=${version}`).join(', ');
   console.log(`Verified controlled audio ABI for FFmpeg ${result.ffmpegRelease}: ${details}`);
 }

@@ -15,8 +15,21 @@ pub struct DeviceMapping {
     pub transcoding_profile_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscodingLocation {
+    #[default]
+    Server,
+    Local,
+}
+impl TranscodingLocation {
+    pub fn as_str(self) -> &'static str { match self { Self::Server => "server", Self::Local => "local" } }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
+    #[serde(default)]
+    pub transcoding_location: TranscodingLocation,
     /// Stable UUID primary key (Story 2.11). Machine-local: DB row PK, credentials
     /// vault key, provider-cache key. Random per machine; NOT portable.
     pub id: String,
@@ -257,7 +270,8 @@ impl Database {
                 server_id TEXT,
                 server_reported_id TEXT,
                 provider_library_id TEXT,
-                provider_library_role TEXT
+                provider_library_role TEXT,
+                transcoding_location TEXT NOT NULL DEFAULT 'server' CHECK (transcoding_location IN ('server', 'local'))
             )",
             [],
         )
@@ -396,6 +410,9 @@ impl Database {
                 )
                 .map_err(|e| anyhow!("Failed to add provider_library_role column: {}", e))?;
             }
+            if conn.prepare("SELECT transcoding_location FROM server_config LIMIT 0").is_err() {
+                conn.execute("ALTER TABLE server_config ADD COLUMN transcoding_location TEXT NOT NULL DEFAULT 'server' CHECK (transcoding_location IN ('server', 'local'))", [])?;
+            }
             Self::backfill_server_identity(conn)?;
             return Ok(());
         }
@@ -462,7 +479,8 @@ impl Database {
                 server_id TEXT,
                 server_reported_id TEXT,
                 provider_library_id TEXT,
-                provider_library_role TEXT
+                provider_library_role TEXT,
+                transcoding_location TEXT NOT NULL DEFAULT 'server' CHECK (transcoding_location IN ('server', 'local'))
             )",
             [],
         )
@@ -554,6 +572,7 @@ impl Database {
 
     fn row_to_server_config(row: &rusqlite::Row) -> rusqlite::Result<ServerConfig> {
         let config = ServerConfig {
+            transcoding_location: match row.get::<_, String>(13)?.as_str() { "local" => TranscodingLocation::Local, _ => TranscodingLocation::Server },
             id: row.get(0)?,
             url: row.get(1)?,
             server_type: row.get(2)?,
@@ -737,7 +756,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, url, server_type, username, server_version, name, icon,
                     updated_at, selected, server_id, server_reported_id,
-                    provider_library_id, provider_library_role
+                    provider_library_id, provider_library_role, transcoding_location
              FROM server_config
              WHERE server_type = 'audiobookshelf'
                AND lower(rtrim(trim(url), '/')) = ?1
@@ -859,31 +878,32 @@ impl Database {
         map
     }
 
-    pub fn update_server_identity(
-        &self,
-        id: &str,
-        name: Option<&str>,
-        icon: Option<Option<&str>>,
-    ) -> Result<()> {
+    /// Capture portable routing and the selected legacy/untagged route at admission.
+    pub fn local_encoding_servers(&self) -> Result<std::collections::HashSet<String>> {
+        let mut result = std::collections::HashSet::new();
+        for server in self.list_servers()? {
+            if server.transcoding_location == TranscodingLocation::Local {
+                result.insert(server.id);
+                if let Some(portable) = server.server_id { result.insert(portable); }
+                if server.selected { result.insert(String::new()); }
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn update_server_identity(&self, id: &str, name: Option<&str>, icon: Option<Option<&str>>) -> Result<()> {
+        self.update_server_settings(id, name, icon, None)
+    }
+
+    pub fn update_server_settings(&self, id: &str, name: Option<&str>, icon: Option<Option<&str>>, location: Option<TranscodingLocation>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let rows = match icon {
-            Some(icon) => conn.execute(
-                "UPDATE server_config
-                 SET name = COALESCE(?2, name), icon = ?3
-                 WHERE id = ?1",
-                params![id, name, icon],
-            ),
-            None => conn.execute(
-                "UPDATE server_config
-                 SET name = COALESCE(?2, name)
-                 WHERE id = ?1",
-                params![id, name],
-            ),
-        }
-        .map_err(|e| anyhow!("Failed to update server identity: {}", e))?;
-        if rows == 0 {
-            return Err(anyhow!("Server not found: {}", id));
-        }
+        let rows = conn.execute(
+            "UPDATE server_config SET name = COALESCE(?2, name),
+             icon = CASE WHEN ?3 THEN ?4 ELSE icon END,
+             transcoding_location = COALESCE(?5, transcoding_location) WHERE id = ?1",
+            params![id, name, icon.is_some(), icon.flatten(), location.map(TranscodingLocation::as_str)],
+        ).map_err(|e| anyhow!("Failed to update server settings: {}", e))?;
+        if rows == 0 { return Err(anyhow!("Server not found: {}", id)); }
         Ok(())
     }
 
@@ -891,7 +911,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role, transcoding_location
              FROM server_config ORDER BY updated_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_server_config)?;
@@ -905,7 +925,7 @@ impl Database {
     pub fn get_server(&self, id: &str) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role, transcoding_location
              FROM server_config WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -920,7 +940,7 @@ impl Database {
     pub fn get_server_config(&self) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id, provider_library_id, provider_library_role, transcoding_location
              FROM server_config WHERE selected = 1 LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -1500,6 +1520,59 @@ mod tests {
         db.upsert_server("http://x", "jellyfin", "u", None, None, None, None)
             .unwrap();
         assert!(db.get_server_config().unwrap().is_some());
+    }
+
+    #[test]
+    fn local_transcoding_is_persisted_per_server_and_survives_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.db");
+        let db = Database::new(path.clone()).unwrap();
+        let first = db
+            .upsert_server("http://one", "subsonic", "user", None, None, None, None)
+            .unwrap();
+        let second = db
+            .upsert_server("http://two", "subsonic", "user", None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            db.get_server(&first).unwrap().unwrap().transcoding_location,
+            TranscodingLocation::Server
+        );
+        let before = db.get_server(&first).unwrap().unwrap();
+        db.update_server_settings(
+            &first,
+            Some("Fast local"),
+            None,
+            Some(TranscodingLocation::Local),
+        )
+        .unwrap();
+        db.upsert_server(
+            "http://one",
+            "subsonic",
+            "user",
+            Some("new"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        drop(db);
+        let db = Database::new(path).unwrap();
+        let after = db.get_server(&first).unwrap().unwrap();
+        assert_eq!(after.transcoding_location, TranscodingLocation::Local);
+        assert_eq!(after.server_id, before.server_id);
+        assert_eq!(after.name.as_deref(), Some("Fast local"));
+        assert_eq!(
+            db.get_server(&second)
+                .unwrap()
+                .unwrap()
+                .transcoding_location,
+            TranscodingLocation::Server
+        );
+        assert!(
+            db.local_encoding_servers()
+                .unwrap()
+                .contains(after.server_id.as_deref().unwrap())
+        );
     }
 
     #[test]

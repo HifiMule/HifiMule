@@ -572,10 +572,15 @@ pub fn start_daemon_core(
                                     let protection_observer = playback_events.sync_protection_observer();
 
                                     if let Some((provider, server_id)) = get_selected_provider(&db).await {
+                                        let mut local_encoding_servers = match db.local_encoding_servers() { Ok(value) => value, Err(error) => { daemon_log!("[AutoSync] Cannot capture encoding settings: {error}"); continue; } };
+                                        local_encoding_servers.remove("");
+                                        if server_id.as_ref().is_some_and(|id| local_encoding_servers.contains(id)) {
+                                            local_encoding_servers.insert(String::new());
+                                        }
                                         tokio::spawn(async move {
                                             daemon_log!("[AutoSync] Starting auto-sync via provider");
                                             if let Err(e) = run_auto_sync_via_provider(
-                                                provider, server_id, dm, som, state_tx_sync, device_id,
+                                                provider, server_id, local_encoding_servers, dm, som, state_tx_sync, device_id,
                                                 protection_observer,
                                             ).await {
                                                 daemon_log!("[AutoSync] Provider auto-sync failed: {}", e);
@@ -1850,6 +1855,7 @@ fn load_auto_sync_transcoding_profile(
 async fn run_auto_sync_via_provider(
     provider: Arc<dyn providers::MediaProvider>,
     server_id: Option<String>,
+    local_encoding_servers: std::collections::HashSet<String>,
     device_manager: Arc<device::DeviceManager>,
     sync_op_manager: Arc<sync::SyncOperationManager>,
     state_tx: std::sync::mpsc::Sender<DaemonState>,
@@ -1858,12 +1864,13 @@ async fn run_auto_sync_via_provider(
 ) -> anyhow::Result<()> {
 
     let run = crate::sync_logging::Run::current();
-    run.scope(run_auto_sync_logged(provider, server_id, device_manager, sync_op_manager, state_tx, device_id, protection_observer)).await
+    run.scope(run_auto_sync_logged(provider, server_id, local_encoding_servers, device_manager, sync_op_manager, state_tx, device_id, protection_observer)).await
 }
 
 async fn run_auto_sync_logged(
     provider: Arc<dyn providers::MediaProvider>,
     server_id: Option<String>,
+    local_encoding_servers: std::collections::HashSet<String>,
     device_manager: Arc<device::DeviceManager>,
     sync_op_manager: Arc<sync::SyncOperationManager>,
     state_tx: std::sync::mpsc::Sender<DaemonState>,
@@ -2119,6 +2126,7 @@ async fn run_auto_sync_logged(
         &delta,
         &target,
         sync::ProviderSyncSource {
+            local_encoding_servers,
             provider,
             transcoding_profile,
             providers_by_server: std::collections::HashMap::new(),

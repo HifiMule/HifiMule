@@ -178,6 +178,7 @@ export interface ServerSummary {
     icon: string | null;
     selected: boolean;
     libraryRole?: 'audiobook' | 'podcast' | null;
+    transcodingLocation?: 'server' | 'local';
 }
 
 export interface AudiobookshelfLibraryChoice {
@@ -230,6 +231,7 @@ export async function serverUpdate(params: {
     id: string;
     name?: string;
     icon?: string | null;
+    transcodingLocation?: 'server' | 'local';
 }): Promise<void> {
     await rpcCall('server.update', params);
 }

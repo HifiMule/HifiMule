@@ -2629,7 +2629,7 @@ pub fn destructive_cleanup_count(delta: &SyncDelta, manifest: &DeviceManifest) -
     net_deletes + playlist_cleanup_paths.len()
 }
 
-pub struct ProviderSyncSource {
+pub struct ProviderSyncSource {    pub local_encoding_servers: HashSet<String>,
     pub provider: Arc<dyn MediaProvider>,
     pub transcoding_profile: Option<serde_json::Value>,
     pub providers_by_server: std::collections::HashMap<String, Arc<dyn MediaProvider>>,
@@ -2725,6 +2725,7 @@ impl StagedByteLimiter {
                             limiter: Arc::clone(self),
                             bytes,
                             complete: false,
+                            output_headroom: 0,
                         },
                         started.elapsed(),
                     ));
@@ -2761,6 +2762,7 @@ struct StagedBytePermit {
     limiter: Arc<StagedByteLimiter>,
     bytes: u64,
     complete: bool,
+    output_headroom: u64,
 }
 
 impl StagedBytePermit {
@@ -2771,7 +2773,7 @@ impl StagedBytePermit {
         operation_id: &str,
     ) -> Result<Duration> {
         self.reserve_additional(
-            bytes.saturating_sub(self.bytes),
+            bytes.saturating_add(self.output_headroom).saturating_sub(self.bytes),
             operation_manager,
             operation_id,
         )
@@ -3001,6 +3003,82 @@ enum PreparedTrack {
         reply: oneshot::Sender<bool>,
     },
     Staged(StagedTrack),
+}
+
+async fn encode_and_enqueue(
+    mut track: StagedTrack,
+    profile: TranscodeProfile,
+    max_output: u64,
+    session: Arc<crate::transcoding::local::Session>,
+    tx: mpsc::Sender<PreparedTrack>,
+    manager: Arc<SyncOperationManager>,
+    operation: String,
+) -> Option<(SyncFileError, bool)> {
+    let original = track.staged_path.clone();
+    let output = original.with_extension("encoded");
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = std::time::Instant::now();
+    let result: Result<()> = async {
+        let permit = tokio::select! {
+            permit = session.acquire(&cancelled) => permit?,
+            _ = wait_for_operation_cancellation(&manager, &operation) => anyhow::bail!("Local encoding cancelled before admission"),
+        };
+        let wait = started.elapsed();
+        let input = original.clone(); let destination = output.clone(); let cancel = Arc::clone(&cancelled);
+        let mut worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            crate::transcoding::local::encode(&input, &destination, &profile, &cancel, max_output)
+        });
+        // Never delete a worker's files or release its reservation before joining it.
+        let size = tokio::select! {
+            result = &mut worker => result??,
+            _ = wait_for_operation_cancellation(&manager, &operation) => {
+                cancelled.store(true, Ordering::Relaxed);
+                let _ = worker.await;
+                anyhow::bail!("Local encoding cancelled");
+            }
+        };
+        tokio::fs::remove_file(&original).await.context("Cannot release downloaded original")?;
+        track.staged_path = output.clone(); track.staged_size = size;
+        track._byte_permit.output_headroom = 0;
+        track._byte_permit.shrink_to(size); track._byte_permit.mark_complete();
+        let seconds = planned_duration_seconds(&track.add_item);
+        crate::daemon_log!("[Sync] Local encoding '{}' wait_ms={:.1} encoding_ms={:.1} audio_seconds={} audio_seconds_per_second={:.2} output_bytes={}",
+            track.add_item.name, wait.as_secs_f64()*1000.0, (started.elapsed()-wait).as_secs_f64()*1000.0,
+            seconds, seconds as f64 / (started.elapsed()-wait).as_secs_f64().max(0.001), size);
+        Ok(())
+    }.await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&original).await;
+        let _ = tokio::fs::remove_file(&output).await;
+        if manager.is_cancelled(&operation).await {
+            return None;
+        }
+        let auto = track.add_item.is_auto_fill;
+        if auto {
+            mark_operation_item_handled(&manager, &operation, track.add_item.size_bytes).await;
+        } else {
+            let _ = manager.request_cancel(&operation).await;
+        }
+        return Some((
+            SyncFileError {
+                jellyfin_id: track.add_item.jellyfin_id.clone(),
+                filename: track.add_item.name.clone(),
+                error_message: format!("Local encoding failed: {error:#}"),
+            },
+            auto,
+        ));
+    }
+    let slot = tokio::select! {
+        slot = tx.reserve() => slot.ok(),
+        _ = wait_for_operation_cancellation(&manager, &operation) => None,
+    };
+    if let Some(slot) = slot {
+        slot.send(PreparedTrack::Staged(track));
+    } else {
+        let _ = tokio::fs::remove_file(&output).await;
+    }
+    None
 }
 
 impl PreparedTrack {
@@ -3269,6 +3347,7 @@ async fn execute_plan_sync_buffered(
     let device_path = target.path.as_path();
     let device_io = Arc::clone(&target.io);
     let ProviderSyncSource {
+        local_encoding_servers,
         provider,
         transcoding_profile,
         providers_by_server,
@@ -3326,6 +3405,22 @@ async fn execute_plan_sync_buffered(
     };
     let compatibility =
         audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
+    let local_participates = delta.provider_groups()?.iter().any(|(id,_,_)| local_encoding_servers.contains(id.as_deref().unwrap_or("")));
+    if local_participates && let Some(profile) = transcoding_profile.as_ref() { crate::transcoding::local::validate_constraints(profile)?; }
+    for item in delta.adds.iter()? {
+        let item = item?;
+        if !local_encoding_servers.contains(item.server_id.as_deref().unwrap_or("")) { continue; }
+        let format = provider_audio_format(item.provider_suffix.as_deref(), item.provider_content_type.as_deref());
+        if compatibility.is_constrained() && !direct_for_bitrate(&compatibility, &format, item.original_bitrate, item.max_bitrate_override_kbps, item.source_audio) {
+            if let Some(profile) = transcoding_profile.as_ref() { crate::transcoding::local::validate_profile(profile)?; }
+            let mut profile = compatibility.transcode_profile.clone().context("Local conversion requires an audio target")?;
+            profile.max_bitrate_kbps = item.max_bitrate_override_kbps.or(profile.max_bitrate_kbps);
+            let normalized = crate::transcoding::local::normalized_for_source(&profile, item.source_audio);
+            anyhow::ensure!(profile.max_bitrate_kbps.is_none_or(|ceiling| normalized.max_bitrate_kbps.is_none_or(|rate| rate <= ceiling)), "No local encoder bitrate meets the requested ceiling");
+            crate::transcoding::local::resolve(&normalized)?;
+        }
+    }
+    let encoding_session = local_participates.then(|| crate::transcoding::local::Session::new(settings.local_encoding_workers));
     let readd_ids: HashSet<String> = delta.adds.iter()?.map(|item|item.map(|item|item.jellyfin_id)).collect::<Result<_>>()?;
     let force_id_changes: HashMap<String, String> = delta.id_changes.iter()?.filter_map(|item| match item {
         Ok(item) if readd_ids.contains(&item.new_jellyfin_id) => Some(Ok((item.new_jellyfin_id,item.old_jellyfin_id))),
@@ -3383,6 +3478,8 @@ async fn execute_plan_sync_buffered(
         let producer_add_count = $count;
         let first_auto_fill = $manual;
         let producer_provider = $producer_provider;
+        let producer_local_encoding = local_encoding_servers.contains(server_id.as_deref().unwrap_or(""));
+        let producer_encoding_session = encoding_session.clone();
         let producer_providers_by_server: std::collections::HashMap<
             String,
             Arc<dyn MediaProvider>,
@@ -3407,11 +3504,26 @@ async fn execute_plan_sync_buffered(
         let mut errors = Vec::new();
         let mut warnings = SyncWarnings::new(producer_warning_journal);
         let mut staging_dir: Option<tempfile::TempDir> = None;
+        let mut encodings: tokio::task::JoinSet<Option<(SyncFileError, bool)>> = tokio::task::JoinSet::new();
         let mut blocked = Duration::ZERO;
         let mut staging = TransferTotals::default();
 
           let mut priority_barrier_passed = false;
           for (index, add_item) in producer_adds.enumerate() {
+            // Completed workers must not accumulate one retained JoinSet entry per
+            // track during large syncs. Active workers remain bounded by staging.
+            while let Some(result) = encodings.try_join_next() {
+                match result {
+                    Ok(Some((error, true))) => warnings.push(error.error_message),
+                    Ok(Some((error, false))) => errors.push(error),
+                    Ok(None) => {},
+                    Err(error) => {
+                        errors.push(SyncFileError { jellyfin_id: String::new(), filename: "local-encoding".into(), error_message: error.to_string() });
+                        let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                    }
+                }
+            }
+
             if let Some(error) = warnings.failure.take() {
                 errors.push(SyncFileError { jellyfin_id:String::new(),filename:"sync-warnings".into(),error_message:error });
                 let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
@@ -3500,7 +3612,7 @@ async fn execute_plan_sync_buffered(
             };
             let source_direct_compatible =
                 direct_for_bitrate(&producer_compatibility, &source_format, add_item.original_bitrate, add_item.max_bitrate_override_kbps, add_item.source_audio);
-            if direct_media.is_some() && !source_direct_compatible {
+            if direct_media.is_some() && !source_direct_compatible && !producer_local_encoding {
                 warnings.push(format!(
                     "[Sync] Skipped '{}' ({}): direct format is incompatible and no verified file transcode is available",
                     add_item.name, add_item.jellyfin_id
@@ -3514,7 +3626,9 @@ async fn execute_plan_sync_buffered(
                         if let Some(kbps) = add_item.max_bitrate_override_kbps {
                             profile.max_bitrate_kbps = Some(kbps);
                         }
-                        Some(profile.normalized_for_source(add_item.source_audio))
+                        Some(if producer_local_encoding {
+                            crate::transcoding::local::normalized_for_source(&profile, add_item.source_audio)
+                        } else { profile.normalized_for_source(add_item.source_audio) })
                     }
                     None => {
                         warnings.push(format!(
@@ -3533,6 +3647,15 @@ async fn execute_plan_sync_buffered(
             } else {
                 None
             };
+            let local_profile = if producer_local_encoding { profile.clone() } else { None };
+            let local_target = match local_profile.as_ref().map(crate::transcoding::local::resolve).transpose() {
+                Ok(target) => target,
+                Err(error) => {
+                    errors.push(SyncFileError { jellyfin_id: add_item.jellyfin_id.clone(), filename: add_item.name.clone(), error_message: error.to_string() });
+                    let _ = producer_operation_manager.request_cancel(&producer_operation_id).await; break;
+                }
+            };
+            let download_profile = if producer_local_encoding { None } else { profile.as_ref() };
             let media_root = producer_manifest.as_ref()
                 .and_then(|manifest| manifest.media_path(add_item.media_role))
                 .map(|folder| producer_device_path.join(folder))
@@ -3563,7 +3686,7 @@ async fn execute_plan_sync_buffered(
                     if let Some(media) = direct_media.as_ref() {
                         return Ok(media.request.url.to_string());
                     }
-                    match producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await {
+                    match producer_provider.download_url(&add_item.jellyfin_id, download_profile).await {
                         Ok(url) => Ok(url),
                         Err(first_error) => {
                             crate::daemon_log!(
@@ -3580,7 +3703,7 @@ async fn execute_plan_sync_buffered(
                             ).await {
                                 return Err(first_error);
                             }
-                            producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await
+                            producer_provider.download_url(&add_item.jellyfin_id, download_profile).await
                         }
                     }
                 } => result,
@@ -3589,7 +3712,7 @@ async fn execute_plan_sync_buffered(
             let url = match url_result {
                 Ok(url) => url,
                 Err(e) => {
-                    if profile.is_some() {
+                    if download_profile.is_some() {
                         warnings.push(format!(
                             "[Sync] Skipped '{}' ({}) because required transcoding could not be negotiated: {}",
                             add_item.name, add_item.jellyfin_id, e
@@ -3709,7 +3832,7 @@ async fn execute_plan_sync_buffered(
                 }
             };
             if !response.status().is_success() {
-                if profile.is_some() {
+                if download_profile.is_some() {
                     warnings.push(format!(
                         "[Sync] Skipped '{}' ({}) because required transcoding returned status {}",
                         add_item.name,
@@ -3755,7 +3878,33 @@ async fn execute_plan_sync_buffered(
                 continue;
             }
             let response_format = provider_audio_format(None, response_content_type);
-            let extension_override = if !producer_compatibility.is_constrained() {
+            let extension_override = if let Some(target) = local_target.as_ref() {
+                // This response is the original, not the requested output. A
+                // definite non-audio response must never enter the decoder.
+                if response_format.is_empty()
+                    && response_content_type
+                        .is_some_and(|kind| !is_generic_binary_content_type(kind))
+                {
+                    if add_item.is_auto_fill {
+                        warnings.push(format!("[Sync] Auto-Fill source failed for '{}': original download returned an unrecognized non-audio content type", add_item.name));
+                        mark_operation_item_handled(
+                            &producer_operation_manager,
+                            &producer_operation_id,
+                            add_item.size_bytes,
+                        ).await;
+                        continue;
+                    }
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: "Original download returned an unrecognized non-audio content type".into(),
+                    });
+                    let _ = producer_operation_manager
+                        .request_cancel(&producer_operation_id).await;
+                    break;
+                }
+                Some(target.extension.to_string())
+            } else if !producer_compatibility.is_constrained() {
                 source_format
                     .extension
                     .clone()
@@ -3880,9 +4029,68 @@ async fn execute_plan_sync_buffered(
                 );
             }
 
+            let bounded_rate = local_profile.as_ref().and_then(|profile| {
+                match (
+                    profile.max_sample_rate_hz,
+                    add_item.source_audio.sample_rate_hz,
+                ) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            });
+            let bounded_channels = local_profile.as_ref().and_then(|profile| {
+                match (profile.max_channels, add_item.source_audio.channels) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            });
+            // Missing source properties are not fabricated device maxima. One
+            // unknown lossless file owns the full byte budget until it can drain.
+            // It never waits for an output reservation held by another original.
+            let exclusive_lossless = local_profile
+                .as_ref()
+                .is_some_and(TranscodeProfile::is_lossless)
+                && (bounded_rate.is_none() || bounded_channels.is_none());
+            let mut output_headroom = if exclusive_lossless {
+                0
+            } else if let Some(profile) = local_profile.as_ref() {
+                let duration = planned_duration_seconds(&add_item);
+                let payload = if profile.is_lossless() {
+                    duration
+                        .saturating_mul(u64::from(bounded_rate.expect("bounded lossless rate")))
+                        .saturating_mul(u64::from(
+                            bounded_channels.expect("bounded lossless channels"),
+                        ))
+                        .saturating_mul(4)
+                } else {
+                    duration
+                        .saturating_mul(u64::from(profile.max_bitrate_kbps.unwrap_or(320)))
+                        .saturating_mul(125)
+                };
+                // Covers are capped at 16 MiB; Ogg picture comments expand
+                // them by 4/3 before tag and muxer overhead.
+                payload
+                    .saturating_add(payload / 4)
+                    .saturating_add(24 * 1024 * 1024)
+            } else {
+                0
+            };
+            let original_reservation = if local_profile.is_some() {
+                response
+                    .content_length()
+                    .or(add_item.source_audio.original_size_bytes)
+                    .unwrap_or(0)
+            } else {
+                add_item.size_bytes
+            };
+            let reservation = if exclusive_lossless {
+                settings.staging_max_bytes
+            } else {
+                original_reservation.saturating_add(output_headroom)
+            };
             let (mut byte_permit, byte_wait) = match producer_byte_limiter
                 .acquire(
-                    add_item.size_bytes,
+                    reservation,
                     &producer_operation_manager,
                     &producer_operation_id,
                 )
@@ -3904,6 +4112,7 @@ async fn execute_plan_sync_buffered(
                     continue;
                 }
             };
+            byte_permit.output_headroom = output_headroom;
             blocked += byte_wait;
             if byte_wait > Duration::ZERO {
                 crate::daemon_log!(
@@ -3914,7 +4123,13 @@ async fn execute_plan_sync_buffered(
                 );
             }
 
-            let total_size = add_item.size_bytes;
+            let total_size = if local_profile.is_some() {
+                response.content_length()
+                    .or(add_item.source_audio.original_size_bytes)
+                    .unwrap_or(0)
+            } else {
+                add_item.size_bytes
+            };
             let progress_callback = Arc::new(|_, _| {}) as ProgressCallback;
 
             crate::daemon_log!("[Sync] Staging '{}'", add_item.name);
@@ -4068,8 +4283,10 @@ async fn execute_plan_sync_buffered(
                     break;
                 }
             };
-            byte_permit.shrink_to(staged_size);
-            byte_permit.mark_complete();
+            if exclusive_lossless {
+                output_headroom = byte_permit.bytes.saturating_sub(staged_size);
+            }
+            if local_profile.is_none() { byte_permit.shrink_to(staged_size); byte_permit.mark_complete(); }
             let staging_elapsed = t_staging.elapsed();
             let staging_timing = transfer_timing(staged_size, staging_elapsed);
             staging.record(staged_size, staging_elapsed);
@@ -4110,7 +4327,7 @@ async fn execute_plan_sync_buffered(
                 producer_destination_hints.write().unwrap_or_else(|p| p.into_inner())
                     .insert(normalized_device_folder(&rel_path), add_item.jellyfin_id.clone());
             }
-            let mut staged = PreparedTrack::Staged(StagedTrack {
+            let staged_track = StagedTrack {
                 add_item,
                 staged_path,
                 rel_path,
@@ -4120,7 +4337,18 @@ async fn execute_plan_sync_buffered(
                 add_index: index,
                 _count_permit: count_permit,
                 _byte_permit: byte_permit,
-            });
+            };
+            if let Some(profile) = local_profile {
+                let tx = staged_tx.clone();
+                let manager = Arc::clone(&producer_operation_manager);
+                let operation = producer_operation_id.clone();
+                let session = Arc::clone(producer_encoding_session.as_ref().expect("preflight captured local encoding work"));
+                encodings.spawn(async move {
+                    encode_and_enqueue(staged_track, profile, output_headroom, session, tx, manager, operation).await
+                });
+                continue;
+            }
+            let mut staged = PreparedTrack::Staged(staged_track);
             let send_started = std::time::Instant::now();
             loop {
                 if producer_operation_manager
@@ -4149,19 +4377,21 @@ async fn execute_plan_sync_buffered(
                     }
                     Err(mpsc::error::TrySendError::Closed(returned)) => {
                         returned.discard().await;
-                        return ProviderProducerOutcome {
-                            errors,
-                            warnings: warnings.finish(),
-                            staging_dir,
-                            blocked,
-                            server_id,
-                            staging,
-                        };
+                        let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                        break;
                     }
                 }
             }
         }
 
+        while let Some(result) = encodings.join_next().await {
+            match result {
+                Ok(Some((error, auto_fill))) if auto_fill => warnings.push(error.error_message),
+                Ok(Some((error, _))) => errors.push(error),
+                Ok(None) => {},
+                Err(error) => { errors.push(SyncFileError { jellyfin_id:String::new(), filename:"local-encoding".into(), error_message:error.to_string() }); let _ = producer_operation_manager.request_cancel(&producer_operation_id).await; }
+            }
+        }
         if !priority_barrier_passed {
             tokio::select! {
                 _ = producer_priority_barrier.wait() => {},
@@ -5737,6 +5967,7 @@ mod tests {
             &plan,
             &target,
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider("http://127.0.0.1:9".into()),
                 transcoding_profile: None,
                 providers_by_server: HashMap::new(),
@@ -6085,6 +6316,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider("http://localhost".into()),
                 transcoding_profile: None,
                 providers_by_server: std::collections::HashMap::new(),
@@ -6249,6 +6481,7 @@ mod tests {
             &delta,
             &root,
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider("http://localhost".to_string()),
                 transcoding_profile: None,
                 providers_by_server: std::collections::HashMap::new(),
@@ -6333,6 +6566,7 @@ mod tests {
             &delta,
             &root,
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider("http://localhost".to_string()),
                 transcoding_profile: None,
                 providers_by_server: std::collections::HashMap::new(),
@@ -6736,7 +6970,7 @@ mod tests {
                 &delta,
                 dir.path(),
                 ProviderSyncSource {
-                    provider: provider.clone(),
+            local_encoding_servers: HashSet::new(),                    provider: provider.clone(),
                     transcoding_profile: None,
                     providers_by_server: Default::default(),
                 },
@@ -7254,6 +7488,561 @@ mod tests {
         format!("{prefix}-{nanos}")
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_encoding_pipeline_overlaps_download_workers_and_writer() {
+        local_encoding_pipeline_scenario(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_encoding_pipeline_cancels_active_workers_without_committing() {
+        local_encoding_pipeline_scenario(true).await;
+    }
+
+    async fn local_encoding_pipeline_scenario(cancel: bool) {
+        let _serial_gate = crate::transcoding::local::test_support::lock_pool().await;
+        let mut server = mockito::Server::new_async().await;
+        let fixture = tempfile::tempdir().unwrap();
+        let wav = fixture.path().join("source.wav");
+        crate::transcoding::local::tests::wav(&wav, 3);
+        let audio = std::fs::read(wav).unwrap();
+        let download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/wav")
+            .with_body(audio.clone())
+            .expect(4)
+            .create_async()
+            .await;
+        let remote_encode = server
+            .mock("GET", "/rest/stream.view")
+            .match_query(mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(dir.path()).await;
+        let trace = BlockingFirstWriteDeviceIo::new(io);
+        let operations = Arc::new(SyncOperationManager::new());
+        let operation = unique_operation_id("local-pipeline");
+        operations.create_operation(operation.clone(), 4).await;
+        let gate = crate::transcoding::local::test_support::install(provider_sync_staging_prefix(
+            &operation,
+        ));
+        let test_session = crate::transcoding::local::Session::new(2);
+        struct Cleanup {
+            gate: Arc<crate::transcoding::local::test_support::Gate>,
+            trace: Arc<BlockingFirstWriteDeviceIo>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.gate.release();
+                self.trace.release_first_write();
+            }
+        }
+        let _cleanup = Cleanup {
+            gate: gate.clone(),
+            trace: trace.clone(),
+        };
+
+        let mut adds: Vec<_> = (0..4)
+            .map(|i| {
+                let mut item = add_item_with_provider_format(
+                    &format!("local-{i}"),
+                    "wav",
+                    "audio/wav",
+                    audio.len() as u64,
+                );
+                item.duration_seconds = 3;
+                item
+            })
+            .collect();
+        adds[3].is_auto_fill = true;
+        let delta = SyncDelta {
+            provenance_updates: HashMap::new(),
+            blocked: vec![],
+            adds,
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let profile = serde_json::json!({"MaxAudioChannels":1,"MaxAudioSampleRate":44100,"MaxAudioBitDepth":16,
+            "MaxStreamingBitrate":192000,"DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
+        let worker_devices = devices.clone();
+        let worker_trace = trace.clone();
+        let root = dir.path().to_path_buf();
+        let op = operation.clone();
+        let worker_operations = operations.clone();
+        let provider = subsonic_provider(server.url());
+        let job = tokio::spawn(async move {
+            execute_test_provider_sync(
+                &delta,
+                &root,
+                ProviderSyncSource {
+                    local_encoding_servers: HashSet::from([String::new()]),
+                    provider,
+                    transcoding_profile: Some(profile),
+                    providers_by_server: HashMap::new(),
+                },
+                worker_operations,
+                op,
+                worker_devices,
+                worker_trace,
+            )
+            .await
+        });
+        let admitted = tokio::time::timeout(Duration::from_secs(10), async {
+            while gate.entered.load(Ordering::Acquire) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        // Release even on assertion failure so blocking native workers never outlive the test.
+        if admitted.is_err() {
+            gate.release();
+            trace.release_first_write();
+            let result = job.await;
+            panic!("Two local workers were not admitted: {result:?}");
+        }
+        // Every original can download while the first two encoder workers wait.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !download.matched_async().await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            gate.entered.load(Ordering::Acquire),
+            2,
+            "global worker limit must cap native jobs"
+        );
+        if cancel {
+            assert!(operations.request_cancel(&operation).await);
+            let (written, errors) = tokio::time::timeout(Duration::from_secs(10), job)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(written.is_empty(), "{written:?}");
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(trace.writes.load(Ordering::Acquire), 0);
+            assert!(
+                devices
+                    .get_current_device()
+                    .await
+                    .unwrap()
+                    .synced_items
+                    .is_empty()
+            );
+            assert!(provider_staging_dirs_for_operation(&operation).is_empty());
+            return;
+        }
+        gate.allow(2);
+        if !trace.wait_for_first_write().await {
+            trace.release_first_write();
+            let result = job.await;
+            panic!("Writer never started after local encoding: {result:?}");
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while gate.entered.load(Ordering::Acquire) < 4 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            trace.writes.load(Ordering::Acquire),
+            1,
+            "writer must begin while later workers remain active"
+        );
+        trace.release_first_write();
+        gate.release();
+        let (written, errors) = tokio::time::timeout(Duration::from_secs(20), job)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(written.len(), 4);
+        for item in written {
+            assert!(item.local_path.ends_with(".mp3"));
+            assert!(dir.path().join(item.local_path).exists());
+        }
+        download.assert_async().await;
+        remote_encode.assert_async().await;
+        drop(test_session);
+        assert!(provider_staging_dirs_for_operation(&operation).is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_encoding_automatic_sync_uses_original_download_and_commits_verified_mp3() {
+        let mut server = mockito::Server::new_async().await;
+        let fixture = tempfile::tempdir().unwrap();
+        let wav = fixture.path().join("original.wav");
+        crate::transcoding::local::tests::wav(&wav, 2);
+        let audio = std::fs::read(wav).unwrap();
+        let album=server.mock("GET","/rest/getAlbum.view").match_query(mockito::Matcher::Any).with_status(200)
+            .with_header("content-type","application/json").with_body(serde_json::json!({"subsonic-response":{"status":"ok","version":"1.16.1","album":{"id":"album","name":"Album","song":[{"id":"auto-local","title":"Auto native","albumId":"album","suffix":"wav","contentType":"audio/wav","duration":2,"size":audio.len(),"bitRate":1536}]}}}).to_string()).create_async().await;
+        let download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/wav")
+            .with_body(audio)
+            .expect(1)
+            .create_async()
+            .await;
+        let remote = server
+            .mock("GET", "/rest/stream.view")
+            .match_query(mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let profile = fixture.path().join("profiles.json");
+        std::fs::write(&profile,serde_json::json!({"profiles":[{"id":"local-test","name":"Local","description":"fixture","deviceProfile":{"MaxStreamingBitrate":192000,"MaxAudioChannels":2,"MaxAudioSampleRate":44100,"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}],"DirectPlayProfiles":[]}}]}).to_string()).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (devices, _) = setup_provider_sync_device(root.path()).await;
+        devices
+            .update_manifest(|m| {
+                m.transcoding_profile_id = Some("local-test".into());
+                m.basket_items = vec![crate::device::BasketItem {
+                    id: "album".into(),
+                    name: "Album".into(),
+                    item_type: "Album".into(),
+                    server_id: Some("portable-local".into()),
+                    artist: None,
+                    child_count: 1,
+                    size_ticks: 0,
+                    size_bytes: 0,
+                }];
+            })
+            .await
+            .unwrap();
+        let operations = Arc::new(SyncOperationManager::new());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let protection = protection::Publisher::default();
+        crate::paths::TEST_DEVICE_PROFILES_PATH
+            .scope(
+                profile,
+                crate::run_auto_sync_via_provider(
+                    subsonic_provider(server.url()),
+                    Some("portable-local".into()),
+                    HashSet::from(["portable-local".into()]),
+                    devices.clone(),
+                    operations.clone(),
+                    tx,
+                    "test-device".into(),
+                    protection.observer(),
+                ),
+            )
+            .await
+            .unwrap();
+        let manifest = devices.get_current_device().await.unwrap();
+        assert_eq!(manifest.synced_items.len(), 1);
+        assert!(manifest.synced_items[0].local_path.ends_with(".mp3"));
+        assert!(!manifest.dirty);
+        assert!(
+            operations
+                .get_all_operations()
+                .await
+                .iter()
+                .all(|o| o.status == SyncStatus::Complete)
+        );
+        album.assert_async().await;
+        download.assert_async().await;
+        remote.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn local_encoding_mixed_servers_preserves_each_captured_route() {
+        let mut local = mockito::Server::new_async().await;
+        let mut remote = mockito::Server::new_async().await;
+        let fixture = tempfile::tempdir().unwrap();
+        let wav = fixture.path().join("source.wav");
+        crate::transcoding::local::tests::wav(&wav, 2);
+        let audio = std::fs::read(&wav).unwrap();
+        let mp3 = fixture.path().join("server.mp3");
+        crate::transcoding::local::encode(
+            &wav,
+            &mp3,
+            &TranscodeProfile {
+                container: Some("mp3".into()),
+                audio_codec: Some("mp3".into()),
+                max_bitrate_kbps: Some(192),
+                ..Default::default()
+            },
+            &AtomicBool::new(false),
+            4 * 1024 * 1024,
+        )
+        .unwrap();
+        let original = local
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/wav")
+            .with_body(audio.clone())
+            .expect(1)
+            .create_async()
+            .await;
+        let encoded = remote
+            .mock("GET", "/rest/stream.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(std::fs::read(mp3).unwrap())
+            .expect(1)
+            .create_async()
+            .await;
+        let mut first =
+            add_item_with_provider_format("local-track", "wav", "audio/wav", audio.len() as u64);
+        first.duration_seconds = 2;
+        first.server_id = Some("local-portable".into());
+        let mut second = first.clone();
+        second.jellyfin_id = "remote-track".into();
+        second.name = "Remote track".into();
+        second.server_id = Some("remote-portable".into());
+        let delta = SyncDelta {
+            provenance_updates: HashMap::new(),
+            blocked: vec![],
+            adds: vec![first, second],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let root = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(root.path()).await;
+        let operations = Arc::new(SyncOperationManager::new());
+        let id = unique_operation_id("mixed-local");
+        operations.create_operation(id.clone(), 2).await;
+        let local_provider = subsonic_provider(local.url());
+        let remote_provider = subsonic_provider(remote.url());
+        let(written,errors)=execute_test_provider_sync(&delta,root.path(),ProviderSyncSource{local_encoding_servers:HashSet::from(["local-portable".into()]),provider:remote_provider.clone(),transcoding_profile:Some(serde_json::json!({"MaxStreamingBitrate":192000,"DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]})),providers_by_server:HashMap::from([("local-portable".into(),local_provider),("remote-portable".into(),remote_provider)])},operations,id,devices,io).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(written.len(), 2);
+        original.assert_async().await;
+        encoded.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn local_encoding_original_failures_preserve_manual_and_autofill_policy() {
+        for auto in [false, true] {
+            for status in [404, 200, 0] {
+                let mut server = mockito::Server::new_async().await;
+                let original = server
+                    .mock("GET", "/rest/download.view")
+                    .match_query(mockito::Matcher::Any)
+                    .with_status(if status == 0 { 404 } else { status })
+                    .with_header("content-type", "text/html")
+                    .with_body("<html>Unavailable</html>")
+                    .expect(if status == 0 { 0 } else { 1 })
+                    .create_async()
+                    .await;
+                let remote = server
+                    .mock("GET", "/rest/stream.view")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let root = tempfile::tempdir().unwrap();
+                let (devices, io) = setup_provider_sync_device(root.path()).await;
+                let mut item = add_item_with_provider_format("missing", "wav", "audio/wav", 100);
+                item.duration_seconds = 2;
+                item.is_auto_fill = auto;
+                let delta = SyncDelta {
+                    provenance_updates: HashMap::new(),
+                    blocked: vec![],
+                    adds: vec![item],
+                    deletes: vec![],
+                    id_changes: vec![],
+                    unchanged: 0,
+                    playlists: vec![],
+                    pity_fired_servers: vec![],
+                };
+                let operations = Arc::new(SyncOperationManager::new());
+                let operation = unique_operation_id("local-original-failure");
+                operations.create_operation(operation.clone(), 1).await;
+                let(written,errors)=execute_test_provider_sync(&delta,root.path(),ProviderSyncSource{local_encoding_servers:HashSet::from([String::new()]),provider:if status==0 {Arc::new(crate::providers::jellyfin::JellyfinProvider::new(crate::api::JellyfinClient::new(),"not-a-url","token","user"))} else {subsonic_provider(server.url())},transcoding_profile:Some(serde_json::json!({"MaxStreamingBitrate":192000,"DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]})),providers_by_server:HashMap::new()},operations.clone(),operation.clone(),devices.clone(),io).await.unwrap();
+                assert!(written.is_empty());
+                assert!(
+                    devices
+                        .get_current_device()
+                        .await
+                        .unwrap()
+                        .synced_items
+                        .is_empty()
+                );
+                assert_eq!(
+                    errors.is_empty(),
+                    auto,
+                    "auto={auto} status={status}: {errors:?}"
+                );
+                assert_eq!(operations.is_cancelled(&operation).await, !auto);
+                if auto {
+                    assert_eq!(
+                        operations
+                            .get_operation(&operation)
+                            .await
+                            .unwrap()
+                            .files_completed,
+                        1
+                    );
+                    assert!(
+                        operations
+                            .warning_journal(&operation)
+                            .unwrap()
+                            .count
+                            .load(Ordering::Acquire)
+                            > 0
+                    );
+                }
+                original.assert_async().await;
+                remote.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_encoding_unknown_lossless_properties_share_budget_without_fabricated_maxima() {
+        let mut server = mockito::Server::new_async().await;
+        let fixture = tempfile::tempdir().unwrap();
+        let wav = fixture.path().join("source.wav");
+        crate::transcoding::local::tests::wav(&wav, 2);
+        let audio = std::fs::read(wav).unwrap();
+        let original = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/wav")
+            .with_body(audio)
+            .expect(2)
+            .create_async()
+            .await;
+        let mut first = add_item_with_provider_format(
+            "unknown-one",
+            "wav",
+            "audio/wav",
+            3 * 1024 * 1024 * 1024,
+        );
+        first.duration_seconds = 300;
+        let mut second = first.clone();
+        second.jellyfin_id = "unknown-two".into();
+        second.name = "Second unknown".into();
+        let delta = SyncDelta {
+            provenance_updates: HashMap::new(),
+            blocked: vec![],
+            adds: vec![first, second],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+        let root = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(root.path()).await;
+        let operations = Arc::new(SyncOperationManager::new());
+        let operation = unique_operation_id("unknown-lossless");
+        operations.create_operation(operation.clone(), 2).await;
+        let job = execute_test_provider_sync(
+            &delta,
+            root.path(),
+            ProviderSyncSource {
+                local_encoding_servers: HashSet::from([String::new()]),
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(
+                    serde_json::json!({"DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]}),
+                ),
+                providers_by_server: HashMap::new(),
+            },
+            operations,
+            operation.clone(),
+            devices,
+            io,
+        );
+        let (written, errors) = tokio::time::timeout(Duration::from_secs(20), job)
+            .await
+            .expect("full-budget original/output reservations must drain")
+            .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(written.len(), 2);
+        assert!(written.iter().all(|i| i.local_path.ends_with(".flac")));
+        assert!(provider_staging_dirs_for_operation(&operation).is_empty());
+        original.assert_async().await;
+    }
+
+    /// Controlled loopback + temporary MSC throughput benchmark. It measures the
+    /// full download/encode/write pipeline without claiming real-device performance.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "explicit CPU throughput benchmark; run local_encoding_throughput_benchmark -- --ignored --nocapture"]
+    async fn local_encoding_throughput_benchmark() {
+        let mut server = mockito::Server::new_async().await;
+        let fixture = tempfile::tempdir().unwrap();
+        let wav = fixture.path().join("benchmark.wav");
+        crate::transcoding::local::tests::wav(&wav, 30);
+        let audio = std::fs::read(wav).unwrap();
+        let download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/wav")
+            .with_body(audio.clone())
+            .expect(96)
+            .create_async()
+            .await;
+        for (codec, container) in [("mp3", "mp3"), ("aac", "m4a"), ("flac", "flac")] {
+            for workers in [1, 2, 4, 0] {
+                let root = tempfile::tempdir().unwrap();
+                let (devices, io) = setup_provider_sync_device(root.path()).await;
+                let mut adds = Vec::new();
+                for index in 0..8 {
+                    let mut item = add_item_with_provider_format(
+                        &format!("bench-{index}"),
+                        "wav",
+                        "audio/wav",
+                        audio.len() as u64,
+                    );
+                    item.duration_seconds = 30;
+                    adds.push(item);
+                }
+                let delta = SyncDelta {
+                    provenance_updates: HashMap::new(),
+                    blocked: vec![],
+                    adds,
+                    deletes: vec![],
+                    id_changes: vec![],
+                    unchanged: 0,
+                    playlists: vec![],
+                    pity_fired_servers: vec![],
+                };
+                let manifest = devices.get_current_device().await.unwrap();
+                let plan = crate::sync_plan::SyncPlan::from_delta(delta, &manifest).unwrap();
+                let target = SyncTarget {
+                    path: root.path().into(),
+                    manifest,
+                    observation: devices.get_selected_sync_target().await.unwrap().3,
+                    io,
+                };
+                let operations = Arc::new(SyncOperationManager::new());
+                let operation = unique_operation_id("encoding-benchmark");
+                operations.create_operation(operation.clone(), 8).await;
+                let started = std::time::Instant::now();
+                let(written,errors)=execute_plan_sync_with_settings(&plan,&target,ProviderSyncSource{local_encoding_servers:HashSet::from([String::new()]),provider:subsonic_provider(server.url()),transcoding_profile:Some(serde_json::json!({"MaxStreamingBitrate":192000,"MaxAudioChannels":2,"MaxAudioSampleRate":44100,"MaxAudioBitDepth":16,"DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":container,"AudioCodec":codec}]})),providers_by_server:HashMap::new()},operations,operation,devices,None,crate::sync_performance::SyncPerformance{local_encoding_workers:workers,..Default::default()}).await.unwrap();
+                assert!(errors.is_empty(), "{errors:?}");
+                assert_eq!(written, 8);
+                println!(
+                    "SYNC_ENCODING_BENCH codec={codec} workers={workers} audio_seconds=240 elapsed_seconds={:.3} audio_seconds_per_second={:.1}",
+                    started.elapsed().as_secs_f64(),
+                    240.0 / started.elapsed().as_secs_f64()
+                );
+            }
+        }
+        download.assert_async().await;
+    }
+
     #[test]
     fn provider_sync_staging_path_component_bounds_long_values() {
         let component = provider_sync_staging_path_component(&"x".repeat(512));
@@ -7551,6 +8340,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider("http://127.0.0.1:9".into()),
                 transcoding_profile: Some(rockbox_direct_profile()),
                 providers_by_server: HashMap::new(),
@@ -7624,6 +8414,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
                     crate::api::JellyfinClient::new(),
                     server.url(),
@@ -7723,6 +8514,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: None,
                 providers_by_server: std::collections::HashMap::new(),
@@ -7814,6 +8606,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: None,
                 providers_by_server: std::collections::HashMap::new(),
@@ -7885,6 +8678,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: None,
                 providers_by_server: HashMap::new(),
@@ -7966,6 +8760,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
                     crate::api::JellyfinClient::new(),
                     server.url(),
@@ -8038,6 +8833,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
                     crate::api::JellyfinClient::new(),
                     server.url(),
@@ -8119,6 +8915,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(generic_mp3_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8194,6 +8991,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8251,6 +9049,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8326,6 +9125,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8390,6 +9190,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(generic_mp3_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8473,6 +9274,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(generic_mp3_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8563,7 +9365,7 @@ mod tests {
                         &plan,
                         &target,
                         ProviderSyncSource {
-                            provider,
+            local_encoding_servers: HashSet::new(),                            provider,
                             transcoding_profile: Some(rockbox_direct_profile()),
                             providers_by_server: Default::default(),
                         },
@@ -8681,7 +9483,7 @@ mod tests {
                     &delta,
                     &dir_path,
                     ProviderSyncSource {
-                        provider,
+            local_encoding_servers: HashSet::new(),                        provider,
                         transcoding_profile: Some(rockbox_direct_profile()),
                         providers_by_server: std::collections::HashMap::new(),
                     },
@@ -8771,7 +9573,7 @@ mod tests {
                 &delta,
                 &dir_path,
                 ProviderSyncSource {
-                    provider,
+            local_encoding_servers: HashSet::new(),                    provider,
                     transcoding_profile: Some(rockbox_direct_profile()),
                     providers_by_server: std::collections::HashMap::new(),
                 },
@@ -8863,6 +9665,7 @@ mod tests {
             &delta,
             dir.path(),
             ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
                 providers_by_server: std::collections::HashMap::new(),
@@ -8963,7 +9766,7 @@ mod tests {
                 &delta,
                 &dir_path,
                 ProviderSyncSource {
-                    provider,
+            local_encoding_servers: HashSet::new(),                    provider,
                     transcoding_profile: Some(rockbox_direct_profile()),
                     providers_by_server: std::collections::HashMap::new(),
                 },
@@ -10959,6 +11762,7 @@ mod tests {
             let operation = unique_operation_id("encoded-repeat");
             operations.create_operation(operation.clone(), delta.adds.len()).await;
             let (synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: provider.clone(), transcoding_profile: Some(generic_mp3_profile()),
                 providers_by_server: Default::default(),
             }, operations.clone(), operation.clone(), manager.clone(), io.clone()).await.unwrap();
@@ -11024,7 +11828,7 @@ mod tests {
         let operation = unique_operation_id("ambiguous-reuse");
         operations.create_operation(operation.clone(), 1).await;
         let (synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
-            provider: subsonic_provider(server.url()), transcoding_profile: Some(profile), providers_by_server: Default::default(),
+            local_encoding_servers: HashSet::new(),            provider: subsonic_provider(server.url()), transcoding_profile: Some(profile), providers_by_server: Default::default(),
         }, operations.clone(), operation.clone(), manager, io).await.unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         assert!(synced.is_empty());
@@ -11157,6 +11961,7 @@ mod tests {
             let id = unique_operation_id("selected-collision");
             operations.create_operation(id.clone(), delta.adds.len()).await;
             let (_synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
             }, operations.clone(), id.clone(), manager.clone(), io.clone()).await.unwrap();
             first_download.assert_async().await;
@@ -11193,7 +11998,7 @@ mod tests {
                 let cleanup_ops = Arc::new(SyncOperationManager::new());
                 cleanup_ops.create_operation(cleanup_id.clone(), cleanup.deletes.len()).await;
                 let (_, errors) = execute_test_provider_sync(&cleanup, root.path(), ProviderSyncSource {
-                    provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
+            local_encoding_servers: HashSet::new(),                    provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
                 }, cleanup_ops, cleanup_id, manager.clone(), io).await.unwrap();
                 assert!(errors.is_empty(), "{errors:?}");
                 assert!(!path.exists());
@@ -11226,6 +12031,7 @@ mod tests {
             let id = unique_operation_id("failed-replacement");
             operations.create_operation(id.clone(), 1).await;
             let (synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
                 provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
             }, operations, id, manager.clone(), io).await.unwrap();
             assert!(synced.is_empty());
@@ -11388,7 +12194,7 @@ mod tests {
                     &delta,
                     &target,
                     ProviderSyncSource {
-                        provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+            local_encoding_servers: HashSet::new(),                        provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
                             crate::api::JellyfinClient::new(),
                             url,
                             "token",

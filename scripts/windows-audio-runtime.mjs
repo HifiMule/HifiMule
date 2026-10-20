@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+import { buildEncodingDependencies, encodingDependencyReceipt } from "./encoding-dependencies.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -54,6 +54,7 @@ function expectedReceipt(target) {
     sourceSha256: manifest.sourceSha256,
     configureFlags: [...manifest.configureFlags, ...manifest.windowsConfigureFlags],
     abiVersions: manifest.abiVersions,
+    encodingDependencies: encodingDependencyReceipt,
   };
 }
 
@@ -226,15 +227,18 @@ function buildOfficialSource(archive, staging, target, options = {}) {
     const source = join(sourceRoot, `ffmpeg-${manifest.ffmpegRelease}`);
     if (!existsSync(join(source, "configure"))) fail(`Official FFmpeg archive did not contain ffmpeg-${manifest.ffmpegRelease}/configure`);
     mkdirSync(staging, { recursive: true });
+    const dependencyEnv = buildEncodingDependencies({ cache: join(root, "target/audio-runtime/sources"), work: sourceRoot, prefix: staging, target, env: baseEnv, windows: true });
     const arch = target.startsWith("aarch64") ? "aarch64" : "x86_64";
     const command = [
       `cd ${shellQuote(toMsysPath(source))}`,
       "export VSLANG=1033",
-      `./configure --toolchain=msvc --arch=${arch} --prefix=${shellQuote(toMsysPath(staging))} ${[...manifest.configureFlags, ...manifest.windowsConfigureFlags].map(shellQuote).join(" ")}`,
+      `export PKG_CONFIG_PATH=${shellQuote(toMsysPath(join(staging, "lib/pkgconfig")))}`,
+
+      `./configure --toolchain=msvc --arch=${arch} --prefix=${shellQuote(toMsysPath(staging))} --extra-cflags=${shellQuote(`-I${toMsysPath(staging)}/include`)} --extra-ldflags=${shellQuote(`-L${toMsysPath(staging)}/lib`)} --pkg-config-flags=--static ${[...manifest.configureFlags, ...manifest.windowsConfigureFlags].map(shellQuote).join(" ")}`,
       `make -j${Math.max(1, Number(process.env.NUMBER_OF_PROCESSORS) || 2)}`,
       "make install",
     ].join(" && ");
-    execute(bash, ["--noprofile", "--norc", "-c", command], { stdio: "inherit", env: { ...baseEnv, VSLANG: "1033" } });
+    execute(bash, ["--noprofile", "--norc", "-c", command], { stdio: "inherit", env: { ...dependencyEnv, VSLANG: "1033" } });
     const machine = target.startsWith("aarch64") ? "ARM64" : "X64";
     for (const library of manifest.requiredLibraries) {
       const definition = readdirSync(join(staging, "lib")).find((name) => name.toLowerCase().startsWith(library) && name.toLowerCase().endsWith(".def"));

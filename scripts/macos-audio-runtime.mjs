@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+import { buildEncodingDependencies, encodingDependencyReceipt } from "./encoding-dependencies.mjs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -39,6 +39,7 @@ function expectedReceipt(target) {
     sourceSha256: manifest.sourceSha256,
     configureFlags: ["--disable-autodetect", `--arch=${info.arch}`, "--target-os=darwin", ...manifest.configureFlags],
     abiVersions: manifest.abiVersions,
+    encodingDependencies: encodingDependencyReceipt,
     minimumSystemVersion: info.minimum,
   };
 }
@@ -120,8 +121,9 @@ export function ensureMacosAudioRuntime(target, options = {}) {
     mkdirSync(staging, { recursive: true });
     execute("tar", ["-xf", archive, "-C", work], { stdio: "inherit" });
     const source = join(work, `ffmpeg-${manifest.ffmpegRelease}`);
-    const env = { ...baseEnv, MACOSX_DEPLOYMENT_TARGET: info.minimum, CFLAGS: `-arch ${info.arch}`, LDFLAGS: `-arch ${info.arch}` };
-    execute("./configure", [`--prefix=${staging}`, "--disable-autodetect", `--arch=${info.arch}`, "--target-os=darwin", ...manifest.configureFlags], { cwd: source, env, stdio: "inherit" });
+    let env = { ...baseEnv, MACOSX_DEPLOYMENT_TARGET: info.minimum, CC: `clang -arch ${info.arch}`, CFLAGS: `-arch ${info.arch}`, LDFLAGS: `-arch ${info.arch}` };
+    env = buildEncodingDependencies({ cache: sources, work, prefix: staging, target, env });
+    execute("./configure", [`--prefix=${staging}`, `--extra-cflags=-I${staging}/include`, `--extra-ldflags=-L${staging}/lib`, "--pkg-config-flags=--static", "--disable-autodetect", `--arch=${info.arch}`, "--target-os=darwin", ...manifest.configureFlags], { cwd: source, env, stdio: "inherit" });
     execute("make", [`-j${Math.min(8, Math.max(1, availableParallelism()))}`], { cwd: source, env, stdio: "inherit" });
     execute("make", ["install"], { cwd: source, env, stdio: "inherit" });
     relocateMachOLoadPaths(staging, prefix, execute);

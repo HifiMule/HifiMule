@@ -41,6 +41,7 @@ mod ordering_tests {
 
     fn server(id: &str, role: Option<&str>) -> crate::db::ServerConfig {
         crate::db::ServerConfig {
+                transcoding_location: crate::db::TranscodingLocation::Server,
             id: id.into(),
             server_id: Some(format!("portable-{id}")),
             url: String::new(),

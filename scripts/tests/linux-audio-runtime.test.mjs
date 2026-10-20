@@ -10,7 +10,7 @@ import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 const root = resolve(import.meta.dirname, "../..");
 const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runtime.json"), "utf8"));
 const target = "x86_64-unknown-linux-gnu";
-const receipt = { schemaVersion: 1, targetTriple: target, ffmpegRelease: manifest.ffmpegRelease, sourceSha256: manifest.sourceSha256, configureFlags: ["--disable-autodetect", ...manifest.configureFlags], abiVersions: manifest.abiVersions };
+const receipt = { schemaVersion: 1, targetTriple: target, ffmpegRelease: manifest.ffmpegRelease, sourceSha256: manifest.sourceSha256, encodingDependencies: manifest.encodingDependencies, configureFlags: ["--disable-autodetect", ...manifest.configureFlags], abiVersions: manifest.abiVersions };
 
 function prefixWithReceipt(value) {
   const prefix = mkdtempSync(join(tmpdir(), "hifimule-ffmpeg-receipt-"));

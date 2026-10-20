@@ -116,7 +116,11 @@ export class ServerHub {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const id = (btn as HTMLElement).dataset.id;
-                if (id) this.handleEdit(id);
+                if (id) {
+                    const dropdown = this.container.querySelector('sl-dropdown') as any;
+                    void dropdown?.hide();
+                    this.handleEdit(id);
+                }
             });
         });
         this.container.querySelectorAll('.server-hub-remove').forEach(btn => {
@@ -157,6 +161,11 @@ export class ServerHub {
                         </button>
                     `).join('')}
                 </div>
+                <sl-select id="server-transcoding-location" label="${t('serverHub.transcoding_location')}"
+                    help-text="${t('serverHub.transcoding_help')}" value="${server.transcodingLocation ?? 'server'}">
+                    <sl-option value="server">${t('serverHub.transcoding_server')}</sl-option>
+                    <sl-option value="local">${t('serverHub.transcoding_local')}</sl-option>
+                </sl-select>
                 <sl-alert id="server-identity-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
             <sl-button slot="footer" variant="default" id="server-identity-cancel">${t('basket.actions.cancel')}</sl-button>
@@ -200,7 +209,8 @@ export class ServerHub {
             try {
                 saveBtn.loading = true;
                 cancel.disabled = true;
-                await serverUpdate({ id, name, icon: selectedIcon });
+                const transcodingLocation = dialog.querySelector('#server-transcoding-location').value as 'server' | 'local';
+                await serverUpdate({ id, name, icon: selectedIcon, transcodingLocation });
                 dialog.hide();
                 await this.refresh();
                 this.onServerChanged();

@@ -109,3 +109,12 @@ test("runtime manifest records the bounded production buffering policy", () => {
     startupFillMilliseconds: 100,
   });
 });
+
+test('local encoding capabilities are verified, not inferred from ABI version', async () => {
+  const { verifyEncodingCapabilities } = await import('../verify-audio-runtime.mjs');
+  const listing = (_executable, args) => args[1] === '-encoders'
+    ? runtimeManifest.requiredEncoders.map(name => ` A..... ${name} encoder`).join('\n')
+    : runtimeManifest.requiredMuxers.map(name => ` E ${name} muxer`).join('\n');
+  verifyEncodingCapabilities('/controlled/ffmpeg', { execFileSync: listing });
+  assert.throws(() => verifyEncodingCapabilities('/controlled/ffmpeg', {execFileSync: (exe,args) => listing(exe,args).replace('libmp3lame','missing')}), /missing required encoders: libmp3lame/);
+});

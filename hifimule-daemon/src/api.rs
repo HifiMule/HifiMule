@@ -3042,7 +3042,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         TEST_CONFIG_PATH.sync_scope(path.clone(), || {
-            let tuning = serde_json::json!({"copy_buffer_kib":64,"staging_max_tracks":"invalid", "checkpoint_track_updates":1000});
+            let tuning = serde_json::json!({"copy_buffer_kib":64,"staging_max_tracks":"invalid", "checkpoint_track_updates":1000,"local_encoding_workers":4});
             fs::write(
                 &path,
                 serde_json::json!({"sync_performance": tuning}).to_string(),
@@ -3066,6 +3066,7 @@ mod tests {
                 64 * 1024
             );
             assert_eq!(CredentialManager::sync_performance().staging_max_tracks, 8);
+            assert_eq!(CredentialManager::sync_performance().local_encoding_workers, 4);
             CredentialManager::set_config_selected_server("second").unwrap();
             assert_eq!(
                 CredentialManager::read_config().unwrap().sync_performance.map(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).unwrap()),
@@ -3191,6 +3192,7 @@ mod tests {
 
     fn server_config_for_test(id: &str, server_type: &str) -> crate::db::ServerConfig {
         crate::db::ServerConfig {
+                transcoding_location: crate::db::TranscodingLocation::Server,
             id: id.to_string(),
             url: "http://srv.example".to_string(),
             server_type: server_type.to_string(),

@@ -1,3 +1,6 @@
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TEST_DEVICE_PROFILES_PATH: PathBuf; }
+
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
@@ -78,6 +81,8 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
 }
 
 pub fn get_device_profiles_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Ok(path) = TEST_DEVICE_PROFILES_PATH.try_with(Clone::clone) { return Ok(path); }
     Ok(get_app_data_dir()?.join("device-profiles.json"))
 }
 

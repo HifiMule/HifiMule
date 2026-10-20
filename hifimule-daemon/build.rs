@@ -1,6 +1,6 @@
 fn main() {
     const VERIFIED_ENV: &str = "HIFIMULE_FFMPEG_RUNTIME_VERIFIED";
-    const VERIFIED_VALUE: &str = "ffmpeg-9-runtime-verified-v2";
+    const VERIFIED_VALUE: &str = "ffmpeg-9-runtime-verified-v3";
 
     println!("cargo:rerun-if-env-changed={VERIFIED_ENV}");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

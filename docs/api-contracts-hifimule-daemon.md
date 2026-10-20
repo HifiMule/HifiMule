@@ -1545,3 +1545,22 @@ All params use camelCase, reject unknown fields, and require `schemaVersion: 1`.
 sanitized descriptors; authenticated URLs, headers, provider session identifiers, and throughput
 samples never cross RPC. `reason` is a localized-code input such as `reducedBufferPressure`.
 Only current-generation resolved or presented-handoff state may replace this field.
+
+### Per-server sync encoding location
+
+`server.list`, `get_daemon_state.servers[]`, and the selected `currentServer`
+expose `transcodingLocation: "server" | "local"`. Missing settings migrate to
+`"server"`. Set it atomically with optional identity changes:
+
+```json
+{"method":"server.update","params":{"id":"<machine-local server id>","transcodingLocation":"local"}}
+```
+
+Invalid strings, types and null return invalid-params before any fields change.
+Reconnect preserves the value and credentials/portable identity. Local sync
+resolves management IDs to portable source IDs at admission; later selection or
+settings changes cannot redirect an active run. Compatible files bypass encoding.
+Failures follow the existing manual/Auto-Fill policy and never enter the manifest
+as completed output. The machine worker budget lives in app-data `config.json`
+under `sync_performance.local_encoding_workers` (`0` automatic, `1..64` explicit),
+not in the server RPC or per-server database tuning.

@@ -245,6 +245,7 @@ async fn manifest_migration_regression_auto_missing_profile_rejected_before_admi
     let result = run_auto_sync_via_provider(
         provider,
         None,
+        Default::default(),
         manager.clone(),
         operations.clone(),
         tx,
@@ -552,7 +553,7 @@ async fn auto_sync_capacity_io_failure_exits_syncing_before_admission() {
     let operations = Arc::new(sync::SyncOperationManager::new());
     let (tx, rx) = std::sync::mpsc::channel();
     let protection = sync::protection::Publisher::default();
-    let result = run_auto_sync_via_provider(provider, None, manager, operations.clone(), tx,
+    let result = run_auto_sync_via_provider(provider, None, Default::default(), manager, operations.clone(), tx,
         manifest.device_id, protection.observer()).await;
     assert!(result.is_err());
     let states: Vec<_> = rx.try_iter().collect();

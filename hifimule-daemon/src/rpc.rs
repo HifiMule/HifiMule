@@ -4030,6 +4030,7 @@ fn server_row_to_json(config: &crate::db::ServerConfig) -> Value {
         "icon": config.icon,
         "selected": config.selected,
         "libraryRole": config.provider_library_role,
+        "transcodingLocation": config.transcoding_location,
     })
 }
 
@@ -4089,7 +4090,12 @@ async fn handle_server_update(
             });
         }
     };
-    if name.is_none() && icon.is_none() {
+    let location = params.get("transcodingLocation").map(|value| {
+        serde_json::from_value::<crate::db::TranscodingLocation>(value.clone()).map_err(|_| JsonRpcError {
+            code: ERR_INVALID_PARAMS, message: "transcodingLocation must be server or local".into(), data: None,
+        })
+    }).transpose()?;
+    if name.is_none() && icon.is_none() && location.is_none() {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "No server identity fields provided".to_string(),
@@ -4099,7 +4105,7 @@ async fn handle_server_update(
 
     state
         .db
-        .update_server_identity(id, name.as_deref(), icon)
+        .update_server_settings(id, name.as_deref(), icon, location)
         .map_err(storage_error_to_rpc)?;
     state.server_manager.write().await.load_from_db(&state.db);
     Ok(serde_json::json!({ "ok": true }))
@@ -4534,6 +4540,7 @@ async fn handle_get_daemon_state_snapshot(
                 "icon": s.icon,
                 "selected": s.selected,
                 "libraryRole": s.provider_library_role,
+                "transcodingLocation": s.transcoding_location,
             })
         })
         .collect();
@@ -4556,6 +4563,7 @@ async fn handle_get_daemon_state_snapshot(
             "serverType": config.server_type,
             "serverVersion": config.server_version,
             "libraryRole": config.provider_library_role,
+            "transcodingLocation": config.transcoding_location,
         })
     });
 
@@ -8918,6 +8926,11 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
     // Adds carry the portable serverId (Story 2.13); compare/route against the
     // selected server's portable id.
     let selected_for_exec = current_server_portable_id(state)?;
+    let mut local_encoding_servers = state.db.local_encoding_servers().map_err(storage_error_to_rpc)?;
+    local_encoding_servers.remove("");
+    if selected_for_exec.as_ref().is_some_and(|id| local_encoding_servers.contains(id)) {
+        local_encoding_servers.insert(String::new());
+    }
     let needs_provider_routing = match selected_for_exec.as_deref() {
         _ if add_servers.is_empty() => false,
         Some(sel) => add_servers.iter().any(|s| s != sel),
@@ -9048,6 +9061,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                 &delta,
                 &target,
                 crate::sync::ProviderSyncSource {
+                    local_encoding_servers,
                     provider: default_provider,
                     transcoding_profile,
                     providers_by_server,
@@ -9141,6 +9155,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                 &delta,
                 &target,
                 crate::sync::ProviderSyncSource {
+                    local_encoding_servers,
                     provider,
                     transcoding_profile,
                     providers_by_server: std::collections::HashMap::new(),
@@ -12771,6 +12786,7 @@ mod tests {
     fn reconcile_basket_server_ids_targets_portable_id() {
         fn cfg(id: &str, server_id: &str, url: &str, selected: bool) -> crate::db::ServerConfig {
             crate::db::ServerConfig {
+                transcoding_location: crate::db::TranscodingLocation::Server,
                 id: id.to_string(),
                 url: url.to_string(),
                 server_type: "jellyfin".to_string(),
@@ -14230,6 +14246,55 @@ mod tests {
             .await
             .expect("clear icon");
         assert_eq!(db.get_server(&id).unwrap().unwrap().icon, None);
+    }
+
+    #[tokio::test]
+    async fn server_transcoding_location_updates_atomically_and_matches_both_views() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let id = db
+            .upsert_server("http://one", "subsonic", "user", None, None, None, None)
+            .unwrap();
+        let other = db
+            .upsert_server("http://two", "subsonic", "user", None, None, None, None)
+            .unwrap();
+        let state = make_test_state(db.clone());
+        state.server_manager.write().await.load_from_db(&db);
+        for invalid in [
+            Value::Null,
+            json!(true),
+            json!(2),
+            json!("remote"),
+            json!("LOCAL"),
+        ] {
+            let error = handle_server_update(
+                &state,
+                Some(json!({"id":id,"name":"Changed","transcodingLocation":invalid})),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, ERR_INVALID_PARAMS);
+            assert_ne!(
+                db.get_server(&id).unwrap().unwrap().name.as_deref(),
+                Some("Changed")
+            );
+        }
+        handle_server_update(&state, Some(json!({"id":id,"transcodingLocation":"local"})))
+            .await
+            .unwrap();
+        let listed = handle_server_list(&state).await.unwrap();
+        let snapshot = handle_get_daemon_state(&state).await.unwrap();
+        let find = |rows: &Value, id: &str| {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .unwrap()["transcodingLocation"]
+                .clone()
+        };
+        assert_eq!(find(&listed, &id), "local");
+        assert_eq!(find(&listed, &other), "server");
+        assert_eq!(find(&snapshot["servers"], &id), "local");
+        assert_eq!(snapshot["currentServer"]["transcodingLocation"], "local");
     }
 
     #[tokio::test]
@@ -18707,7 +18772,7 @@ mod tests {
         assert_eq!(events.iter().filter(|e|e.contains("event=start")).count(), events.iter().filter(|e|e.contains("event=end")).count());
         assert!(!events.iter().any(|e|e.contains("outcome=interrupted")));
         let auto_run = crate::sync_logging::Run::new();
-        auto_run.scope(crate::run_auto_sync_via_provider(provider, None, state.device_manager.clone(),
+        auto_run.scope(crate::run_auto_sync_via_provider(provider, None, Default::default(), state.device_manager.clone(),
             state.sync_operation_manager.clone(), state.state_tx.clone(), "log-empty".into(),
             state.playback.sync_protection_observer())).await.unwrap();
         let events = auto_run.events();
@@ -18734,7 +18799,7 @@ mod tests {
         let run = crate::sync_logging::Run::new();
         // This path intentionally still returns Ok and does not admit execution.
         run.scope(crate::run_auto_sync_via_provider(FakeBrowseProvider::with_song_auth_error("fixture failure"),
-            None, state.device_manager.clone(), state.sync_operation_manager.clone(), state.state_tx.clone(),
+            None, Default::default(), state.device_manager.clone(), state.sync_operation_manager.clone(), state.state_tx.clone(),
             "log-failed-basket".into(), state.playback.sync_protection_observer())).await.unwrap();
         let events = run.events();
         for stage in ["basket_expansion", "preparation"] {

@@ -117,6 +117,7 @@ async fn benchmark_large_sync_retention() {
             &plan,
             &target,
             ProviderSyncSource {
+                local_encoding_servers: Default::default(),
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
                 providers_by_server: HashMap::new(),

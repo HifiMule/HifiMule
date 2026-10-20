@@ -65,6 +65,7 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     dependencies.stageWindowsAudioRuntimeForCargo(env.FFMPEG_DIR, target, output);
     env.HIFIMULE_TEST_FFMPEG = join(env.FFMPEG_DIR, "bin", "ffmpeg.exe");
     env = prependWindowsPath(env, join(env.FFMPEG_DIR, "bin"));
+    execute("node", ["scripts/verify-audio-runtime.mjs", "--capabilities-only", "--prefix", env.FFMPEG_DIR], { cwd: root, stdio: "inherit", env });
     env = withAudioRuntimeVerification(env);
   } else if (platform === "darwin") {
     const prefix = dependencies.ensureMacosAudioRuntime(target, { env });

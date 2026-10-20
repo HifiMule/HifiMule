@@ -11,12 +11,75 @@
     "--disable-everything", "--enable-avcodec", "--enable-avformat",
     "--enable-avutil", "--enable-swresample", "--enable-protocol=file,pipe",
     "--enable-demuxer=wav,flac,mov,mp3,aac,ogg,aiff,asf", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be,pcm_s24be,pcm_s32be,flac,alac,mp3,aac,opus,vorbis,wmav1,wmav2,wmapro,wmalossless",
-    "--enable-encoder=pcm_f32le,aac,flac", "--enable-muxer=pcm_f32le,mov,ipod,adts,flac", "--enable-parser=aac", "--enable-bsf=aac_adtstoasc", "--enable-filter=aresample,aformat"
+    "--enable-parser=aac", "--enable-bsf=aac_adtstoasc", "--enable-filter=aresample,aformat",
+    "--enable-libmp3lame", "--enable-libopus", "--enable-libvorbis",
+    "--enable-encoder=libmp3lame,aac,flac,alac,libopus,libvorbis,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le",
+    "--enable-muxer=mp3,mov,mp4,ipod,adts,flac,ogg,opus,wav,pcm_f32le"
   ],
   "windowsConfigureFlags": ["--disable-x86asm"],
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],
   "abiVersions": { "avcodec": "63.1.102", "avformat": "63.1.102", "avutil": "61.1.102", "swresample": "7.1.102" },
   "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.18.2", "libpulse-binding": "2.30.1" },
+  "encodingDependencies": [
+    {
+      "name": "lame",
+      "version": "3.100",
+      "archive": "lame-3.100.tar.gz",
+      "directory": "lame-3.100",
+      "url": "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz",
+      "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "license": "LGPL-2.0-or-later"
+    },
+    {
+      "name": "ogg",
+      "version": "1.3.5",
+      "archive": "ogg-1.3.5.tar.xz",
+      "directory": "libogg-1.3.5",
+      "url": "https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.xz",
+      "sha256": "c4d91be36fc8e54deae7575241e03f4211eb102afb3fc0775fbbc1b740016705",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "vorbis",
+      "version": "1.3.7",
+      "archive": "vorbis-1.3.7.tar.xz",
+      "directory": "libvorbis-1.3.7",
+      "url": "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz",
+      "sha256": "b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "opus",
+      "version": "1.5.2",
+      "archive": "opus-1.5.2.tar.gz",
+      "directory": "opus-1.5.2",
+      "url": "https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz",
+      "sha256": "65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1",
+      "license": "BSD-3-Clause"
+    }
+  ],
+  "requiredEncoders": [
+    "libmp3lame",
+    "aac",
+    "flac",
+    "alac",
+    "libvorbis",
+    "libopus",
+    "pcm_s16le",
+    "pcm_s24le",
+    "pcm_s32le",
+    "pcm_f32le"
+  ],
+  "requiredMuxers": [
+    "mp3",
+    "ipod",
+    "mp4",
+    "adts",
+    "flac",
+    "ogg",
+    "opus",
+    "wav"
+  ],
   "bufferPolicy": {
     "compressedChunkBytes": 65536,
     "compressedCapacityBytes": 8388608,
@@ -31,7 +94,7 @@
     "sourceSlotLimit": 2,
     "startupFillMilliseconds": 100
   },
-  "licenses": ["LGPL-2.1-or-later"],
+  "licenses": ["LGPL-2.1-or-later", "LGPL-2.0-or-later", "BSD-3-Clause"],
   "sourceSha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
   "verification": { "macosArm64": "candidate-required", "macosX64": "candidate-required", "linuxX64": "candidate-required", "windowsX64": "candidate-required" }
 }

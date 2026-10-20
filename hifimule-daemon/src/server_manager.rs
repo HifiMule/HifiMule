@@ -18,6 +18,7 @@ use crate::providers::{CredentialKind, MediaProvider, ProviderCredentials, Provi
 /// In-memory view of one configured server row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerRecord {
+    pub transcoding_location: crate::db::TranscodingLocation,
     pub id: String,
     pub url: String,
     pub server_type: String,
@@ -37,6 +38,7 @@ pub struct ServerRecord {
 impl From<ServerConfig> for ServerRecord {
     fn from(c: ServerConfig) -> Self {
         ServerRecord {
+            transcoding_location: c.transcoding_location,
             id: c.id,
             url: c.url,
             server_type: c.server_type,
@@ -98,6 +100,7 @@ impl ServerManager {
         // which silently masked any bug that confused the two identities.
         let portable_id = crate::db::derive_server_id(&server_type, "", "", None);
         self.servers = vec![ServerRecord {
+            transcoding_location: crate::db::TranscodingLocation::Server,
             id: id.clone(),
             url: String::new(),
             server_type,

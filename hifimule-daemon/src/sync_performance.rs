@@ -6,6 +6,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SyncPerformance {
     pub copy_buffer_bytes: usize,
+    pub local_encoding_workers: usize,
     pub staging_max_tracks: usize,
     pub staging_max_bytes: u64,
     pub checkpoint_track_updates: usize,
@@ -16,6 +17,7 @@ impl Default for SyncPerformance {
     fn default() -> Self {
         Self {
             copy_buffer_bytes: 1024 * 1024,
+            local_encoding_workers: 0,
             staging_max_tracks: 8,
             staging_max_bytes: 2048 * 1024 * 1024,
             checkpoint_track_updates: 1000,
@@ -64,11 +66,12 @@ impl SyncPerformance {
         let kib = field("copy_buffer_kib", 8, 16384, 1024);
         let mib = field("staging_max_mib", 2048, 32768, 2048);
         Self {
+            local_encoding_workers: field("local_encoding_workers", 0, 64, 0) as usize,
             copy_buffer_bytes: kib
                 .checked_mul(1024)
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(defaults.copy_buffer_bytes),
-            staging_max_tracks: field("staging_max_tracks", 1, 32,8) as usize,
+            staging_max_tracks: field("staging_max_tracks", 1, 32, 8) as usize,
             staging_max_bytes: mib
                 .checked_mul(1024 * 1024)
                 .unwrap_or(defaults.staging_max_bytes),
@@ -87,6 +90,31 @@ impl SyncPerformance {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn local_workers_validate_independently() {
+        for valid in [0, 1, 64] {
+            assert_eq!(
+                SyncPerformance::from_json(Some(&json!({"local_encoding_workers":valid})))
+                    .local_encoding_workers,
+                valid
+            );
+        }
+        for invalid in [
+            Value::Null,
+            json!(1.5),
+            json!(-1),
+            json!(65),
+            json!("4"),
+            json!(true),
+            json!(1e100),
+        ] {
+            let value = json!({"local_encoding_workers":invalid,"copy_buffer_kib":64});
+            let actual = SyncPerformance::from_json(Some(&value));
+            assert_eq!(actual.local_encoding_workers, 0);
+            assert_eq!(actual.copy_buffer_bytes, 65536);
+        }
+    }
 
     #[test]
     fn unbounded_json_numbers_fall_back_independently() {
