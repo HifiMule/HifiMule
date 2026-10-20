@@ -224,11 +224,27 @@ async fn msc_cleanup_empty_dirs(path: &std::path::Path) -> Result<()> {
 #[derive(Debug)]
 pub struct MscBackend {
     pub root: PathBuf,
+    #[cfg(test)]
+    storage_query: Option<TestStorageQuery>,
+}
+
+#[cfg(test)]
+struct TestStorageQuery(Arc<dyn Fn(&Path) -> Result<u64> + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for TestStorageQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestStorageQuery")
+    }
 }
 
 impl MscBackend {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            #[cfg(test)]
+            storage_query: None,
+        }
     }
 }
 
@@ -588,7 +604,17 @@ impl DeviceIO for MscBackend {
     }
 
     async fn free_space(&self) -> Result<u64> {
-        crate::device::get_storage_info_free_bytes(&self.root)
+        let root = self.root.clone();
+        #[cfg(test)]
+        let query = self.storage_query.as_ref().map(|query| query.0.clone());
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(query) = query {
+                return query(&root);
+            }
+            crate::device::get_storage_info_free_bytes(&root)
+        })
+        .await?
     }
 
     async fn ensure_dir(&self, path: &str) -> Result<()> {
@@ -864,6 +890,51 @@ pub mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn msc_free_space_query_keeps_current_thread_runtime_schedulable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started = std::sync::Mutex::new(Some(started_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release = std::sync::Mutex::new(release_rx);
+        let finished = Arc::new(AtomicBool::new(false));
+        let query_finished = finished.clone();
+        let backend = MscBackend {
+            root: PathBuf::from("controlled-storage"),
+            storage_query: Some(TestStorageQuery(Arc::new(move |root| {
+                assert_eq!(root, Path::new("controlled-storage"));
+                started.lock().unwrap().take().unwrap().send(()).unwrap();
+                let released = release.lock().unwrap().recv_timeout(Duration::from_secs(2));
+                query_finished.store(true, Ordering::Release);
+                released?;
+                Ok(123456)
+            }))),
+        };
+        let query = tokio::spawn(async move { backend.free_space().await });
+        started_rx.await.unwrap();
+        // If free_space executes the query inline, this task cannot resume until
+        // the query's external watchdog expires; that is an explicit failure.
+        assert!(!finished.load(Ordering::Acquire));
+        tokio::task::yield_now().await;
+        assert!(!query.is_finished());
+        release_tx.send(()).unwrap();
+        assert_eq!(query.await.unwrap().unwrap(), 123456);
+    }
+
+    #[tokio::test]
+    async fn msc_free_space_propagates_query_errors_and_blocking_task_panics() {
+        let backend = MscBackend {
+            root: PathBuf::new(),
+            storage_query: Some(TestStorageQuery(Arc::new(|_| anyhow::bail!("storage unavailable")))),
+        };
+        assert_eq!(backend.free_space().await.unwrap_err().to_string(), "storage unavailable");
+        let backend = MscBackend {
+            root: PathBuf::new(),
+            storage_query: Some(TestStorageQuery(Arc::new(|_| panic!("storage query panicked")))),
+        };
+        assert!(backend.free_space().await.unwrap_err().to_string().contains("storage query panicked"));
+    }
 
     #[cfg(unix)]
     pub(crate) struct DeniedDirectory {

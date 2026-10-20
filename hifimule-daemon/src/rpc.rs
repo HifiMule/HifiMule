@@ -5,7 +5,7 @@ use crate::providers::{
     SUBSONIC_PLAYLISTS_LIBRARY_ID, ServerType, ServerTypeHint, TrackListFilter, server_type_slug,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path, State},
     http::{Request, StatusCode},
@@ -270,6 +270,8 @@ pub struct RpcServerConfig {
     pub descriptor: hifimule_lifecycle::OwnerDescriptor,
     pub ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Schedule sync work on the core while the RPC runtime serves controls.
+    pub core_runtime: tokio::runtime::Handle,
 }
 
 /// The daemon menu uses the same start operation as playback.startSelection.
@@ -508,32 +510,7 @@ pub async fn run_server(
         }
     });
 
-    let app = Router::new()
-        .route("/", post(handler))
-        .route("/jellyfin/image/{*id}", get(handle_proxy_image))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin([
-                    "http://localhost:1420"
-                        .parse::<http::HeaderValue>()
-                        .unwrap(),
-                    "http://127.0.0.1:1420"
-                        .parse::<http::HeaderValue>()
-                        .unwrap(),
-                    "tauri://localhost".parse::<http::HeaderValue>().unwrap(),
-                    "https://tauri.localhost"
-                        .parse::<http::HeaderValue>()
-                        .unwrap(),
-                ])
-                .allow_methods([http::Method::POST, http::Method::GET])
-                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]),
-        )
-        .layer(middleware::from_fn_with_state(
-            token,
-            authenticate_local_request,
-        ))
-        .with_state(state.clone());
+    let app = rpc_router(state.clone(), token, config.core_runtime);
 
     config
         .listener
@@ -564,27 +541,121 @@ pub async fn run_server(
     result
 }
 
+fn rpc_router(
+    state: Arc<AppState>,
+    token: Arc<String>,
+    core_runtime: tokio::runtime::Handle,
+) -> Router {
+    Router::new()
+        .route("/", post(dispatch_handler))
+        .route("/jellyfin/image/{*id}", get(handle_proxy_image))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin([
+                    "http://localhost:1420"
+                        .parse::<http::HeaderValue>()
+                        .unwrap(),
+                    "http://127.0.0.1:1420"
+                        .parse::<http::HeaderValue>()
+                        .unwrap(),
+                    "tauri://localhost".parse::<http::HeaderValue>().unwrap(),
+                    "https://tauri.localhost"
+                        .parse::<http::HeaderValue>()
+                        .unwrap(),
+                ])
+                .allow_methods([http::Method::POST, http::Method::GET])
+                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]),
+        )
+        .layer(middleware::from_fn_with_state(
+            token,
+            authenticate_local_request,
+        ))
+        .layer(Extension(core_runtime))
+        .with_state(state)
+}
+
+fn request_rejected_while_stopping(state: &AppState, method: &str) -> bool {
+    (LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2
+        || state.sync_operation_manager.is_shutdown_committed())
+        && !matches!(method, "daemon.health" | "playback.retryCheckpoint")
+}
+
+fn stopped_response(id: Value) -> Json<JsonRpcResponse> {
+    Json(JsonRpcResponse {
+        jsonrpc: "2.0".into(),
+        result: None,
+        id,
+        error: Some(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "The daemon is stopping".into(),
+            data: Some(serde_json::json!({"errorCode":"DAEMON_STOPPED"})),
+        }),
+    })
+}
+
+// Dropping an HTTP request cancels its unfinished handler. Execution already
+// detached by sync_execute keeps its own pipeline guard and continues normally.
+struct ForwardedRequest(tokio::task::AbortHandle);
+
+impl Drop for ForwardedRequest {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn dispatch_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(core_runtime): Extension<tokio::runtime::Handle>,
+    Json(payload): Json<JsonRpcRequest>,
+) -> Json<JsonRpcResponse> {
+    if request_rejected_while_stopping(&state, &payload.method) {
+        return stopped_response(payload.id);
+    }
+    if !matches!(
+        payload.method.as_str(),
+        "sync_calculate_delta"
+            | "sync_prepare"
+            | "sync_detect_changes"
+            | "sync_execute"
+            | "basket.estimate"
+            | "basket.autoFill"
+    ) {
+        return handler(State(state), Json(payload)).await;
+    }
+    // Heavy reads also need admission: queued or running work must not cross
+    // the shutdown fence or disappear from its drain accounting.
+    let Some(admission) = state.sync_operation_manager.try_admit_mutation() else {
+        return stopped_response(payload.id);
+    };
+    let id = payload.id.clone();
+    let task = core_runtime.spawn(async move {
+        let _admission = admission;
+        handler(State(state), Json(payload)).await
+    });
+    let _request = ForwardedRequest(task.abort_handle());
+    match task.await {
+        Ok(response) => response,
+        Err(error) if error.is_cancelled() => stopped_response(id),
+        Err(_) => Json(JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            result: None,
+            id,
+            error: Some(JsonRpcError {
+                code: ERR_INTERNAL_ERROR,
+                message: "Sync request failed unexpectedly".into(),
+                data: None,
+            }),
+        }),
+    }
+}
+
 async fn handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    if (LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2
-        || state.sync_operation_manager.is_shutdown_committed())
-        && !matches!(
-            payload.method.as_str(),
-            "daemon.health" | "playback.retryCheckpoint"
-        )
-    {
-        return Json(JsonRpcResponse {
-            jsonrpc: "2.0".into(),
-            result: None,
-            id: payload.id,
-            error: Some(JsonRpcError {
-                code: ERR_SYNC_IN_PROGRESS,
-                message: "The daemon is stopping".into(),
-                data: Some(serde_json::json!({"errorCode":"DAEMON_STOPPED"})),
-            }),
-        });
+    if request_rejected_while_stopping(&state, &payload.method) {
+        return stopped_response(payload.id);
     }
     let mut mutation_guard = if is_mutating_method(&payload.method) {
         match state.sync_operation_manager.try_admit_mutation() {
@@ -16864,6 +16935,7 @@ mod tests {
                 descriptor: descriptor.clone(),
                 ready_tx,
                 shutdown: task_shutdown,
+                core_runtime: tokio::runtime::Handle::current(),
             },
             tokio::sync::mpsc::unbounded_channel().1,
             db,
@@ -17398,6 +17470,7 @@ mod tests {
     // --- Fake provider for browse handler tests ---
 
     struct FakeBrowseProvider {
+        runtime_block: Option<Arc<RuntimeBlock>>,
         change_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
         change_outcome: &'static str,
         album_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
@@ -17418,6 +17491,7 @@ mod tests {
             genres: Vec<crate::domain::models::Genre>,
         ) -> Arc<Self> {
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17440,6 +17514,7 @@ mod tests {
             let mut genre_tracks = HashMap::new();
             genre_tracks.insert(genre_id.to_string(), tracks);
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17459,6 +17534,7 @@ mod tests {
             let mut songs = HashMap::new();
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17483,6 +17559,7 @@ mod tests {
             let mut songs = HashMap::new();
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17505,6 +17582,7 @@ mod tests {
                 .map(|album| (album.album.id.clone(), album))
                 .collect();
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17522,6 +17600,7 @@ mod tests {
 
         fn with_song_auth_error(message: &str) -> Arc<Self> {
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17539,6 +17618,7 @@ mod tests {
 
         fn with_tracks(tracks: Vec<crate::domain::models::Song>) -> Arc<Self> {
             Arc::new(Self {
+                runtime_block: None,
                 change_gate: None,
                 change_outcome: "success",
                 album_gate: None,
@@ -17760,6 +17840,7 @@ mod tests {
             &self,
             album_id: &str,
         ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            if let Some(block) = &self.runtime_block { block.enter("album"); }
             if let Some(gate) = &self.album_gate {
                 gate.0.notify_one();
                 gate.1.notified().await;
@@ -17809,6 +17890,12 @@ mod tests {
             _: &str,
             _: Option<&crate::providers::TranscodeProfile>,
         ) -> Result<String, ProviderError> {
+            if let Some(block) = &self.runtime_block {
+                block.enter("download");
+                // Once released, let the producer's cancellation select own
+                // completion without manufacturing a source/download failure.
+                return std::future::pending().await;
+            }
             unimplemented!()
         }
         async fn cover_art_url(&self, _: &str) -> Result<String, ProviderError> {
@@ -17819,6 +17906,10 @@ mod tests {
             _: Option<&str>,
             _: &crate::providers::ProviderChangeContext,
         ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
+            if let Some(block) = &self.runtime_block {
+                block.enter("changes");
+                return Ok(vec![]);
+            }
             let gate = self.change_gate.as_ref().expect("change detection fixture configured");
             gate.0.notify_one();
             gate.1.notified().await;
@@ -17900,7 +17991,7 @@ mod tests {
             Ok((self.tracks.iter().skip(offset as usize).take(limit as usize).cloned().collect(), self.tracks.len() as u32))
         }
         fn server_type(&self) -> crate::providers::ServerType {
-            if self.album_gate.is_some() { crate::providers::ServerType::Subsonic } else { crate::providers::ServerType::Jellyfin }
+            if self.album_gate.is_some() || self.runtime_block.is_some() { crate::providers::ServerType::Subsonic } else { crate::providers::ServerType::Jellyfin }
         }
         fn capabilities(&self) -> crate::providers::Capabilities {
             crate::providers::Capabilities {
@@ -19740,4 +19831,5 @@ mod tests {
                 .unwrap()
         );
     }
+    include!("rpc/runtime_tests.rs");
 }

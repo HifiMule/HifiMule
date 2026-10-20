@@ -467,6 +467,7 @@ pub fn start_daemon_core(
             let rpc_shutdown = Arc::new(AtomicBool::new(false));
             let rpc_shutdown_server = Arc::clone(&rpc_shutdown);
             let rpc_native_bridge = core_native_bridge.clone();
+            let core_runtime = tokio::runtime::Handle::current();
             // Keep authenticated health on a separate runtime until the device/core
             // runtime (including blocking MTP calls) has actually shut down.
             let rpc_thread = thread::spawn(move || {
@@ -475,7 +476,7 @@ pub fn start_daemon_core(
                     Err(error) => { let _ = ready_tx.send(Err(error.to_string())); return; }
                 };
                 if let Err(error) = rpc_runtime.block_on(rpc::run_server(
-                    rpc::RpcServerConfig { listener, descriptor, ready_tx, shutdown: rpc_shutdown_server },
+                    rpc::RpcServerConfig { listener, descriptor, ready_tx, shutdown: rpc_shutdown_server, core_runtime },
                     menu_start_rx,
                     db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc, playback_rpc,
                     rpc_native_bridge,
