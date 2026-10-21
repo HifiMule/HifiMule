@@ -533,7 +533,6 @@ export class MediaCard {
             if (errorEl) errorEl.style.display = 'none';
 
             try {
-                const { rpcCall } = await import('../rpc');
                 await rpcCall('playlist.create', { name, itemIds });
                 invalidatePlaylistsCache();
                 dialog.hide();
@@ -608,7 +607,6 @@ export class MediaCard {
             const errorEl = dialog.querySelector('#ctx-track-error') as HTMLElement | null;
 
             try {
-                const { rpcCall } = await import('../rpc');
                 const result = await rpcCall('browse.listPlaylists');
                 const playlists: Array<{ id: string; name: string }> = result.playlists ?? [];
 

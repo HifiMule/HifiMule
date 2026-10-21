@@ -1,4 +1,4 @@
-import { destinationSelect, getDaemonState, type DaemonDestinationState, type Destination } from '../rpc';
+import { destinationSelect, getDaemonState, rpcCall, type DaemonDestinationState, type Destination } from '../rpc';
 import { t } from '../i18n';
 import { InitDeviceModal } from './InitDeviceModal';
 import { basketStore } from '../state/basket';
@@ -220,7 +220,7 @@ export class DestinationHub {
             }
             if (!current()) return;
             if (destination.kind === 'device') {
-                const basket = await import('../rpc').then(({ rpcCall }) => rpcCall('manifest_get_basket')) as any;
+                const basket = await rpcCall('manifest_get_basket') as any;
                 if (!current()) return;
                 basketStore.setDaemonContext(basket?.targetDeviceId ?? destination.deviceId,basket?.basketHash ?? null);
                 basketStore.hydrateFromDaemon(basket?.basketItems ?? []);

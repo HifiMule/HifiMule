@@ -4584,20 +4584,20 @@ fn autofill_config_accessor_parity() {
     assert!(keyed.enabled_for(Some("srv-1")));
     assert_eq!(keyed.max_bytes_for(Some("srv-1")), Some(4242));
     // Single-entry fallback for unkeyed (no-server-context) callers.
-    assert!(keyed.legacy_enabled());
-    assert_eq!(keyed.legacy_max_bytes(), Some(4242));
+    assert!(keyed.enabled_for(None));
+    assert_eq!(keyed.max_bytes_for(None), Some(4242));
 
     // Legacy-block fallback when no pipelines exist.
     let mut legacy_cfg = AutoFillConfig::default();
     legacy_cfg.set_legacy(true, Some(77));
-    assert!(legacy_cfg.legacy_enabled());
-    assert_eq!(legacy_cfg.legacy_max_bytes(), Some(77));
+    assert!(legacy_cfg.enabled_for(None));
+    assert_eq!(legacy_cfg.max_bytes_for(None), Some(77));
     assert!(legacy_cfg.enabled_for(Some("srv-x")));
 
     // Empty config: disabled, no budget.
     let empty = AutoFillConfig::default();
-    assert!(!empty.legacy_enabled());
-    assert_eq!(empty.legacy_max_bytes(), None);
+    assert!(!empty.enabled_for(None));
+    assert_eq!(empty.max_bytes_for(None), None);
 
     // set_for clears any parked legacy block.
     let mut mixed = AutoFillConfig::default();
@@ -4622,8 +4622,8 @@ fn manifest_reads_legacy_autofill_block() {
             max_bytes: Some(8000),
         })
     );
-    assert!(manifest.auto_fill.legacy_enabled());
-    assert_eq!(manifest.auto_fill.legacy_max_bytes(), Some(8000));
+    assert!(manifest.auto_fill.enabled_for(None));
+    assert_eq!(manifest.auto_fill.max_bytes_for(None), Some(8000));
 }
 
 #[test]
@@ -4662,7 +4662,7 @@ fn autofill_config_deserializes_partial_legacy_block() {
         r#"{ "device_id": "d", "version": "1.0", "auto_fill": { "maxBytes": 123 } }"#,
     )
     .unwrap();
-    assert_eq!(manifest.auto_fill.legacy_max_bytes(), Some(123));
+    assert_eq!(manifest.auto_fill.max_bytes_for(None), Some(123));
 }
 
 #[test]

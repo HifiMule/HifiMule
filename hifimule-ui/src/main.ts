@@ -1,3 +1,6 @@
+import { rpcCall } from './rpc';
+import { basketStore } from './state/basket';
+import { listen } from '@tauri-apps/api/event';
 import { escapeHtml } from './html';
 import '@shoelace-style/shoelace/dist/themes/dark.css';
 import './shoelace';
@@ -50,8 +53,6 @@ async function init() {
     // prompt scoped to the selected server's URL.
     registerReauthHandler();
 
-    const { rpcCall } = await import('./rpc');
-    const { listen } = await import('@tauri-apps/api/event');
     await listen('hifimule-open-playback-settings', () => openPlaybackSettings());
     await listen('hifimule-open-audio-output', () => openAudioOutput());
 
@@ -326,7 +327,6 @@ async function routeFromDaemonState(state: any): Promise<void> {
 
     renderMainLayout(state);
 
-    const { basketStore } = await import('./state/basket');
     basketStore.setActiveServerId(selectedServerPortableId);
 
     if (selectedServerId) {
@@ -340,7 +340,6 @@ async function routeFromDaemonState(state: any): Promise<void> {
 
 /** Re-fetches daemon state and re-routes (after login/select/remove/logout). */
 async function reloadFromDaemon(): Promise<void> {
-    const { rpcCall } = await import('./rpc');
     try {
         const state = await rpcCall('get_daemon_state');
         await routeFromDaemonState(state);
@@ -359,7 +358,6 @@ function registerReauthHandler(): void {
         if (reauthInFlight) return;
         reauthInFlight = true;
         try {
-            const { rpcCall } = await import('./rpc');
             const state = await rpcCall('get_daemon_state');
             const url: string | undefined = state?.currentServer?.url;
             const serverId: string | undefined = state?.currentServer?.localId;

@@ -522,17 +522,6 @@ impl AutoFillConfig {
         }
     }
 
-    /// Server-agnostic enabled read for callers without server context (resolves the single
-    /// migrated pipeline of a single-server install, else the legacy block).
-    pub fn legacy_enabled(&self) -> bool {
-        self.enabled_for(None)
-    }
-
-    /// Server-agnostic max-bytes read for callers without server context.
-    pub fn legacy_max_bytes(&self) -> Option<u64> {
-        self.max_bytes_for(None)
-    }
-
     /// Upserts the pipeline for `server_id` from a legacy-equivalent `{ enabled, maxBytes }` and
     /// clears any parked legacy block. Used by `setAutoFill` (which can resolve the selected id).
     pub fn set_for(&mut self, server_id: &str, enabled: bool, max_bytes: Option<u64>) {

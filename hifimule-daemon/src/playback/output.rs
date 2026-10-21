@@ -421,116 +421,6 @@ impl BoundaryPcmConsumer {
     }
 }
 
-pub struct PcmConsumer {
-    channels: usize,
-    refill: usize,
-    buffering: bool,
-}
-
-impl PcmConsumer {
-    pub fn new(channels: usize, refill: usize) -> Self {
-        Self {
-            channels,
-            refill,
-            buffering: true,
-        }
-    }
-
-    pub fn render<T: cpal::Sample + cpal::FromSample<f32>>(
-        &mut self,
-        output: &mut [T],
-        pcm: &ArrayQueue<f32>,
-        enabled: bool,
-        finished: bool,
-    ) -> Rendered {
-        let mut result = Rendered {
-            samples: 0,
-            last_audio_frame: None,
-        };
-        for (index, frame) in output.chunks_mut(self.channels).enumerate() {
-            if self.buffering
-                && (pcm.len() >= self.refill || finished && pcm.len() >= self.channels)
-            {
-                self.buffering = false;
-            }
-            let ready = enabled
-                && !self.buffering
-                && frame.len() == self.channels
-                && pcm.len() >= self.channels;
-            if ready {
-                // One consumer: a full frame observed above cannot be removed
-                // by the producer. Never consume half of an interleaved frame.
-                for target in frame {
-                    *target = T::from_sample(pcm.pop().unwrap_or(0.0));
-                }
-                result.samples += self.channels as u64;
-                result.last_audio_frame = Some(index + 1);
-            } else {
-                frame.fill(T::from_sample(0.0));
-                if enabled {
-                    self.buffering = true;
-                }
-            }
-        }
-        result
-    }
-
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub fn render_with_tail<T: cpal::Sample + cpal::FromSample<f32>>(
-        &mut self,
-        output: &mut [T],
-        pcm: &ArrayQueue<f32>,
-        replay: &ArrayQueue<SubmittedFrame>,
-        tail: &SubmittedTail,
-        enabled: bool,
-        finished: bool,
-    ) -> Rendered {
-        let mut result = Rendered {
-            samples: 0,
-            last_audio_frame: None,
-        };
-        for (index, output_frame) in output.chunks_mut(self.channels).enumerate() {
-            if enabled && let Some(replayed) = replay.pop() {
-                debug_assert_eq!(usize::from(replayed.channels), self.channels);
-                for (channel, target) in output_frame.iter_mut().enumerate() {
-                    *target = T::from_sample(replayed.samples[channel]);
-                }
-                if replayed.logical_audio {
-                    result.samples += self.channels as u64;
-                    result.last_audio_frame = Some(index + 1);
-                }
-                tail.record(replayed);
-                continue;
-            }
-            if self.buffering
-                && (pcm.len() >= self.refill || finished && pcm.len() >= self.channels)
-            {
-                self.buffering = false;
-            }
-            let ready = enabled
-                && !self.buffering
-                && output_frame.len() == self.channels
-                && pcm.len() >= self.channels;
-            let mut samples = [0.0; 2];
-            if ready {
-                for (channel, target) in output_frame.iter_mut().enumerate() {
-                    samples[channel] = pcm.pop().unwrap_or(0.0);
-                    *target = T::from_sample(samples[channel]);
-                }
-                result.samples += self.channels as u64;
-                result.last_audio_frame = Some(index + 1);
-            } else {
-                output_frame.fill(T::from_sample(0.0));
-                if enabled {
-                    self.buffering = true;
-                }
-            }
-            tail.record(SubmittedFrame::new(samples, self.channels, ready));
-        }
-        result
-    }
-}
-
 pub struct PresentationClock {
     origin: Instant,
     until_ns: AtomicU64,
@@ -852,23 +742,66 @@ mod tests {
     #[test]
     fn underrun_never_splits_stereo_and_waits_for_refill() {
         let pcm = ArrayQueue::new(8);
-        let mut consumer = PcmConsumer::new(2, 4);
+        let successor = ArrayQueue::new(2);
+        let mut consumer = BoundaryPcmConsumer::new(2, 4);
         pcm.push(1.0).unwrap();
         let mut output = [9.0f32; 2];
-        consumer.render(&mut output, &pcm, true, false);
+        consumer.render(
+            &mut output,
+            &pcm,
+            true,
+            false,
+            &successor,
+            false,
+            false,
+            true,
+        );
         assert_eq!(output, [0.0, 0.0]);
         assert_eq!(pcm.len(), 1);
         for sample in [2.0, 3.0, 4.0] {
             pcm.push(sample).unwrap();
         }
         let mut output = [0.0f32; 6];
-        assert_eq!(consumer.render(&mut output, &pcm, true, false).samples, 4);
+        assert_eq!(
+            consumer
+                .render(
+                    &mut output,
+                    &pcm,
+                    true,
+                    false,
+                    &successor,
+                    false,
+                    false,
+                    true
+                )
+                .rendered
+                .samples,
+            4
+        );
         assert_eq!(output, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
         pcm.push(5.0).unwrap();
         pcm.push(6.0).unwrap();
-        consumer.render(&mut output, &pcm, true, false);
+        consumer.render(
+            &mut output,
+            &pcm,
+            true,
+            false,
+            &successor,
+            false,
+            false,
+            true,
+        );
         assert_eq!(pcm.len(), 2);
-        consumer.render(&mut output, &pcm, true, true);
+        consumer.render(
+            &mut output,
+            &pcm,
+            true,
+            true,
+            &successor,
+            false,
+            false,
+            true,
+        );
         assert_eq!(output[..2], [5.0, 6.0]);
     }
 
@@ -982,11 +915,15 @@ mod tests {
         }
         let replay = ArrayQueue::new(4);
         let tail = SubmittedTail::new(2);
-        let mut consumer = PcmConsumer::new(2, 2);
+        let successor = ArrayQueue::new(2);
+        let mut consumer = BoundaryPcmConsumer::new(2, 2);
         let mut first = [0.0f32; 6];
         assert_eq!(
             consumer
-                .render_with_tail(&mut first, &pcm, &replay, &tail, true, true)
+                .render_with_tail(
+                    &mut first, &pcm, true, true, &successor, false, false, &replay, &tail, true,
+                )
+                .rendered
                 .samples,
             6
         );
@@ -997,7 +934,19 @@ mod tests {
         let mut paused = [9.0f32; 2];
         assert_eq!(
             consumer
-                .render_with_tail(&mut paused, &pcm, &replay, &tail, false, true)
+                .render_with_tail(
+                    &mut paused,
+                    &pcm,
+                    true,
+                    true,
+                    &successor,
+                    false,
+                    false,
+                    &replay,
+                    &tail,
+                    false,
+                )
+                .rendered
                 .samples,
             0
         );
@@ -1006,7 +955,19 @@ mod tests {
         let mut resumed = [0.0f32; 4];
         assert_eq!(
             consumer
-                .render_with_tail(&mut resumed, &pcm, &replay, &tail, true, true)
+                .render_with_tail(
+                    &mut resumed,
+                    &pcm,
+                    true,
+                    true,
+                    &successor,
+                    false,
+                    false,
+                    &replay,
+                    &tail,
+                    true,
+                )
+                .rendered
                 .samples,
             4
         );

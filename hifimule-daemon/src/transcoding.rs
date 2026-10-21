@@ -33,13 +33,6 @@ pub fn load_profiles(path: &Path) -> Result<Vec<DeviceProfileEntry>> {
     Ok(file.profiles)
 }
 
-/// Find a profile by ID. Returns None if not found or if the profile is passthrough (null payload).
-pub fn find_device_profile(path: &Path, profile_id: &str) -> Result<Option<Value>> {
-    let profiles = load_profiles(path)?;
-    let entry = profiles.into_iter().find(|p| p.id == profile_id);
-    Ok(entry.and_then(|e| e.device_profile))
-}
-
 /// Seed or merge the default device-profiles.json into `dest_path`.
 /// Existing customer values win; embedded defaults fill missing attributes and
 /// append newly shipped profiles.
@@ -190,29 +183,6 @@ mod tests {
         let path = std::path::Path::new("/nonexistent/device-profiles.json");
         let result = load_profiles(path);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_find_device_profile_known_id() {
-        let (_dir, path) = write_temp_profiles(VALID_JSON);
-        let result = find_device_profile(&path, "rockbox-mp3-320").unwrap();
-        assert!(result.is_some());
-        let val = result.unwrap();
-        assert_eq!(val["Name"], "Test");
-    }
-
-    #[test]
-    fn test_find_device_profile_passthrough_returns_none() {
-        let (_dir, path) = write_temp_profiles(VALID_JSON);
-        let result = find_device_profile(&path, "passthrough").unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_find_device_profile_unknown_id() {
-        let (_dir, path) = write_temp_profiles(VALID_JSON);
-        let result = find_device_profile(&path, "does-not-exist").unwrap();
-        assert!(result.is_none());
     }
 
     #[test]

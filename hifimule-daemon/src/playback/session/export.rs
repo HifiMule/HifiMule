@@ -617,13 +617,28 @@ mod tests {
         let audio_running = running.clone();
         let audio_worker = std::thread::spawn(move || {
             let pcm = ArrayQueue::new(2048);
-            let mut consumer = crate::playback::output::PcmConsumer::new(2, 480);
+            let successor = ArrayQueue::new(2);
+            let mut consumer = crate::playback::output::BoundaryPcmConsumer::new(2, 480);
             let mut output = [0f32; 480];
             let mut underruns = 0;
             let mut callbacks = 0;
             while audio_running.load(Ordering::Acquire) {
                 while pcm.push(0.1).is_ok() {}
-                if consumer.render(&mut output, &pcm, true, false).samples != 480 {
+                if consumer
+                    .render(
+                        &mut output,
+                        &pcm,
+                        true,
+                        false,
+                        &successor,
+                        false,
+                        false,
+                        true,
+                    )
+                    .rendered
+                    .samples
+                    != 480
+                {
                     underruns += 1;
                 }
                 callbacks += 1;
