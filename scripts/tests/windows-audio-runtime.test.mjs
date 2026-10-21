@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-import { createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyInstalledWindowsBundle, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
+import { buildOfficialSource, createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyInstalledWindowsBundle, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
 
 test("Windows PATH normalization retains entries from competing case aliases", () => {
   const source = { Path: "C:\\Rust\\bin", PATH: "C:\\Windows", path: "C:\\Rust\\bin", KEEP: "yes" };
@@ -85,6 +85,28 @@ test("creates the isolated GPG home under a short temporary root", () => {
     assert.ok(home.length < 100, `GPG home is too long for an MSYS2 agent socket: ${home}`);
   } finally { rmSync(temporaryRoot, { recursive: true, force: true }); }
 });
+
+for (const extractionFails of [false, true]) {
+  test(`Windows source workspace avoids staging path length and cleans up after ${extractionFails ? 'extraction failure' : 'invalid source'}`, t => {
+    const parent = mkdtempSync(join(tmpdir(), "hm-staging-"));
+    t.after(() => rmSync(parent, { recursive: true, force: true }));
+    const staging = join(parent, "ffmpeg-9.0.2-official-x86_64-pc-windows-msvc.staging-3252-d88e00dd-b3e7-4d5e-b047-ff9e41976286");
+    const extractionError = new Error("fixture extraction failure");
+    let sourceRoot;
+    assert.throws(() => buildOfficialSource("fixture.tar.xz", staging, "x86_64-pc-windows-msvc", {
+      bash: "fixture-bash", librarian: "fixture-lib", env: {},
+      execFileSync(_command, args) {
+        sourceRoot = args[args.indexOf("-C") + 1];
+        assert.equal(existsSync(sourceRoot), true);
+        const compilerDependency = join(sourceRoot, "libvorbis-1.3.7/build-hifimule/CMakeFiles/CMakeScratch/TryCompile-axk2wi/CMakeFiles/cmTC_c9011.dir/compiler_depend.make");
+        assert.ok(compilerDependency.length < 250, `CMake path exceeds native tool limit: ${compilerDependency}`);
+        assert.equal(sourceRoot.startsWith(staging), false);
+        if (extractionFails) throw extractionError;
+      },
+    }), extractionFails ? error => error === extractionError : /Official FFmpeg archive did not contain/);
+    assert.equal(existsSync(sourceRoot), false, "failed builds must remove their source workspace");
+  });
+}
 
 const root = resolve(import.meta.dirname, "../..");
 const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runtime.json"), "utf8"));

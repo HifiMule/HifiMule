@@ -211,7 +211,7 @@ export function verifyOfficialSignature(archive, signature, key, options = {}) {
   } finally { rmSync(home, { recursive: true, force: true }); }
 }
 
-function buildOfficialSource(archive, staging, target, options = {}) {
+export function buildOfficialSource(archive, staging, target, options = {}) {
   const execute = options.execFileSync ?? execFileSync;
   const baseEnv = options.env ?? process.env;
   const bash = options.bash ?? findMsys2Bash(baseEnv);
@@ -219,9 +219,10 @@ function buildOfficialSource(archive, staging, target, options = {}) {
   if (!options.bash) validateMsys2Toolchain(bash);
   const librarian = options.librarian ?? executable(["lib.exe"], baseEnv);
   if (!librarian) fail("MSVC lib.exe is missing; run the build from a Visual Studio Native Tools environment");
-  const sourceRoot = `${staging}.source`;
-  rmSync(sourceRoot, { recursive: true, force: true });
-  mkdirSync(sourceRoot, { recursive: true });
+  // CMake's nested compiler checks exceed NMake's path limit when sources
+  // inherit the long runtime staging name. Keep all build sources short-lived
+  // in a short, uniquely owned directory; install into staging as before.
+  const sourceRoot = mkdtempSync(join(tmpdir(), "hm-audio-"));
   try {
     execute(windowsTarExecutable(baseEnv), ["-xf", archive, "-C", sourceRoot], { stdio: "inherit", env: baseEnv });
     const source = join(sourceRoot, `ffmpeg-${manifest.ffmpegRelease}`);
