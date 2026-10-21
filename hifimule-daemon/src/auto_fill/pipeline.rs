@@ -1261,23 +1261,6 @@ fn filter_stage(cands: Vec<Candidate>, f: &FilterStage) -> Vec<Candidate> {
         .collect()
 }
 
-/// Apply the consumed memory modifiers: drop tracks still in their cooldown window and, when
-/// `played_exclusion` is set, drop any track with a recorded play. Time math derives "now" from
-/// the snapshot — never from a clock.
-fn memory_stage(
-    cands: Vec<Candidate>,
-    mem: &MemoryStage,
-    hist: &HistorySnapshot,
-) -> Vec<Candidate> {
-    if mem.cooldown_weeks.is_none() && !mem.played_exclusion {
-        return cands;
-    }
-    cands
-        .into_iter()
-        .filter(|c| memory_allows(&c.song, mem, hist, false))
-        .collect()
-}
-
 /// Whether a candidate survives the Memory stage. `skip_cooldown` exempts the candidate from the
 /// cooldown window (used by the stable-core pass, AC 6) while still honoring played-exclusion.
 ///
