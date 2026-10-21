@@ -2290,6 +2290,8 @@ impl DeviceManager {
             transcoding_profile_id,
             name,
             icon,
+            false,
+            Default::default(),
         )
         .await
     }
@@ -2303,6 +2305,8 @@ impl DeviceManager {
         transcoding_profile_id: Option<String>,
         name: String,
         icon: Option<String>,
+        reconcile_before_sync: bool,
+        folder_artwork: FolderArtwork,
     ) -> Result<DeviceManifest> {
         // Validate folder_path: no traversal, no absolute paths; multi-level paths (e.g.
         // "Music/HifiMule") are allowed — both MscBackend (create_dir_all) and MtpBackend
@@ -2352,6 +2356,7 @@ impl DeviceManager {
             _ = cancelled.wait_for(|removed| *removed) => Err(anyhow::anyhow!("Pending destination is no longer available")),
             result = self.initialize_reserved_pending(
                 pending, folder_path, playlist_folder_path, transcoding_profile_id, name, icon,
+                reconcile_before_sync, folder_artwork,
             ) => result,
         }
     }
@@ -2364,6 +2369,8 @@ impl DeviceManager {
         transcoding_profile_id: Option<String>,
         name: String,
         icon: Option<String>,
+        reconcile_before_sync: bool,
+        folder_artwork: FolderArtwork,
     ) -> Result<DeviceManifest> {
         let pending_id = pending.pending_id.clone();
         let observation_token = pending.observation_token;
@@ -2468,9 +2475,9 @@ impl DeviceManager {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
-            folder_artwork: Default::default(),
+            folder_artwork,
             folder_artwork_records: Default::default(),
-            reconcile_before_sync: false,
+            reconcile_before_sync,
             auto_sync_on_connect: false,
             last_sync_at: None,
             auto_fill: AutoFillConfig::default(),

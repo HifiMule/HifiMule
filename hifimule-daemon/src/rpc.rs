@@ -9401,20 +9401,9 @@ async fn handle_device_update_manifest(
     validate_device_name_and_icon(name, icon_for_validation)?;
 
     let reconcile_before_sync = optional_bool_param(&params, "reconcileBeforeSync")?;
-    let folder_artwork = params.get("folderArtwork").map(|value| {
-        let invalid = || JsonRpcError { code: ERR_INVALID_PARAMS, message: "folderArtwork must contain known boolean settings".into(), data: None };
-        let fields = value.as_object().ok_or_else(invalid)?;
-        let mut settings = current.folder_artwork.clone();
-        for (key,value) in fields {
-            let enabled = value.as_bool().ok_or_else(invalid)?;
-            match key.as_str() {
-                "enabled" => settings.enabled=enabled, "windows" => settings.windows=enabled,
-                "macos" => settings.macos=enabled, "kde" => settings.kde=enabled, "gnome" => settings.gnome=enabled,
-                _ => return Err(invalid()),
-            }
-        }
-        Ok(settings)
-    }).transpose()?;
+    let folder_artwork = params.get("folderArtwork")
+        .map(|value| parse_folder_artwork(value, current.folder_artwork.clone()))
+        .transpose()?;
     let music_folder_path = string_param(&params, "musicFolderPath")?
         .map(normalize_editable_folder_path)
         .transpose()?;
@@ -9593,6 +9582,30 @@ async fn handle_music_setup_scan(state:&AppState,method:&str,params:Option<Value
     result.map_err(sync_plan_error)
 }
 
+fn parse_folder_artwork(
+    value: &Value,
+    mut settings: crate::device::FolderArtwork,
+) -> Result<crate::device::FolderArtwork, JsonRpcError> {
+    let invalid = || JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "folderArtwork must contain known boolean settings".into(),
+        data: None,
+    };
+    let fields = value.as_object().ok_or_else(invalid)?;
+    for (key, value) in fields {
+        let enabled = value.as_bool().ok_or_else(invalid)?;
+        match key.as_str() {
+            "enabled" => settings.enabled = enabled,
+            "windows" => settings.windows = enabled,
+            "macos" => settings.macos = enabled,
+            "kde" => settings.kde = enabled,
+            "gnome" => settings.gnome = enabled,
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(settings)
+}
+
 async fn handle_device_initialize(
     state: &AppState,
     params: Option<Value>,
@@ -9613,6 +9626,8 @@ async fn handle_device_initialize(
         "transcodingProfileId",
         "name",
         "icon",
+        "reconcileBeforeSync",
+        "folderArtwork",
     ];
     if params
         .as_object()
@@ -9685,6 +9700,12 @@ async fn handle_device_initialize(
         .map(|s| s.to_string());
     validate_device_name_and_icon(Some(&device_name), device_icon.as_deref())?;
 
+    let reconcile_before_sync = optional_bool_param(&params, "reconcileBeforeSync")?.unwrap_or(false);
+    let folder_artwork = params.get("folderArtwork")
+        .map(|value| parse_folder_artwork(value, Default::default()))
+        .transpose()?
+        .unwrap_or_default();
+
     // Validate the transcoding profile ID exists in device-profiles.json (if provided)
     if let Some(ref tpid) = transcoding_profile_id {
         let profiles_path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
@@ -9720,6 +9741,8 @@ async fn handle_device_initialize(
             transcoding_profile_id.clone(),
             device_name,
             device_icon,
+            reconcile_before_sync,
+            folder_artwork,
         )
         .await
         .map_err(|e| {
@@ -12055,6 +12078,13 @@ mod tests {
         assert_eq!(saved.polling_metadata().folder_artwork,saved.folder_artwork);
         let persisted: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(&std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap()).unwrap();
         assert_eq!(persisted.folder_artwork,saved.folder_artwork);
+        handle_device_update_manifest(&state, Some(json!({
+            "deviceId": "dev-1", "folderArtwork": {"enabled":false,"macos":false}
+        }))).await.unwrap();
+        let partial = state.device_manager.get_current_device().await.unwrap();
+        assert_eq!(partial.folder_artwork, crate::device::FolderArtwork {
+            enabled: false, windows: true, macos: false, kde: true, gnome: true,
+        });
         let dirty = updated.transcoding_profile_dirty;
         for value in [true, false] {
             let result = handle_device_update_manifest(&state, Some(json!({"deviceId":"dev-1", "reconcileBeforeSync":value}))).await.unwrap();
@@ -15473,6 +15503,14 @@ mod tests {
         // Verify device is now recognized
         let current_device = device_manager.get_current_device().await;
         assert!(current_device.is_some(), "Device should now be recognized");
+        let current = current_device.unwrap();
+        assert!(!current.reconcile_before_sync);
+        assert_eq!(current.folder_artwork, crate::device::FolderArtwork::default());
+        let persisted: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(
+            &std::fs::read(&manifest_path).unwrap(),
+        ).unwrap();
+        assert!(!persisted.reconcile_before_sync);
+        assert_eq!(persisted.folder_artwork, crate::device::FolderArtwork::default());
         assert!(
             device_manager
                 .get_unrecognized_device_path()
@@ -15488,6 +15526,79 @@ mod tests {
             mapping.unwrap().jellyfin_user_id,
             Some("user-abc".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn device_initialize_preferences_persist_exact_values_and_partial_defaults() {
+        for (reconcile, artwork) in [
+            (true, json!({"enabled":true,"windows":true,"macos":false,"kde":true,"gnome":false})),
+            (false, json!({"enabled":false,"windows":true})),
+            (true, json!({})),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+            let manager = &state.device_manager;
+            manager.handle_device_unrecognized(
+                dir.path().into(), Arc::new(crate::device_io::MscBackend::new(dir.path().into())), None,
+            ).await;
+            let pending_id = manager.get_pending_devices_snapshot().await[0].pending_id.clone();
+            let revision = manager.get_destination_snapshot().await.revision;
+            let response = handle_device_initialize(&state, Some(json!({
+                "pendingId": pending_id, "observedDestinationRevision": revision.to_string(),
+                "folderPath": "Music", "profileId": "listener", "name": "Player",
+                "reconcileBeforeSync": reconcile, "folderArtwork": artwork,
+            }))).await.unwrap();
+            assert_eq!(response["status"], "success");
+            let expected: crate::device::FolderArtwork = serde_json::from_value(artwork).unwrap();
+            let current = manager.get_current_device().await.unwrap();
+            let persisted: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(
+                &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+            ).unwrap();
+            for manifest in [current, persisted] {
+                assert_eq!(manifest.reconcile_before_sync, reconcile);
+                assert_eq!(manifest.folder_artwork, expected);
+                assert!(manifest.folder_artwork_records.is_empty());
+                assert!(manifest.synced_items.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn device_initialize_rejects_invalid_preferences_before_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let manager = &state.device_manager;
+        manager.handle_device_unrecognized(
+            dir.path().into(), Arc::new(crate::device_io::MscBackend::new(dir.path().into())), None,
+        ).await;
+        let pending_id = manager.get_pending_devices_snapshot().await[0].pending_id.clone();
+        let revision = manager.get_destination_snapshot().await.revision;
+        let mut invalid = vec![
+            json!({"reconcileBeforeSync": "true"}), json!({"reconcileBeforeSync": 1}),
+            json!({"reconcileBeforeSync": null}), json!({"folderArtwork": null}),
+            json!({"folderArtwork": true}), json!({"folderArtwork": []}),
+            json!({"folderArtwork": {"unknown":true}}),
+        ];
+        for key in ["enabled", "windows", "macos", "kde", "gnome"] {
+            for value in [json!("true"), json!(1), json!(null)] {
+                invalid.push(json!({"folderArtwork": {key:value}}));
+            }
+        }
+        for preferences in invalid {
+            let mut params = json!({
+                "pendingId": pending_id, "observedDestinationRevision": revision.to_string(),
+                "folderPath": "Music", "playlistFolderPath":"Playlists",
+                "audiobookFolderPath":"Books", "podcastFolderPath":"Podcasts",
+                "profileId": "listener", "name":"Player",
+            });
+            params.as_object_mut().unwrap().extend(preferences.as_object().unwrap().clone());
+            let error = handle_device_initialize(&state, Some(params)).await.unwrap_err();
+            assert_eq!(error.code, ERR_INVALID_PARAMS);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+            assert!(manager.get_current_device().await.is_none());
+            assert_eq!(manager.get_pending_devices_snapshot().await.len(), 1);
+            assert_eq!(manager.get_destination_snapshot().await.revision, revision);
+        }
     }
 
     #[tokio::test]

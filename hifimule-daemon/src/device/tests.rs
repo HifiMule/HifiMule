@@ -1244,7 +1244,7 @@ async fn sync_checkpoint_pending_publication_removal_waits_for_recognized_commit
     let observed = DeviceManager::removal_observation(&*manager.state.read().await, &path);
     let token = manager.begin_destination_mutation();
     let manifest = manager
-        .initialize_reserved_pending(pending, "", None, None, "Initialized".into(), None)
+        .initialize_reserved_pending(pending, "", None, None, "Initialized".into(), None, false, Default::default())
         .await
         .unwrap();
     let lock = manager.manifest_commit_lock(&manifest.device_id);
@@ -2975,8 +2975,14 @@ async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
         )
         .await;
 
+    let pending = manager.get_unrecognized_device_snapshot().await.unwrap();
+    let revision = manager.get_destination_snapshot().await.revision;
+    let artwork = FolderArtwork { enabled: true, windows: false, macos: true, kde: false, gnome: true };
     let manifest = manager
-        .initialize_device("", None, None, "Garmin Watch".to_string(), None, device_io)
+        .initialize_pending_device(
+            &pending.pending_id, revision, "", None, None, "Garmin Watch".to_string(), None,
+            true, artwork.clone(),
+        )
         .await
         .expect("a failed best-effort MTP mirror must not abort initialization");
 
@@ -2987,6 +2993,9 @@ async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
     let cached: DeviceManifest =
         manifest_codec::decode_test_manifest(&std::fs::read(&cache).unwrap()).unwrap();
     assert_eq!(cached.device_id, manifest.device_id);
+    assert!(cached.reconcile_before_sync);
+    assert_eq!(cached.folder_artwork, artwork);
+    assert_eq!(manifest.folder_artwork, artwork);
 }
 
 #[tokio::test]
@@ -3326,6 +3335,8 @@ async fn pending_initialization_rejects_a_stale_dialog_without_redirecting() {
             None,
             "First".into(),
             None,
+            false,
+            Default::default(),
         )
         .await;
     assert!(
@@ -4955,6 +4966,7 @@ async fn failed_discovery_retry_keeps_arrival_order_and_disappearance_clears_iss
 #[derive(Debug)]
 struct GatedInitDeviceIo {
     inner: crate::device_io::MscBackend,
+    manifest_writes: tokio::sync::Mutex<Vec<Vec<u8>>>,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -4968,6 +4980,7 @@ impl crate::device_io::DeviceIO for GatedInitDeviceIo {
         self.inner.write_file(path, data).await
     }
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.manifest_writes.lock().await.push(data.to_vec());
         self.entered.notify_one();
         self.release.notified().await;
         self.inner.write_with_verify(path, data).await
@@ -4990,6 +5003,64 @@ impl crate::device_io::DeviceIO for GatedInitDeviceIo {
 }
 
 #[tokio::test]
+async fn device_initialize_preferences_commit_to_first_write_of_unselected_pending_target() {
+    let manager = Arc::new(DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap())));
+    let selected_dir = tempdir().unwrap();
+    manager.handle_device_detected(
+        selected_dir.path().into(), make_manifest("selected", "Selected"), msc(selected_dir.path()),
+    ).await.unwrap();
+    let dir = tempdir().unwrap();
+    let io = Arc::new(GatedInitDeviceIo {
+        inner: crate::device_io::MscBackend::new(dir.path().into()),
+        manifest_writes: tokio::sync::Mutex::new(vec![]),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    manager.handle_device_unrecognized(dir.path().into(), io.clone(), None).await;
+    assert!(manager.select_device(selected_dir.path().into()).await);
+    let pending_id = manager.get_pending_devices_snapshot().await[0].pending_id.clone();
+    let revision = manager.get_destination_snapshot().await.revision;
+    let artwork = FolderArtwork { enabled: false, windows: true, macos: false, kde: true, gnome: false };
+    let task = {
+        let manager = manager.clone();
+        let artwork = artwork.clone();
+        tokio::spawn(async move {
+            manager.initialize_pending_device(
+                &pending_id, revision, "Music", None, None, "New player".into(), None, true, artwork,
+            ).await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), io.entered.notified()).await.unwrap();
+    let writes = io.manifest_writes.lock().await;
+    assert_eq!(writes.len(), 1);
+    let first: DeviceManifest = manifest_codec::decode_test_manifest(&writes[0]).unwrap();
+    assert!(first.reconcile_before_sync);
+    assert_eq!(first.folder_artwork, artwork);
+    assert!(first.folder_artwork_records.is_empty());
+    drop(writes);
+    io.release.notify_one();
+    let initialized = task.await.unwrap().unwrap();
+    assert_eq!(serde_json::to_value(&initialized).unwrap(), serde_json::to_value(&first).unwrap());
+    let persisted: DeviceManifest = manifest_codec::decode_test_manifest(
+        &std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap(),
+    ).unwrap();
+    assert_eq!(serde_json::to_value(&persisted).unwrap(), serde_json::to_value(&first).unwrap());
+    let selected = manager.get_current_device().await.unwrap();
+    assert_eq!(selected.device_id, "selected");
+    assert!(!selected.reconcile_before_sync);
+    assert_eq!(selected.folder_artwork, FolderArtwork::default());
+    assert!(!selected_dir.path().join(".hifimule.json.zst").exists());
+    assert_eq!(io.manifest_writes.lock().await.len(), 1);
+    // Reconnecting reloads the preferences from the initial manifest.
+    manager.handle_device_removed(&dir.path().to_path_buf()).await;
+    manager.handle_device_detected(dir.path().into(), persisted, msc(dir.path())).await.unwrap();
+    assert!(manager.select_device(dir.path().into()).await);
+    let reconnected = manager.get_current_device().await.unwrap();
+    assert!(reconnected.reconcile_before_sync);
+    assert_eq!(reconnected.folder_artwork, artwork);
+}
+
+#[tokio::test]
 async fn pending_setup_rejects_duplicate_submission_and_removal_during_commit() {
     let manager = Arc::new(DeviceManager::new(Arc::new(
         crate::db::Database::memory().unwrap(),
@@ -4997,6 +5068,7 @@ async fn pending_setup_rejects_duplicate_submission_and_removal_during_commit() 
     let dir = tempdir().unwrap();
     let io = Arc::new(GatedInitDeviceIo {
         inner: crate::device_io::MscBackend::new(dir.path().into()),
+        manifest_writes: tokio::sync::Mutex::new(vec![]),
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
     });
@@ -5010,7 +5082,9 @@ async fn pending_setup_rejects_duplicate_submission_and_removal_during_commit() 
         let id = pending.pending_id.clone();
         tokio::spawn(async move {
             manager
-                .initialize_pending_device(&id, revision, "", None, None, "First".into(), None)
+                .initialize_pending_device(
+                    &id, revision, "", None, None, "First".into(), None, false, Default::default(),
+                )
                 .await
         })
     };
@@ -5026,6 +5100,8 @@ async fn pending_setup_rejects_duplicate_submission_and_removal_during_commit() 
             None,
             "Duplicate".into(),
             None,
+            false,
+            Default::default(),
         )
         .await;
     assert!(
@@ -5075,6 +5151,8 @@ async fn failed_pending_setup_releases_reservation_for_retry() {
                 None,
                 "Retry".into(),
                 None,
+                false,
+                Default::default(),
             )
             .await
             .unwrap_err();
