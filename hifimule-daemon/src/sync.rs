@@ -2918,6 +2918,12 @@ enum PreparedTrack {
     Staged(StagedTrack),
 }
 
+enum EncodingOutcome {
+    Complete,
+    Warning(String),
+    Error(SyncFileError),
+}
+
 async fn encode_and_enqueue(
     mut track: StagedTrack,
     profile: TranscodeProfile,
@@ -2926,12 +2932,12 @@ async fn encode_and_enqueue(
     tx: mpsc::Sender<PreparedTrack>,
     manager: Arc<SyncOperationManager>,
     operation: String,
-) -> Option<(SyncFileError, bool)> {
+) -> EncodingOutcome {
     let original = track.staged_path.clone();
     let output = original.with_extension("encoded");
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let started = std::time::Instant::now();
-    let result: Result<()> = async {
+    let result: Result<crate::transcoding::local::RecoveryReport> = async {
         let permit = tokio::select! {
             permit = session.acquire(&cancelled) => permit?,
             _ = wait_for_operation_cancellation(&manager, &operation) => anyhow::bail!("Local encoding cancelled before admission"),
@@ -2940,10 +2946,10 @@ async fn encode_and_enqueue(
         let input = original.clone(); let destination = output.clone(); let cancel = Arc::clone(&cancelled);
         let mut worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            crate::transcoding::local::encode(&input, &destination, &profile, &cancel, max_output)
+            crate::transcoding::local::encode_with_report(&input, &destination, &profile, &cancel, max_output)
         });
         // Never delete a worker's files or release its reservation before joining it.
-        let size = tokio::select! {
+        let report = tokio::select! {
             result = &mut worker => result??,
             _ = wait_for_operation_cancellation(&manager, &operation) => {
                 cancelled.store(true, Ordering::Relaxed);
@@ -2951,6 +2957,7 @@ async fn encode_and_enqueue(
                 anyhow::bail!("Local encoding cancelled");
             }
         };
+        let size = report.output_bytes;
         tokio::fs::remove_file(&original).await.context("Cannot release downloaded original")?;
         track.staged_path = output.clone(); track.staged_size = size;
         track._byte_permit.output_headroom = 0;
@@ -2959,39 +2966,54 @@ async fn encode_and_enqueue(
         crate::daemon_log!("[Sync] Local encoding '{}' wait_ms={:.1} encoding_ms={:.1} audio_seconds={} audio_seconds_per_second={:.2} output_bytes={}",
             track.add_item.name, wait.as_secs_f64()*1000.0, (started.elapsed()-wait).as_secs_f64()*1000.0,
             seconds, seconds as f64 / (started.elapsed()-wait).as_secs_f64().max(0.001), size);
-        Ok(())
+        Ok(report.recovery)
     }.await;
-    if let Err(error) = result {
-        let _ = tokio::fs::remove_file(&original).await;
-        let _ = tokio::fs::remove_file(&output).await;
-        if manager.is_cancelled(&operation).await {
-            return None;
-        }
-        let auto = track.add_item.is_auto_fill;
-        if auto {
-            mark_operation_item_handled(&manager, &operation, track.add_item.size_bytes).await;
-        } else {
-            let _ = manager.request_cancel(&operation).await;
-        }
-        return Some((
-            SyncFileError {
+    let recovery = match result {
+        Ok(recovery) => recovery,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&original).await;
+            let _ = tokio::fs::remove_file(&output).await;
+            if manager.is_cancelled(&operation).await {
+                return EncodingOutcome::Complete;
+            }
+            let auto = track.add_item.is_auto_fill;
+            if auto {
+                mark_operation_item_handled(&manager, &operation, track.add_item.size_bytes).await;
+            } else {
+                let _ = manager.request_cancel(&operation).await;
+            }
+            let error = SyncFileError {
                 jellyfin_id: track.add_item.jellyfin_id.clone(),
                 filename: track.add_item.name.clone(),
                 error_message: format!("Local encoding failed: {error:#}"),
-            },
-            auto,
-        ));
-    }
+            };
+            return if auto {
+                EncodingOutcome::Warning(error.error_message)
+            } else {
+                EncodingOutcome::Error(error)
+            };
+        }
+    };
     let slot = tokio::select! {
         slot = tx.reserve() => slot.ok(),
         _ = wait_for_operation_cancellation(&manager, &operation) => None,
     };
     if let Some(slot) = slot {
+        let warning = (recovery.invalid_events > 0).then(|| {
+            crate::daemon_log!("[Sync] Local encoding recovery '{}' ({}): events={} rejected_bytes={} first_position={}",
+                track.add_item.name, track.add_item.jellyfin_id, recovery.invalid_events,
+                recovery.rejected_bytes, recovery.first_position.unwrap_or(-1));
+            format!("'{}': local encoding recovered from {} damaged audio section(s). Audible defects may remain.",
+                track.add_item.name, recovery.invalid_events)
+        });
         slot.send(PreparedTrack::Staged(track));
+        if let Some(warning) = warning {
+            return EncodingOutcome::Warning(warning);
+        }
     } else {
         let _ = tokio::fs::remove_file(&output).await;
     }
-    None
+    EncodingOutcome::Complete
 }
 
 impl PreparedTrack {
@@ -3429,7 +3451,7 @@ async fn execute_plan_sync_buffered(
         let mut errors = Vec::new();
         let mut warnings = SyncWarnings::new(producer_warning_journal);
         let mut staging_dir: Option<tempfile::TempDir> = None;
-        let mut encodings: tokio::task::JoinSet<Option<(SyncFileError, bool)>> = tokio::task::JoinSet::new();
+        let mut encodings: tokio::task::JoinSet<EncodingOutcome> = tokio::task::JoinSet::new();
         let mut blocked = Duration::ZERO;
         let mut staging = TransferTotals::default();
 
@@ -3439,9 +3461,9 @@ async fn execute_plan_sync_buffered(
             // track during large syncs. Active workers remain bounded by staging.
             while let Some(result) = encodings.try_join_next() {
                 match result {
-                    Ok(Some((error, true))) => warnings.push(error.error_message),
-                    Ok(Some((error, false))) => errors.push(error),
-                    Ok(None) => {},
+                    Ok(EncodingOutcome::Warning(warning)) => warnings.push(warning),
+                    Ok(EncodingOutcome::Error(error)) => errors.push(error),
+                    Ok(EncodingOutcome::Complete) => {},
                     Err(error) => {
                         errors.push(SyncFileError { jellyfin_id: String::new(), filename: "local-encoding".into(), error_message: error.to_string() });
                         let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
@@ -4311,9 +4333,9 @@ async fn execute_plan_sync_buffered(
 
         while let Some(result) = encodings.join_next().await {
             match result {
-                Ok(Some((error, auto_fill))) if auto_fill => warnings.push(error.error_message),
-                Ok(Some((error, _))) => errors.push(error),
-                Ok(None) => {},
+                Ok(EncodingOutcome::Warning(warning)) => warnings.push(warning),
+                Ok(EncodingOutcome::Error(error)) => errors.push(error),
+                Ok(EncodingOutcome::Complete) => {},
                 Err(error) => { errors.push(SyncFileError { jellyfin_id:String::new(), filename:"local-encoding".into(), error_message:error.to_string() }); let _ = producer_operation_manager.request_cancel(&producer_operation_id).await; }
             }
         }
@@ -7940,6 +7962,73 @@ mod tests {
         assert_eq!(written.len(), 2);
         original.assert_async().await;
         encoded.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn local_encoding_recovered_tracks_write_once_with_warnings_in_both_modes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let audio = crate::transcoding::local::tests::damaged_mp3(fixture.path(), &[60]);
+        for auto in [false, true] {
+            let mut server = mockito::Server::new_async().await;
+            let original = server
+                .mock("GET", "/rest/download.view")
+                .match_query(mockito::Matcher::Any)
+                .with_status(200)
+                .with_header("content-type", "audio/mpeg")
+                .with_body(audio.clone())
+                .expect(1)
+                .create_async()
+                .await;
+            let root = tempfile::tempdir().unwrap();
+            let (devices, io) = setup_provider_sync_device(root.path()).await;
+            let mut item =
+                add_item_with_provider_format("recovered", "mp3", "audio/mpeg", audio.len() as u64);
+            item.name = "Recovered fixture".into();
+            item.duration_seconds = 4;
+            item.is_auto_fill = auto;
+            let delta = SyncDelta {
+                provenance_updates: HashMap::new(),
+                blocked: vec![],
+                adds: vec![item],
+                deletes: vec![],
+                id_changes: vec![],
+                unchanged: 0,
+                playlists: vec![],
+                pity_fired_servers: vec![],
+            };
+            let operations = Arc::new(SyncOperationManager::new());
+            let operation = unique_operation_id("local-recovery");
+            operations.create_operation(operation.clone(), 1).await;
+            let (written, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                local_encoding_servers: HashSet::from([String::new()]),
+                provider: subsonic_provider(server.url()), providers_by_server: HashMap::new(),
+                transcoding_profile: Some(serde_json::json!({"MaxStreamingBitrate":192000,
+                    "DirectPlayProfiles":[],"TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]})),
+            }, operations.clone(), operation.clone(), devices.clone(), io).await.unwrap();
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(written.len(), 1);
+            assert_eq!(
+                devices
+                    .get_current_device()
+                    .await
+                    .unwrap()
+                    .synced_items
+                    .len(),
+                1
+            );
+            assert!(!operations.is_cancelled(&operation).await);
+            let op = operations.get_operation(&operation).await.unwrap();
+            assert_eq!(
+                op.files_completed, 1,
+                "recovery must not count a skipped track"
+            );
+            assert!(op.errors.is_empty());
+            assert_eq!(op.warnings.len(), 1);
+            assert!(op.warnings[0].contains("Recovered fixture"));
+            assert!(op.warnings[0].contains("damaged audio"));
+            assert!(provider_staging_dirs_for_operation(&operation).is_empty());
+            original.assert_async().await;
+        }
     }
 
     #[tokio::test]

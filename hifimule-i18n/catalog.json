@@ -1,5 +1,6 @@
 {
   "en": {
+    "basket.sync.complete_with_warnings": "Sync complete with warnings",
     "basket.device.artwork": "Add thumbnail",
     "basket.device.artwork_hint": "On the next sync, add artist and album folder.jpg files, up to 500 × 500 pixels. Existing files are preserved.",
     "basket.device.artwork_windows": "Windows icon",
@@ -915,6 +916,7 @@
     "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
+    "basket.sync.complete_with_warnings": "Synchronisation terminée avec des avertissements",
     "basket.device.artwork": "Ajouter une miniature",
     "basket.device.artwork_hint": "À la prochaine synchronisation, ajouter folder.jpg aux dossiers des artistes et albums (500 × 500 pixels maximum). Les fichiers existants sont conservés.",
     "basket.device.artwork_windows": "Icône Windows",
@@ -1806,6 +1808,7 @@
     "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
+    "basket.sync.complete_with_warnings": "Sincronización completada con advertencias",
     "basket.device.artwork": "Añadir miniatura",
     "basket.device.artwork_hint": "En la próxima sincronización, añadir folder.jpg a las carpetas de artistas y álbumes, hasta 500 × 500 píxeles. Se conservan los archivos existentes.",
     "basket.device.artwork_windows": "Icono de Windows",
@@ -2697,6 +2700,7 @@
     "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
+    "basket.sync.complete_with_warnings": "Synchronisierung mit Warnungen abgeschlossen",
     "basket.device.artwork": "Vorschaubild hinzufügen",
     "basket.device.artwork_hint": "Bei der nächsten Synchronisierung folder.jpg in Künstler- und Albumordnern mit bis zu 500 × 500 Pixeln ergänzen. Vorhandene Dateien bleiben erhalten.",
     "basket.device.artwork_windows": "Windows-Symbol",

@@ -79,6 +79,7 @@ interface SyncOperation {
     filesCompleted: number;
     filesTotal: number;
     errors: Array<{ jellyfinId: string; filename: string; errorMessage: string }>;
+    warnings?: string[];
 }
 
 function getBasename(path: string): string {
@@ -287,6 +288,7 @@ export class BasketSidebar {
     // Transfer stats captured at completion for the sync-complete screen
     private completedFilesCount: number = 0;
     private completedBytesCount: number = 0;
+    private completedWarnings: string[] = [];
     private supportsPlaylistWrite: boolean = false;
     private destinationHub?: { mountDeviceChooser(host: HTMLElement | null): void };
     private focusedDestinationKey?: string;
@@ -1936,6 +1938,8 @@ export class BasketSidebar {
 
     private renderSyncComplete() {
         const focused = this.container.contains(document.activeElement) ? document.activeElement : null;
+        const warnings = this.completedWarnings ?? [];
+        const title = t(warnings.length ? 'basket.sync.complete_with_warnings' : 'basket.sync.complete');
         const summary = this.completedFilesCount > 0
             ? t('basket.sync.complete_summary', {
                 files: this.completedFilesCount,
@@ -1948,10 +1952,11 @@ export class BasketSidebar {
                 <sl-badge variant="neutral" pill>0</sl-badge>
             </div>
             <div class="sync-success-panel">
-                <sl-icon name="check-circle-fill"
-                    style="font-size: 2.5rem; color: var(--sl-color-success-600);"></sl-icon>
-                <p class="sync-status-label">${t('basket.sync.complete')}</p>
+                <sl-icon name="${warnings.length ? 'exclamation-triangle-fill' : 'check-circle-fill'}"
+                    style="font-size: 2.5rem; color: var(${warnings.length ? '--sl-color-warning-600' : '--sl-color-success-600'});"></sl-icon>
+                <p class="sync-status-label">${title}</p>
                 ${summary ? `<p class="sync-summary-label">${escapeAttr(summary)}</p>` : ''}
+                ${warnings.length ? `<ul class="sync-error-list sync-warning-list">${warnings.map(message => `<li>${escapeAttr(message)}</li>`).join('')}</ul>` : ''}
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-done-btn" variant="primary" style="width: 100%;">
@@ -1961,7 +1966,7 @@ export class BasketSidebar {
             </div>
         `;
 
-        this.announceSync([t('basket.sync.complete'), summary].filter(Boolean).join(' '));
+        this.announceSync([title, summary, ...warnings].filter(Boolean).join(' '));
         this.restoreSyncFocus(focused, '#sync-done-btn');
         this.container.querySelector('#sync-done-btn')?.addEventListener('click', () => {
             this.showSyncComplete = false;
@@ -2015,6 +2020,7 @@ export class BasketSidebar {
         // Capture transfer stats before clearing the operation reference
         this.completedFilesCount = this.currentOperation?.filesCompleted ?? 0;
         this.completedBytesCount = this.currentOperation?.bytesTransferred ?? 0;
+        this.completedWarnings = [...(this.currentOperation?.warnings ?? [])];
 
         // Fetch fresh storage info so capacity bar is accurate immediately after sync
         try {

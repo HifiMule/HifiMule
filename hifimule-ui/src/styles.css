@@ -1378,6 +1378,13 @@ sl-input, sl-textarea, sl-select {
   white-space: nowrap;
 }
 
+.sync-warning-list li {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* ========================
    Repair Modal (Story 5.4)
    ======================== */
