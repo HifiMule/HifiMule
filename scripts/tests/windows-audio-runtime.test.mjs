@@ -123,6 +123,10 @@ for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
     // link.exe unchanged and its LNK4044 warning fails the compiler check.
     assert.ok(command.includes("--extra-ldflags='-libpath:D:/AudioRuntime/lib'"));
     assert.equal(command.includes("--extra-ldflags='-L"), false);
+    // Codec archives use CMake's MultiThreadedDLL runtime (/MD). FFmpeg's
+    // probes and both language compilers must use that same runtime.
+    assert.ok(command.includes("'--extra-cflags=-MD'"));
+    assert.ok(command.includes("'--extra-cxxflags=-MD'"));
     assert.equal(invocation.options.env.VSLANG, "1033");
   });
 }
@@ -213,6 +217,16 @@ function populateOfficialRuntime(prefix, target) {
 test("accepts an exact controlled ARM64 FFmpeg development runtime", () => {
   const prefix = fakeRuntime();
   assert.equal(verifyWindowsAudioRuntime(prefix, "aarch64-pc-windows-msvc").dlls.length, 4);
+});
+
+test("rejects a cached Windows runtime without the matching DLL CRT flags", t => {
+  const prefix = fakeRuntime("x86_64-pc-windows-msvc");
+  t.after(() => rmSync(prefix, { recursive: true, force: true }));
+  const path = join(prefix, ".hifimule-audio-runtime.json");
+  const receipt = JSON.parse(readFileSync(path, "utf8"));
+  receipt.configureFlags = receipt.configureFlags.filter(flag => flag !== "--extra-cflags=-MD" && flag !== "--extra-cxxflags=-MD");
+  writeFileSync(path, JSON.stringify(receipt));
+  assert.throws(() => verifyWindowsAudioRuntime(prefix, "x86_64-pc-windows-msvc"), /receipt is stale/);
 });
 
 test("rejects a runtime built for the wrong Windows architecture", () => {
