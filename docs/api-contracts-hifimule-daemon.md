@@ -469,44 +469,9 @@ Playlist methods require provider playlist-write capability. Cross-server basket
 
 ---
 
-## Legacy Jellyfin-Compatible Browse
+## Legacy Jellyfin-Compatible Metadata
 
-### `jellyfin_get_views`
-
-Returns the user's Jellyfin media library roots.
-
-**Params:** none  
-**Returns:** `Array<JellyfinView>` where `JellyfinView = { Id, Name, Type, CollectionType? }`
-
----
-
-### `jellyfin_get_items`
-
-Returns paginated items from a parent container.
-
-**Params:**
-```json
-{
-  "parentId"?: string,
-  "includeItemTypes"?: string,        // e.g. "MusicAlbum,Playlist,Audio"
-  "startIndex"?: number,
-  "limit"?: number,
-  "nameStartsWith"?: string,          // single alpha char (quick-nav filter)
-  "nameLessThan"?: string             // single alpha char (quick-nav '#' filter)
-}
-```
-**Returns:** `{ "Items": JellyfinItem[], "TotalRecordCount": number, "StartIndex": number }`
-
----
-
-### `jellyfin_get_item_details`
-
-Returns full details for a single item.
-
-**Params:** `{ "itemId": string }`  
-**Returns:** `JellyfinItem` (with `MediaSources`, `UserData`, `RunTimeTicks`, etc.)
-
----
+The legacy browse methods `jellyfin_get_views`, `jellyfin_get_items`, and `jellyfin_get_item_details` have been retired and return JSON-RPC method not found (`-32601`). Use the provider-neutral `browse.*` endpoints above for navigation. Count and size methods remain available for basket metadata.
 
 ### `jellyfin_get_item_counts`
 
