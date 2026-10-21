@@ -34,7 +34,7 @@ test('installer notice includes the full dependency licenses',()=>{
 });
 
 for (const windows of [false, true]) {
-  test(`dependency extraction uses a local archive name (${windows ? 'Windows' : 'Unix'})`, async t => {
+  test(`dependency extraction and package metadata match installed layouts (${windows ? 'Windows' : 'Unix'})`, async t => {
     const fixture = mkdtempSync(join(tmpdir(), 'hifimule-encoding-extract-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
     const scripts = join(fixture, 'scripts');
@@ -43,13 +43,17 @@ for (const windows of [false, true]) {
     const work = join(fixture, 'source work');
     const prefix = join(fixture, 'install prefix');
     const input = join(fixture, 'input');
-    const dep = encodingDependencyReceipt[0];
-    for (const directory of [scripts, daemon, cache, work, join(input, dep.directory)]) mkdirSync(directory, { recursive: true });
-    writeFileSync(join(input, dep.directory, 'configMS.h'), '/* fixture config */');
-    writeFileSync(join(input, dep.directory, 'COPYING'), 'fixture license');
-    execFileSync(hostTar, ['-czf', dep.archive, '-C', input, dep.directory], { cwd: cache });
-    const sha256 = createHash('sha256').update(readFileSync(join(cache, dep.archive))).digest('hex');
-    writeFileSync(join(daemon, 'audio-runtime.json'), JSON.stringify({ encodingDependencies: [{ ...dep, sha256 }] }));
+    const dependencies = windows ? encodingDependencyReceipt : encodingDependencyReceipt.slice(0, 1);
+    for (const directory of [scripts, daemon, cache, work]) mkdirSync(directory, { recursive: true });
+    const fixtures = dependencies.map(dep => {
+      mkdirSync(join(input, dep.directory), { recursive: true });
+      writeFileSync(join(input, dep.directory, 'configMS.h'), '/* fixture config */');
+      writeFileSync(join(input, dep.directory, 'COPYING'), 'fixture license');
+      execFileSync(hostTar, [dep.archive.endsWith('.xz') ? '-cJf' : '-czf', dep.archive, '-C', input, dep.directory], { cwd: cache });
+      const sha256 = createHash('sha256').update(readFileSync(join(cache, dep.archive))).digest('hex');
+      return { ...dep, sha256 };
+    });
+    writeFileSync(join(daemon, 'audio-runtime.json'), JSON.stringify({ encodingDependencies: fixtures }));
     copyFileSync(new URL('../encoding-dependencies.mjs', import.meta.url), join(scripts, 'encoding-dependencies.mjs'));
     const { buildEncodingDependencies } = await import(pathToFileURL(join(scripts, 'encoding-dependencies.mjs')).href);
     let extractions = 0;
@@ -63,8 +67,8 @@ for (const windows of [false, true]) {
             'Windows extraction must bypass MSYS2 tar on PATH');
           const archive = args[args.indexOf('-xf') + 1];
           // GNU tar treats a drive colon in -f as remote; require a local basename.
-          assert.equal(archive, dep.archive);
-          assert.equal(resolve(options.cwd, archive), join(cache, dep.archive));
+          assert.ok(dependencies.some(dep => dep.archive === archive));
+          assert.equal(resolve(options.cwd, archive), join(cache, archive));
           assert.equal(resolve(options.cwd, args[args.indexOf('-C') + 1]), work);
           // Exercise the actual native executable on Windows; use the host tar elsewhere.
           return execFileSync(windows && process.platform === 'win32' ? command : hostTar, args, options);
@@ -72,7 +76,18 @@ for (const windows of [false, true]) {
         assert.ok(command === 'cmake' || command === './configure' || command === 'make', `Unexpected command: ${command}`);
       },
     });
-    assert.equal(extractions, 1);
-    assert.equal(readFileSync(join(prefix, 'share/licenses/lame/COPYING'), 'utf8'), 'fixture license');
+    assert.equal(extractions, dependencies.length);
+    for (const dep of dependencies) {
+      assert.equal(readFileSync(join(prefix, 'share/licenses', dep.name, 'COPYING'), 'utf8'), 'fixture license');
+    }
+    if (windows) {
+      for (const name of ['lame', 'ogg', 'vorbis', 'vorbisenc', 'opus']) {
+        const metadata = readFileSync(join(prefix, 'lib/pkgconfig', `${name}.pc`), 'utf8');
+        const includeFlags = metadata.split('\n').find(line => line.startsWith('Cflags:'));
+        // FFmpeg includes opus_multistream.h directly; the other APIs use
+        // package-qualified headers such as vorbis/vorbisenc.h and lame/lame.h.
+        assert.equal(includeFlags, name === 'opus' ? 'Cflags: -I${includedir}/opus' : 'Cflags: -I${includedir}');
+      }
+    }
   });
 }

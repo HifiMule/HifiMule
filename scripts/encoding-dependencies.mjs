@@ -61,7 +61,10 @@ export function buildEncodingDependencies({ cache, work, prefix, target, env = p
       const packages = dep.name === 'vorbis' ? [['vorbis', 'ogg', '-lvorbis'], ['vorbisenc', 'vorbis', '-lvorbisenc']] : [[dep.name === 'lame' ? 'lame' : dep.name, '', dep.name === 'lame' ? '-lmp3lame' : `-l${dep.name}`]];
       const pkgdir = join(prefix, 'lib/pkgconfig'); mkdirSync(pkgdir, { recursive: true });
       const portablePrefix = prefix.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`);
-      for (const [name, requires, libs] of packages) writeFileSync(join(pkgdir, `${name}.pc`), `prefix=${portablePrefix}\nlibdir=\${prefix}/lib\nincludedir=\${prefix}/include\nName: ${name}\nDescription: HifiMule private ${name}\nVersion: ${dep.version}\nRequires.private: ${requires}\nLibs: -L\${libdir} ${libs}\nCflags: -I\${includedir}\n`);
+      // Opus consumers include bare opus*.h names; upstream installs them in
+      // include/opus and advertises that subdirectory in its pkg-config flags.
+      const includeSuffix = dep.name === 'opus' ? '/opus' : '';
+      for (const [name, requires, libs] of packages) writeFileSync(join(pkgdir, `${name}.pc`), `prefix=${portablePrefix}\nlibdir=\${prefix}/lib\nincludedir=\${prefix}/include\nName: ${name}\nDescription: HifiMule private ${name}\nVersion: ${dep.version}\nRequires.private: ${requires}\nLibs: -L\${libdir} ${libs}\nCflags: -I\${includedir}${includeSuffix}\n`);
 
     }
     const notices = join(prefix, 'share/licenses', dep.name); mkdirSync(notices, { recursive: true });
