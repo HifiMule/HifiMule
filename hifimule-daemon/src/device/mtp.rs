@@ -52,6 +52,24 @@ where
     Ok(current_id)
 }
 
+/// Verification owns the new object ID, never a mutable filename lookup.
+/// A read error is also a failed publication and retires only that object.
+#[cfg(any(windows, test))]
+fn verify_created_artwork(
+    id: &str,
+    expected: &[u8],
+    read: impl FnOnce(&str) -> Result<Vec<u8>>,
+    delete: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let failure = match read(id) {
+        Ok(bytes) if bytes == expected => return Ok(()),
+        Ok(_) => anyhow::anyhow!("Artwork verification mismatch"),
+        Err(_) => anyhow::anyhow!("Artwork verification read failed"),
+    };
+    delete(id).map_err(|_|anyhow::anyhow!("{failure}; newly created artwork cleanup failed"))?;
+    Err(failure)
+}
+
 // ── Windows WPD implementation ────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -1134,6 +1152,21 @@ pub mod windows_wpd {
     }
 
     impl WpdHandle {
+        unsafe fn read_artwork_object(content: &windows::Win32::Devices::PortableDevices::IPortableDeviceContent, id: &str, limit: usize) -> Result<Vec<u8>> {
+            unsafe {
+                let id=HSTRING::from(id); let resources:IPortableDeviceResources=content.Transfer()?;
+                let mut optimal=0;let mut stream=None;
+                resources.GetStream(PCWSTR(id.as_ptr()),&WPD_RESOURCE_DEFAULT,0,&mut optimal,&mut stream)?;
+                let stream=stream.ok_or_else(||anyhow::anyhow!("WPD artwork stream unavailable"))?;
+                let mut bytes=Vec::new();let mut buffer=vec![0u8;(optimal as usize).clamp(4096,1024*1024)];
+                loop {
+                    let mut read=0;stream.Read(buffer.as_mut_ptr().cast(),buffer.len() as u32,Some(&mut read)).ok()?;
+                    if read==0 {return Ok(bytes);}
+                    anyhow::ensure!(bytes.len().saturating_add(read as usize)<=limit,"Artwork verification size mismatch");
+                    bytes.extend_from_slice(&buffer[..read as usize]);
+                }
+            }
+        }
         fn write_input(&self, path: &str, source: WpdWriteInput<'_>) -> Result<()> {
             source.preflight()?;
             let source_size = source.size()?;
@@ -1145,6 +1178,7 @@ pub mod windows_wpd {
             let parent_components = &components[..components.len() - 1];
 
             if self.prefers_shell_copy() {
+                anyhow::ensure!(filename != "folder.jpg", "Artwork pending: shell transport cannot preserve unknown existing files");
                 {
                     let (_com, device) = self.session()?;
                     unsafe {
@@ -1178,6 +1212,7 @@ pub mod windows_wpd {
                     if let Some(existing_id) =
                         find_child_object_id(&content, &parent_id_str, filename)?
                     {
+                        anyhow::ensure!(filename != "folder.jpg", "Existing artwork preserved");
                         // T12: log the ID of the object being deleted before replace.
                         crate::daemon_log!(
                             "[WPD] write_file: deleting existing object {:?} at path={}",
@@ -1202,11 +1237,12 @@ pub mod windows_wpd {
                             PCWSTR(fname_hstr.as_ptr()),
                         )?;
                         props.SetStringValue(&WPD_OBJECT_NAME, PCWSTR(fname_hstr.as_ptr()))?;
+                        let jpeg = filename.to_ascii_lowercase().ends_with(".jpg") || filename.to_ascii_lowercase().ends_with(".jpeg");
                         props.SetGuidValue(
                             &WPD_OBJECT_CONTENT_TYPE,
-                            &WPD_CONTENT_TYPE_GENERIC_FILE,
+                            if jpeg { &windows::Win32::Devices::PortableDevices::WPD_CONTENT_TYPE_IMAGE } else { &WPD_CONTENT_TYPE_GENERIC_FILE },
                         )?;
-                        props.SetGuidValue(&WPD_OBJECT_FORMAT, &WPD_OBJECT_FORMAT_UNDEFINED)?;
+                        props.SetGuidValue(&WPD_OBJECT_FORMAT, if jpeg { &windows::Win32::Devices::PortableDevices::WPD_OBJECT_FORMAT_JFIF } else { &WPD_OBJECT_FORMAT_UNDEFINED })?;
                         props.SetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE, source_size)?;
 
                         crate::daemon_log!(
@@ -1225,16 +1261,35 @@ pub mod windows_wpd {
                         let stream = stream_opt
                             .ok_or_else(|| anyhow::anyhow!("WPD write_file: no stream returned"))?;
 
-                        source.write_stream(&stream, optimal_buf, source_size)?;
-
-                        crate::daemon_log!("[WPD] write_file: Commit path={}", path);
                         let data_stream: IPortableDeviceDataStream = stream.cast()?;
-                        data_stream.Commit(STGC_DEFAULT)?;
-                        crate::daemon_log!("[WPD] write_file: Commit OK path={}", path);
-                        Ok(())
+                        let transfer = (|| -> Result<()> {
+                            let expected = if filename=="folder.jpg" {
+                                anyhow::ensure!(source_size<=8*1024*1024,"Artwork source is too large");
+                                Some(match &source {WpdWriteInput::Bytes(bytes)=>bytes.to_vec(),WpdWriteInput::File(path)=>std::fs::read(path)?})
+                            } else {None};
+                            source.write_stream(&stream, optimal_buf, source_size)?;
+                            crate::daemon_log!("[WPD] write_file: Commit path={}", path);
+                            data_stream.Commit(STGC_DEFAULT)?;
+                            if let Some(expected)=expected {
+                                let object_id=data_stream.GetObjectID()?;
+                                let created=object_id.to_string();
+                                CoTaskMemFree(Some(object_id.0.cast()));
+                                let created=created?;
+                                super::verify_created_artwork(&created,&expected,
+                                    |id|Self::read_artwork_object(&content,id,expected.len()),
+                                    |id| {
+                                        let collection=make_object_id_collection(id)?;let mut results=None;
+                                        content.Delete(0,&collection,&mut results)?;Ok(())
+                                    })?;
+                            }
+                            crate::daemon_log!("[WPD] write_file: Commit OK path={}", path);
+                            Ok(())
+                        })();
+                        if transfer.is_err() && filename=="folder.jpg" {let _=data_stream.Cancel();}
+                        transfer
                     })();
 
-                    if result.is_err() {
+                    if result.is_err() && filename!="folder.jpg" {
                         // Clean up any erroneous object left by the failed write (e.g. the
                         // folder that Garmin's driver creates in place of a file).
                         if let Ok(Some(bad_id)) =
@@ -1256,6 +1311,7 @@ pub mod windows_wpd {
                 }
             };
 
+            if filename == "folder.jpg" { return wpd_result; }
             if wpd_result.is_ok() {
                 return Ok(());
             }
@@ -1274,6 +1330,17 @@ pub mod windows_wpd {
     }
 
     impl MtpHandle for WpdHandle {
+        fn folder_identity(&self, path: &str) -> Result<Option<String>> {
+            let (_com,device)=self.session()?;
+            let result=unsafe { path_to_object_id(&device.Content()?,path,self.storage_id.as_deref()).map(|id|Some(id.to_string())) };
+            match result {Err(error) if crate::device_io::is_missing_object_error(&error)=>Ok(None),other=>other}
+        }
+
+        fn publish_artwork(&self, path: &str, data: &[u8]) -> Result<()> {
+            anyhow::ensure!(!self.prefers_shell_copy(), "Artwork pending: this device cannot prove destination absence");
+            self.write_file(path, data)
+        }
+
         fn begin_sync_job(&self) -> Result<()> {
             if !self.prefers_shell_copy() {
                 return Ok(());
@@ -1601,6 +1668,7 @@ pub mod libmtp {
 
     fn filetype_for_extension(ext: &str) -> u32 {
         match ext.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" => LIBMTP_FILETYPE_JPEG,
             "mp3" => LIBMTP_FILETYPE_MP3,
             "mp2" => LIBMTP_FILETYPE_MP2,
             "wav" => LIBMTP_FILETYPE_WAV,
@@ -2294,6 +2362,19 @@ pub mod libmtp {
     }
 
     impl MtpHandle for LibmtpHandle {
+        fn folder_identity(&self, path: &str) -> Result<Option<String>> {
+            let hints=self.folder_hints.lock().map(|h|h.clone()).unwrap_or_default();
+            let guard=self.device.lock().unwrap();
+            let result=unsafe {Self::path_to_object_id_with_hints_raw(*guard,path,&hints).map(|id|Some(id.to_string()))};
+            match result {Err(error) if crate::device_io::is_missing_object_error(&error)=>Ok(None),other=>other}
+        }
+
+        fn publish_artwork(&self, path: &str, data: &[u8]) -> Result<()> {
+            // SendObject creates a fresh object. The writer refuses its usual
+            // delete/replace branch for folder.jpg and verifies assigned object size.
+            self.write_file(path, data)
+        }
+
         fn load_folder_hints(&self, hints: std::collections::HashMap<String, u32>) {
             // Treat externally loaded hints as equivalent to having run the BFS — no need
             // to lazy-prime again on the first path miss.
@@ -2416,6 +2497,7 @@ pub mod libmtp {
             if let Ok((existing_id, existing_storage)) =
                 unsafe { Self::path_to_object_and_storage_raw(dev, path) }
             {
+                anyhow::ensure!(*filename != "folder.jpg", "Existing artwork preserved");
                 storage_id = existing_storage;
                 crate::daemon_log!(
                     "[libmtp] write_file: overwrite '{}' id={} storage_id={} - deleting",
@@ -2475,6 +2557,7 @@ pub mod libmtp {
                 )
             };
             if rc != LIBMTP_ERROR_NONE {
+                if *filename == "folder.jpg" && file_meta.item_id != 0 { unsafe { LIBMTP_Delete_Object(dev, file_meta.item_id); } }
                 drop(guard);
                 crate::daemon_log!(
                     "[libmtp] write_file: send '{}' failed rc={} parent_id={} storage_id={}",
@@ -2503,7 +2586,12 @@ pub mod libmtp {
                     assigned_id
                 ));
             }
+            let verified_size = unsafe { (*meta_ptr).filesize };
             unsafe { LIBMTP_destroy_file_t(meta_ptr) };
+            if *filename == "folder.jpg" && verified_size != source_size {
+                unsafe { LIBMTP_Delete_Object(dev, assigned_id); }
+                anyhow::bail!("Artwork object size verification failed");
+            }
             crate::daemon_log!(
                 "[libmtp] write_file: '{}' confirmed on device (item_id={})",
                 path,
@@ -2655,6 +2743,19 @@ mod tests {
         assert!(split_path_components("").is_empty());
         assert!(split_path_components("/").is_empty());
         assert!(split_path_components(".").is_empty());
+    }
+
+    #[test]
+    fn failed_artwork_verification_retires_only_created_object() {
+        for read_error in [false,true] {
+            let objects=std::cell::RefCell::new(std::collections::HashMap::from([("new",b"partial".to_vec()),("user-replacement",b"user".to_vec())]));
+            let result=super::verify_created_artwork("new",b"expected",
+                |id|if read_error {Err(anyhow::anyhow!("read failed"))} else {Ok(objects.borrow()[id].clone())},
+                |id|{objects.borrow_mut().remove(id);Ok(())});
+            assert!(result.is_err());assert!(!objects.borrow().contains_key("new"));
+            assert_eq!(objects.borrow()["user-replacement"],b"user");
+        }
+        assert!(super::verify_created_artwork("new",b"complete",|_|Ok(b"complete".to_vec()),|_|panic!("Successful publication must not be deleted")).is_ok());
     }
 
     #[test]

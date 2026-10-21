@@ -1785,6 +1785,8 @@ async fn test_dirty_manifest_roundtrip() {
         dirty: true,
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2116,6 +2118,8 @@ async fn test_write_manifest_creates_files() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2165,6 +2169,8 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2205,6 +2211,8 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2262,6 +2270,8 @@ async fn test_get_discrepancies_missing_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2310,6 +2320,8 @@ async fn test_get_discrepancies_orphaned_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2379,6 +2391,8 @@ async fn test_get_discrepancies_no_issues() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2458,6 +2472,8 @@ async fn test_prune_items() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2523,6 +2539,8 @@ async fn test_relink_item() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2572,6 +2590,8 @@ async fn test_relink_item_path_traversal() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2609,6 +2629,8 @@ async fn test_clear_dirty_flag() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -2657,6 +2679,8 @@ async fn test_clear_dirty_flag_with_orphaned_files() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -3547,6 +3571,8 @@ async fn test_save_basket_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -3615,6 +3641,8 @@ async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -3662,6 +3690,8 @@ async fn test_auto_sync_on_connect_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -3711,6 +3741,8 @@ fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -4366,6 +4398,8 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -5429,4 +5463,24 @@ fn reconciliation_defaults_off_and_survives_manifest_roundtrip_and_polling() {
     let restored: DeviceManifest = serde_json::from_value(serialized).unwrap();
     assert!(restored.reconcile_before_sync);
     assert!(restored.polling_metadata().reconcile_before_sync);
+}
+
+#[test]
+fn folder_artwork_legacy_defaults_and_compressed_ownership_roundtrip() {
+    let mut manifest = DeviceManifest { device_id:"artwork".into(), version:"1.0".into(), ..Default::default() };
+    let mut legacy = serde_json::to_value(&manifest).unwrap();
+    legacy.as_object_mut().unwrap().remove("folderArtwork");
+    let old: DeviceManifest = serde_json::from_value(legacy).unwrap();
+    assert_eq!(old.folder_artwork, FolderArtwork::default());
+    manifest.folder_artwork.enabled=true;
+    manifest.folder_artwork_records.insert("Music/Artist/Album".into(), FolderArtworkRecord {
+        source:Some(FolderArtworkSource {server_id:Some("source".into()),entity_id:"album".into(),artist:false,cover_id:Some("cover".into())}),
+        jpeg_hash:Some("hash".into()),native:std::collections::BTreeMap::from([("kde".into(),"token".into())]),
+    });
+    let decoded: DeviceManifest=manifest_codec::decode_test_manifest(&manifest_codec::encode(&manifest).unwrap()).unwrap();
+    assert_eq!(decoded.folder_artwork,manifest.folder_artwork);
+    assert_eq!(decoded.folder_artwork_records,manifest.folder_artwork_records);
+    let mut target = crate::sync::SyncTarget { path: std::path::PathBuf::from("test"), manifest:decoded, io:Arc::new(crate::device_io::MscBackend::new("test".into())), observation:1 };
+    crate::sync_plan::compact_target(&mut target);
+    assert_eq!(target.manifest.folder_artwork_records,manifest.folder_artwork_records);
 }

@@ -133,8 +133,43 @@ pub struct PlaylistManifestEntry {
     pub last_modified: String,  // ISO 8601 timestamp
 }
 
+/// Portable choices; native activation depends on the connected host and transport.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FolderArtwork {
+    pub enabled: bool,
+    pub windows: bool,
+    pub macos: bool,
+    pub kde: bool,
+    pub gnome: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderArtworkSource {
+    pub server_id: Option<String>,
+    pub entity_id: String,
+    pub artist: bool,
+    pub cover_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderArtworkRecord {
+    pub source: Option<FolderArtworkSource>,
+    /// Content hash of our JPEG; an existing user file never establishes ownership.
+    pub jpeg_hash: Option<String>,
+    /// Adapter-owned evidence, checked before reusing or retiring native state.
+    #[serde(default)]
+    pub native: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct DeviceManifest {
+    #[serde(default, rename = "folderArtwork")]
+    pub folder_artwork: FolderArtwork,
+    #[serde(default, rename = "folderArtworkRecords", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub folder_artwork_records: std::collections::BTreeMap<String, FolderArtworkRecord>,
     pub device_id: String,
     #[serde(default)]
     pub name: Option<String>,
@@ -296,6 +331,7 @@ impl DeviceManifest {
             dirty: self.dirty,
             auto_sync_on_connect: self.auto_sync_on_connect,
             reconcile_before_sync: self.reconcile_before_sync,
+            folder_artwork: self.folder_artwork.clone(),
             last_sync_at: self.last_sync_at,
             auto_fill: self.auto_fill.clone(),
             transcoding_profile_id: self.transcoding_profile_id.clone(),
@@ -2432,6 +2468,8 @@ impl DeviceManager {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             last_sync_at: None,

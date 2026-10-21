@@ -39,6 +39,23 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn begin_sync_job(&self) -> Result<()> {
         Ok(())
     }
+    /// Physical directory identity for artwork grouping; the path remains the IO address.
+    /// The conservative default keeps distinct case-sensitive paths distinct.
+    async fn folder_identity(&self, path: &str) -> Result<Option<String>> {
+        check_relative(path)?;
+        Ok(Some(path.replace('\\', "/").trim_matches('/').to_owned()))
+    }
+    /// Native directory metadata is available only to mounted transports.
+    async fn folder_icon(&self, _folder: &str, _kind: &str, _jpeg: Option<&[u8]>, _owned: Option<&str>) -> Result<Option<String>> {
+        anyhow::bail!("Native folder icons require a compatible host and mass-storage connection")
+    }
+    /// Publish new artwork without assuming ownership of an existing file.
+    async fn publish_artwork(&self, path: &str, data: &[u8]) -> Result<()> {
+        anyhow::ensure!(self.file_length(path).await?.is_none(), "Existing artwork preserved");
+        self.write_with_verify(path, data).await?;
+        anyhow::ensure!(self.read_file(path).await? == data, "Artwork verification failed");
+        Ok(())
+    }
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()>;
@@ -257,7 +274,7 @@ impl Drop for PendingMscWrite {
     }
 }
 
-fn is_missing_object_error(error: &anyhow::Error) -> bool {
+pub(crate) fn is_missing_object_error(error: &anyhow::Error) -> bool {
     if error
         .downcast_ref::<std::io::Error>()
         .map(|io| io.kind() == std::io::ErrorKind::NotFound)
@@ -273,6 +290,47 @@ fn is_missing_object_error(error: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl DeviceIO for MscBackend {
+    async fn folder_identity(&self, path: &str) -> Result<Option<String>> {
+        check_relative(path)?;
+        let root=self.root.clone();let path=PathBuf::from(path);
+        tokio::task::spawn_blocking(move || match crate::folder_icons::safe_folder(&root,&path) {
+            Ok(folder) => {
+                let folder=folder.canonicalize()?;
+                #[cfg(unix)]
+                let identity={
+                    use std::os::unix::fs::MetadataExt;
+                    let metadata=std::fs::metadata(&folder)?;
+                    // realpath may preserve a requested spelling on Linux FAT mounts;
+                    // inode identity still groups aliases without folding case-sensitive paths.
+                    format!("{}:{}",metadata.dev(),metadata.ino()).into_bytes()
+                };
+                #[cfg(not(unix))]
+                let identity=folder.as_os_str().as_encoded_bytes().to_vec();
+                Ok(Some(blake3::hash(&identity).to_hex().to_string()))
+            },
+            Err(error) if is_missing_object_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }).await?
+    }
+
+    async fn folder_icon(&self, folder: &str, kind: &str, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Option<String>> {
+        check_relative(folder)?;
+        let root = self.root.clone();
+        let folder = folder.to_string(); let kind = kind.to_string();
+        let jpeg = jpeg.map(|v| v.to_vec()); let owned = owned.map(str::to_owned);
+        tokio::task::spawn_blocking(move || crate::folder_icons::apply(&root, &folder, &kind, jpeg.as_deref(), owned.as_deref())).await?
+    }
+    async fn publish_artwork(&self, path: &str, data: &[u8]) -> Result<()> {
+        check_relative(path)?;
+        self.file_length(path).await?;
+        let root = self.root.clone(); let path = path.to_string(); let data = data.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let parent = Path::new(&path).parent().context("Artwork parent missing")?;
+            let folder = crate::folder_icons::safe_folder(&root, parent)?;
+            crate::folder_icons::publish_new(&folder.join(Path::new(&path).file_name().context("Artwork filename missing")?), &data)
+        }).await?
+    }
+
     async fn metadata_path(&self, path: &str) -> Result<Option<PathBuf>> {
         check_relative(path)?;
         let root = tokio::fs::canonicalize(&self.root).await?;
@@ -667,6 +725,15 @@ impl std::fmt::Debug for MtpBackend {
 
 /// Platform-independent MTP handle trait, enabling mock injection for tests.
 pub trait MtpHandle: Send + Sync {
+    fn folder_identity(&self, path: &str) -> Result<Option<String>> {
+        // The MTP path resolvers compare names ignoring ASCII case.
+        Ok(Some(path.replace('\\', "/").trim_matches('/').to_ascii_lowercase()))
+    }
+
+    fn publish_artwork(&self, _path: &str, _data: &[u8]) -> Result<()> {
+        anyhow::bail!("Transport cannot safely publish new artwork")
+    }
+
     fn begin_sync_job(&self) -> Result<()> {
         Ok(())
     }
@@ -707,6 +774,20 @@ pub trait MtpHandle: Send + Sync {
 
 #[async_trait]
 impl DeviceIO for MtpBackend {
+    async fn folder_identity(&self, path: &str) -> Result<Option<String>> {
+        check_relative(path)?;
+        let guard=self.operation_lock.clone().lock_owned().await;
+        let handle=self.handle.clone();let path=path.to_owned();
+        tokio::task::spawn_blocking(move || {let _guard=guard;handle.folder_identity(&path)}).await?
+    }
+
+    async fn publish_artwork(&self, path: &str, data: &[u8]) -> Result<()> {
+        check_relative(path)?;
+        let guard = self.operation_lock.clone().lock_owned().await;
+        let handle=self.handle.clone(); let path=path.to_owned(); let data=data.to_vec();
+        tokio::task::spawn_blocking(move || { let _guard=guard; handle.publish_artwork(&path,&data) }).await?
+    }
+
     async fn file_length(&self, path: &str) -> Result<Option<u64>> {
         check_relative(path)?;
         let parent=path.rsplit_once('/').map(|(p,_)|p).unwrap_or("");
@@ -1861,4 +1942,16 @@ mod scan_transport_regressions {
         let error=tokio::time::timeout(std::time::Duration::from_secs(1),read).await.unwrap().unwrap().unwrap_err();
         assert!(error.to_string().contains("cancelled"));
     }
+    #[tokio::test]
+    async fn artwork_folder_identity_follows_transport_case_rules() {
+        let root=tempfile::tempdir().unwrap();std::fs::create_dir(root.path().join("Artist")).unwrap();
+        let aliases=root.path().join("artist").exists();
+        if !aliases {std::fs::create_dir(root.path().join("artist")).unwrap();}
+        let msc=MscBackend::new(root.path().to_owned());
+        let upper=msc.folder_identity("Artist").await.unwrap();let lower=msc.folder_identity("artist").await.unwrap();
+        assert_eq!(upper==lower,aliases,"MSC must use actual filesystem identities rather than lowercasing paths");
+        let mtp=MtpBackend::new(Arc::new(super::tests::MockMtpHandle::new()));
+        assert_eq!(mtp.folder_identity("Music/Artist/Album").await.unwrap(),mtp.folder_identity("music/artist/album").await.unwrap());
+    }
+
 }

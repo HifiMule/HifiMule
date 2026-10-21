@@ -30,7 +30,7 @@ export function basketEstimateKey(device: any, serverId: string | null, items: B
         device?.plannedProfileRevision,
         device?.transcoding_profile_dirty ?? device?.transcodingProfileDirty,
         device?.last_synced_transcoding_profile_id ?? device?.lastSyncedTranscodingProfileId,
-        device?.last_sync_at ?? device?.lastSyncAt, device?.reconcile_before_sync ?? device?.reconcileBeforeSync,
+        device?.last_sync_at ?? device?.lastSyncAt, device?.reconcile_before_sync ?? device?.reconcileBeforeSync, device?.folderArtwork,
         force,
         items.filter(item => !item.id.startsWith('__auto_fill_slot__'))
             .map(item => [item.serverId ?? serverId, item.id, item.type]),

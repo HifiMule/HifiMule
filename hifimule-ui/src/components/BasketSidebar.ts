@@ -52,6 +52,7 @@ interface ConnectedDeviceSummary {
     audiobookPath?: string | null;
     podcastPath?: string | null;
     reconcileBeforeSync?: boolean;
+    folderArtwork?: { enabled?: boolean; windows?: boolean; macos?: boolean; kde?: boolean; gnome?: boolean };
     transcodingProfileId?: string | null;
     deviceClass?: 'msc' | 'mtp';
 }
@@ -718,6 +719,7 @@ export class BasketSidebar {
             ?? '';
         const audiobookFolder = selected.audiobookPath ?? current.audiobookPath ?? current.audiobook_path ?? '';
         const reconcileBeforeSync = selected.reconcileBeforeSync ?? current.reconcileBeforeSync ?? false;
+        const folderArtwork = selected.folderArtwork ?? current.folderArtwork ?? {};
         const podcastFolder = selected.podcastPath ?? current.podcastPath ?? current.podcast_path ?? '';
         let selectedIcon = selected.icon || 'usb-drive';
         const selectedProfileId = selected.transcodingProfileId
@@ -767,6 +769,10 @@ export class BasketSidebar {
                 <sl-input id="device-settings-podcast" label="${t('basket.device.podcast_folder')}" placeholder="${escapeAttr(musicFolder)}" value="${escapeAttr(podcastFolder)}"></sl-input>
                 <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${escapeAttr(musicFolder)}" value="${escapeAttr(playlistFolder ?? '')}"></sl-input>
                 <sl-checkbox id="device-settings-reconcile" ${reconcileBeforeSync ? 'checked' : ''} help-text="${t('basket.device.reconcile_hint')}">${t('basket.device.reconcile_before_sync')}</sl-checkbox>
+                <sl-checkbox id="device-settings-artwork" ${folderArtwork.enabled ? 'checked' : ''} help-text="${t('basket.device.artwork_hint')}">${t('basket.device.artwork')}</sl-checkbox>
+                <div id="device-settings-artwork-additions" ${folderArtwork.enabled ? '' : 'hidden'}>
+                    ${(['windows', 'macos', 'kde', 'gnome'] as const).map(kind => `<sl-checkbox id="device-settings-artwork-${kind}" ${folderArtwork[kind] ? 'checked' : ''} help-text="${t(`basket.device.artwork_${kind}_hint`)}">${t(`basket.device.artwork_${kind}`)}</sl-checkbox>`).join('')}
+                </div>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
             <sl-button slot="footer" variant="default" id="device-settings-cancel">${t('basket.actions.cancel')}</sl-button>
@@ -786,6 +792,10 @@ export class BasketSidebar {
                     el.setAttribute('aria-pressed', String(isSelected));
                 });
             });
+        });
+        dialog.querySelector('#device-settings-artwork')?.addEventListener('sl-change', () => {
+            const additions = dialog.querySelector('#device-settings-artwork-additions') as HTMLElement;
+            additions.hidden = (dialog.querySelector('#device-settings-artwork') as any)?.checked !== true;
         });
         const profileSelect = dialog.querySelector('#device-settings-transcoding-profile') as any;
         const profileDesc = dialog.querySelector('#device-settings-transcoding-desc') as HTMLElement | null;
@@ -853,6 +863,7 @@ export class BasketSidebar {
                     icon: selectedIcon || null,
                     transcodingProfileId: (dialog.querySelector('#device-settings-transcoding-profile') as any)?.value ?? 'passthrough',
                     reconcileBeforeSync: (dialog.querySelector('#device-settings-reconcile') as any)?.checked === true,
+                    folderArtwork: Object.fromEntries(['enabled', 'windows', 'macos', 'kde', 'gnome'].map(kind => [kind, (dialog.querySelector(kind === 'enabled' ? '#device-settings-artwork' : `#device-settings-artwork-${kind}`) as any)?.checked === true])),
                     playlistFolderPath: playlistFolderValue,
                     audiobookFolderPath: audiobookFolderValue,
                     podcastFolderPath: podcastFolderValue,

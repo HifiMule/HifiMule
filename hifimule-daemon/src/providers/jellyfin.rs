@@ -860,6 +860,10 @@ impl MediaProvider for JellyfinProvider {
         })
     }
 
+    async fn fetch_cover_art(&self, cover_art_id: &str) -> Result<reqwest::Response, ProviderError> {
+        self.client.get_image(self.url(), self.token(), cover_art_id).await.map_err(Self::map_error)
+    }
+
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError> {
         Ok(format!(
             "{}/Items/{}/Images/Primary",

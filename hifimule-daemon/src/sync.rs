@@ -1,3 +1,4 @@
+pub(crate) mod artwork;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,7 @@ fn provider_source_label(server_id: Option<String>) -> String {
 /// An item desired for sync (from the UI basket / Jellyfin API).
 #[derive(Debug, Clone)]
 pub struct DesiredItem {
+    pub artwork: Option<artwork::TrackArtwork>,
     pub source_audio: crate::domain::models::SourceAudioProperties,
     pub disc_number: Option<u32>,
     pub duration_seconds: u32,
@@ -92,6 +94,8 @@ pub struct DesiredItem {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncAddItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artwork: Option<artwork::TrackArtwork>,
     #[serde(default)]
     pub source_audio: crate::domain::models::SourceAudioProperties,
     #[serde(default)]
@@ -1643,7 +1647,7 @@ pub fn planned_song_bytes(song: &crate::domain::models::Song, profile: Option<&s
 }
 
 pub fn planned_song_bytes_with_preferred(song: &crate::domain::models::Song, profile: Option<&serde_json::Value>, preferred: Option<&str>, override_kbps: Option<u32>) -> u64 {
-    let item = SyncAddItem {source_audio: source_audio_for_song(song), disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:crate::sync::song_audio_bitrate_bps(&song),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
+    let item = SyncAddItem { artwork: Some(artwork::TrackArtwork::from(song)),source_audio: source_audio_for_song(song), disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:crate::sync::song_audio_bitrate_bps(&song),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
     planned_audio_bytes(&item, profile, preferred)
 }
 
@@ -1715,7 +1719,7 @@ pub async fn capacity_manifest_with_existing_files(manifest: &DeviceManifest, io
 }
 
 fn add_from_desired(item: &DesiredItem) -> SyncAddItem {
-    SyncAddItem {
+    SyncAddItem { artwork: item.artwork.clone(),
         source_audio: item.source_audio, disc_number: item.disc_number, duration_seconds: item.duration_seconds,
         media_role: item.media_role, jellyfin_id: item.jellyfin_id.clone(), name: item.name.clone(),
         album: item.album.clone(), artist: item.artist.clone(), size_bytes: item.size_bytes, etag: item.etag.clone(),
@@ -4851,25 +4855,6 @@ async fn execute_plan_sync_buffered(
     }
 
     deletion_log.finish(crate::sync_logging::outcome(deletion_errors > 0, operation_manager.is_cancelled(&operation_id).await), delta.deletes.len());
-    let managed_subfolder = managed_path
-        .strip_prefix(device_path)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    crate::daemon_log!("[Sync] Post-transfer directory cleanup begin");
-    let mut cleanup_log = crate::sync_logging::Step::current("directory_cleanup");
-    if operation_manager.is_cancelled(&operation_id).await {
-        cleanup_log.finish("cancelled", 0);
-    } else {
-        match device_io.cleanup_empty_subdirs(&managed_subfolder).await {
-            Ok(()) => cleanup_log.finish("success", 0),
-            Err(e) => {
-                cleanup_log.finish("failed", 0);
-                eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
-            }
-        }
-    }
-    crate::daemon_log!("[Sync] Post-transfer directory cleanup end");
-
     crate::daemon_log!(
         "[Sync] Post-transfer ID updates begin count={}",
         delta.id_changes.len()
@@ -5027,6 +5012,37 @@ async fn execute_plan_sync_buffered(
     }
 
     provenance_log.finish(crate::sync_logging::outcome(errors.len() > provenance_errors_before, operation_manager.is_cancelled(&operation_id).await), delta.provenance.len());
+    if !operation_manager.is_cancelled(&operation_id).await
+        && let Some(mut snapshot) = device_manager.get_manifest_for_device(&operation_device_id).await
+        && (snapshot.folder_artwork.enabled || !snapshot.folder_artwork_records.is_empty())
+    {
+        let warnings = artwork::run(&mut snapshot, delta, &device_io, &provider, &providers_by_server,
+            &operation_manager, &operation_id, checkpoint).await;
+        for warning in warnings {
+            crate::daemon_log!("{}", warning);
+            let _ = warning_journal.record(&warning);
+            sync_warnings.push(warning);
+        }
+    }
+    let managed_subfolder = managed_path
+        .strip_prefix(device_path)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    crate::daemon_log!("[Sync] Post-transfer directory cleanup begin");
+    let mut cleanup_log = crate::sync_logging::Step::current("directory_cleanup");
+    if operation_manager.is_cancelled(&operation_id).await {
+        cleanup_log.finish("cancelled", 0);
+    } else {
+        match device_io.cleanup_empty_subdirs(&managed_subfolder).await {
+            Ok(()) => cleanup_log.finish("success", 0),
+            Err(e) => {
+                cleanup_log.finish("failed", 0);
+                eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
+            }
+        }
+    }
+    crate::daemon_log!("[Sync] Post-transfer directory cleanup end");
+
     let mut playlists_log = crate::sync_logging::Step::current("playlists");
     let playlist_errors_before = errors.len();
     crate::daemon_log!(
@@ -5532,7 +5548,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 })
                 .unwrap_or("new-selection");
             annotate_add(
-                SyncAddItem {source_audio: i.source_audio, disc_number: i.disc_number,
+                SyncAddItem { artwork: i.artwork.clone(),source_audio: i.source_audio, disc_number: i.disc_number,
                     duration_seconds: i.duration_seconds,
                     media_role: i.media_role,
                     jellyfin_id: i.jellyfin_id.clone(),
@@ -5941,6 +5957,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -6634,7 +6652,7 @@ mod tests {
         album: Option<&str>,
         artist: Option<&str>,
     ) -> DesiredItem {
-        DesiredItem {source_audio: Default::default(), disc_number: None,
+        DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -7313,7 +7331,7 @@ mod tests {
         content_type: &str,
         size_bytes: u64,
     ) -> SyncAddItem {
-        SyncAddItem {source_audio: Default::default(), disc_number: None,
+        SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -10506,7 +10524,7 @@ mod tests {
 
     #[test]
     fn test_calculate_delta_cleans_up_tracks_outside_current_music_folder() {
-        let desired = vec![DesiredItem {source_audio: Default::default(), disc_number: None,
+        let desired = vec![DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "t1".to_string(),
@@ -10570,7 +10588,7 @@ mod tests {
 
     #[test]
     fn test_calculate_delta_does_not_convert_relocation_to_id_change() {
-        let desired = vec![DesiredItem {source_audio: Default::default(), disc_number: None,
+        let desired = vec![DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "new-id".to_string(),
@@ -10956,7 +10974,7 @@ mod tests {
             provenance_updates: std::collections::HashMap::new(),
             blocked: vec![],
             adds: vec![annotate_add(
-                SyncAddItem {source_audio: Default::default(), disc_number: None,
+                SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
                     duration_seconds: 0,
                     media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "track-1".to_string(),
@@ -12351,7 +12369,7 @@ mod source_audio_planning_tests {
 
     #[test]
     fn resident_measurements_are_used_only_when_delta_keeps_the_file() {
-        let desired = DesiredItem {
+        let desired = DesiredItem { artwork: None,
             source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
             media_role: crate::device::MediaRole::Music, jellyfin_id: "track".into(), name: "Track".into(),
             album: None, artist: None, size_bytes: 50_000_000, etag: None, provider_album_id: None,
@@ -12399,7 +12417,7 @@ mod source_audio_planning_tests {
 
     #[test]
     fn selection_identity_includes_server_and_deduplicates_only_same_owner() {
-        let make = |server: &str, size| DesiredItem { source_audio: Default::default(), disc_number: None,
+        let make = |server: &str, size| DesiredItem { artwork: None, source_audio: Default::default(), disc_number: None,
             duration_seconds: 240, media_role: crate::device::MediaRole::Music, jellyfin_id:"same".into(), name:"Track".into(),
             album:None, artist:None, size_bytes:size, etag:None, provider_album_id:None, provider_content_type:None,
             provider_suffix:Some("mp3".into()), original_bitrate:Some(128_000), track_number:None, server_id:Some(server.into()) };
@@ -12407,7 +12425,7 @@ mod source_audio_planning_tests {
         assert_eq!(planned_selection_bytes(&items, &DeviceManifest::default(), None, None), 300);
     }
     fn review_desired(id: &str) -> DesiredItem {
-        DesiredItem { source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
+        DesiredItem { artwork: None, source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
             media_role: crate::device::MediaRole::Music, jellyfin_id: id.into(), name: "Track".into(),
             album: None, artist: None, size_bytes: 50_000_000, etag: None, provider_album_id: None,
             provider_content_type: None, provider_suffix: Some("flac".into()), original_bitrate: Some(1_600_000),

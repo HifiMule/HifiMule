@@ -65,3 +65,20 @@ test('every supported language explains external file management and scan cost',
         assert.ok(catalog[language]['basket.device.reconcile_hint']);
     }
 });
+
+test('folder artwork preferences load defaults and save explicit independent additions', async () => {
+    const defaults = await setup({});
+    assert.equal(defaults.dialog.querySelector('#device-settings-artwork').checked, false);
+    for (const kind of ['windows','macos','kde','gnome']) assert.equal(defaults.dialog.querySelector(`#device-settings-artwork-${kind}`).checked,false);
+    const value = { enabled:true, windows:true, macos:false, kde:true, gnome:false };
+    const { dialog,calls } = await setup({ folderArtwork:value });
+    assert.equal(dialog.querySelector('#device-settings-artwork').checked,true);
+    assert.equal(dialog.querySelector('#device-settings-artwork-windows').checked,true);
+    dialog.querySelector('#device-settings-artwork').checked=false;
+    await dialog.querySelector('#device-settings-save').click();
+    assert.deepEqual(calls.find(call=>call.method==='device.update_manifest').params.folderArtwork,{...value,enabled:false});
+});
+test('all languages describe optional native requirements and next-sync activation', () => {
+    const catalog=JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json',import.meta.url),'utf8'));
+    for(const lang of ['en','fr','es','de']) for(const key of ['artwork','artwork_hint','artwork_windows_hint','artwork_macos_hint','artwork_kde_hint','artwork_gnome_hint']) assert.ok(catalog[lang][`basket.device.${key}`]);
+});

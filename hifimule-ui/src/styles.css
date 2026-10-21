@@ -3200,3 +3200,9 @@ hm-radio-action sl-icon-button[aria-disabled="true"]::part(base) {
     --speed: 0s;
   }
 }
+
+#device-settings-artwork-additions:not([hidden]) {
+    display: grid;
+    gap: var(--sl-spacing-medium);
+    padding-inline-start: var(--sl-spacing-large);
+}

@@ -4429,6 +4429,7 @@ async fn handle_get_daemon_state_snapshot(
                 "playlistPath": m.playlist_path.clone(),
                 "transcodingProfileId": m.transcoding_profile_id.clone(),
                 "reconcileBeforeSync": m.reconcile_before_sync,
+                "folderArtwork": m.folder_artwork,
                 "deviceClass": match class {
                     crate::device::DeviceClass::Msc => "msc",
                     crate::device::DeviceClass::Mtp => "mtp",
@@ -4997,7 +4998,7 @@ fn provider_track_size(track: &Song) -> u64 {
 }
 
 pub(crate) fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
-    crate::sync::DesiredItem {source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
+    crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork::from(song)),source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
         duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
@@ -5213,7 +5214,7 @@ fn podcast_episode_to_desired(
 ) -> crate::sync::DesiredItem {
     // Episode catalog details do not expose a byte size. Reserve 128 kbit/s,
     // using one hour when duration is missing; transfer checks actual capacity.
-    crate::sync::DesiredItem {source_audio: Default::default(), disc_number: None,
+    crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
         duration_seconds: 0,
         media_role: crate::device::MediaRole::Podcast,
         jellyfin_id: episode.id.clone(),
@@ -6160,7 +6161,7 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         .or_else(|| item.container.clone());
     let original_bitrate = item.audio_bitrate_bps();
         let source_audio = item.source_audio_properties();
-    crate::sync::DesiredItem {source_audio, disc_number: item.parent_index_number,
+    crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork::from_jellyfin(&item)),source_audio, disc_number: item.parent_index_number,
         duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0) / 10_000_000) as u32,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: item.id,
@@ -6579,7 +6580,7 @@ pub(crate) fn auto_fill_to_desired_item(
     media_role: crate::device::MediaRole,
     provider_album_id: Option<String>,
 ) -> crate::sync::DesiredItem {
-    crate::sync::DesiredItem {
+    crate::sync::DesiredItem { artwork: None,
         source_audio: item.source_audio,
         disc_number: item.disc_number,
         duration_seconds: item.duration_seconds,
@@ -7593,7 +7594,7 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
             .or_else(|| item.container.clone());
         let original_bitrate = item.audio_bitrate_bps();
         let source_audio = item.source_audio_properties();
-        crate::sync::DesiredItem {source_audio, disc_number: item.parent_index_number,
+        crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork::from_jellyfin(&item)),source_audio, disc_number: item.parent_index_number,
             duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: item.id,
@@ -8173,7 +8174,7 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
                 .synced_items
                 .iter()
                 .find(|item| item.jellyfin_id == change.old_jellyfin_id);
-            force_adds.push(crate::sync::SyncAddItem {source_audio: Default::default(), disc_number: None,
+            force_adds.push(crate::sync::SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: change.media_role,
                 jellyfin_id: change.new_jellyfin_id.clone(),
@@ -8212,7 +8213,7 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
             {
                 continue;
             }
-            force_adds.push(crate::sync::SyncAddItem {source_audio: Default::default(), disc_number: None,
+            force_adds.push(crate::sync::SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: item.media_role,
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -8390,6 +8391,21 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
         Some(require_provider(state).await?)
     };
 
+    let mut artwork_providers = std::collections::HashMap::new();
+    if manifest.folder_artwork.enabled {
+        let mut ids: std::collections::BTreeSet<String> = manifest.synced_items.iter().filter_map(|i|i.server_id.clone()).collect();
+        ids.extend(manifest.folder_artwork_records.values().filter_map(|r|r.source.as_ref().and_then(|s|s.server_id.clone())));
+        ids.extend(selected_for_exec.iter().cloned());
+        for id in ids {
+            // Artwork-only server availability never blocks audio admission.
+            if let Ok(Ok(provider)) = tokio::time::timeout(std::time::Duration::from_secs(10), get_provider_by_server_id_for(state, &id)).await {
+                artwork_providers.insert(id, provider);
+            }
+        }
+    }
+    if let (Some(id),Some(provider)) = (selected_for_exec.as_ref(),selected_provider.as_ref()) {
+        artwork_providers.insert(id.clone(),Arc::clone(provider));
+    }
     phases.finish("success", add_servers.len());
     // Create the operation only after single-server provider resolution succeeds.
     let operation_id = uuid::Uuid::new_v4().to_string();
@@ -8493,7 +8509,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                 }
             };
 
-            let (default_provider, providers_by_server) = {
+            let (default_provider, mut providers_by_server) = {
                 let mut groups = group_providers.into_iter();
                 let (default_server, default_provider) = groups
                     .next()
@@ -8505,6 +8521,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                 }
                 (default_provider, providers)
             };
+            providers_by_server.extend(artwork_providers);
             let result = crate::sync::execute_plan_sync_with_protection(
                 &delta,
                 &target,
@@ -8606,7 +8623,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                     local_encoding_servers,
                     provider,
                     transcoding_profile,
-                    providers_by_server: std::collections::HashMap::new(),
+                    providers_by_server: artwork_providers,
                 },
                 op_manager.clone(),
                 op_id.clone(),
@@ -9374,6 +9391,20 @@ async fn handle_device_update_manifest(
     validate_device_name_and_icon(name, icon_for_validation)?;
 
     let reconcile_before_sync = optional_bool_param(&params, "reconcileBeforeSync")?;
+    let folder_artwork = params.get("folderArtwork").map(|value| {
+        let invalid = || JsonRpcError { code: ERR_INVALID_PARAMS, message: "folderArtwork must contain known boolean settings".into(), data: None };
+        let fields = value.as_object().ok_or_else(invalid)?;
+        let mut settings = current.folder_artwork.clone();
+        for (key,value) in fields {
+            let enabled = value.as_bool().ok_or_else(invalid)?;
+            match key.as_str() {
+                "enabled" => settings.enabled=enabled, "windows" => settings.windows=enabled,
+                "macos" => settings.macos=enabled, "kde" => settings.kde=enabled, "gnome" => settings.gnome=enabled,
+                _ => return Err(invalid()),
+            }
+        }
+        Ok(settings)
+    }).transpose()?;
     let music_folder_path = string_param(&params, "musicFolderPath")?
         .map(normalize_editable_folder_path)
         .transpose()?;
@@ -9449,6 +9480,7 @@ async fn handle_device_update_manifest(
     state
         .device_manager
         .update_manifest(|manifest| {
+            if let Some(settings) = folder_artwork { manifest.folder_artwork = settings; }
             if let Some(enabled) = reconcile_before_sync {
                 manifest.reconcile_before_sync = enabled;
             }
@@ -9795,6 +9827,7 @@ async fn handle_device_initialize(
             "playlistPath": manifest.playlist_path,
             "transcodingProfileId": manifest.transcoding_profile_id,
             "reconcileBeforeSync": manifest.reconcile_before_sync,
+            "folderArtwork": manifest.folder_artwork,
         }
     }))
 }
@@ -10546,7 +10579,7 @@ mod tests {
     // ---- Story 13.5 #20: encoding-from-goals per-slot transcode override (RPC-level). ----
 
     fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
-        crate::sync::SyncAddItem {source_audio: Default::default(), disc_number: None,
+        crate::sync::SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -11602,6 +11635,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -11999,6 +12034,16 @@ mod tests {
         assert_eq!(updated.managed_paths, vec!["Audio".to_string()]);
         assert_eq!(updated.playlist_path, None);
         assert_eq!(updated.resolved_playlist_path(), Some("Audio"));
+        assert_eq!(updated.folder_artwork, crate::device::FolderArtwork::default());
+        let preferences = json!({"enabled":true,"windows":true,"macos":true,"kde":true,"gnome":true});
+        let result = handle_device_update_manifest(&state,Some(json!({"deviceId":"dev-1","folderArtwork":preferences}))).await.unwrap();
+        assert_eq!(result["relocationRequired"],false);
+        handle_device_update_manifest(&state,Some(json!({"deviceId":"dev-1"}))).await.unwrap();
+        let saved = state.device_manager.get_current_device().await.unwrap();
+        assert_eq!(serde_json::to_value(&saved.folder_artwork).unwrap(),preferences);
+        assert_eq!(saved.polling_metadata().folder_artwork,saved.folder_artwork);
+        let persisted: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(&std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap()).unwrap();
+        assert_eq!(persisted.folder_artwork,saved.folder_artwork);
         let dirty = updated.transcoding_profile_dirty;
         for value in [true, false] {
             let result = handle_device_update_manifest(&state, Some(json!({"deviceId":"dev-1", "reconcileBeforeSync":value}))).await.unwrap();
@@ -12037,6 +12082,9 @@ mod tests {
             .unwrap();
 
         for params in [
+            json!({ "deviceId": "dev-1", "folderArtwork": null }),
+            json!({ "deviceId": "dev-1", "folderArtwork": {"enabled":"true"} }),
+            json!({ "deviceId": "dev-1", "folderArtwork": {"unknown":true} }),
             json!({ "deviceId": "dev-1", "reconcileBeforeSync": "true" }),
             json!({ "deviceId": "dev-1", "reconcileBeforeSync": 1 }),
             json!({ "deviceId": "dev-1", "reconcileBeforeSync": null }),
@@ -12694,6 +12742,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -12876,6 +12926,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -12997,6 +13049,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -13041,7 +13095,7 @@ mod tests {
                 .get_selected_sync_target()
                 .await
                 .unwrap();
-            let desired = vec![crate::sync::DesiredItem {source_audio: Default::default(), disc_number: None,
+            let desired = vec![crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song1".into(),
@@ -13156,6 +13210,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -14240,7 +14296,7 @@ mod tests {
         }
 
         // Manual item "m1" (100 bytes) already resolved on server s1.
-        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {source_audio: Default::default(), disc_number: None,
+        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "m1".to_string(),
@@ -14795,6 +14851,8 @@ mod tests {
                 size_ticks: 0,
                 size_bytes: 4000,
             }],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -14897,6 +14955,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -14955,6 +15015,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15000,6 +15062,8 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15050,6 +15114,8 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15173,6 +15239,8 @@ mod tests {
                     dirty: false,
                     pending_item_ids: vec![],
                     basket_items: vec![],
+                    folder_artwork: Default::default(),
+                    folder_artwork_records: Default::default(),
                     reconcile_before_sync: false,
                     auto_sync_on_connect: false,
                     auto_fill: crate::device::AutoFillConfig::default(),
@@ -15264,6 +15332,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15473,6 +15543,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15558,6 +15630,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: true,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15674,6 +15748,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15692,6 +15768,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),
@@ -15756,6 +15834,8 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            folder_artwork: Default::default(),
+            folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillConfig::default(),

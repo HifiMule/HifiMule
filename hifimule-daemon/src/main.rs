@@ -78,6 +78,7 @@ mod db;
 mod device;
 pub mod device_io;
 mod device_music_scan;
+mod folder_icons;
 // Provider catalog models are part of the multi-provider contract, even while
 // the current daemon binary only uses the sync-facing subset.
 #[allow(dead_code)]
@@ -1690,7 +1691,7 @@ mod auto_sync_tests {
 
     #[test]
     fn push_auto_fill_items_dedups_and_writes_playlist() {
-        let mut desired_items = vec![sync::DesiredItem {source_audio: Default::default(), disc_number: None,
+        let mut desired_items = vec![sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "manual".to_string(),
@@ -2020,7 +2021,7 @@ async fn run_auto_sync_logged(
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 
-    if !auto_sync_delta_has_work(&delta, total_files) {
+    if !auto_sync_delta_has_work(&delta, total_files) && !manifest.folder_artwork.enabled && manifest.folder_artwork_records.is_empty() {
         terminal = "noop";
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         let _ = state_tx.send(DaemonState::Idle);
@@ -2109,9 +2110,9 @@ async fn run_auto_sync_logged(
         &target,
         sync::ProviderSyncSource {
             local_encoding_servers,
-            provider,
+            provider: Arc::clone(&provider),
             transcoding_profile,
-            providers_by_server: std::collections::HashMap::new(),
+            providers_by_server: server_id.iter().map(|id|(id.clone(), Arc::clone(&provider))).collect(),
         },
         sync_op_manager.clone(),
         operation_id.clone(),

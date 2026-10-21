@@ -154,7 +154,7 @@ async fn manifest_migration_regression_auto_finalization_preserves_profile_histo
             assert!(durable.last_sync_at.is_some());
             durable.set_transcoding_profile(None);
             let item = &durable.synced_items[0];
-            let desired = sync::DesiredItem {source_audio: Default::default(), disc_number: None,
+            let desired = sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
                 duration_seconds: 0,
                 media_role: item.media_role.clone(),
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -350,6 +350,8 @@ async fn test_device_recognition_integration() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -429,6 +431,8 @@ async fn test_device_detection_auto_sync_enabled() {
             size_ticks: 1000000,
             size_bytes: 50000000,
         }],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillConfig::default(),
@@ -498,6 +502,8 @@ async fn test_device_detection_auto_sync_disabled() {
             size_ticks: 500000,
             size_bytes: 25000000,
         }],
+        folder_artwork: Default::default(),
+        folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillConfig::default(),
