@@ -1915,7 +1915,7 @@ impl AudiobookshelfProvider {
         }
         check_status(&response)?;
         let envelope: LibrariesEnvelope = response.json().await.map_err(deserialization_error)?;
-        envelope
+        Ok(envelope
             .libraries
             .into_iter()
             .filter_map(|library| {
@@ -1937,17 +1937,9 @@ impl AudiobookshelfProvider {
                     role,
                 })
             })
-            .collect::<Vec<_>>()
-            .pipe(Ok)
+            .collect::<Vec<_>>())
     }
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}
 
 fn transport_error(error: reqwest::Error) -> ProviderError {
     crate::log_to_file(&format!(
