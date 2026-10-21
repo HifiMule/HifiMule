@@ -672,22 +672,26 @@ mod tests {
         }
     }
     use crate::playback::streaming::{
-        BoundedHttpReader, COMPRESSED_CAPACITY_BYTES, COMPRESSED_CHUNK_BYTES,
+        BoundedHttpReader, COMPRESSED_CAPACITY_BYTES,
+        test_sources::{ReadError, SequentialSource},
     };
     use std::io::{Read, Write};
 
     #[test]
     fn review_source_error_cannot_be_clean_decoder_eof() {
         let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, reader) = BoundedHttpReader::channel(cancel.clone());
         let bytes = include_bytes!("../../tests/fixtures/generated-pcm16.aif");
-        for part in bytes.chunks(COMPRESSED_CHUNK_BYTES) {
-            tx.blocking_send(Ok(bytes::Bytes::copy_from_slice(part)))
-                .unwrap();
-        }
-        tx.blocking_send(Err(super::super::streaming::StreamReadError::Timeout))
-            .unwrap();
-        drop(tx);
+        // Fail during the declared audio body, before the demuxer can finish.
+        let source = bytes[..bytes.len() / 2].chain(ReadError(
+            std::io::ErrorKind::TimedOut,
+            "source made no byte progress",
+        ));
+        let reader = BoundedHttpReader::from_source(
+            SequentialSource(source),
+            cancel.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let failure = reader.failure_state();
         let result = decode_stream(
             reader,
             Some("stream.aif"),
@@ -700,6 +704,10 @@ mod tests {
         assert!(
             result.is_err(),
             "terminal source error was accepted as clean EOF"
+        );
+        assert_eq!(
+            failure.error(),
+            Some(super::super::streaming::StreamReadError::Timeout)
         );
     }
 
@@ -863,21 +871,14 @@ mod tests {
         header[8] = ((tag_size >> 7) & 0x7f) as u8;
         header[9] = (tag_size & 0x7f) as u8;
         let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
-        let producer = std::thread::spawn(move || {
-            tx.blocking_send(Ok(bytes::Bytes::from(header))).unwrap();
-            for _ in 0..(tag_size / COMPRESSED_CHUNK_BYTES) {
-                tx.blocking_send(Ok(bytes::Bytes::from(vec![0; COMPRESSED_CHUNK_BYTES])))
-                    .unwrap();
-            }
-            let remainder = tag_size % COMPRESSED_CHUNK_BYTES;
-            tx.blocking_send(Ok(bytes::Bytes::from(vec![0; remainder])))
-                .unwrap();
-            tx.blocking_send(Ok(bytes::Bytes::from_static(&[0xff, 0xfb, 0x90, 0x64])))
-                .unwrap();
-        });
+        header.resize(10 + tag_size, 0);
+        header.extend_from_slice(&[0xff, 0xfb, 0x90, 0x64]);
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(std::io::Cursor::new(header)),
+            cancel,
+            Arc::new(AtomicU64::new(0)),
+        );
         assert!(reader_is_mp3(&mut reader, None).unwrap());
-        producer.join().unwrap();
     }
 
     #[test]
@@ -1379,17 +1380,11 @@ mod tests {
         ] {
             eprintln!("decoding {name}");
             let cancel = Arc::new(AtomicBool::new(false));
-            let (tx, reader) = BoundedHttpReader::channel(cancel.clone());
-            let mut bytes = Vec::new();
-            std::fs::File::open(root.join(name))
-                .unwrap()
-                .read_to_end(&mut bytes)
-                .unwrap();
-            for chunk in bytes.chunks(COMPRESSED_CHUNK_BYTES) {
-                tx.blocking_send(Ok(bytes::Bytes::copy_from_slice(chunk)))
-                    .unwrap();
-            }
-            drop(tx);
+            let reader = BoundedHttpReader::from_source(
+                std::fs::File::open(root.join(name)).unwrap(),
+                cancel.clone(),
+                Arc::new(AtomicU64::new(0)),
+            );
             let pcm = Arc::new(ArrayQueue::new(20_000_000));
             let result =
                 decode_stream(reader, Some(name), 48_000, 2, 0, pcm.clone(), cancel).unwrap();

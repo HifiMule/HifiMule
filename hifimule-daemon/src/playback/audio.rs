@@ -3596,15 +3596,19 @@ mod tests {
 
     #[test]
     fn shared_stream_source_detail_is_preserved_in_sanitized_diagnostic() {
+        use super::super::streaming::test_sources::{ReadError, SequentialSource};
         use std::io::Read as _;
 
         let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(ReadError(
+                std::io::ErrorKind::Other,
+                "GET https://music.example/private?token=secret reset",
+            )),
+            cancel,
+            Arc::new(AtomicU64::new(0)),
+        );
         let failure = reader.failure_state();
-        tx.blocking_send(Err(StreamReadError::Source(
-            "GET https://music.example/private?token=secret reset".into(),
-        )))
-        .unwrap();
         let _ = reader.read(&mut [0u8; 1]);
 
         let error = PlaybackPipelineError::from_decode_error_and_stream_state(

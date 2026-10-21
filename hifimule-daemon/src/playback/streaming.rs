@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -119,7 +118,6 @@ impl StreamFailureState {
 }
 
 pub struct BoundedHttpReader {
-    rx: tokio::sync::mpsc::Receiver<Result<Bytes, StreamReadError>>,
     buffer: Vec<u8>,
     base: u64,
     position: u64,
@@ -127,54 +125,16 @@ pub struct BoundedHttpReader {
     cancel: Arc<AtomicBool>,
     high_water: Arc<AtomicU64>,
     failure: StreamFailureState,
-    source: Option<Box<dyn CompressedSource>>,
+    source: Box<dyn CompressedSource>,
 }
 
 impl BoundedHttpReader {
-    #[cfg(test)]
-    pub fn channel(
-        cancel: Arc<AtomicBool>,
-    ) -> (
-        tokio::sync::mpsc::Sender<Result<Bytes, StreamReadError>>,
-        Self,
-    ) {
-        Self::channel_with_high_water(cancel, Arc::new(AtomicU64::new(0)))
-    }
-
-    #[cfg(test)]
-    pub fn channel_with_high_water(
-        cancel: Arc<AtomicBool>,
-        high_water: Arc<AtomicU64>,
-    ) -> (
-        tokio::sync::mpsc::Sender<Result<Bytes, StreamReadError>>,
-        Self,
-    ) {
-        let (tx, rx) =
-            tokio::sync::mpsc::channel(COMPRESSED_CAPACITY_BYTES / COMPRESSED_CHUNK_BYTES);
-        (
-            tx,
-            Self {
-                rx,
-                buffer: Vec::new(),
-                base: 0,
-                position: 0,
-                eof: false,
-                cancel,
-                high_water,
-                failure: StreamFailureState::default(),
-                source: None,
-            },
-        )
-    }
-
     pub fn from_source(
         source: impl CompressedSource + 'static,
         cancel: Arc<AtomicBool>,
         high_water: Arc<AtomicU64>,
     ) -> Self {
-        let (_, rx) = tokio::sync::mpsc::channel(1);
         Self {
-            rx,
             buffer: Vec::with_capacity(COMPRESSED_WINDOW_BYTES),
             base: 0,
             position: 0,
@@ -182,7 +142,7 @@ impl BoundedHttpReader {
             cancel,
             high_water,
             failure: StreamFailureState::default(),
-            source: Some(Box::new(source)),
+            source: Box::new(source),
         }
     }
 
@@ -191,19 +151,13 @@ impl BoundedHttpReader {
     }
 
     pub(crate) fn preparation(&self) -> Option<super::http_source::Preparation> {
-        self.source.as_ref().and_then(|source| source.preparation())
+        self.source.preparation()
     }
 
     fn position_source_for_read(&mut self) -> io::Result<()> {
         let end = self.base + self.buffer.len() as u64;
         if self.position < self.base || self.position > end {
-            let source = self.source.as_mut().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "seek outside bounded compressed window",
-                )
-            })?;
-            source
+            self.source
                 .seek(SeekFrom::Start(self.position))
                 .inspect_err(|error| self.failure.record_io(error))?;
             self.buffer.clear();
@@ -214,78 +168,53 @@ impl BoundedHttpReader {
     }
 
     fn at_known_end(&self) -> bool {
-        self.source.as_ref().and_then(|source| source.length()) == Some(self.position)
+        self.source.length() == Some(self.position)
     }
 
     fn receive_next(&mut self) -> io::Result<()> {
-        loop {
-            if self.cancel.load(Ordering::Acquire) {
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "playback generation cancelled",
+            ));
+        }
+        let buffered = self.buffer.len().saturating_sub(
+            usize::try_from(self.position.saturating_sub(self.base)).unwrap_or(usize::MAX),
+        );
+        self.source.update_compressed_buffer_bytes(buffered);
+        let mut bytes = vec![0u8; COMPRESSED_CHUNK_BYTES];
+        let count = self
+            .source
+            .read(&mut bytes)
+            .inspect_err(|error| self.failure.record_io(error))?;
+        if count == 0 {
+            self.eof = true;
+            return Ok(());
+        }
+        self.high_water.fetch_max(
+            (self.buffer.len() + bytes.capacity() + self.source.retained_bytes()) as u64,
+            Ordering::AcqRel,
+        );
+        let overflow = self
+            .buffer
+            .len()
+            .saturating_add(count)
+            .saturating_sub(COMPRESSED_WINDOW_BYTES);
+        if overflow > 0 {
+            let consumed = usize::try_from(self.position - self.base).unwrap_or(usize::MAX);
+            if overflow > consumed {
                 return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "playback generation cancelled",
+                    io::ErrorKind::Unsupported,
+                    "random-access source exceeds bounded compressed window",
                 ));
             }
-            let next = if let Some(source) = self.source.as_mut() {
-                let buffered = self.buffer.len().saturating_sub(
-                    usize::try_from(self.position.saturating_sub(self.base)).unwrap_or(usize::MAX),
-                );
-                source.update_compressed_buffer_bytes(buffered);
-                let mut bytes = vec![0u8; COMPRESSED_CHUNK_BYTES];
-                match source.read(&mut bytes) {
-                    Ok(0) => Err(tokio::sync::mpsc::error::TryRecvError::Disconnected),
-                    Ok(count) => {
-                        self.high_water.fetch_max(
-                            (self.buffer.len() + bytes.capacity() + source.retained_bytes()) as u64,
-                            Ordering::AcqRel,
-                        );
-                        bytes.truncate(count);
-                        Ok(Ok(Bytes::from(bytes)))
-                    }
-                    Err(error) => {
-                        self.failure.record_io(&error);
-                        return Err(error);
-                    }
-                }
-            } else {
-                self.rx.try_recv()
-            };
-            match next {
-                Ok(Ok(bytes)) => {
-                    let overflow = self
-                        .buffer
-                        .len()
-                        .saturating_add(bytes.len())
-                        .saturating_sub(COMPRESSED_WINDOW_BYTES);
-                    if overflow > 0 {
-                        let consumed =
-                            usize::try_from(self.position - self.base).unwrap_or(usize::MAX);
-                        if overflow > consumed {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Unsupported,
-                                "random-access source exceeds bounded compressed window",
-                            ));
-                        }
-                        self.buffer.drain(..overflow);
-                        self.base += overflow as u64;
-                    }
-                    self.buffer.extend_from_slice(&bytes);
-                    self.high_water
-                        .fetch_max(self.buffer.len() as u64, Ordering::AcqRel);
-                    return Ok(());
-                }
-                Ok(Err(error)) => {
-                    self.failure.record(&error);
-                    return Err(io::Error::other(error));
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    self.eof = true;
-                    return Ok(());
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            }
+            self.buffer.drain(..overflow);
+            self.base += overflow as u64;
         }
+        self.buffer.extend_from_slice(&bytes[..count]);
+        self.high_water
+            .fetch_max(self.buffer.len() as u64, Ordering::AcqRel);
+        Ok(())
     }
 
     pub fn peek_prefix(&mut self, count: usize) -> io::Result<Vec<u8>> {
@@ -332,65 +261,69 @@ impl Read for BoundedHttpReader {
 
 impl Seek for BoundedHttpReader {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-        if let Some(source) = self.source.as_ref() {
-            let length = source.length();
-            let target = match from {
-                SeekFrom::Start(value) => i128::from(value),
-                SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
-                SeekFrom::End(delta) => {
-                    i128::from(length.ok_or_else(|| {
-                        // A demuxer's optional size probe is not a failed body read.
-                        io::Error::new(io::ErrorKind::Unsupported, "source length is unknown")
-                    })?) + i128::from(delta)
-                }
-            };
-            if target < 0
-                || target > i128::from(u64::MAX)
-                || length.is_some_and(|length| target > i128::from(length))
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid source offset",
-                ));
-            }
-            // FFmpeg probes size with End(0), then restores the cursor. Keep
-            // cached bytes and the live response until an actual read requires
-            // repositioning, so a size query never requires HTTP Range support.
-            self.position = target as u64;
-            return Ok(self.position);
-        }
-        if matches!(from, SeekFrom::End(_)) {
-            // A small finite test/sequential source can establish its length
-            // inside the window; never evict data just to discover an end.
-            while !self.eof {
-                if self.buffer.len() >= COMPRESSED_WINDOW_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "source length exceeds bounded window",
-                    ));
-                }
-                self.receive_next()?;
-            }
-        }
-        let end = self.base + self.buffer.len() as u64;
+        let length = self.source.length();
         let target = match from {
             SeekFrom::Start(value) => i128::from(value),
             SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
-            SeekFrom::End(delta) => i128::from(end) + i128::from(delta),
+            SeekFrom::End(delta) => {
+                i128::from(length.ok_or_else(|| {
+                    // A demuxer's optional size probe is not a failed body read.
+                    io::Error::new(io::ErrorKind::Unsupported, "source length is unknown")
+                })?) + i128::from(delta)
+            }
         };
-        if target < i128::from(self.base) || target > i128::from(end) {
+        if target < 0
+            || target > i128::from(u64::MAX)
+            || length.is_some_and(|length| target > i128::from(length))
+        {
             return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "seek outside bounded compressed window",
+                io::ErrorKind::InvalidInput,
+                "invalid source offset",
             ));
         }
+        // FFmpeg probes size with End(0), then restores the cursor. Keep
+        // cached bytes and the live response until an actual read requires
+        // repositioning, so a size query never requires HTTP Range support.
         self.position = target as u64;
         Ok(self.position)
     }
 }
 
 #[cfg(test)]
+pub(crate) mod test_sources {
+    use super::*;
+
+    pub struct SequentialSource<R>(pub R);
+
+    impl<R: Read> Read for SequentialSource<R> {
+        fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
+            self.0.read(target)
+        }
+    }
+
+    impl<R> Seek for SequentialSource<R> {
+        fn seek(&mut self, _from: SeekFrom) -> io::Result<u64> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "sequential source",
+            ))
+        }
+    }
+
+    impl<R: Read + Send> CompressedSource for SequentialSource<R> {}
+
+    pub struct ReadError(pub io::ErrorKind, pub &'static str);
+
+    impl Read for ReadError {
+        fn read(&mut self, _target: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(self.0, self.1))
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_sources::{ReadError, SequentialSource};
     use super::*;
 
     #[test]
@@ -457,22 +390,24 @@ mod tests {
     }
     #[test]
     fn reader_preserves_chunk_order_and_eof() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
-        tx.blocking_send(Ok(Bytes::from_static(b"ab"))).unwrap();
-        tx.blocking_send(Ok(Bytes::from_static(b"cdef"))).unwrap();
-        drop(tx);
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(b"ab".as_slice().chain(b"cdef".as_slice())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        );
         let mut result = Vec::new();
         reader.read_to_end(&mut result).unwrap();
         assert_eq!(result, b"abcdef");
     }
 
     #[test]
-    fn peek_preserves_position_and_cancellation_interrupts_open_channel() {
+    fn peek_preserves_position_and_cancellation_interrupts_reads() {
         let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel.clone());
-        tx.blocking_send(Ok(Bytes::from_static(b"fLaCpayload")))
-            .unwrap();
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(b"fLaCpayload".as_slice()),
+            cancel.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
         assert_eq!(reader.peek_prefix(4).unwrap(), b"fLaC");
         let mut bytes = [0; 4];
         reader.read_exact(&mut bytes).unwrap();
@@ -484,100 +419,64 @@ mod tests {
             reader.read(&mut remaining).unwrap_err().kind(),
             io::ErrorKind::Interrupted
         );
-        drop(tx);
     }
 
     #[test]
-    fn sequential_stream_evicts_consumed_bytes_and_rejects_evicted_seek() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
-        let chunk = Bytes::from(vec![0x5a; COMPRESSED_CHUNK_BYTES]);
+    fn sequential_stream_evicts_consumed_bytes_and_rejects_evicted_reads() {
+        let high_water = Arc::new(AtomicU64::new(0));
         let chunks = COMPRESSED_CAPACITY_BYTES / COMPRESSED_CHUNK_BYTES + 2;
-        let producer = std::thread::spawn(move || {
-            for _ in 0..chunks {
-                tx.blocking_send(Ok(chunk.clone())).unwrap();
-            }
-        });
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(io::repeat(0x5a).take((chunks * COMPRESSED_CHUNK_BYTES) as u64)),
+            Arc::new(AtomicBool::new(false)),
+            high_water.clone(),
+        );
         let mut scratch = vec![0; COMPRESSED_CHUNK_BYTES];
         for _ in 0..chunks {
             reader.read_exact(&mut scratch).unwrap();
             assert!(scratch.iter().all(|byte| *byte == 0x5a));
         }
-        producer.join().unwrap();
         assert!(reader.base > 0);
-        assert!(reader.buffer.len() <= COMPRESSED_CAPACITY_BYTES);
-        assert_eq!(
-            reader.seek(SeekFrom::Start(0)).unwrap_err().kind(),
-            io::ErrorKind::Unsupported
-        );
-    }
-
-    #[test]
-    fn evicted_bytes_require_a_verified_random_access_source() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let high_water = Arc::new(AtomicU64::new(0));
-        let (tx, mut reader) =
-            BoundedHttpReader::channel_with_high_water(cancel, high_water.clone());
-        let chunks = COMPRESSED_CAPACITY_BYTES / COMPRESSED_CHUNK_BYTES + 2;
-        let producer = std::thread::spawn(move || {
-            for index in 0..chunks {
-                tx.blocking_send(Ok(Bytes::from(vec![index as u8; COMPRESSED_CHUNK_BYTES])))
-                    .unwrap();
-            }
-            drop(tx);
-        });
-
-        let mut scratch = vec![0; COMPRESSED_CHUNK_BYTES];
-        for _ in 0..chunks {
-            reader.read_exact(&mut scratch).unwrap();
-        }
-        assert_eq!(
-            reader.seek(SeekFrom::Start(0)).unwrap_err().kind(),
-            io::ErrorKind::Unsupported
-        );
-
-        producer.join().unwrap();
-        assert!(reader.buffer.len() <= COMPRESSED_CAPACITY_BYTES);
+        assert!(reader.buffer.len() <= COMPRESSED_WINDOW_BYTES);
         assert!(high_water.load(Ordering::Acquire) <= COMPRESSED_CAPACITY_BYTES as u64);
+        // Seeking is deferred until a read needs bytes outside the window.
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(
+            reader.read(&mut scratch).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            reader.failure_state().kind(),
+            Some(StreamFailureKind::Unsupported)
+        );
     }
 
     #[test]
-    fn source_timeout_is_preserved_as_a_typed_reader_error() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
-        tx.blocking_send(Err(StreamReadError::Timeout)).unwrap();
-        let mut byte = [0u8; 1];
-        let error = reader.read(&mut byte).unwrap_err();
-        assert!(matches!(
-            error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<StreamReadError>()),
-            Some(StreamReadError::Timeout)
-        ));
-    }
-
-    #[test]
-    fn source_timeout_updates_shared_failure_state() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+    fn source_timeout_is_preserved_as_a_native_reader_error() {
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(ReadError(
+                io::ErrorKind::TimedOut,
+                "source made no byte progress",
+            )),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        );
         let failure = reader.failure_state();
-        tx.blocking_send(Err(StreamReadError::Timeout)).unwrap();
-        let mut byte = [0u8; 1];
-        let _ = reader.read(&mut byte);
+        let error = reader.read(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "source made no byte progress");
         assert_eq!(failure.kind(), Some(StreamFailureKind::Timeout));
+        assert_eq!(failure.error(), Some(StreamReadError::Timeout));
     }
 
     #[test]
     fn source_failure_state_retains_native_error_detail() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        let mut reader = BoundedHttpReader::from_source(
+            SequentialSource(ReadError(io::ErrorKind::Other, "native transport reset")),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        );
         let failure = reader.failure_state();
-        tx.blocking_send(Err(StreamReadError::Source(
-            "native transport reset".into(),
-        )))
-        .unwrap();
-        let mut byte = [0u8; 1];
-        let _ = reader.read(&mut byte);
+        let _ = reader.read(&mut [0u8; 1]);
         assert_eq!(
             failure.error(),
             Some(StreamReadError::Source("native transport reset".into()))
