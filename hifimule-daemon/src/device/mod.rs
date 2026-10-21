@@ -1701,20 +1701,6 @@ impl DeviceManager {
             .collect()
     }
 
-    /// Returns a consistent snapshot of connected devices and selected path in a single
-    /// atomic read, preventing torn reads in get_daemon_state.
-    pub async fn get_multi_device_snapshot(
-        &self,
-    ) -> (Vec<(PathBuf, DeviceManifest, DeviceClass)>, Option<PathBuf>) {
-        let state = self.state.read().await;
-        let device_list = state
-            .connected_devices
-            .iter()
-            .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
-            .collect();
-        (device_list, state.selected_device_path.clone())
-    }
-
     pub async fn get_polling_snapshot(
         &self,
         include_manifest: bool,
