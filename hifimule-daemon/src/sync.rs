@@ -78,6 +78,7 @@ pub struct DesiredItem {
     pub name: String,
     pub album: Option<String>,
     pub artist: Option<String>,
+    pub album_artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
     pub provider_album_id: Option<String>,
@@ -108,6 +109,8 @@ pub struct SyncAddItem {
     pub name: String,
     pub album: Option<String>,
     pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
     #[serde(default)]
@@ -1312,7 +1315,20 @@ fn construct_desired_file_path(
     item: &SyncAddItem,
     extension_override: Option<&str>,
 ) -> Result<PathConstructionResult> {
-    let artist = item.artist.as_deref().unwrap_or("Unknown Artist");
+    let artist = match item.media_role {
+        crate::device::MediaRole::Music => item
+            .album_artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|artist| !artist.is_empty())
+            .or_else(|| {
+                item.artist
+                    .as_deref()
+                    .filter(|artist| !artist.trim().is_empty())
+            }),
+        _ => item.artist.as_deref(),
+    }
+    .unwrap_or("Unknown Artist");
     let album = item.album.as_deref().unwrap_or("Unknown Album");
     let track_name = &item.name;
     let extension = extension_override
@@ -1647,7 +1663,7 @@ pub fn planned_song_bytes(song: &crate::domain::models::Song, profile: Option<&s
 }
 
 pub fn planned_song_bytes_with_preferred(song: &crate::domain::models::Song, profile: Option<&serde_json::Value>, preferred: Option<&str>, override_kbps: Option<u32>) -> u64 {
-    let item = SyncAddItem { artwork: Some(artwork::TrackArtwork::from(song)),source_audio: source_audio_for_song(song), disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:crate::sync::song_audio_bitrate_bps(&song),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
+    let item = SyncAddItem { album_artist: song.album_artist.clone(), artwork: Some(artwork::TrackArtwork::from(song)),source_audio: source_audio_for_song(song), disc_number: song.disc_number,duration_seconds:song.duration_seconds,media_role:crate::device::MediaRole::Music,jellyfin_id:song.id.clone(),name:song.title.clone(),album:song.album_title.clone(),artist:song.artist_name.clone(),size_bytes:song.size_bytes.unwrap_or_else(||u64::from(song.bitrate_kbps.unwrap_or(0))*125*u64::from(song.duration_seconds)),etag:None,provider_album_id:song.album_id.clone(),provider_content_type:song.content_type.clone(),provider_suffix:song.suffix.clone(),original_bitrate:crate::sync::song_audio_bitrate_bps(&song),track_number:song.track_number,reason_code:None,reason:None,server_id:None,tier:None,is_auto_fill:true,max_bitrate_override_kbps:override_kbps};
     planned_audio_bytes(&item, profile, preferred)
 }
 
@@ -1720,6 +1736,7 @@ pub async fn capacity_manifest_with_existing_files(manifest: &DeviceManifest, io
 
 fn add_from_desired(item: &DesiredItem) -> SyncAddItem {
     SyncAddItem { artwork: item.artwork.clone(),
+        album_artist: item.album_artist.clone(),
         source_audio: item.source_audio, disc_number: item.disc_number, duration_seconds: item.duration_seconds,
         media_role: item.media_role, jellyfin_id: item.jellyfin_id.clone(), name: item.name.clone(),
         album: item.album.clone(), artist: item.artist.clone(), size_bytes: item.size_bytes, etag: item.etag.clone(),
@@ -5549,6 +5566,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 .unwrap_or("new-selection");
             annotate_add(
                 SyncAddItem { artwork: i.artwork.clone(),source_audio: i.source_audio, disc_number: i.disc_number,
+                    album_artist: i.album_artist.clone(),
                     duration_seconds: i.duration_seconds,
                     media_role: i.media_role,
                     jellyfin_id: i.jellyfin_id.clone(),
@@ -5761,6 +5779,201 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn album_artist_groups_provider_music_and_survives_plan_serialization() {
+        use crate::providers::{CredentialKind, MediaProvider, ProviderCredentials};
+        let mut server = mockito::Server::new_async().await;
+        let response = serde_json::json!({"subsonic-response":{
+            "status":"ok", "version":"1.16.1", "openSubsonic":true,
+            "album":{"id":"album", "name":"Album", "song":[
+                {"id":"solo", "title":"Solo", "album":"Album", "artist":"Main", "displayAlbumArtist":"Main"},
+                {"id":"guest", "title":"Duet", "album":"Album", "artist":"Main feat. Guest", "albumArtists":[{"id":"main", "name":"Main"}]}
+            ]}
+        }});
+        let mock = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "album".into()))
+            .with_body(response.to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = crate::providers::subsonic::SubsonicProvider::from_stored_config(
+            ProviderCredentials {
+                server_url: server.url(),
+                credential: CredentialKind::Password {
+                    username: "user".into(),
+                    password: "password".into(),
+                },
+            },
+            true,
+            None,
+        )
+        .unwrap();
+        let navidrome = provider.get_album("album").await.unwrap().tracks;
+        let jellyfin = [
+            ("solo", "Solo", "Main"),
+            ("guest", "Duet", "Main feat. Guest"),
+        ]
+        .into_iter()
+        .map(|(id, title, performer)| {
+            crate::providers::jellyfin::song_from_item(
+                serde_json::from_value(serde_json::json!({
+                    "Id":id, "Name":title, "Type":"Audio", "Album":"Album",
+                    "AlbumArtist":"Main", "Artists":[performer]
+                }))
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+        for songs in [jellyfin, navidrome] {
+            let desired = songs
+                .iter()
+                .map(crate::rpc::provider_song_to_desired_item)
+                .collect::<Vec<_>>();
+            let input = crate::auto_fill::pipeline::PipelineInput::default().with_pool(
+                crate::auto_fill::pipeline::SourceKind::Library,
+                None,
+                songs
+                    .into_iter()
+                    .map(|mut song| {
+                        song.size_bytes = Some(1000);
+                        crate::auto_fill::pipeline::Candidate::new(song)
+                    })
+                    .collect(),
+            );
+            let pipeline = crate::auto_fill::pipeline::AutoFillPipeline {
+                sources: vec![crate::auto_fill::pipeline::SourceEntry::new(
+                    crate::auto_fill::pipeline::SourceKind::Library,
+                )],
+                ..Default::default()
+            };
+            let automatic = crate::auto_fill::pipeline::run_pipeline(&input, &pipeline)
+                .into_iter()
+                .map(|fill| {
+                    crate::rpc::auto_fill_to_desired_item(
+                        fill,
+                        None,
+                        crate::device::MediaRole::Music,
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(automatic.len(), 2);
+            for selection in [&desired, &automatic] {
+                let adds = calculate_delta(selection, &empty_manifest()).adds;
+                assert_eq!(adds.len(), 2);
+                for add in adds {
+                    assert_eq!(
+                        construct_desired_file_path(Path::new("Music"), &add, None)
+                            .unwrap()
+                            .path
+                            .parent(),
+                        Some(Path::new("Music/Main/Album"))
+                    );
+                }
+            }
+            assert_eq!(desired[1].artist.as_deref(), Some("Main feat. Guest"));
+            let delta = calculate_delta(&desired, &empty_manifest());
+            assert_eq!(delta.adds.len(), 2);
+            let saved = serde_json::to_value(&delta).unwrap();
+            let restored: SyncDelta = serde_json::from_value(saved).unwrap();
+            for item in &restored.adds {
+                assert_eq!(item.album_artist.as_deref(), Some("Main"));
+                let path = construct_desired_file_path(Path::new("Music"), item, None)
+                    .unwrap()
+                    .path;
+                assert_eq!(path.parent(), Some(Path::new("Music/Main/Album")));
+            }
+            assert_eq!(restored.adds[1].artist.as_deref(), Some("Main feat. Guest"));
+            let mut legacy = serde_json::to_value(&restored.adds[1]).unwrap();
+            legacy.as_object_mut().unwrap().remove("albumArtist");
+            let legacy: SyncAddItem = serde_json::from_value(legacy).unwrap();
+            assert_eq!(legacy.album_artist, None);
+            assert_eq!(
+                construct_desired_file_path(Path::new("Music"), &legacy, None)
+                    .unwrap()
+                    .path
+                    .parent(),
+                Some(Path::new("Music/Main feat. Guest/Album"))
+            );
+        }
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn album_artist_paths_handle_compilations_blanks_sanitization_and_media_roles() {
+        let mut item = make_test_item(
+            "Track",
+            Some("Performer"),
+            Some("Album"),
+            Some(1),
+            Some("flac"),
+        );
+        for (album_artist, expected) in [
+            (Some("Various Artists"), "Various Artists"),
+            (Some("Main/Artist"), "Main_Artist"),
+            (Some(" "), "Performer"),
+            (None, "Performer"),
+        ] {
+            item.album_artist = album_artist.map(str::to_owned);
+            assert_eq!(
+                construct_desired_file_path(Path::new("Music"), &item, None)
+                    .unwrap()
+                    .path,
+                Path::new("Music")
+                    .join(expected)
+                    .join("Album/01 - Track.flac")
+            );
+        }
+        item.album_artist = Some("Main".into());
+        item.media_role = crate::device::MediaRole::Audiobook;
+        assert_eq!(
+            construct_desired_file_path(Path::new("Books"), &item, None)
+                .unwrap()
+                .path,
+            Path::new("Books/Performer/Album/01 - Track.flac")
+        );
+        item.media_role = crate::device::MediaRole::Podcast;
+        assert_eq!(
+            construct_desired_file_path(Path::new("Podcasts"), &item, None)
+                .unwrap()
+                .path,
+            Path::new("Podcasts/Album/00000001 - Track.flac")
+        );
+        item.media_role = crate::device::MediaRole::Music;
+        item.album_artist = Some(" ".into());
+        item.artist = Some(" ".into());
+        assert_eq!(
+            construct_desired_file_path(Path::new("Music"), &item, None)
+                .unwrap()
+                .path
+                .parent(),
+            Some(Path::new("Music/Unknown Artist/Album"))
+        );
+    }
+
+    #[test]
+    fn new_album_artist_keeps_existing_performer_directory() {
+        let mut desired = make_desired("guest", "Duet", Some("Album"), Some("Main feat. Guest"));
+        desired.album_artist = Some("Main".into());
+        let mut manifest = empty_manifest();
+        manifest.synced_items = serde_json::from_value(serde_json::json!([{
+            "providerItemId":"guest", "name":"Duet", "album":"Album", "artist":"Main feat. Guest",
+            "localPath":"Music/Main feat. Guest/Album/00 - Duet.mp3", "sizeBytes":10_000_000,
+            "etag":"test-etag", "syncedAt":"before"
+        }]))
+        .unwrap();
+        let delta = calculate_delta(&[desired], &manifest);
+        assert_eq!(delta.unchanged, 1);
+        assert!(delta.adds.is_empty());
+        assert!(delta.deletes.is_empty());
+        assert!(delta.id_changes.is_empty());
+        assert_eq!(
+            manifest.synced_items[0].local_path,
+            "Music/Main feat. Guest/Album/00 - Duet.mp3"
+        );
+    }
+
     #[tokio::test]
     async fn targeted_admission_never_publishes_without_identity_or_cancellation() {
         let manager = std::sync::Arc::new(super::SyncOperationManager::new());
@@ -6653,6 +6866,7 @@ mod tests {
         artist: Option<&str>,
     ) -> DesiredItem {
         DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -7332,6 +7546,7 @@ mod tests {
         size_bytes: u64,
     ) -> SyncAddItem {
         SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -10181,13 +10396,14 @@ mod tests {
         let long_artist: String = "B".repeat(300);
         let long_album: String = "C".repeat(300);
         let managed = std::path::PathBuf::from("Music");
-        let item = make_test_item(
+        let mut item = make_test_item(
             "Track",
-            Some(&long_artist),
+            Some("Performer"),
             Some(&long_album),
             Some(1),
             Some("mp3"),
         );
+        item.album_artist = Some(long_artist);
         let result = construct_desired_file_path(&managed, &item, None).unwrap();
 
         let components: Vec<_> = result.path.components().collect();
@@ -10525,6 +10741,7 @@ mod tests {
     #[test]
     fn test_calculate_delta_cleans_up_tracks_outside_current_music_folder() {
         let desired = vec![DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "t1".to_string(),
@@ -10589,6 +10806,7 @@ mod tests {
     #[test]
     fn test_calculate_delta_does_not_convert_relocation_to_id_change() {
         let desired = vec![DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "new-id".to_string(),
@@ -10975,6 +11193,7 @@ mod tests {
             blocked: vec![],
             adds: vec![annotate_add(
                 SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
+                    album_artist: None,
                     duration_seconds: 0,
                     media_role: crate::device::MediaRole::Music,
                     jellyfin_id: "track-1".to_string(),
@@ -12370,6 +12589,7 @@ mod source_audio_planning_tests {
     #[test]
     fn resident_measurements_are_used_only_when_delta_keeps_the_file() {
         let desired = DesiredItem { artwork: None,
+            album_artist: None,
             source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
             media_role: crate::device::MediaRole::Music, jellyfin_id: "track".into(), name: "Track".into(),
             album: None, artist: None, size_bytes: 50_000_000, etag: None, provider_album_id: None,
@@ -12418,6 +12638,7 @@ mod source_audio_planning_tests {
     #[test]
     fn selection_identity_includes_server_and_deduplicates_only_same_owner() {
         let make = |server: &str, size| DesiredItem { artwork: None, source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 240, media_role: crate::device::MediaRole::Music, jellyfin_id:"same".into(), name:"Track".into(),
             album:None, artist:None, size_bytes:size, etag:None, provider_album_id:None, provider_content_type:None,
             provider_suffix:Some("mp3".into()), original_bitrate:Some(128_000), track_number:None, server_id:Some(server.into()) };
@@ -12426,6 +12647,7 @@ mod source_audio_planning_tests {
     }
     fn review_desired(id: &str) -> DesiredItem {
         DesiredItem { artwork: None, source_audio: source(44_100, 16), disc_number: None, duration_seconds: 240,
+            album_artist: None,
             media_role: crate::device::MediaRole::Music, jellyfin_id: id.into(), name: "Track".into(),
             album: None, artist: None, size_bytes: 50_000_000, etag: None, provider_album_id: None,
             provider_content_type: None, provider_suffix: Some("flac".into()), original_bitrate: Some(1_600_000),

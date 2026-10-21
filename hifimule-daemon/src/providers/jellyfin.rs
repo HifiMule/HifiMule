@@ -1298,6 +1298,12 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         .or_else(|| item.container.clone());
 
     Song {
+        album_artist: item
+            .album_artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|artist| !artist.is_empty())
+            .map(str::to_owned),
         id: item.id.clone(),
         title: item.name,
         artist_id: artist.map(|artist| artist.id.clone()),
@@ -1434,6 +1440,26 @@ fn status_from_message(message: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn album_artist_is_independent_of_guest_performer() {
+        for (album_artist, expected) in [
+            (Some("  Main Artist  "), Some("Main Artist")),
+            (Some(" "), None),
+            (None, None),
+        ] {
+            let item: JellyfinItem = serde_json::from_value(serde_json::json!({
+                "Id":"guest-track", "Name":"Duet", "Type":"Audio", "Album":"Album",
+                "AlbumArtist":album_artist, "Artists":["Main feat. Guest"],
+                "ArtistItems":[{"Id":"performer", "Name":"Main feat. Guest"}]
+            }))
+            .unwrap();
+            let song = song_from_item(item);
+            assert_eq!(song.album_artist.as_deref(), expected);
+            assert_eq!(song.artist_name.as_deref(), Some("Main feat. Guest"));
+            assert_eq!(song.artist_id.as_deref(), Some("performer"));
+        }
+    }
+
     use super::*;
     use crate::api::{JellyfinClient, JellyfinItem, JellyfinView, MediaSource};
     use crate::domain::models::{ChangeType, ItemType};

@@ -2543,6 +2543,7 @@ fn podcast_episode(
 
 fn podcast_episode_song(episode: &PodcastEpisode) -> Song {
     Song {
+        album_artist: None,
         id: episode.id.clone(),
         title: episode.title.clone(),
         artist_id: None,
@@ -2692,6 +2693,7 @@ fn map_book_detail(
                 audio_file_id: file.ino.clone(),
             });
             Some(Song {
+                album_artist: None,
                 id,
                 title: part_title(book.media.metadata.title.as_deref(), index, file_count),
                 artist_id: book

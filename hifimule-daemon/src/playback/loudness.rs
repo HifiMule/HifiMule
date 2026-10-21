@@ -385,6 +385,7 @@ mod tests {
 
     fn song(id: &str, gain: AlbumLoudnessEvidence, suffix: &str) -> Song {
         Song {
+            album_artist: None,
             id: id.into(),
             title: id.into(),
             artist_id: None,

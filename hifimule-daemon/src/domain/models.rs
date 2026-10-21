@@ -105,6 +105,9 @@ pub struct Song {
     pub title: String,
     pub artist_id: Option<String>,
     pub artist_name: Option<String>,
+    /// Album credit used for music directories; track performer remains independent.
+    #[serde(default)]
+    pub album_artist: Option<String>,
     pub album_id: Option<String>,
     #[serde(rename = "albumName")]
     pub album_title: Option<String>,
@@ -427,6 +430,7 @@ mod tests {
     #[test]
     fn string_ids_preserve_navidrome_style_values() {
         let song = Song {
+            album_artist: None,
             id: "9f86d081884c7d659a2feaa0c55ad015".to_string(),
             title: "A Neutral Track".to_string(),
             artist_id: Some("artist-md5-id".to_string()),

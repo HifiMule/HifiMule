@@ -83,6 +83,7 @@ mod tests {
 
     fn song(id: &str, disc: Option<u32>, track: Option<u32>) -> Song {
         Song {
+            album_artist: None,
             id: id.into(),
             title: id.into(),
             artist_id: None,

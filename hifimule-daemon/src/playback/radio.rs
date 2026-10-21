@@ -477,6 +477,7 @@ mod tests {
             source: source(server, track),
             center_origin: None,
             song: Song {
+                album_artist: None,
                 id: track.into(),
                 title: track.into(),
                 artist_id: Some(artist.into()),

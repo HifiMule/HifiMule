@@ -2152,7 +2152,8 @@ fn exceeds(current: u64, add: u64, ceiling: u64) -> bool {
 }
 
 fn make_item(song: &Song, size_bytes: u64, reason: String) -> AutoFillItem {
-    AutoFillItem {max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: song.disc_number,
+    AutoFillItem { max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: song.disc_number,
+        album_artist: song.album_artist.clone(),
         original_bitrate: crate::sync::song_audio_bitrate_bps(&song),
         duration_seconds: song.duration_seconds,
         id: song.id.clone(),
@@ -2198,6 +2199,22 @@ fn reason_for(song: &Song, source: &SourceEntry, is_fallback: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pipeline_fill_preserves_album_artist_and_performer() {
+        let mut song = song_sized("guest", false, 0, "2024-01-01", 1000);
+        song.artist_name = Some("Main feat. Guest".into());
+        song.album_artist = Some("Main".into());
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, vec![cand(song)]);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ..Default::default()
+        };
+        let result = run_pipeline(&input, &pipeline);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].artist.as_deref(), Some("Main feat. Guest"));
+        assert_eq!(result[0].album_artist.as_deref(), Some("Main"));
+    }
+
     use super::*;
 
     // -------------------------------------------------------------------
@@ -2208,6 +2225,7 @@ mod tests {
     /// Build a `Song` with an explicit `size_bytes`, so budget math is exact in tests.
     fn song_sized(id: &str, fav: bool, play_count: u32, date_added: &str, size_bytes: u64) -> Song {
         Song {
+            album_artist: None,
             id: id.to_string(),
             title: format!("Track {id}"),
             artist_id: Some(format!("artist-{id}")),
@@ -3330,6 +3348,7 @@ mod tests {
         bitrate: u32,
     ) -> Song {
         Song {
+            album_artist: None,
             title: title.to_string(),
             artist_name: Some(artist.to_string()),
             album_title: Some(album.to_string()),
@@ -5470,6 +5489,7 @@ mod tests {
         size_bytes: u64,
     ) -> Song {
         Song {
+            album_artist: None,
             artist_id: Some(artist.to_string()),
             artist_name: Some(format!("Artist {artist}")),
             album_id: Some(album.to_string()),

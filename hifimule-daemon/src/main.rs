@@ -1672,7 +1672,8 @@ mod auto_sync_tests {
     }
 
     fn fill_item(id: &str, track_number: Option<u32>) -> auto_fill::AutoFillItem {
-        auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+        auto_fill::AutoFillItem { max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             original_bitrate: None,
             duration_seconds: 0,
         id: id.to_string(),
@@ -1692,6 +1693,7 @@ mod auto_sync_tests {
     #[test]
     fn push_auto_fill_items_dedups_and_writes_playlist() {
         let mut desired_items = vec![sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "manual".to_string(),

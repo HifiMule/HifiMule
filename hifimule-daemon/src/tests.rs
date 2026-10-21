@@ -155,6 +155,7 @@ async fn manifest_migration_regression_auto_finalization_preserves_profile_histo
             durable.set_transcoding_profile(None);
             let item = &durable.synced_items[0];
             let desired = sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+                album_artist: None,
                 duration_seconds: 0,
                 media_role: item.media_role.clone(),
                 jellyfin_id: item.jellyfin_id.clone(),

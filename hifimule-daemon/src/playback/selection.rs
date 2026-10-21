@@ -1615,6 +1615,7 @@ mod tests {
 
     fn song(id: &str, title: &str) -> Song {
         Song {
+            album_artist: None,
             id: id.into(),
             title: title.into(),
             artist_id: None,

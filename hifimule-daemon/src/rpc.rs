@@ -4999,6 +4999,7 @@ fn provider_track_size(track: &Song) -> u64 {
 
 pub(crate) fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
     crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork::from(song)),source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
+        album_artist: song.album_artist.clone(),
         duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: song.id.clone(),
@@ -5215,6 +5216,7 @@ fn podcast_episode_to_desired(
     // Episode catalog details do not expose a byte size. Reserve 128 kbit/s,
     // using one hour when duration is missing; transfer checks actual capacity.
     crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+        album_artist: None,
         duration_seconds: 0,
         media_role: crate::device::MediaRole::Podcast,
         jellyfin_id: episode.id.clone(),
@@ -6162,6 +6164,7 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
     let original_bitrate = item.audio_bitrate_bps();
         let source_audio = item.source_audio_properties();
     crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork::from_jellyfin(&item)),source_audio, disc_number: item.parent_index_number,
+        album_artist: item.album_artist.clone().filter(|artist| !artist.trim().is_empty()),
         duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0) / 10_000_000) as u32,
         media_role: crate::device::MediaRole::Music,
         jellyfin_id: item.id,
@@ -6581,6 +6584,7 @@ pub(crate) fn auto_fill_to_desired_item(
     provider_album_id: Option<String>,
 ) -> crate::sync::DesiredItem {
     crate::sync::DesiredItem { artwork: None,
+        album_artist: item.album_artist,
         source_audio: item.source_audio,
         disc_number: item.disc_number,
         duration_seconds: item.duration_seconds,
@@ -6717,7 +6721,8 @@ async fn expand_audiobook_auto_fill(
                 continue;
             }
             for part in parts {
-                result.push(crate::auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+                result.push(crate::auto_fill::AutoFillItem { max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+                    album_artist: None,
                     original_bitrate: None,
                     duration_seconds: 0,
         id: part.id.clone(),
@@ -6811,7 +6816,8 @@ async fn expand_podcast_auto_fill(
             candidates.push((
                 podcast_published_at(&episode.published_at),
                 episode.id.clone(),
-                crate::auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+                crate::auto_fill::AutoFillItem { max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+                    album_artist: None,
                     original_bitrate: None,
                     duration_seconds: 0,
         id: episode.id,
@@ -7595,6 +7601,7 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
         let original_bitrate = item.audio_bitrate_bps();
         let source_audio = item.source_audio_properties();
         crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork::from_jellyfin(&item)),source_audio, disc_number: item.parent_index_number,
+            album_artist: item.album_artist.clone().filter(|artist| !artist.trim().is_empty()),
             duration_seconds: (item.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: item.id,
@@ -8135,6 +8142,7 @@ fn apply_force_sync_with_desired(delta: &mut crate::sync::SyncDelta,
                 by_id.get(add.jellyfin_id.as_str()).copied().flatten()
             } else { None });
         if let Some(source) = source {
+            add.album_artist = source.album_artist.clone();
             add.source_audio = source.source_audio;
             add.duration_seconds = source.duration_seconds;
             add.disc_number = source.disc_number;
@@ -8175,6 +8183,7 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
                 .iter()
                 .find(|item| item.jellyfin_id == change.old_jellyfin_id);
             force_adds.push(crate::sync::SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
+                album_artist: None,
                 duration_seconds: 0,
                 media_role: change.media_role,
                 jellyfin_id: change.new_jellyfin_id.clone(),
@@ -8214,6 +8223,7 @@ fn apply_force_sync(delta: &mut crate::sync::SyncDelta, manifest: &crate::device
                 continue;
             }
             force_adds.push(crate::sync::SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
+                album_artist: None,
                 duration_seconds: 0,
                 media_role: item.media_role,
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -10580,6 +10590,7 @@ mod tests {
 
     fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
         crate::sync::SyncAddItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: id.to_string(),
@@ -13096,6 +13107,7 @@ mod tests {
                 .await
                 .unwrap();
             let desired = vec![crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+                album_artist: None,
                 duration_seconds: 0,
                 media_role: crate::device::MediaRole::Music,
                 jellyfin_id: "song1".into(),
@@ -14278,7 +14290,8 @@ mod tests {
             size: u64,
             track_number: Option<u32>,
         ) -> crate::auto_fill::AutoFillItem {
-            crate::auto_fill::AutoFillItem {max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+            crate::auto_fill::AutoFillItem { max_bitrate_override_kbps: None, source_audio: Default::default(), disc_number: None,
+                album_artist: None,
                 original_bitrate: None,
                 duration_seconds: 0,
         id: id.to_string(),
@@ -14297,6 +14310,7 @@ mod tests {
 
         // Manual item "m1" (100 bytes) already resolved on server s1.
         let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+            album_artist: None,
             duration_seconds: 0,
             media_role: crate::device::MediaRole::Music,
             jellyfin_id: "m1".to_string(),
@@ -16901,6 +16915,7 @@ mod tests {
     #[tokio::test]
     async fn audiobook_author_selection_resolves_all_unique_parts_without_playlist() {
         let part = |id: &str, album_id: &str| crate::domain::models::Song {
+            album_artist: None,
             id: id.into(),
             title: id.into(),
             artist_id: None,
@@ -17032,6 +17047,7 @@ mod tests {
         let track_count = GENRE_TRACK_PAGE_SIZE + 3;
         let tracks = (0..track_count)
             .map(|idx| crate::domain::models::Song {
+                album_artist: None,
                 id: format!("song-{idx}"),
                 title: format!("Track {idx}"),
                 artist_id: None,
@@ -17074,6 +17090,7 @@ mod tests {
     #[tokio::test]
     async fn provider_sync_items_for_id_resolves_single_song() {
         let provider = FakeBrowseProvider::with_song(crate::domain::models::Song {
+            album_artist: None,
             id: "song1".to_string(),
             title: "Track".to_string(),
             artist_id: Some("artist1".to_string()),
@@ -17656,6 +17673,7 @@ mod tests {
     #[tokio::test]
     async fn provider_calculate_delta_dedupes_album_and_selected_song() {
         let song = crate::domain::models::Song {
+            album_artist: None,
             id: "song1".to_string(),
             title: "Track".to_string(),
             artist_id: Some("artist1".to_string()),
@@ -17738,6 +17756,7 @@ mod tests {
 
     fn make_fake_song(id: &str, title: &str) -> crate::domain::models::Song {
         crate::domain::models::Song {
+            album_artist: None,
             id: id.to_string(),
             title: title.to_string(),
             artist_id: Some("artist1".to_string()),
@@ -18138,6 +18157,7 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let song = crate::domain::models::Song {
+            album_artist: None,
             id: "song1".to_string(),
             title: "Track 1".to_string(),
             artist_id: None,
@@ -18183,6 +18203,7 @@ mod tests {
 
     fn fake_song(id: &str) -> crate::domain::models::Song {
         crate::domain::models::Song {
+            album_artist: None,
             id: id.to_string(),
             title: format!("Track {id}"),
             artist_id: None,

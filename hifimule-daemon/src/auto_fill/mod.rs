@@ -49,6 +49,8 @@ pub struct AutoFillItem {
     pub album: Option<String>,
     #[serde(default)]
     pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
     #[serde(default)]
     pub provider_album_id: Option<String>,
     #[serde(default)]
@@ -349,7 +351,8 @@ impl ProviderFillState {
             return true; // skip this candidate; smaller later tracks may still fit
         }
         self.cumulative_bytes += size_bytes;
-        self.result.push(AutoFillItem {max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: song.disc_number,
+        self.result.push(AutoFillItem { max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: song.disc_number,
+            album_artist: song.album_artist.clone(),
             original_bitrate: crate::sync::song_audio_bitrate_bps(&song),
             duration_seconds: song.duration_seconds,
         id: song.id,
@@ -483,6 +486,23 @@ pub async fn run_auto_fill_provider(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_fill_preserves_album_artist_and_performer() {
+        let track = make_track("guest", true, 0, "2024-01-01", 1000);
+        let mut song = crate::providers::jellyfin::song_from_item(track);
+        song.artist_name = Some("Main feat. Guest".into());
+        song.album_artist = Some("Main".into());
+        let mut state = ProviderFillState::new(HashSet::new(), 10_000);
+        assert!(state.try_add(song, "favorite".into()));
+        let result = state.into_result();
+        assert_eq!(result[0].artist.as_deref(), Some("Main feat. Guest"));
+        assert_eq!(result[0].album_artist.as_deref(), Some("Main"));
+        let mut legacy = serde_json::to_value(&result[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("albumArtist");
+        let legacy: AutoFillItem = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.album_artist, None);
+    }
+
     use super::*;
     use crate::api::{JellyfinItem, JellyfinUserData, MediaSource};
 
@@ -609,6 +629,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].provider_album_id.as_deref(), Some("album1"));
         assert_eq!(result[0].artist.as_deref(), Some("Album artist"));
+        assert_eq!(result[0].album_artist.as_deref(), Some("Album artist"));
         assert_eq!(result[0].track_number, Some(7));
         assert_eq!(result[0].disc_number, Some(2));
         assert_eq!(result[0].duration_seconds, 42);

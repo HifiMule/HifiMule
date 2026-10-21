@@ -1475,3 +1475,32 @@ fn exact_audio_bitrate_survives_the_song_adapter_at_transcode_boundaries() {
     assert_eq!(crate::sync::planned_song_bytes(&song, Some(&profile), None), expected);
     assert_eq!(expected, 5_883_136);
 }
+
+#[test]
+fn album_artist_survives_manual_and_auto_fill_adapters() {
+    let item: crate::api::JellyfinItem = serde_json::from_value(json!({
+        "Id":"guest", "Name":"Duet", "Type":"Audio", "Album":"Album",
+        "AlbumArtist":"Main", "Artists":["Main feat. Guest"]
+    }))
+    .unwrap();
+    let legacy = jellyfin_item_to_desired_item(item.clone());
+    assert_eq!(legacy.artist.as_deref(), Some("Main"));
+    assert_eq!(legacy.album_artist.as_deref(), Some("Main"));
+    let song = crate::providers::jellyfin::song_from_item(item);
+    let manual = provider_song_to_desired_item(&song);
+    assert_eq!(manual.artist.as_deref(), Some("Main feat. Guest"));
+    assert_eq!(manual.album_artist.as_deref(), Some("Main"));
+    let fill: crate::auto_fill::AutoFillItem = serde_json::from_value(json!({
+        "id":"guest", "name":"Duet", "album":"Album", "artist":"Main feat. Guest",
+        "albumArtist":"Main", "sizeBytes":1000, "priorityReason":"favorite"
+    }))
+    .unwrap();
+    let automatic = auto_fill_to_desired_item(fill, None, crate::device::MediaRole::Music, None);
+    assert_eq!(automatic.artist, manual.artist);
+    assert_eq!(automatic.album_artist, manual.album_artist);
+    let mut legacy_song = serde_json::to_value(&song).unwrap();
+    legacy_song.as_object_mut().unwrap().remove("albumArtist");
+    let legacy_song: Song = serde_json::from_value(legacy_song).unwrap();
+    assert_eq!(legacy_song.album_artist, None);
+    assert_eq!(legacy_song.artist_name, song.artist_name);
+}

@@ -1898,10 +1898,28 @@ fn song_from_dto(song: SongDto) -> Song {
         .as_ref()
         .map(|artists| artists.iter().map(|artist| artist.id.clone()).collect())
         .unwrap_or_else(|| song.artist_id.clone().into_iter().collect());
+    let album_artist = song
+        .display_album_artist
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let names: Vec<_> = song
+                .album_artists
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|artist| artist.name.trim())
+                .filter(|name| !name.is_empty())
+                .collect();
+            (!names.is_empty()).then(|| names.join(", "))
+        });
     let album_loudness = parse_album_loudness(song.replay_gain.as_deref());
     let track_loudness = parse_track_loudness(song.replay_gain.as_deref());
 
     Song {
+        album_artist,
         id: song.id,
         title: song.title,
         artist_id: song
@@ -2403,6 +2421,10 @@ struct SongDto {
     media_kind: Option<String>,
     album: Option<String>,
     artist: Option<String>,
+    #[serde(default, rename = "displayAlbumArtist")]
+    display_album_artist: Option<String>,
+    #[serde(default, rename = "albumArtists")]
+    album_artists: Option<Vec<ArtistDto>>,
     #[serde(rename = "albumId")]
     album_id: Option<String>,
     #[serde(rename = "artistId")]
@@ -2506,6 +2528,35 @@ fn genre_from_dto(genre: GenreDto) -> Genre {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_subsonic_album_artists_use_display_then_nonblank_names() {
+        for (extra, expected) in [
+            (
+                serde_json::json!({"displayAlbumArtist":" Various Artists ", "albumArtists":[{"id":"a", "name":"Other"}]}),
+                Some("Various Artists"),
+            ),
+            (
+                serde_json::json!({"displayAlbumArtist":" ", "albumArtists":[{"id":"a", "name":" First "}, {"id":"blank", "name":" "}, {"id":"b", "name":"Second"}]}),
+                Some("First, Second"),
+            ),
+            (
+                serde_json::json!({"albumArtists":[{"id":"blank", "name":" "}]}),
+                None,
+            ),
+            (serde_json::json!({}), None),
+        ] {
+            let mut value = serde_json::json!({"id":"guest-track", "title":"Duet", "artist":"Main feat. Guest", "artistId":"performer"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let song = song_from_dto(serde_json::from_value(value).unwrap());
+            assert_eq!(song.album_artist.as_deref(), expected);
+            assert_eq!(song.artist_name.as_deref(), Some("Main feat. Guest"));
+            assert_eq!(song.artist_id.as_deref(), Some("performer"));
+        }
+    }
+
     use super::*;
     use crate::providers::{BrowseCapabilities, BrowseMode, MediaProvider, ScrobbleSubmission};
     use mockito::{Matcher, Server};
@@ -2563,6 +2614,8 @@ mod tests {
             media_kind: None,
             album: Some("Album".to_string()),
             artist: Some("Artist".to_string()),
+            display_album_artist: None,
+            album_artists: None,
             album_id: Some("album-id".to_string()),
             artist_id: Some("artist-id".to_string()),
             duration: Some(319),
@@ -2650,6 +2703,8 @@ mod tests {
             media_kind: None,
             album: None,
             artist: None,
+            display_album_artist: None,
+            album_artists: None,
             album_id: None,
             artist_id: None,
             duration: None,
@@ -3891,6 +3946,8 @@ mod tests {
             media_kind: None,
             album: None,
             artist: None,
+            display_album_artist: None,
+            album_artists: None,
             album_id: Some("album1".to_string()),
             artist_id: None,
             duration: None,

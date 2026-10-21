@@ -849,6 +849,7 @@ mod tests {
 
     fn song(id: &str, size_bytes: u64) -> Song {
         Song {
+            album_artist: None,
             id: id.to_string(),
             title: format!("Track {id}"),
             artist_id: Some(format!("artist-{id}")),
