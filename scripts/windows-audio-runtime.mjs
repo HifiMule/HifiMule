@@ -211,6 +211,46 @@ export function verifyOfficialSignature(archive, signature, key, options = {}) {
   } finally { rmSync(home, { recursive: true, force: true }); }
 }
 
+export function runWindowsFfmpegBuild({ source, staging, target, bash, env, execute = execFileSync, logRoot = join(root, "target/audio-runtime/logs") }) {
+  const arch = target.startsWith("aarch64") ? "aarch64" : "x86_64";
+  const nativePrefix = staging.replaceAll("\\", "/");
+  const command = [
+    `cd ${shellQuote(toMsysPath(source))}`,
+    "export VSLANG=1033",
+    `export PKG_CONFIG_PATH=${shellQuote(toMsysPath(join(staging, "lib/pkgconfig")))}`,
+    // configure consumes extra linker flags before detecting MSVC, so they
+    // must already use link.exe syntax rather than the GNU -L shorthand.
+    `./configure --toolchain=msvc --arch=${arch} --prefix=${shellQuote(toMsysPath(staging))} --extra-cflags=${shellQuote(`-I${toMsysPath(staging)}/include`)} --extra-ldflags=${shellQuote(`-libpath:${nativePrefix}/lib`)} --pkg-config-flags=--static ${[...manifest.configureFlags, ...manifest.windowsConfigureFlags].map(shellQuote).join(" ")}`,
+    `make -j${Math.max(1, Number(process.env.NUMBER_OF_PROCESSORS) || 2)}`,
+    "make install",
+  ].join(" && ");
+  try {
+    execute(bash, ["--noprofile", "--norc", "-c", command], { stdio: "inherit", env: { ...env, VSLANG: "1033" } });
+  } catch (error) {
+    try {
+      const configLog = join(source, "ffbuild/config.log");
+      if (existsSync(configLog)) {
+        const contents = readFileSync(configLog, "utf8");
+        // configure begins with a full `set` dump. Retain only its final probe,
+        // never the environment variables that precede the test commands.
+        const probes = [...contents.matchAll(/^(?:test_ld cc|BEGIN [^\r\n]+)\r?$/gm)];
+        const linkProbes = probes.filter(match => match[0].trim() === "test_ld cc");
+        const probe = linkProbes.at(-1) ?? probes.at(-1);
+        if (probe) {
+          const diagnostic = contents.slice(probe.index);
+          mkdirSync(logRoot, { recursive: true });
+          const savedLog = join(logRoot, `ffmpeg-${target}-configure.log`);
+          writeFileSync(savedLog, diagnostic);
+          console.error(`[Windows FFmpeg] Compiler diagnostics saved to ${savedLog}\n${diagnostic.split(/\r?\n/).slice(-200).join("\n")}`);
+        }
+      }
+    } catch (diagnosticError) {
+      console.error(`[Windows FFmpeg] Could not retain configure diagnostics: ${diagnosticError.message}`);
+    }
+    throw error;
+  }
+}
+
 export function buildOfficialSource(archive, staging, target, options = {}) {
   const execute = options.execFileSync ?? execFileSync;
   const baseEnv = options.env ?? process.env;
@@ -229,17 +269,7 @@ export function buildOfficialSource(archive, staging, target, options = {}) {
     if (!existsSync(join(source, "configure"))) fail(`Official FFmpeg archive did not contain ffmpeg-${manifest.ffmpegRelease}/configure`);
     mkdirSync(staging, { recursive: true });
     const dependencyEnv = buildEncodingDependencies({ cache: join(root, "target/audio-runtime/sources"), work: sourceRoot, prefix: staging, target, env: baseEnv, windows: true });
-    const arch = target.startsWith("aarch64") ? "aarch64" : "x86_64";
-    const command = [
-      `cd ${shellQuote(toMsysPath(source))}`,
-      "export VSLANG=1033",
-      `export PKG_CONFIG_PATH=${shellQuote(toMsysPath(join(staging, "lib/pkgconfig")))}`,
-
-      `./configure --toolchain=msvc --arch=${arch} --prefix=${shellQuote(toMsysPath(staging))} --extra-cflags=${shellQuote(`-I${toMsysPath(staging)}/include`)} --extra-ldflags=${shellQuote(`-L${toMsysPath(staging)}/lib`)} --pkg-config-flags=--static ${[...manifest.configureFlags, ...manifest.windowsConfigureFlags].map(shellQuote).join(" ")}`,
-      `make -j${Math.max(1, Number(process.env.NUMBER_OF_PROCESSORS) || 2)}`,
-      "make install",
-    ].join(" && ");
-    execute(bash, ["--noprofile", "--norc", "-c", command], { stdio: "inherit", env: { ...dependencyEnv, VSLANG: "1033" } });
+    runWindowsFfmpegBuild({ source, staging, target, bash, env: dependencyEnv, execute });
     const machine = target.startsWith("aarch64") ? "ARM64" : "X64";
     for (const library of manifest.requiredLibraries) {
       const definition = readdirSync(join(staging, "lib")).find((name) => name.toLowerCase().startsWith(library) && name.toLowerCase().endsWith(".def"));

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-import { buildOfficialSource, createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyInstalledWindowsBundle, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
+import { buildOfficialSource, createGpgHome, ensureWindowsAudioRuntime, findMsys2Bash, gpgInvocation, pathForGpg, prependWindowsPath, runWindowsFfmpegBuild, stageWindowsAudioRuntimeForCargo, toMsysPath, validateMsys2Toolchain, verifyInstalledWindowsBundle, verifyWindowsAudioRuntime, windowsBuildEnvironment, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
 
 test("Windows PATH normalization retains entries from competing case aliases", () => {
   const source = { Path: "C:\\Rust\\bin", PATH: "C:\\Windows", path: "C:\\Rust\\bin", KEEP: "yes" };
@@ -110,6 +110,54 @@ for (const extractionFails of [false, true]) {
 
 const root = resolve(import.meta.dirname, "../..");
 const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runtime.json"), "utf8"));
+
+for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
+  test(`FFmpeg receives native linker search flags for ${target}`, () => {
+    let invocation;
+    runWindowsFfmpegBuild({
+      source: "C:\\Temp\\ffmpeg", staging: "D:\\AudioRuntime", target, bash: "fixture-bash", env: {},
+      execute(command, args, options) { invocation = { command, args, options }; },
+    });
+    const command = invocation.args.at(-1);
+    // configure adds extra ldflags before detecting MSVC. GNU -L reaches
+    // link.exe unchanged and its LNK4044 warning fails the compiler check.
+    assert.ok(command.includes("--extra-ldflags='-libpath:D:/AudioRuntime/lib'"));
+    assert.equal(command.includes("--extra-ldflags='-L"), false);
+    assert.equal(invocation.options.env.VSLANG, "1033");
+  });
+}
+
+test("failed FFmpeg configure retains compiler diagnostics without its environment dump", t => {
+  const fixture = mkdtempSync(join(tmpdir(), "hm-config-log-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const source = join(fixture, "source");
+  const logRoot = join(fixture, "logs");
+  mkdirSync(join(source, "ffbuild"), { recursive: true });
+  const diagnostic = 'test_ld cc\ntest_cc\nBEGIN ./test.c\n1 int main(void){ return 0; }\nEND ./test.c\ncl.exe -c -Fo./test.o ./test.c\nLINK : fatal error LNK1181: cannot open input file kernel32.lib\nC compiler test failed.\n';
+  writeFileSync(join(source, "ffbuild/config.log"), `CI_SECRET=fixture-private-value\n${diagnostic}`);
+  const messages = [];
+  t.mock.method(console, "error", message => messages.push(message));
+  const failure = new Error("configure exited with status 1");
+  assert.throws(() => runWindowsFfmpegBuild({
+    source, staging: join(fixture, "staging"), target: "x86_64-pc-windows-msvc", bash: "fixture-bash", env: {}, logRoot,
+    execute() { throw failure; },
+  }), error => error === failure);
+  rmSync(source, { recursive: true, force: true });
+  const saved = readFileSync(join(logRoot, "ffmpeg-x86_64-pc-windows-msvc-configure.log"), "utf8");
+  assert.equal(saved, diagnostic);
+  assert.ok(messages.join('\n').includes('LNK1181'));
+  assert.equal(messages.join('\n').includes('fixture-private-value'), false);
+});
+
+test("FFmpeg failure without a configure log retains the original process error", t => {
+  const source = mkdtempSync(join(tmpdir(), "hm-no-config-log-"));
+  t.after(() => rmSync(source, { recursive: true, force: true }));
+  const failure = new Error("Bash could not start");
+  assert.throws(() => runWindowsFfmpegBuild({
+    source, staging: source, target: "x86_64-pc-windows-msvc", bash: "fixture-bash", env: {}, logRoot: join(source, "logs"),
+    execute() { throw failure; },
+  }), error => error === failure);
+});
 
 test("manifest selects only the signed official Windows source", () => {
   assert.equal(manifest.sourceUrl, `https://ffmpeg.org/releases/ffmpeg-${manifest.ffmpegRelease}.tar.xz`);
