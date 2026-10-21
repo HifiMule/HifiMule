@@ -487,6 +487,15 @@ test('elapsed paints leave unchanged live-region text untouched', async () => {
   h.component.destroy();
 });
 
+function playbackActionModule(document, toasts) {
+  const exports = {};
+  const source = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/playbackAction.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(source, { exports, document, require: () => ({ showToast: (...args) => toasts.push(args) }) });
+  return exports;
+}
+
 function albumButtonHarness() {
   const calls = []; const toasts = [];
   class Element {
@@ -514,7 +523,9 @@ function albumButtonHarness() {
   }).outputText;
   vm.runInNewContext(source, {
     exports, document: { createElement: () => new Element() },
-    require: name => name === '../rpc'
+    require: name => name === './playbackAction'
+      ? playbackActionModule({ createElement: () => new Element() }, toasts)
+      : name === '../rpc'
       ? { playbackPlayAlbum: async (serverId, albumId) => calls.push({ serverId, albumId }) }
       : name === '../toast'
         ? { showToast: (...args) => toasts.push(args) }
@@ -565,7 +576,9 @@ function previewButtonHarness() {
   }).outputText;
   vm.runInNewContext(source, {
     exports, document,
-    require: name => name === '../rpc'
+    require: name => name === './playbackAction'
+      ? playbackActionModule(document, toasts)
+      : name === '../rpc'
       ? { playbackPreviewTrack: async (serverId, trackId) => calls.push({ serverId, trackId }) }
       : name === '../toast'
         ? { showToast: (...args) => toasts.push(args) }
@@ -599,7 +612,9 @@ function queueButtonHarness() {
   }).outputText;
   vm.runInNewContext(source, {
     exports, document,
-    require: name => name === '../state/queue'
+    require: name => name === './playbackAction'
+      ? playbackActionModule(document, toasts)
+      : name === '../state/queue'
       ? { appendTracksToQueueFromLibrary: async sources => calls.push(sources.map(source => ({ ...source }))) }
       : name === '../toast'
         ? { showToast: (...args) => toasts.push(args) }
@@ -742,7 +757,10 @@ function libraryQueueHarness({ conflict, refreshFails = false, deferAdmission = 
     '../rpc': rpc, './playback': { playbackStore: store }, '../i18n': translations,
     '../toast': { showToast: (...args) => toasts.push(args), ERROR_TOAST_DURATION: 6000 },
   });
-  const button = load('components/TrackQueueButton.ts', { '../state/queue': queue, '../i18n': translations });
+  const button = load('components/TrackQueueButton.ts', {
+    '../state/queue': queue, '../i18n': translations,
+    './playbackAction': playbackActionModule(document, toasts),
+  });
   const tracks = load('components/TracksBrowseView.ts', { '../state/queue': queue });
   const library = load('library.ts', {
     './state/queue': queue,

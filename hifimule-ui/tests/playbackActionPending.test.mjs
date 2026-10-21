@@ -21,23 +21,32 @@ for (const [file, factory, args, icon] of [
             removeAttribute(key) { delete this.attributes[key]; },
         }) };
         const rpc = new Proxy({}, { get: () => (...source) => new Promise((resolve, reject) => requests.push({source, resolve, reject})) });
+        const action = {};
+        vm.runInNewContext(ts.transpileModule(readFileSync(new URL('../src/components/playbackAction.ts', import.meta.url), 'utf8'), {
+            compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+        }).outputText, { exports: action, document, require: () => ({ showToast: error => errors.push(error) }) });
         const source = ts.transpileModule(readFileSync(new URL(`../src/components/${file}.ts`, import.meta.url), 'utf8'), {
             compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
         }).outputText;
-        vm.runInNewContext(source, { exports, document, require: name => (name === '../rpc' || name === '../state/queue') ? rpc
+        vm.runInNewContext(source, { exports, document, require: name => name === './playbackAction' ? action
+            : (name === '../rpc' || name === '../state/queue') ? rpc
             : name === '../i18n' ? { t: (_, values) => values.title } : { showToast: error => errors.push(error) } });
         const button = exports[factory](...args);
-        const click = () => button.listeners.click({stopPropagation() {}});
+        let stopped = 0;
+        const event = { stopPropagation() { stopped++; } };
+        button.listeners.mousedown(event);
+        assert.equal(stopped, 1);
+        const click = () => button.listeners.click(event);
         const first = click();
+        assert.equal(stopped, 2);
         await Promise.all(Array.from({length: 10}, click));
         assert.equal(requests.length, 1);
         assert.equal(button.disabled, true);
         assert.equal(button.attributes['aria-busy'], 'true');
         assert.equal(button.name, 'hourglass-split');
         requests[0].reject(new Error('Offline'));
-        if (file === 'TrackQueueButton') await assert.rejects(first, /Offline/);
-        else await first;
-        assert.deepEqual(errors, file === 'TrackQueueButton' ? [] : ['Offline']);
+        await first;
+        assert.deepEqual(errors, ['Offline']);
         assert.equal(button.disabled, false);
         assert.equal(button.attributes['aria-busy'], undefined);
         assert.equal(button.name, icon);
@@ -45,7 +54,21 @@ for (const [file, factory, args, icon] of [
         assert.equal(requests.length, 2);
         requests[1].resolve(); await retry;
         assert.equal(button.disabled, false);
+        assert.equal(button.attributes['aria-busy'], undefined);
         assert.equal(button.name, icon);
         assert.equal(button.label, '夜の音楽 🎵');
+        const unavailable = [...args];
+        unavailable[file === 'AlbumPlayButton' || file === 'PlaylistPlayButton' ? 1 : 0] = undefined;
+        const disabled = exports[factory](...unavailable);
+        assert.equal(disabled.disabled, true);
+        await disabled.listeners.click(event);
+        assert.equal(requests.length, 2);
+        if (file === 'PlaylistPlayButton') {
+            const empty = exports[factory](...args, 0);
+            assert.equal(empty.disabled, true);
+            await empty.listeners.click(event);
+            assert.equal(requests.length, 2);
+        }
+        if (file === 'TrackQueueButton') assert.equal(button.dataset.queueAdd, 'track');
     });
 }
