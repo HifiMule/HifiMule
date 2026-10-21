@@ -1790,36 +1790,7 @@ fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
 }
 
 pub(crate) fn sanitize_subsonic_message(message: &str) -> String {
-    let mut sanitized = message.to_string();
-    for key in SUBSONIC_SECRET_QUERY_KEYS {
-        let needle = format!("{key}=");
-        let mut rebuilt = String::with_capacity(sanitized.len());
-        let mut cursor = 0;
-        while let Some(relative_start) = sanitized[cursor..].find(&needle) {
-            let start = cursor + relative_start;
-            let preceded_by_separator = start == 0
-                || matches!(
-                    sanitized[..start].chars().last(),
-                    Some('?' | '&' | ' ' | '\t' | '\n')
-                );
-            if !preceded_by_separator {
-                rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
-                cursor = start + needle.len();
-                continue;
-            }
-            let value_start = start + needle.len();
-            let value_end = sanitized[value_start..]
-                .find(|ch: char| ch == '&' || ch.is_whitespace())
-                .map(|offset| value_start + offset)
-                .unwrap_or_else(|| sanitized.len());
-            rebuilt.push_str(&sanitized[cursor..value_start]);
-            rebuilt.push_str(REDACTED);
-            cursor = value_end;
-        }
-        rebuilt.push_str(&sanitized[cursor..]);
-        sanitized = rebuilt;
-    }
-    sanitized
+    super::redact_query_values(message.to_string(), SUBSONIC_SECRET_QUERY_KEYS, REDACTED)
 }
 
 fn artist_from_dto(artist: ArtistDto) -> Artist {

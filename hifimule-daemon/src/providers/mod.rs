@@ -1389,55 +1389,61 @@ pub(crate) fn sanitize_secret_message(message: &str) -> String {
             .unwrap_or(remainder.len());
         remainder = &remainder[url_end..];
     }
-    for key in [
-        "password",
-        "pw",
-        "token",
-        "api_key",
-        "ApiKey",
-        "title",
-        "trackId",
-        "track_id",
-        "serverId",
-        "server_id",
-        "songId",
-        "song_id",
-        "itemId",
-        "item_id",
-        "id",
-        "u",
-        "p",
-        "t",
-        "s",
-    ] {
+    redact_query_values(
+        sanitized,
+        &[
+            "password",
+            "pw",
+            "token",
+            "api_key",
+            "ApiKey",
+            "title",
+            "trackId",
+            "track_id",
+            "serverId",
+            "server_id",
+            "songId",
+            "song_id",
+            "itemId",
+            "item_id",
+            "id",
+            "u",
+            "p",
+            "t",
+            "s",
+        ],
+        "[redacted]",
+    )
+}
+
+fn redact_query_values(mut message: String, keys: &[&str], marker: &str) -> String {
+    for key in keys {
         let needle = format!("{key}=");
-        let mut rebuilt = String::with_capacity(sanitized.len());
+        let mut rebuilt = String::with_capacity(message.len());
         let mut cursor = 0;
-        while let Some(relative_start) = sanitized[cursor..].find(&needle) {
+        while let Some(relative_start) = message[cursor..].find(&needle) {
             let start = cursor + relative_start;
             let preceded_by_separator = start == 0
                 || matches!(
-                    sanitized[..start].chars().last(),
+                    message[..start].chars().last(),
                     Some('?' | '&' | ' ' | '\t' | '\n')
                 );
+            rebuilt.push_str(&message[cursor..start + needle.len()]);
+            cursor = start + needle.len();
             if !preceded_by_separator {
-                rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
-                cursor = start + needle.len();
                 continue;
             }
-            rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
-            cursor = start + needle.len();
-            let value_end = sanitized[cursor..]
+            let value_end = message[cursor..]
                 .find(|ch: char| ch == '&' || ch.is_whitespace())
                 .map(|offset| cursor + offset)
-                .unwrap_or(sanitized.len());
-            rebuilt.push_str("[redacted]");
+                .unwrap_or(message.len());
+            rebuilt.push_str(marker);
             cursor = value_end;
         }
-        rebuilt.push_str(&sanitized[cursor..]);
-        sanitized = rebuilt;
+        rebuilt.push_str(&message[cursor..]);
+        message = rebuilt;
     }
-    sanitized
+    message
 }
 
 #[cfg(test)]
@@ -1838,6 +1844,25 @@ mod tests {
             sanitize_secret_message("msg token=abc end"),
             "msg token=[redacted] end"
         );
+    }
+
+    #[test]
+    fn sanitizers_preserve_distinct_query_redaction_policies() {
+        for (message, secret, subsonic) in [
+            (
+                "GET HTTPS://music.example/rest?u=alice&t=token&id=song title=private api_key=secret",
+                "GET [redacted-url] title=[redacted] api_key=[redacted]",
+                "GET HTTPS://music.example/rest?u=[REDACTED]&t=[REDACTED]&id=song title=private api_key=secret",
+            ),
+            (
+                "u=élise&u=\tp=secret\nt=token status=ok type=json préu=visible ?s=salt&format=mp3",
+                "u=[redacted]&u=[redacted]\tp=[redacted]\nt=[redacted] status=ok type=json préu=visible ?s=[redacted]&format=mp3",
+                "u=[REDACTED]&u=[REDACTED]\tp=[REDACTED]\nt=[REDACTED] status=ok type=json préu=visible ?s=[REDACTED]&format=mp3",
+            ),
+        ] {
+            assert_eq!(sanitize_secret_message(message), secret);
+            assert_eq!(subsonic::sanitize_subsonic_message(message), subsonic);
+        }
     }
 
     #[test]
