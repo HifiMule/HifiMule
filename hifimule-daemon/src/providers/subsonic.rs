@@ -185,32 +185,6 @@ impl SubsonicProvider {
         }
     }
 
-    async fn history_song_dump(&self) -> Result<Vec<SongDto>, ProviderError> {
-        const PAGE_SIZE: usize = 500;
-        let mut songs = Vec::new();
-        let mut offset = 0usize;
-        let mut pages_fetched = 0usize;
-        loop {
-            let page = self
-                .client
-                .search3_paged("", Some(PAGE_SIZE), Some(offset))
-                .await?;
-            let count = page.search_result3.song.len();
-            songs.extend(page.search_result3.song);
-            pages_fetched += 1;
-            if count < PAGE_SIZE {
-                break;
-            }
-            if pages_fetched >= MAX_SONG_DUMP_PAGES {
-                return Err(ProviderError::UnsupportedCapability(format!(
-                    "Subsonic history browse exceeded {MAX_SONG_DUMP_PAGES} pages without a partial page"
-                )));
-            }
-            offset += PAGE_SIZE;
-        }
-        Ok(songs)
-    }
-
     async fn history_songs_from_album_list(
         &self,
         album_list_type: &str,
