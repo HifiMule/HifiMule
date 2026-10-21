@@ -2994,10 +2994,9 @@ async fn handle_browse_search(
     }))
 }
 
-async fn handle_playlist_create(
+async fn require_playlist_write_provider(
     state: &AppState,
-    params: Option<Value>,
-) -> Result<Value, JsonRpcError> {
+) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
     let provider = require_provider(state).await?;
     if !provider.capabilities().supports_playlist_write {
         return Err(JsonRpcError {
@@ -3006,24 +3005,41 @@ async fn handle_playlist_create(
             data: None,
         });
     }
-    let params = params.ok_or(JsonRpcError {
+    Ok(provider)
+}
+
+fn require_params(params: Option<Value>) -> Result<Value, JsonRpcError> {
+    params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing params".to_string(),
         data: None,
-    })?;
-    let name = params["name"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing name".to_string(),
-            data: None,
-        })?
-        .to_owned();
-    let raw_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+    })
+}
+
+fn required_string_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, JsonRpcError> {
+    params[key].as_str().ok_or_else(|| JsonRpcError {
         code: ERR_INVALID_PARAMS,
-        message: "Missing or invalid itemIds array".to_string(),
+        message: format!("Missing {key}"),
         data: None,
-    })?;
+    })
+}
+
+fn required_array_param<'a>(params: &'a Value, key: &str) -> Result<&'a Vec<Value>, JsonRpcError> {
+    params[key].as_array().ok_or_else(|| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: format!("Missing or invalid {key} array"),
+        data: None,
+    })
+}
+
+async fn handle_playlist_create(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let name = required_string_param(&params, "name")?.to_owned();
+    let raw_ids = required_array_param(&params, "itemIds")?;
     let item_ids: Vec<String> = raw_ids
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -3097,32 +3113,10 @@ async fn handle_playlist_add_items(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
-    if !provider.capabilities().supports_playlist_write {
-        return Err(JsonRpcError {
-            code: ERR_UNSUPPORTED_CAPABILITY,
-            message: "Connected provider does not support playlist write".to_string(),
-            data: None,
-        });
-    }
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let playlist_id = params["playlistId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing playlistId".to_string(),
-            data: None,
-        })?
-        .to_owned();
-    let raw_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing or invalid itemIds array".to_string(),
-        data: None,
-    })?;
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let playlist_id = required_string_param(&params, "playlistId")?.to_owned();
+    let raw_ids = required_array_param(&params, "itemIds")?;
     let item_ids: Vec<String> = raw_ids
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -3167,32 +3161,10 @@ async fn handle_playlist_add_tracks(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
-    if !provider.capabilities().supports_playlist_write {
-        return Err(JsonRpcError {
-            code: ERR_UNSUPPORTED_CAPABILITY,
-            message: "Connected provider does not support playlist write".to_string(),
-            data: None,
-        });
-    }
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let playlist_id = params["playlistId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing playlistId".to_string(),
-            data: None,
-        })?
-        .to_owned();
-    let raw_ids = params["trackIds"].as_array().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing or invalid trackIds array".to_string(),
-        data: None,
-    })?;
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let playlist_id = required_string_param(&params, "playlistId")?.to_owned();
+    let raw_ids = required_array_param(&params, "trackIds")?;
     let track_ids: Vec<String> = raw_ids
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -3208,32 +3180,10 @@ async fn handle_playlist_remove_tracks(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
-    if !provider.capabilities().supports_playlist_write {
-        return Err(JsonRpcError {
-            code: ERR_UNSUPPORTED_CAPABILITY,
-            message: "Connected provider does not support playlist write".to_string(),
-            data: None,
-        });
-    }
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let playlist_id = params["playlistId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing playlistId".to_string(),
-            data: None,
-        })?
-        .to_owned();
-    let raw_ids = params["trackIds"].as_array().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing or invalid trackIds array".to_string(),
-        data: None,
-    })?;
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let playlist_id = required_string_param(&params, "playlistId")?.to_owned();
+    let raw_ids = required_array_param(&params, "trackIds")?;
     let track_ids: Vec<String> = raw_ids
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -3249,27 +3199,9 @@ async fn handle_playlist_delete(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
-    if !provider.capabilities().supports_playlist_write {
-        return Err(JsonRpcError {
-            code: ERR_UNSUPPORTED_CAPABILITY,
-            message: "Connected provider does not support playlist write".to_string(),
-            data: None,
-        });
-    }
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let playlist_id = params["playlistId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing playlistId".to_string(),
-            data: None,
-        })?
-        .to_owned();
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let playlist_id = required_string_param(&params, "playlistId")?.to_owned();
     provider
         .delete_playlist(&playlist_id)
         .await
@@ -3281,36 +3213,10 @@ async fn handle_playlist_rename(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
-    if !provider.capabilities().supports_playlist_write {
-        return Err(JsonRpcError {
-            code: ERR_UNSUPPORTED_CAPABILITY,
-            message: "Connected provider does not support playlist write".to_string(),
-            data: None,
-        });
-    }
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let playlist_id = params["playlistId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing playlistId".to_string(),
-            data: None,
-        })?
-        .to_owned();
-    let name = params["name"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing name".to_string(),
-            data: None,
-        })?
-        .trim()
-        .to_owned();
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let playlist_id = required_string_param(&params, "playlistId")?.to_owned();
+    let name = required_string_param(&params, "name")?.trim().to_owned();
     if name.is_empty() {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
@@ -3329,32 +3235,10 @@ async fn handle_playlist_reorder(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
-    if !provider.capabilities().supports_playlist_write {
-        return Err(JsonRpcError {
-            code: ERR_UNSUPPORTED_CAPABILITY,
-            message: "Connected provider does not support playlist write".to_string(),
-            data: None,
-        });
-    }
-    let params = params.ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let playlist_id = params["playlistId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing playlistId".to_string(),
-            data: None,
-        })?
-        .to_owned();
-    let raw_ids = params["trackIds"].as_array().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing or invalid trackIds array".to_string(),
-        data: None,
-    })?;
+    let provider = require_playlist_write_provider(state).await?;
+    let params = require_params(params)?;
+    let playlist_id = required_string_param(&params, "playlistId")?.to_owned();
+    let raw_ids = required_array_param(&params, "trackIds")?;
     // Reject non-string entries rather than silently dropping them: a dropped id would
     // shrink the requested order and, on the Subsonic replace path, could remove a track.
     let mut track_ids: Vec<String> = Vec::with_capacity(raw_ids.len());
@@ -18530,6 +18414,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn playlist_required_params_preserve_validation_errors() {
+        let error = require_params(None).unwrap_err();
+        assert_eq!(error.code, ERR_INVALID_PARAMS);
+        assert_eq!(error.message, "Missing params");
+        assert!(error.data.is_none());
+        assert!(require_params(Some(Value::Null)).unwrap().is_null());
+
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({ "name": 42, "itemIds": "x" }),
+        ] {
+            for (error, message) in [
+                (
+                    required_string_param(&params, "name").unwrap_err(),
+                    "Missing name",
+                ),
+                (
+                    required_array_param(&params, "itemIds").unwrap_err(),
+                    "Missing or invalid itemIds array",
+                ),
+            ] {
+                assert_eq!(error.code, ERR_INVALID_PARAMS);
+                assert_eq!(error.message, message);
+                assert!(error.data.is_none());
+            }
+        }
+        let params = serde_json::json!({ "name": "  ", "itemIds": [] });
+        assert_eq!(required_string_param(&params, "name").unwrap(), "  ");
+        assert!(required_array_param(&params, "itemIds").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn playlist_reorder_rejects_non_string_track_ids() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(FakePlaylistProvider::new("ignored"));
+        let error = handle_playlist_reorder(
+            &state,
+            Some(serde_json::json!({ "playlistId": "p", "trackIds": ["t1", 42] })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ERR_INVALID_PARAMS);
+        assert_eq!(error.message, "trackIds must contain only strings");
+    }
+
     #[tokio::test]
     async fn playlist_create_resolves_song_and_returns_server_id() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
@@ -18708,7 +18642,7 @@ mod tests {
 
         let result = handle_playlist_add_tracks(
             &state,
-            Some(serde_json::json!({ "playlistId": "p1", "trackIds": ["t1", "t2"] })),
+            Some(serde_json::json!({ "playlistId": "p1", "trackIds": ["t1", 42, null, "t2"] })),
         )
         .await
         .expect("playlist.addTracks");
@@ -18733,7 +18667,7 @@ mod tests {
 
         let result = handle_playlist_remove_tracks(
             &state,
-            Some(serde_json::json!({ "playlistId": "p2", "trackIds": ["t3"] })),
+            Some(serde_json::json!({ "playlistId": "p2", "trackIds": [null, "t3", 42] })),
         )
         .await
         .expect("playlist.removeTracks");
@@ -18779,37 +18713,24 @@ mod tests {
             .await
             .set_test_provider(provider as Arc<dyn MediaProvider>);
 
-        let dummy_create_params = Some(serde_json::json!({ "name": "x", "itemIds": [] }));
-        let dummy_modify_params = Some(serde_json::json!({ "playlistId": "p", "trackIds": [] }));
-        let dummy_delete_params = Some(serde_json::json!({ "playlistId": "p" }));
-
-        let create_err = handle_playlist_create(&state, dummy_create_params)
-            .await
-            .expect_err("create should fail");
-        assert_eq!(create_err.code, ERR_UNSUPPORTED_CAPABILITY);
-
-        let add_err = handle_playlist_add_tracks(&state, dummy_modify_params.clone())
-            .await
-            .expect_err("addTracks should fail");
-        assert_eq!(add_err.code, ERR_UNSUPPORTED_CAPABILITY);
-
-        let remove_err = handle_playlist_remove_tracks(&state, dummy_modify_params)
-            .await
-            .expect_err("removeTracks should fail");
-        assert_eq!(remove_err.code, ERR_UNSUPPORTED_CAPABILITY);
-
-        let delete_err = handle_playlist_delete(&state, dummy_delete_params)
-            .await
-            .expect_err("delete should fail");
-        assert_eq!(delete_err.code, ERR_UNSUPPORTED_CAPABILITY);
-
-        let reorder_err = handle_playlist_reorder(
-            &state,
-            Some(serde_json::json!({ "playlistId": "p", "trackIds": ["t1", "t2"] })),
-        )
-        .await
-        .expect_err("reorder should fail");
-        assert_eq!(reorder_err.code, ERR_UNSUPPORTED_CAPABILITY);
+        // Capability errors must still take precedence over missing params.
+        for result in [
+            handle_playlist_create(&state, None).await,
+            handle_playlist_add_items(&state, None).await,
+            handle_playlist_add_tracks(&state, None).await,
+            handle_playlist_remove_tracks(&state, None).await,
+            handle_playlist_delete(&state, None).await,
+            handle_playlist_rename(&state, None).await,
+            handle_playlist_reorder(&state, None).await,
+        ] {
+            let error = result.expect_err("playlist write should fail");
+            assert_eq!(error.code, ERR_UNSUPPORTED_CAPABILITY);
+            assert_eq!(
+                error.message,
+                "Connected provider does not support playlist write"
+            );
+            assert!(error.data.is_none());
+        }
     }
 
     #[test]
