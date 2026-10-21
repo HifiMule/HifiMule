@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const bundle = await build({
-    entryPoints: [new URL('../src/components/PlaybackSelectionSettings.ts', import.meta.url).pathname],
+    entryPoints: [fileURLToPath(new URL('../src/components/PlaybackSelectionSettings.ts', import.meta.url))],
     bundle: true, platform: 'node', format: 'esm', write: false,
     plugins: [{ name: 'radio-settings-dependencies', setup(build) {
         build.onResolve({ filter: /^\.\.\/(rpc|i18n|serverIdentity)$/ }, args => ({ path: args.path, namespace: 'test' }));
