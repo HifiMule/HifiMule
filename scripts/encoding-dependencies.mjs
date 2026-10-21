@@ -3,11 +3,15 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
-import { join, resolve, delimiter } from 'node:path';
+import { join, resolve, delimiter, win32 } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const manifest = JSON.parse(readFileSync(join(root, 'hifimule-daemon/audio-runtime.json')));
 export const encodingDependencyReceipt = manifest.encodingDependencies;
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+export function windowsTarExecutable(env = process.env) {
+  const systemRoot = Object.entries(env).find(([key]) => key.toUpperCase() === 'SYSTEMROOT')?.[1] ?? 'C:\\Windows';
+  return win32.join(systemRoot, 'System32', 'tar.exe');
+}
 export function buildEncodingDependencies({ cache, work, prefix, target, env = process.env, execute = execFileSync, windows = false }) {
   env = { ...env, PKG_CONFIG_PATH: [join(prefix, 'lib/pkgconfig'), env.PKG_CONFIG_PATH].filter(Boolean).join(delimiter) };
   const run = (cmd, args, cwd) => execute(cmd, args, { cwd, env, stdio: 'inherit' });
@@ -28,9 +32,9 @@ export function buildEncodingDependencies({ cache, work, prefix, target, env = p
         renameSync(temporary, archive);
       } finally { rmSync(temporary, { force: true }); }
     }
-    // MSYS2 GNU tar interprets the colon in an absolute Windows archive path
-    // as a remote host. A local filename also works with Windows' BSD tar.
-    run(windows ? 'tar.exe' : 'tar', ['-xf', dep.archive, '-C', resolve(work)], cache);
+    // MSYS2 tar on PATH rejects native Windows archive and destination paths.
+    // Use the OS-provided BSD tar, which accepts both, regardless of PATH order.
+    run(windows ? windowsTarExecutable(env) : 'tar', ['-xf', dep.archive, '-C', resolve(work)], cache);
     const source = join(work, dep.directory);
     if (!windows) {
       if (target.includes('apple')) {

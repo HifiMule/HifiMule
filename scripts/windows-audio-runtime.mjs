@@ -1,4 +1,4 @@
-import { buildEncodingDependencies, encodingDependencyReceipt } from "./encoding-dependencies.mjs";
+import { buildEncodingDependencies, encodingDependencyReceipt, windowsTarExecutable } from "./encoding-dependencies.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -223,7 +223,7 @@ function buildOfficialSource(archive, staging, target, options = {}) {
   rmSync(sourceRoot, { recursive: true, force: true });
   mkdirSync(sourceRoot, { recursive: true });
   try {
-    execute("tar.exe", ["-xf", archive, "-C", sourceRoot], { stdio: "inherit" });
+    execute(windowsTarExecutable(baseEnv), ["-xf", archive, "-C", sourceRoot], { stdio: "inherit", env: baseEnv });
     const source = join(sourceRoot, `ffmpeg-${manifest.ffmpegRelease}`);
     if (!existsSync(join(source, "configure"))) fail(`Official FFmpeg archive did not contain ffmpeg-${manifest.ffmpegRelease}/configure`);
     mkdirSync(staging, { recursive: true });
@@ -291,7 +291,7 @@ export function ensureWindowsAudioRuntime(target, options = {}) {
       const msysBin = validateMsys2Toolchain(msysBash);
       runtimeOptions = { ...options, env: prependWindowsPath(buildEnv, msysBin), bash: msysBash };
       for (const [tool, candidates] of [
-        ["tar.exe", ["tar.exe"]], ["lib.exe", ["lib.exe"]],
+        ["Windows system tar.exe", [windowsTarExecutable(buildEnv)]], ["lib.exe", ["lib.exe"]],
       ]) if (!executable(candidates, buildEnv)) fail(`Required Windows official-source build tool is missing: ${tool}`);
     }
     if (!existsSync(archive) || calculateSha(archive) !== manifest.sourceSha256) {
