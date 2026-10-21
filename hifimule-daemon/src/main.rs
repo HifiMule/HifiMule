@@ -1818,7 +1818,7 @@ async fn get_selected_provider(
 ) -> Option<(Arc<dyn providers::MediaProvider>, Option<String>)> {
     let config = db.get_server_config().ok()??;
     let server_id = config.server_id.clone();
-    let provider = crate::server_manager::connect_provider_for(&config.into())
+    let provider = crate::server_manager::connect_provider_for(&config)
         .await
         .ok()?;
     Some((provider, server_id))

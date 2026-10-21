@@ -15,49 +15,9 @@ use crate::api::{CredentialManager, JellyfinClient};
 use crate::db::{Database, ServerConfig};
 use crate::providers::{CredentialKind, MediaProvider, ProviderCredentials, ProviderError};
 
-/// In-memory view of one configured server row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerRecord {
-    pub transcoding_location: crate::db::TranscodingLocation,
-    pub id: String,
-    pub url: String,
-    pub server_type: String,
-    pub username: String,
-    pub server_version: Option<String>,
-    pub name: Option<String>,
-    pub icon: Option<String>,
-    pub selected: bool,
-    /// Deterministic portable identity (Story 2.13) — used for manifest/basket
-    /// tagging and sync routing. Resolved back to `id` for provider lookup.
-    pub server_id: Option<String>,
-    pub server_reported_id: Option<String>,
-    pub provider_library_id: Option<String>,
-    pub provider_library_role: Option<String>,
-}
-
-impl From<ServerConfig> for ServerRecord {
-    fn from(c: ServerConfig) -> Self {
-        ServerRecord {
-            transcoding_location: c.transcoding_location,
-            id: c.id,
-            url: c.url,
-            server_type: c.server_type,
-            username: c.username,
-            server_version: c.server_version,
-            name: c.name,
-            icon: c.icon,
-            selected: c.selected,
-            server_id: c.server_id,
-            server_reported_id: c.server_reported_id,
-            provider_library_id: c.provider_library_id,
-            provider_library_role: c.provider_library_role,
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct ServerManager {
-    pub servers: Vec<ServerRecord>,
+    pub servers: Vec<ServerConfig>,
     pub selected_server_id: Option<String>,
     /// Lazy provider cache keyed by server UUID.
     pub providers: HashMap<String, Arc<dyn MediaProvider>>,
@@ -71,17 +31,12 @@ impl ServerManager {
     /// Loads all server rows from the DB into memory and sets the selected id
     /// from the `selected = 1` row. Does NOT connect any provider (AC14).
     pub fn load_from_db(&mut self, db: &Database) {
-        let servers: Vec<ServerRecord> = db
-            .list_servers()
-            .unwrap_or_default()
-            .into_iter()
-            .map(ServerRecord::from)
-            .collect();
+        let servers = db.list_servers().unwrap_or_default();
         self.selected_server_id = servers.iter().find(|s| s.selected).map(|s| s.id.clone());
         self.servers = servers;
     }
 
-    pub fn selected_record(&self) -> Option<&ServerRecord> {
+    pub fn selected_record(&self) -> Option<&ServerConfig> {
         let id = self.selected_server_id.as_deref()?;
         self.servers.iter().find(|s| s.id == id)
     }
@@ -99,7 +54,7 @@ impl ServerManager {
         // that production code performs. A previous version mirrored id → server_id,
         // which silently masked any bug that confused the two identities.
         let portable_id = crate::db::derive_server_id(&server_type, "", "", None);
-        self.servers = vec![ServerRecord {
+        self.servers = vec![ServerConfig {
             transcoding_location: crate::db::TranscodingLocation::Server,
             id: id.clone(),
             url: String::new(),
@@ -108,6 +63,7 @@ impl ServerManager {
             server_version,
             name: None,
             icon: None,
+            updated_at: 0,
             selected: true,
             server_id: Some(portable_id),
             server_reported_id: None,
@@ -123,7 +79,7 @@ impl ServerManager {
 /// Builds a provider from a server's stored credentials. Construction only — no
 /// network round-trip — so it is safe to call lazily on first selection/use.
 pub(crate) async fn connect_provider_for(
-    record: &ServerRecord,
+    record: &ServerConfig,
 ) -> Result<Arc<dyn MediaProvider>, ProviderError> {
     let creds = CredentialManager::get_server_credential(&record.id)
         .map_err(|e| ProviderError::Auth(e.to_string()))?;
@@ -213,7 +169,6 @@ pub async fn get_provider(
             .get_server(id)
             .ok()
             .flatten()
-            .map(ServerRecord::from)
             .ok_or_else(|| ProviderError::Auth(format!("Unknown server: {id}")))?,
     };
     let provider = connect_provider_for(&record).await?;
@@ -294,6 +249,7 @@ mod tests {
         mgr.load_from_db(&db);
 
         assert_eq!(mgr.servers.len(), 2);
+        assert_eq!(mgr.servers, db.list_servers().unwrap());
         // First-ever server auto-selected by the DB layer.
         assert_eq!(mgr.selected_server_id.as_deref(), Some(id1.as_str()));
         assert_eq!(mgr.selected_record().unwrap().id, id1);
