@@ -407,6 +407,8 @@ pub(crate) async fn run(
     operation: &str,
     checkpoint: &crate::device::SyncManifestSession,
 ) -> Vec<String> {
+    let mut progress = crate::sync_logging::Step::current("folder_artwork");
+    crate::daemon_log!("[Artwork] Resolving synced folders");
     let mut warnings = Vec::new();
     let mut artist_covers = HashMap::new();
     let (mut folders, live) = match grouped_folders(
@@ -422,6 +424,10 @@ pub(crate) async fn run(
         Ok(grouped) => grouped,
         Err(_) => {
             warnings.push("[Artwork] Folder grouping interrupted; ownership retained".into());
+            progress.finish(
+                if manager.is_cancelled(operation).await { "cancelled" } else { "failed" },
+                0,
+            );
             return warnings;
         }
     };
@@ -452,8 +458,10 @@ pub(crate) async fn run(
         .collect();
     for folder in obsolete {
         if manager.is_cancelled(operation).await {
+            progress.finish("cancelled", 0);
             return warnings;
         }
+        crate::daemon_log!("[Artwork] {folder}: retiring owned artwork");
         let mut record = manifest.folder_artwork_records[&folder].clone();
         // Retire native state first, because Finder may create Icon\r and Windows
         // may activate folder attributes. Unsupported hosts keep evidence for later.
@@ -511,16 +519,28 @@ pub(crate) async fn run(
             .is_err()
         {
             warnings.push("[Artwork] Could not checkpoint artwork cleanup".into());
+            progress.finish("failed", 0);
             return warnings;
         }
     }
     if !manifest.folder_artwork.enabled {
+        crate::daemon_log!("[Artwork] Thumbnail creation disabled; cleanup finished");
+        let cancelled = manager.is_cancelled(operation).await;
+        progress.finish(
+            if cancelled { "cancelled" } else if warnings.is_empty() { "skipped" } else { "warnings" },
+            0,
+        );
         return warnings;
     }
-    for (folder, candidates) in folders {
+    let total = folders.len();
+    let mut processed = 0;
+    crate::daemon_log!("[Artwork] Checking {total} folders for thumbnails");
+    for (index, (folder, candidates)) in folders.into_iter().enumerate() {
         if manager.is_cancelled(operation).await {
             break;
         }
+        processed = index + 1;
+        crate::daemon_log!("[Artwork] Folder {processed}/{total}: {folder}");
         let mut record = manifest
             .folder_artwork_records
             .get(&folder)
@@ -535,7 +555,11 @@ pub(crate) async fn run(
                 },
                 None => { anyhow::ensure!(io.file_length(&path).await?.is_none(), "Existing artwork preserved"); None }
             };
-            let bytes = if let Some(bytes) = bytes { bytes } else {
+            let bytes = if let Some(bytes) = bytes {
+                crate::daemon_log!("[Artwork] {folder}: reusing folder.jpg");
+                bytes
+            } else {
+                crate::daemon_log!("[Artwork] {folder}: resolving artwork source");
                 let source = if let Some(source) = record.source.clone().filter(|source|source.cover_id.as_ref().is_some_and(|id|!id.is_empty())) { Some(source) } else {
                     let mut sources = Vec::new();
                     for candidate in &candidates {
@@ -553,45 +577,67 @@ pub(crate) async fn run(
                     sources.sort_by(|a,b| (&a.server_id,&a.entity_id).cmp(&(&b.server_id,&b.entity_id)));
                     sources.into_iter().next()
                 };
-                let Some(source) = source else { return Ok(()) };
+                let Some(source) = source else {
+                    crate::daemon_log!("[Artwork] {folder}: skipped; no artwork source available");
+                    return Ok(());
+                };
                 let Some(cover) = source.cover_id.as_deref() else { return Ok(()) };
                 let provider = provider_for(source.server_id.as_deref(), fallback, providers).context("Source server unavailable")?;
                 // One source winner and one image request for this physical folder.
+                crate::daemon_log!("[Artwork] {folder}: fetching and resizing server image");
                 let image = tokio::select! {
                     result = tokio::time::timeout(Duration::from_secs(30), fetch(provider.as_ref(), cover)) => result.context("Artwork request timed out")??,
                     _ = wait_for_operation_cancellation(manager, operation) => return Ok(()),
                 };
                 if manager.is_cancelled(operation).await { return Ok(()); }
                 anyhow::ensure!(io.free_space().await? >= image.len() as u64, "Insufficient space for artwork");
+                crate::daemon_log!("[Artwork] {folder}: writing folder.jpg ({} bytes)", image.len());
                 io.publish_artwork(&path, &image).await?;
                 record.jpeg_hash = Some(hash(&image)); record.source = Some(source);
                 // Always checkpoint the successfully published image, even if cancelled now.
                 let saved = record.clone(); let key = folder.clone();
                 checkpoint.stage(0, |m|{m.folder_artwork_records.insert(key,saved);}).await?;
+                crate::daemon_log!("[Artwork] {folder}: folder.jpg saved");
                 image
             };
             for (kind, enabled) in [("windows",manifest.folder_artwork.windows),("macos",manifest.folder_artwork.macos),("kde",manifest.folder_artwork.kde),("gnome",manifest.folder_artwork.gnome)] {
                 if !enabled || manager.is_cancelled(operation).await { continue; }
                 let old = record.native.get(kind).map(String::as_str);
+                crate::daemon_log!("[Artwork] {folder}: applying {kind} folder icon");
                 match io.folder_icon(&folder, kind, Some(&bytes), old).await {
                     Ok(Some(token)) => {
                         record.native.insert(kind.into(),token);
                         let saved = record.clone(); let key = folder.clone();
                         checkpoint.stage(0, |m|{m.folder_artwork_records.insert(key,saved);}).await?;
+                        crate::daemon_log!("[Artwork] {folder}: {kind} folder icon ready");
                     }
-                    Ok(None) => {},
-                    Err(error) => warnings.push(format!("[Artwork] {folder}: {kind}: {error}")),
+                    Ok(None) => crate::daemon_log!("[Artwork] {folder}: {kind} folder icon not applied"),
+                    Err(error) => {
+                        crate::daemon_log!("[Artwork] {folder}: {kind} folder icon failed: {error:#}");
+                        warnings.push(format!("[Artwork] {folder}: {kind}: {error}"));
+                    },
                 }
             }
             Ok(())
         }.await;
         if let Err(error) = result {
+            crate::daemon_log!("[Artwork] {folder}: failed: {error:#}; retry next sync");
             warnings.push(format!("[Artwork] {folder}: {error:#}; retry next sync"));
         }
         if record.jpeg_hash.is_some() || !record.native.is_empty() {
             manifest.folder_artwork_records.insert(folder, record);
         }
     }
+    let cancelled = manager.is_cancelled(operation).await;
+    crate::daemon_log!(
+        "[Artwork] {}: checked {processed}/{total} folders; {} warnings",
+        if cancelled { "Cancelled" } else { "Finished" },
+        warnings.len()
+    );
+    progress.finish(
+        if cancelled { "cancelled" } else if warnings.is_empty() { "success" } else { "warnings" },
+        processed,
+    );
     warnings
 }
 
