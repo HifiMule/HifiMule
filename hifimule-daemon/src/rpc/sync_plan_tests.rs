@@ -98,9 +98,66 @@ async fn compact_daemon_state_preserves_metadata_and_capacity_without_track_reco
 
 async fn publish_test_plan(state: &AppState, delta: crate::sync::SyncDelta) -> Value {
     let manifest = state.device_manager.get_current_device().await.unwrap();
-    finish_sync_delta(state, delta, &manifest, &json!({"prepared":true}))
+    publish_sync_delta(state, delta, &manifest, &json!({"prepared":true}))
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn finish_sync_delta_preserves_force_recovery_and_autofill_metadata() {
+    let _guard = credential_test_lock();
+    let (dir, state) = sync_plan_test_state().await;
+    tokio::fs::create_dir_all(dir.path().join("Music")).await.unwrap();
+    tokio::fs::write(dir.path().join("Music/retained.mp3"), b"audio").await.unwrap();
+    let mut manifest = state.device_manager.get_current_device().await.unwrap();
+    manifest.synced_items = serde_json::from_value(json!([
+        {"providerItemId":"retained","name":"retained","localPath":"Music/retained.mp3",
+            "sizeBytes":1000,"syncedAt":"before","serverId":"source"},
+        {"providerItemId":"missing","name":"missing","localPath":"Music/missing.mp3",
+            "sizeBytes":1000,"syncedAt":"before","serverId":"source"}
+    ])).unwrap();
+    let desired: Vec<_> = ["retained", "missing", "new"].into_iter().map(|id| {
+        let mut song = make_fake_song(id, id);
+        song.duration_seconds = 240;
+        song.size_bytes = Some(1000);
+        let mut item = provider_song_to_desired_item(&song);
+        item.server_id = Some("source".into());
+        item
+    }).collect();
+    for force in [false, true] {
+        let delta = finish_sync_delta(&state, &desired, &manifest, &json!({"force":force}), SyncDeltaPreparation {
+            playlists: vec![crate::sync::PlaylistSyncItem {
+                jellyfin_id: "playlist".into(), name: "Playlist".into(), tracks: vec![],
+            }],
+            auto_fill_ids: HashSet::from(["retained".into(), "missing".into()]),
+            tiers: HashMap::from([("new".into(), "discovery".into())]),
+            bitrate_overrides: HashMap::from([(("missing".into(), Some("source".into())), 96)]),
+            pity_fired_servers: vec!["source".into()],
+        }).await.unwrap();
+        assert_eq!(delta.adds.len(), if force { 3 } else { 2 });
+        assert_eq!(delta.unchanged, if force { 0 } else { 1 });
+        let missing = delta.adds.iter().find(|item| item.jellyfin_id == "missing").unwrap();
+        assert_eq!(missing.reason_code.as_deref(), Some(if force { "force-sync" } else { "device-file-missing" }));
+        assert_eq!(missing.max_bitrate_override_kbps, Some(96));
+        assert!(missing.is_auto_fill);
+        assert_eq!(missing.duration_seconds, 240);
+        let new = delta.adds.iter().find(|item| item.jellyfin_id == "new").unwrap();
+        assert_eq!(new.tier.as_deref(), Some("discovery"));
+        assert!(!new.is_auto_fill);
+        if force {
+            let retained = delta.adds.iter().find(|item| item.jellyfin_id == "retained").unwrap();
+            assert!(retained.is_auto_fill);
+            assert_eq!(retained.duration_seconds, 240);
+        } else {
+            assert_eq!(delta.provenance_updates.get("retained"), Some(&true));
+        }
+        assert_eq!(delta.playlists[0].jellyfin_id, "playlist");
+        assert_eq!(delta.pity_fired_servers, ["source"]);
+    }
+    let mut conflicting = desired[0].clone();
+    conflicting.server_id = Some("other-source".into());
+    let error = finish_sync_delta(&state, &[conflicting], &manifest, &json!({}), Default::default()).await.unwrap_err();
+    assert_eq!(error.data.unwrap()["code"], "AMBIGUOUS_PROVIDER_ITEM_ID");
 }
 
 #[tokio::test]
@@ -276,7 +333,7 @@ async fn preparation_rejects_changed_server_configuration_without_publishing_a_p
     let fingerprint = sync_target_fingerprint(&state, &target).await.unwrap();
     state.server_manager.write().await.servers[0].url = "http://changed.invalid".into();
     let delta = crate::sync::calculate_delta(&[], &target.manifest);
-    let error = finish_sync_delta(
+    let error = publish_sync_delta(
         &state,
         delta,
         &target.manifest,
@@ -443,7 +500,7 @@ async fn reviewed_prepared_force_preserves_blocked_resident_and_exact_count() {
         reason_code: "server-unavailable".into(),
         reason: "Unavailable".into(),
     });
-    let summary = finish_sync_delta(
+    let summary = publish_sync_delta(
         &state,
         delta,
         &manifest,
@@ -588,7 +645,7 @@ async fn reviewed_cancel_or_shutdown_during_final_preflight_cannot_publish() {
         delta.adds.push(add);
         let taskstate = state.clone();
         let mut task = tokio::spawn(async move {
-            finish_sync_delta(&taskstate, delta, &manifest, &json!({"prepared":true})).await
+            publish_sync_delta(&taskstate, delta, &manifest, &json!({"prepared":true})).await
         });
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(30), &mut task)
@@ -982,20 +1039,20 @@ async fn normal_existing_audio_is_reused_but_force_schedules_replacement() {
     let manifest = state.device_manager.get_current_device().await.unwrap();
     let delta: crate::sync::SyncDelta = serde_json::from_value(json!({"adds":[{"jellyfinId":"track-1","name":"Track","album":"Album","artist":"Artist","sizeBytes":50000000,"providerSuffix":"flac"}],"deletes":[],"idChanges":[],"unchanged":0,"playlists":[]})).unwrap();
     assert!(!manifest.reconcile_before_sync);
-    let disabled = finish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
+    let disabled = publish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
     assert_eq!(disabled["adds"].as_array().unwrap().len(), 1);
     assert!(disabled["idChanges"].as_array().unwrap().is_empty());
     state.device_manager.update_manifest(|m| m.reconcile_before_sync = true).await.unwrap();
     let manifest = state.device_manager.get_current_device().await.unwrap();
-    let preview = finish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
+    let preview = publish_sync_delta(&state, delta.clone(), &manifest, &json!({})).await.unwrap();
     assert!(preview["adds"].as_array().unwrap().is_empty());
     assert_eq!(preview["idChanges"][0]["sizeBytes"], before.len() as u64);
     assert!(state.device_manager.get_current_device().await.unwrap().synced_items.is_empty());
-    let forced = finish_sync_delta(&state, delta.clone(), &manifest, &json!({"force":true})).await.unwrap();
+    let forced = publish_sync_delta(&state, delta.clone(), &manifest, &json!({"force":true})).await.unwrap();
     assert_eq!(forced["adds"].as_array().unwrap().len(), 1);
     assert!(forced["idChanges"].as_array().unwrap().is_empty());
     assert_eq!(tokio::fs::read(root.path().join("Music/existing.mp3")).await.unwrap(), before);
-    let summary = finish_sync_delta(&state, delta, &manifest, &json!({"prepared":true})).await.unwrap();
+    let summary = publish_sync_delta(&state, delta, &manifest, &json!({"prepared":true})).await.unwrap();
     assert_eq!(summary["selectedBytes"], before.len() as u64);
     assert_eq!(summary["selectedExpectedBytes"], before.len() as u64);
     assert_eq!(summary["selectedReserveBytes"], 0);
@@ -1086,7 +1143,7 @@ async fn prepared_sync_replaces_untracked_music_and_continues_in_normal_and_forc
                 {"jellyfinId":"track-2","name":"Next Track","album":"The Sign","artist":"Ace of Base","trackNumber":2,"sizeBytes":100,"providerSuffix":"mp3","providerContentType":"audio/mpeg"}
             ], "deletes":[],"idChanges":[],"unchanged":0,"playlists":[]
         })).unwrap();
-        let summary = finish_sync_delta(&state, delta, &manifest, &json!({"prepared":true,"force":force})).await.unwrap();
+        let summary = publish_sync_delta(&state, delta, &manifest, &json!({"prepared":true,"force":force})).await.unwrap();
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"unrecognized old audio");
         assert!(state.device_manager.get_current_device().await.unwrap().synced_items.is_empty());
         let started = handle_sync_execute(&state, Some(json!({"planId":summary["planId"],"force":force}))).await.unwrap();
@@ -1143,7 +1200,7 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
             ], "deletes":[],"idChanges":[],"unchanged":0,"playlists":[]
         })).unwrap();
         let repeat_add = delta.adds[1].clone();
-        let summary = finish_sync_delta(&state, delta, &manifest, &json!({"prepared":true,"force":force})).await.unwrap();
+        let summary = publish_sync_delta(&state, delta, &manifest, &json!({"prepared":true,"force":force})).await.unwrap();
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"unrecognized old audio");
         assert!(state.device_manager.get_current_device().await.unwrap().synced_items.is_empty());
         let started = handle_sync_execute(&state, Some(json!({"planId":summary["planId"],"force":force}))).await.unwrap();
@@ -1170,7 +1227,7 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
             playlists: vec![], provenance_updates: Default::default(), blocked: vec![],
             pity_fired_servers: vec![],
         };
-        let repeat_summary = finish_sync_delta(&state, repeat_delta, &manifest, &json!({"prepared":true})).await.unwrap();
+        let repeat_summary = publish_sync_delta(&state, repeat_delta, &manifest, &json!({"prepared":true})).await.unwrap();
         let repeat_started = handle_sync_execute(&state, Some(json!({"planId":repeat_summary["planId"]}))).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while state.sync_operation_manager.has_active_operation().await {

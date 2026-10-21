@@ -5958,73 +5958,16 @@ async fn provider_calculate_delta(
         item.media_role = media_role;
     }
 
-    crate::daemon_log!(
-        "[Delta] Provider desired set prepared: desired_items={} playlists={}; calculating manifest delta",
-        desired_items.len(),
-        playlist_sync_items.len()
-    );
-    ensure_unambiguous_sync_track_owners(manifest, &desired_items)?;
-    let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
-    if params.get("force").and_then(Value::as_bool) == Some(true) {
-        apply_force_sync_with_desired(&mut delta, manifest, &desired_items);
-    }
-    crate::sync::replace_oversized_goal_residents(&mut delta, &desired_items, manifest, &af_bitrate_map);
-    patch_delta_tiers(&mut delta, &af_tier_map);
-    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
-    delta.pity_fired_servers = af_pity_fired;
-    delta.playlists = playlist_sync_items;
-    crate::daemon_log!(
-        "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={} reasons={}",
-        delta.adds.len(),
-        delta.deletes.len(),
-        delta.id_changes.len(),
-        delta.unchanged,
-        delta.playlists.len(),
-        crate::sync::format_change_reason_summary(&delta)
-    );
-    if !delta.id_changes.is_empty() {
-        crate::daemon_log!(
-            "[Delta] Provider id-change sample: {}",
-            crate::sync::format_id_change_diagnostics(&delta, 5)
-        );
-    }
-
-    if let Some((_, _, device_io, _)) = _state
-        .device_manager
-        .get_sync_target_for_device(&manifest.device_id)
-        .await
-    {
-        crate::daemon_log!(
-            "[Delta] Provider existence check starting for {} desired item(s)",
-            desired_items.len()
-        );
-        crate::sync::augment_delta_with_existence_check(
-            &mut delta,
-            &desired_items,
-            manifest,
-            device_io.as_ref(),
-        )
-        .await.map_err(sync_plan_error)?;
-        crate::daemon_log!(
-            "[Delta] Provider existence check complete: adds={} deletes={} id_changes={} unchanged={} reasons={}",
-            delta.adds.len(),
-            delta.deletes.len(),
-            delta.id_changes.len(),
-            delta.unchanged,
-            crate::sync::format_change_reason_summary(&delta)
-        );
-        if !delta.id_changes.is_empty() {
-            crate::daemon_log!(
-                "[Delta] Provider id-change sample after existence check: {}",
-                crate::sync::format_id_change_diagnostics(&delta, 5)
-            );
-        }
-    }
-    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
-    crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
+    let mut delta = finish_sync_delta(_state, &desired_items, manifest, params, SyncDeltaPreparation {
+        playlists: playlist_sync_items,
+        auto_fill_ids: af_item_ids,
+        tiers: af_tier_map,
+        bitrate_overrides: af_bitrate_map,
+        pity_fired_servers: af_pity_fired,
+    }).await?;
     preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
-    finish_sync_delta(_state, delta, manifest, params).await
+    publish_sync_delta(_state, delta, manifest, params).await
     }.await;
     phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) || _state.sync_operation_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
     result
@@ -6083,7 +6026,66 @@ fn prepared_manual_selection_size(delta: &crate::sync::SyncDelta, manifest: &cra
         .fold(crate::sync::OutputSizeEstimate::default(), crate::sync::OutputSizeEstimate::saturating_add)
 }
 
-async fn finish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest, params: &Value) -> Result<Value, JsonRpcError> {
+#[derive(Default)]
+struct SyncDeltaPreparation {
+    playlists: Vec<crate::sync::PlaylistSyncItem>,
+    auto_fill_ids: HashSet<String>,
+    tiers: HashMap<String, String>,
+    bitrate_overrides: HashMap<(String, Option<String>), u32>,
+    pity_fired_servers: Vec<String>,
+}
+
+async fn finish_sync_delta(
+    state: &AppState,
+    desired_items: &[crate::sync::DesiredItem],
+    manifest: &crate::device::DeviceManifest,
+    params: &Value,
+    preparation: SyncDeltaPreparation,
+) -> Result<crate::sync::SyncDelta, JsonRpcError> {
+    ensure_unambiguous_sync_track_owners(manifest, desired_items)?;
+    let mut delta = crate::sync::calculate_delta(desired_items, manifest);
+    if params.get("force").and_then(Value::as_bool) == Some(true) {
+        apply_force_sync_with_desired(&mut delta, manifest, desired_items);
+    }
+    crate::sync::replace_oversized_goal_residents(
+        &mut delta, desired_items, manifest, &preparation.bitrate_overrides,
+    );
+    patch_delta_tiers(&mut delta, &preparation.tiers);
+    patch_delta_bitrate_overrides(&mut delta, &preparation.bitrate_overrides);
+    delta.pity_fired_servers = preparation.pity_fired_servers;
+    delta.playlists = preparation.playlists;
+    crate::daemon_log!(
+        "[Delta] Calculated: desired={} adds={} deletes={} id_changes={} unchanged={} playlists={} reasons={}",
+        desired_items.len(), delta.adds.len(), delta.deletes.len(), delta.id_changes.len(),
+        delta.unchanged, delta.playlists.len(), crate::sync::format_change_reason_summary(&delta)
+    );
+    if !delta.id_changes.is_empty() {
+        crate::daemon_log!("[Delta] Id-change sample: {}", crate::sync::format_id_change_diagnostics(&delta, 5));
+    }
+    if let Some((_, _, device_io, _)) = state
+        .device_manager
+        .get_sync_target_for_device(&manifest.device_id)
+        .await
+    {
+        crate::daemon_log!("[Delta] Existence check starting for {} desired item(s)", desired_items.len());
+        crate::sync::augment_delta_with_existence_check(
+            &mut delta, desired_items, manifest, device_io.as_ref(),
+        ).await.map_err(sync_plan_error)?;
+        crate::daemon_log!(
+            "[Delta] Existence check complete: adds={} deletes={} id_changes={} unchanged={} reasons={}",
+            delta.adds.len(), delta.deletes.len(), delta.id_changes.len(), delta.unchanged,
+            crate::sync::format_change_reason_summary(&delta)
+        );
+        if !delta.id_changes.is_empty() {
+            crate::daemon_log!("[Delta] Id-change sample after existence check: {}", crate::sync::format_id_change_diagnostics(&delta, 5));
+        }
+    }
+    patch_delta_bitrate_overrides(&mut delta, &preparation.bitrate_overrides);
+    crate::sync::classify_provenance(&mut delta, desired_items, manifest, &preparation.auto_fill_ids);
+    Ok(delta)
+}
+
+async fn publish_sync_delta(state: &AppState, mut delta: crate::sync::SyncDelta, manifest: &crate::device::DeviceManifest, params: &Value) -> Result<Value, JsonRpcError> {
 
 
     let mut lifecycle = crate::sync_logging::Step::current("plan_publication");
@@ -7579,33 +7581,15 @@ async fn multi_provider_calculate_delta(
     }
 
     phases.finish("success", af_item_ids.len());
-    ensure_unambiguous_sync_track_owners(manifest, &desired_items)?;
-    let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
-    if params.get("force").and_then(Value::as_bool) == Some(true) {
-        apply_force_sync_with_desired(&mut delta, manifest, &desired_items);
-    }
-    crate::sync::replace_oversized_goal_residents(&mut delta, &desired_items, manifest, &af_bitrate_map);
-    patch_delta_tiers(&mut delta, &af_tier_map);
-    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
-    delta.pity_fired_servers = af_pity_fired;
-    delta.playlists = playlist_sync_items;
-    if let Some((_, _, device_io, _)) = state
-        .device_manager
-        .get_sync_target_for_device(&manifest.device_id)
-        .await
-    {
-        crate::sync::augment_delta_with_existence_check(
-            &mut delta,
-            &desired_items,
-            manifest,
-            device_io.as_ref(),
-        )
-        .await.map_err(sync_plan_error)?;
-    }
-    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
-    crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
+    let mut delta = finish_sync_delta(state, &desired_items, manifest, params, SyncDeltaPreparation {
+        playlists: playlist_sync_items,
+        auto_fill_ids: af_item_ids,
+        tiers: af_tier_map,
+        bitrate_overrides: af_bitrate_map,
+        pity_fired_servers: af_pity_fired,
+    }).await?;
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
-    finish_sync_delta(state, delta, manifest, params).await
+    publish_sync_delta(state, delta, manifest, params).await
     }.await;
     phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) || state.sync_operation_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
     result
@@ -8106,60 +8090,16 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
     // Story 2.13: tag untagged items with the selected server's portable id.
     tag_untagged_with_selected_portable(state, &mut desired_items)?;
 
-    crate::daemon_log!(
-        "[Sync] Computing delta: {} desired items vs {} synced in manifest",
-        desired_items.len(),
-        manifest.synced_items.len(),
-    );
-    ensure_unambiguous_sync_track_owners(&manifest, &desired_items)?;
-    let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
-    if params.get("force").and_then(Value::as_bool) == Some(true) {
-        apply_force_sync_with_desired(&mut delta, &manifest, &desired_items);
-    }
-    delta.playlists = playlist_sync_items;
-    crate::daemon_log!(
-        "[Sync] Delta computed: {} adds, {} deletes, {} id-changes, {} unchanged, reasons={}",
-        delta.adds.len(),
-        delta.deletes.len(),
-        delta.id_changes.len(),
-        delta.unchanged,
-        crate::sync::format_change_reason_summary(&delta)
-    );
-    if !delta.id_changes.is_empty() {
-        crate::daemon_log!(
-            "[Sync] Id-change sample: {}",
-            crate::sync::format_id_change_diagnostics(&delta, 5)
-        );
-    }
-
-    if let Some((_, _, device_io, _)) = state
-        .device_manager
-        .get_sync_target_for_device(&manifest.device_id)
-        .await
-    {
-        crate::daemon_log!(
-            "[Sync] Checking device file existence for {} synced items",
-            manifest.synced_items.len(),
-        );
-        crate::sync::augment_delta_with_existence_check(
-            &mut delta,
-            &desired_items,
-            &manifest,
-            device_io.as_ref(),
-        )
-        .await.map_err(sync_plan_error)?;
-        crate::daemon_log!(
-            "[Sync] Existence check complete: {} adds after recovery, reasons={}",
-            delta.adds.len(),
-            crate::sync::format_change_reason_summary(&delta)
-        );
-    }
-    crate::sync::classify_provenance(&mut delta, &desired_items, &manifest, &af_item_ids);
+    let delta = finish_sync_delta(state, &desired_items, &manifest, &params, SyncDeltaPreparation {
+        playlists: playlist_sync_items,
+        auto_fill_ids: af_item_ids,
+        ..Default::default()
+    }).await?;
 
     if state.sync_operation_manager.is_pipeline_cancelled() {
         return Err(sync_cancelled_error());
     }
-    finish_sync_delta(state, delta, &manifest, &params).await
+    publish_sync_delta(state, delta, &manifest, &params).await
     }.await;
     phases.finish(if result.as_ref().is_err_and(|e: &JsonRpcError| e.code == ERR_SYNC_CANCELLED) || state.sync_operation_manager.is_pipeline_cancelled() { "cancelled" } else if result.is_err() { "failed" } else { "ready" }, 0);
     result
