@@ -183,14 +183,11 @@ pub struct NameIdPair {
 pub struct JellyfinItem {
     pub id: String,
     pub name: String,
-    // Read-only: rename_item round-trips this DTO in a write request.
+    // Read-only metadata.
     #[serde(default, skip_serializing)]
     pub provider_ids: Option<std::collections::HashMap<String, serde_json::Value>>,
     #[serde(rename = "Type")]
     pub item_type: String,
-    // `skip_serializing_if` keeps `None` fields out of the serialized body. This matters for
-    // `rename_item`, which round-trips this struct back to `POST /Items/{id}`: without it, every
-    // unset field would be sent as an explicit `null` and clobber the server-side value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1698,45 +1695,6 @@ impl JellyfinClient {
         Ok(())
     }
 
-    pub async fn rename_item(
-        &self,
-        url: &str,
-        token: &str,
-        user_id: &str,
-        item_id: &str,
-        new_name: &str,
-    ) -> Result<()> {
-        CredentialManager::validate_url(url)?;
-        CredentialManager::validate_token(token)?;
-
-        // Step 1: fetch current item JSON
-        let mut item = self.get_item_details(url, token, user_id, item_id).await?;
-
-        // Step 2: mutate name and POST back. UserData is user-scoped read metadata; newer
-        // Jellyfin versions reject it on item update bodies unless it includes server-only fields.
-        item.name = new_name.to_string();
-        item.user_data = None;
-
-        let headers = jellyfin_token_headers(token)?;
-
-        let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
-
-        let response = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .json(&item)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Server returned status: {} — {}", status, text));
-        }
-        Ok(())
-    }
-
     async fn get_music_items(
         &self,
         url: &str,
@@ -2636,56 +2594,6 @@ mod tests {
         let item: JellyfinItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.recursive_item_count, Some(12));
         assert_eq!(item.cumulative_run_time_ticks, Some(123456789));
-    }
-
-    #[tokio::test]
-    async fn test_rename_item_omits_user_data_from_update_body() {
-        let mut server = Server::new_async().await;
-        let url = server.url();
-        let token = "test-token-1234567890";
-
-        let _get = server
-            .mock("GET", "/Items/playlist1")
-            .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded("userId".to_string(), "user1".to_string()),
-                mockito::Matcher::UrlEncoded(
-                    "Fields".to_string(),
-                    "RecursiveItemCount,CumulativeRunTimeTicks".to_string(),
-                ),
-            ]))
-            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"Id":"playlist1","Name":"Old Name","Type":"Playlist","RecursiveItemCount":3,"UserData":{"PlayCount":0,"IsFavorite":false}}"#,
-            )
-            .create_async()
-            .await;
-
-        let update = server
-            .mock("POST", "/Items/playlist1")
-            .match_header(
-                "Authorization",
-                format!("MediaBrowser Token=\"{}\"", token).as_str(),
-            )
-            .match_body(mockito::Matcher::Json(serde_json::json!({
-                "Id": "playlist1",
-                "Name": "New Name",
-                "Type": "Playlist",
-                "RecursiveItemCount": 3,
-            })))
-            .with_status(204)
-            .expect(1)
-            .create_async()
-            .await;
-
-        let client = JellyfinClient::new();
-        client
-            .rename_item(&url, token, "user1", "playlist1", "New Name")
-            .await
-            .expect("rename_item should update without user data");
-
-        update.assert_async().await;
     }
 
     #[tokio::test]
