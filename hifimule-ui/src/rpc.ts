@@ -727,12 +727,7 @@ export async function fetchBrowseArtists(
     startIndex?: number,
     limit?: number,
 ): Promise<{ artists: BrowseArtist[]; total: number }> {
-    return await rpcCall('browse.listArtists', {
-        ...(letter !== undefined && { letter }),
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listArtists', { letter, libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseArtist(
@@ -747,12 +742,7 @@ export async function fetchBrowseAlbums(
     startIndex?: number,
     limit?: number,
 ): Promise<{ albums: BrowseAlbum[]; total: number }> {
-    return await rpcCall('browse.listAlbums', {
-        ...(letter !== undefined && { letter }),
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listAlbums', { letter, libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseAlbum(
@@ -804,11 +794,7 @@ export async function fetchBrowseGenres(
     startIndex?: number,
     limit?: number,
 ): Promise<{ genres: BrowseGenre[]; total: number }> {
-    return await rpcCall('browse.listGenres', {
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listGenres', { libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseGenre(
@@ -816,11 +802,7 @@ export async function fetchBrowseGenre(
     startIndex?: number,
     limit?: number,
 ): Promise<{ genre: BrowseGenre; tracks: BrowseTrack[]; total: number }> {
-    return await rpcCall('browse.getGenre', {
-        genreId: genreIdOrName,
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.getGenre', { genreId: genreIdOrName, startIndex, limit });
 }
 
 export async function fetchBrowseRecentlyAdded(
@@ -828,11 +810,7 @@ export async function fetchBrowseRecentlyAdded(
     startIndex?: number,
     limit?: number,
 ): Promise<{ albums: BrowseAlbum[]; total: number }> {
-    return await rpcCall('browse.listRecentlyAdded', {
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listRecentlyAdded', { libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseFrequentlyPlayed(
@@ -840,11 +818,7 @@ export async function fetchBrowseFrequentlyPlayed(
     startIndex?: number,
     limit?: number,
 ): Promise<{ tracks: BrowseTrack[]; total: number }> {
-    return await rpcCall('browse.listFrequentlyPlayed', {
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listFrequentlyPlayed', { libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseRecentlyPlayed(
@@ -852,11 +826,7 @@ export async function fetchBrowseRecentlyPlayed(
     startIndex?: number,
     limit?: number,
 ): Promise<{ tracks: BrowseTrack[]; total: number }> {
-    return await rpcCall('browse.listRecentlyPlayed', {
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listRecentlyPlayed', { libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseFavorites(
@@ -864,11 +834,7 @@ export async function fetchBrowseFavorites(
     startIndex?: number,
     limit?: number,
 ): Promise<{ tracks: BrowseTrack[]; total: number }> {
-    return await rpcCall('browse.listFavorites', {
-        ...(libraryId !== undefined && { libraryId }),
-        ...(startIndex !== undefined && { startIndex }),
-        ...(limit !== undefined && { limit }),
-    });
+    return await rpcCall('browse.listFavorites', { libraryId, startIndex, limit });
 }
 
 export async function fetchBrowseTracks(filter: {
@@ -885,9 +851,7 @@ export async function fetchBrowseTracks(filter: {
 export async function fetchBrowseFavoriteItems(
     libraryId?: string,
 ): Promise<{ artists: BrowseArtist[]; albums: BrowseAlbum[]; tracks: BrowseTrack[] }> {
-    return await rpcCall('browse.listFavoriteItems', {
-        ...(libraryId !== undefined && { libraryId }),
-    });
+    return await rpcCall('browse.listFavoriteItems', { libraryId });
 }
 
 export async function fetchBrowseSearch(
