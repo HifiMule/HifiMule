@@ -36,11 +36,82 @@ pub(crate) fn safe_folder(root: &Path, relative: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn publish_new(path: &Path, data: &[u8]) -> Result<()> {
-    let mut staged = tempfile::NamedTempFile::new_in(path.parent().context("Missing parent")?)?;
-    staged.write_all(data)?;
-    staged.as_file().sync_all()?;
-    staged.persist_noclobber(path).map_err(|e| e.error)?;
-    Ok(())
+    publish_new_with(path, data, |staged, path| {
+        staged
+            .persist_noclobber(path)
+            .map(|_| ())
+            .map_err(|e| e.error)
+    })
+}
+
+fn publish_new_with(
+    path: &Path,
+    data: &[u8],
+    persist: impl FnOnce(tempfile::NamedTempFile, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let mut staged = tempfile::NamedTempFile::new_in(path.parent().context("Missing parent")?)
+        .context("Create staged artwork")?;
+    staged.write_all(data).context("Write staged artwork")?;
+    staged.as_file().sync_all().context("Sync staged artwork")?;
+    match persist(staged, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Some removable filesystems support neither exclusive rename nor hard links.
+            // Exclusive creation still preserves existing files, but the destination is
+            // visible while being written; an abrupt exit can leave incomplete artwork.
+            #[cfg(unix)]
+            if error.raw_os_error().is_some_and(|code| {
+                code == libc::ENOTSUP || code == libc::EOPNOTSUPP || code == libc::ENOSYS
+            }) {
+                return publish_exclusive(path, |file| {
+                    file.write_all(data)
+                        .context("Write newly created artwork")?;
+                    file.sync_all().context("Sync newly created artwork")
+                });
+            }
+            Err(error).context("Publish staged artwork without replacing existing files")
+        }
+    }
+}
+
+#[cfg(unix)]
+fn publish_exclusive(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("Exclusively create artwork")?;
+    // Keep the descriptor open through cleanup so its inode cannot be reused.
+    let still_owned = |file: &std::fs::File| -> std::io::Result<bool> {
+        // FSKit exFAT can replace a temporary inode number at the first fsync.
+        // Compare the current descriptor identity, not metadata saved at creation.
+        let created = file.metadata()?;
+        match std::fs::symlink_metadata(path) {
+            Ok(current) => Ok(current.is_file()
+                && current.dev() == created.dev()
+                && current.ino() == created.ino()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    };
+    let result = write(&mut file).and_then(|()| {
+        ensure!(
+            still_owned(&file).context("Inspect published artwork")?,
+            "Artwork destination changed during publication"
+        );
+        Ok(())
+    });
+    if result.is_err() && still_owned(&file).unwrap_or(false) {
+        // Preserve a replacement observed at cleanup. POSIX has no portable
+        // conditional unlink, so inspect identity immediately before removing.
+        std::fs::remove_file(path).context("Clean up failed artwork publication")?;
+    }
+    result
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -509,6 +580,158 @@ fn macos(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artwork_publication_preserves_existing_file_and_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("folder.jpg");
+        publish_new(&path, b"complete image").unwrap();
+        assert!(publish_new(&path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"complete image");
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(publish_new(&directory, b"replacement").is_err());
+        assert!(directory.is_dir());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    fn unsupported_publish(_: tempfile::NamedTempFile, _: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_artwork_publication_uses_exclusive_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("folder.jpg");
+        for code in [libc::ENOTSUP, libc::EOPNOTSUPP, libc::ENOSYS] {
+            publish_new_with(&path, b"complete image", |_, _| {
+                Err(std::io::Error::from_raw_os_error(code))
+            })
+            .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"complete image");
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_artwork_publication_preserves_existing_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let user_file = root.path().join("user.jpg");
+        std::fs::write(&user_file, b"user image").unwrap();
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        let link = root.path().join("symlink.jpg");
+        std::os::unix::fs::symlink(&user_file, &link).unwrap();
+        let dangling = root.path().join("dangling.jpg");
+        std::os::unix::fs::symlink(root.path().join("missing"), &dangling).unwrap();
+        for path in [&user_file, &directory, &link, &dangling] {
+            assert!(publish_new_with(path, b"replacement", unsupported_publish).is_err());
+        }
+        assert_eq!(std::fs::read(&user_file).unwrap(), b"user image");
+        assert!(directory.is_dir());
+        assert!(std::fs::symlink_metadata(link).unwrap().is_symlink());
+        assert!(std::fs::symlink_metadata(dangling).unwrap().is_symlink());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn artwork_publication_does_not_fallback_for_other_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("folder.jpg");
+        for kind in [
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let error = publish_new_with(&path, b"image", |_, _| Err(kind.into())).unwrap_err();
+            assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), kind);
+            assert!(error.to_string().contains("Publish staged artwork"));
+            assert!(!path.exists());
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_artwork_write_and_sync_failure_cleanup_allows_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("folder.jpg");
+        for failed_stage in ["write", "sync"] {
+            let error = publish_exclusive(&path, |file| {
+                file.write_all(if failed_stage == "write" {
+                    b"partial"
+                } else {
+                    b"complete"
+                })?;
+                if failed_stage == "sync" {
+                    file.sync_all()?;
+                }
+                Err(std::io::Error::other(format!("injected {failed_stage} failure")).into())
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(failed_stage));
+            assert!(!path.exists());
+            publish_new_with(&path, b"retry image", unsupported_publish).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"retry image");
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_artwork_failure_preserves_a_replaced_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("folder.jpg");
+        for write_fails in [true, false] {
+            let result = publish_exclusive(&path, |file| {
+                file.write_all(b"partial artwork")?;
+                std::fs::remove_file(&path)?;
+                std::fs::write(&path, b"user replacement")?;
+                if write_fails {
+                    bail!("injected failure");
+                }
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"user replacement");
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_exclusive_artwork_publishers_have_one_complete_winner() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("folder.jpg");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..8u8)
+                .map(|value| {
+                    let path = &path;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let data = vec![value; 32 * 1024];
+                        let result = publish_new_with(path, &data, |_, _| {
+                            barrier.wait();
+                            Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
+                        });
+                        result.ok().map(|()| data)
+                    })
+                })
+                .collect();
+            let winners: Vec<_> = jobs
+                .into_iter()
+                .filter_map(|job| job.join().unwrap())
+                .collect();
+            assert_eq!(winners.len(), 1);
+            assert_eq!(std::fs::read(&path).unwrap(), winners[0]);
+        });
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn kde_ownership_and_modified_user_files() {
         let root = tempfile::tempdir().unwrap();

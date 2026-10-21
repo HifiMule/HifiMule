@@ -1367,6 +1367,20 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn msc_artwork_publication_preserves_existing_artwork() {
+        let dir = tempdir().unwrap();
+        let folder = dir.path().join("Music/Artist/Album");
+        std::fs::create_dir_all(&folder).unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+        let path = "Music/Artist/Album/folder.jpg";
+        backend.publish_artwork(path, b"complete image").await.unwrap();
+        assert_eq!(backend.read_file(path).await.unwrap(), b"complete image");
+        assert!(backend.publish_artwork(path, b"replacement").await.is_err());
+        assert_eq!(backend.read_file(path).await.unwrap(), b"complete image");
+        assert_eq!(std::fs::read_dir(folder).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
     async fn msc_write_with_verify_no_tmp_on_success() {
         let dir = tempdir().unwrap();
         let backend = MscBackend::new(dir.path().to_path_buf());

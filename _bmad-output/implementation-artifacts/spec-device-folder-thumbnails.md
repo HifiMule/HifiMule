@@ -80,14 +80,14 @@ JPEG is the shared base. Native execution depends on the host. Finder can genera
 - From `hifimule-ui`, `rtk proxy node --test tests/deviceSettings.test.mjs` — 6 passed; `rtk npm run build` — passed (TypeScript, localization and production bundle).
 - Isolated `folder_icons.rs` checks with the installed rustup toolchain, offline dependencies and targets `aarch64-pc-windows-gnullvm` and `aarch64-unknown-linux-gnu` — passed. These validate native-adapter Rust/API types, not Windows/Linux file-manager behavior or the complete cross-platform daemon.
 - `rtk git diff --check` — passed.
-- Unavailable manual checks: Windows 11 Explorer, macOS FAT32/exFAT, KDE/GNOME removable mounts, cross-host/remount behavior and physical MTP devices. The macOS native test used the host temporary filesystem; it does not establish removable-volume compatibility.
+- At initial implementation, unavailable manual checks included Windows 11 Explorer, macOS FAT32/exFAT, KDE/GNOME removable mounts, cross-host/remount behavior and physical MTP devices. The exFAT regression verification below subsequently covered JPEG publication and KDE/Finder adapters on the user's mounted drive.
 
 ## Implementation Notes
 
 - Artwork ownership/source/native tokens live in top-level manifest metadata, preserving the existing compressed track-column format. Polling exposes the portable preference; compact sync targets retain ownership records.
 - The disk-backed addition records carry known artist/cover IDs. Retained legacy music resolves metadata through captured source providers only when a folder needs artwork. RPC captures retained artwork servers independently of audio additions; unavailable artwork sources remain nonfatal.
 - The shared executor runs artwork after audio deletions/identity updates and before directory pruning. Verified publication is checkpointed even if cancellation arrives immediately afterward. Disabling options leaves live-folder outputs intact.
-- MSC publication uses no-clobber atomic files and rejects symlink folders. MTP JPEG creation refuses the existing-object replacement branch; WPD shell-copy devices that cannot safely establish absence report artwork pending. Native adapters remain unsupported on MTP.
+- MSC publication prefers staged no-clobber atomic files and rejects symlink folders. On Unix filesystems rejecting the required native primitives, exclusive destination creation preserves existing entries; see the interruption limitation below. MTP JPEG creation refuses the existing-object replacement branch; WPD shell-copy devices that cannot safely establish absence report artwork pending. Native adapters remain unsupported on MTP.
 - Native options reuse the exported JPEG. Windows and macOS activate only on their hosts; KDE sidecars can be prepared on any MSC host. GNOME GIO metadata remains host-local, preserves themed customizations and has bounded command timeouts.
 
 ## Review Fixes and Final Verification
@@ -105,9 +105,33 @@ Final checks after review fixes:
 - Final mounted-directory identity regression after the Unix inode refinement — **1 passed**; current daemon production/test code compiled successfully.
 - Isolated offline Windows check — passed for the native adapters **and the actual modified WPD module**, using minimal project-boundary stubs and the installed target standard library. Linux native-adapter check including hashed GNOME scopes — passed. These remain type/API checks rather than runtime file-manager/device validation.
 - Root independently ran `rtk test node --test scripts/tests/*.test.mjs hifimule-ui/tests/*.test.mjs` — passed, no failures/cancellations, one skipped case. UI production build passed earlier and review fixes did not change UI code.
-- Final `rtk git diff --check` — passed. Unavailable physical/file-manager checks listed above remain unchanged.
+- Final `rtk git diff --check` — passed. Remaining physical/file-manager checks are listed above, with the subsequent exFAT exception below.
+
+## exFAT Publication Regression
+
+The reported sync produced no thumbnails because macOS FSKit exFAT rejects `renameatx_np(RENAME_EXCL)` and hard links with errno 45. The shared publisher now retains staged publication where supported and falls back only for Unix ENOTSUP/EOPNOTSUPP/ENOSYS. `create_new` preserves existing files, directories and symlinks. Failed ordinary writes/syncs remove only a destination still matching the open descriptor. Fresh descriptor metadata handles FSKit changing provisional inode numbers after the first sync. Warnings retain operation context and underlying causes.
+
+The fallback destination is visible during writing. Process termination or device removal can leave an incomplete unowned file, which later syncs preserve; remove a confirmed incomplete file before retrying. This interruption case is outside the matrix's ordinary missing/invalid/failed-image handling. POSIX offers no portable conditional unlink, so cleanup cannot eliminate an external replacement precisely between identity inspection and removal.
+
+Regression verification:
+
+- Wrapped daemon `artwork` suite: **22 passed**, including 11 helper/native tests, one MSC publication integration and nine artwork lifecycle tests. Unsupported errors, no fallback for collision/permission failures, existing entries, failed-write/sync cleanup, replacements and concurrent publication are covered.
+- Wrapped daemon check and runnable debug build passed; the running application was not restarted or installed.
+- Exact shared publisher, existing-JPEG preservation, KDE `.directory` apply/verify/cleanup and Finder icon apply/verify/cleanup passed on **FLASHDISK exFAT**. Root independently repeated the probe successfully. Only unique temporary test directories were created and removed; no existing music or actual sync was changed.
+- Three independent focused reviews found no ordinary-path regression. Interruption recovery and the conditional-unlink limitation are explicitly recorded above; no atomic/crash-recovery claim is made for the unsupported-filesystem fallback.
+- `rustfmt --check` for the modified publisher and `git diff --check` passed.
+
+The investigation record is [folder-thumbnails-not-created-investigation.md](investigations/folder-thumbnails-not-created-investigation.md). Relaunch the rebuilt application and sync again to backfill the actual library; no audio retransfers are required.
 
 ## Suggested Review Order
+
+**exFAT publication**
+
+- Preserve existing entries when removable filesystems reject native no-clobber publication.
+  [folder_icons.rs:38](../../hifimule-daemon/src/folder_icons.rs#L38)
+
+- Verify fresh descriptor identity before success or failed-write cleanup.
+  [folder_icons.rs:78](../../hifimule-daemon/src/folder_icons.rs#L78)
 
 **Artwork lifecycle**
 
@@ -137,12 +161,18 @@ Final checks after review fixes:
   [device_io.rs:44](../../hifimule-daemon/src/device_io.rs#L44)
 
 - Preserve native customizations and scope GNOME ownership by computer and user.
-  [folder_icons.rs:63](../../hifimule-daemon/src/folder_icons.rs#L63)
+  [folder_icons.rs:134](../../hifimule-daemon/src/folder_icons.rs#L134)
 
 - Verify new MTP objects and retire failed publications by object identity.
   [mtp.rs:58](../../hifimule-daemon/src/device/mtp.rs#L58)
 
 **Supporting checks**
+
+- Exercise unsupported primitives, preservation, failure cleanup, replacement and concurrent publication.
+  [folder_icons.rs:581](../../hifimule-daemon/src/folder_icons.rs#L581)
+
+- Verify mounted-device artwork publication and collision preservation through DeviceIO.
+  [device_io.rs:1370](../../hifimule-daemon/src/device_io.rs#L1370)
 
 - Exercise artwork reuse, cancellation, preservation, aliases, and cleanup.
   [artwork.rs:599](../../hifimule-daemon/src/sync/artwork.rs#L599)

@@ -586,7 +586,7 @@ pub(crate) async fn run(
             Ok(())
         }.await;
         if let Err(error) = result {
-            warnings.push(format!("[Artwork] {folder}: {error}; retry next sync"));
+            warnings.push(format!("[Artwork] {folder}: {error:#}; retry next sync"));
         }
         if record.jpeg_hash.is_some() || !record.native.is_empty() {
             manifest.folder_artwork_records.insert(folder, record);
