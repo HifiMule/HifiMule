@@ -187,28 +187,16 @@ test("root build:daemon script uses the supported native wrapper", () => {
   assert.equal(pkg.scripts["build:daemon"], "node scripts/build-daemon.mjs");
 });
 
-test("sidecar and Build workflow export auto-provisioned Windows FFMPEG_DIR", () => {
+test("sidecar delegates verified Cargo builds and retains Windows bundle staging", () => {
   const prepare = readFileSync(join(root, "scripts/prepare-sidecar.mjs"), "utf8");
-  const ensure = prepare.indexOf("ensureWindowsAudioRuntime(targetTriple");
-  const exportPrefix = prepare.indexOf("buildEnv.FFMPEG_DIR = audioPrefix", ensure);
-  const exportPath = prepare.indexOf("join(audioPrefix, \"bin\")");
-  const cargo = prepare.indexOf("cargo build --release -p hifimule-daemon");
-  assert.ok(ensure >= 0 && exportPrefix > ensure && exportPath > exportPrefix && cargo > exportPath);
+  assert.match(prepare, /import \{ runDaemonBuild \} from "\.\/build-daemon\.mjs"/);
+  const build = prepare.indexOf("const { env: buildEnv } = runDaemonBuild()");
+  const stage = prepare.indexOf("stageWindowsAudioRuntime(audioPrefix, targetTriple)");
+  const copy = prepare.indexOf("copyFileSync(sourceBinary, tempBinary)");
+  assert.ok(build >= 0 && stage > build && copy > stage);
+  assert.doesNotMatch(prepare, /cargo build|ensureWindowsAudioRuntime|withAudioRuntimeVerification/);
   const workflow = readFileSync(join(root, ".github/workflows/build.yml"), "utf8");
   assert.match(workflow, /windows-audio-runtime\.mjs env \$TargetTriple \$env:GITHUB_ENV/);
-});
-
-test("sidecar marks Cargo only after the platform runtime verification succeeds", () => {
-  const prepare = readFileSync(join(root, "scripts/prepare-sidecar.mjs"), "utf8");
-  const sanitize = prepare.indexOf("withoutAudioRuntimeVerification(process.env)");
-  const windowsVerify = prepare.indexOf("stageWindowsAudioRuntime(audioPrefix, targetTriple)");
-  const verify = prepare.indexOf('"scripts/verify-audio-runtime.mjs"');
-  const windowsMark = prepare.indexOf("buildEnv = withAudioRuntimeVerification(buildEnv)", windowsVerify);
-  const unixMark = prepare.indexOf("buildEnv = withAudioRuntimeVerification(buildEnv)", verify);
-  const cargo = prepare.indexOf("cargo build --release -p hifimule-daemon");
-  assert.ok(sanitize >= 0);
-  assert.ok(windowsVerify > sanitize && windowsMark > windowsVerify && cargo > windowsMark);
-  assert.ok(verify > sanitize && unixMark > verify && cargo > unixMark);
 });
 
 test("Rust build gate exact-matches the shared marker and rejects unverified raw Cargo", () => {

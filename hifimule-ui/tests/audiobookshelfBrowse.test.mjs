@@ -5,7 +5,6 @@ import test from 'node:test';
 const library = readFileSync(new URL('../src/library.ts', import.meta.url), 'utf8');
 const card = readFileSync(new URL('../src/components/MediaCard.ts', import.meta.url), 'utf8');
 const rpc = readFileSync(new URL('../src/rpc.ts', import.meta.url), 'utf8');
-const albumPlay = readFileSync(new URL('../src/components/AlbumPlayButton.ts', import.meta.url), 'utf8');
 const playbackControls = readFileSync(new URL('../src/components/PlaybackControls.ts', import.meta.url), 'utf8');
 const basketSidebar = readFileSync(new URL('../src/components/BasketSidebar.ts', import.meta.url), 'utf8');
 const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
@@ -25,8 +24,7 @@ test('Audiobookshelf books and parts use the existing playback routes without mu
     assert.match(library, /item\.type === 'Audio' \|\| item\.type === 'BookPart'/);
     assert.match(library, /item\.type === 'MusicAlbum' \|\| item\.type === 'Book'/);
     assert.match(library, /resolved === 'Book' \|\| resolved === 'BookPart'/);
-    assert.match(albumPlay, /playbackPlayAlbum\(source\.serverId, source\.albumId\)/);
-    // BookPart playback routing is exercised through the production card and
+    // Book and BookPart playback routing are exercised through the production card and
     // shared play button in mediaCardHardening.test.mjs.
     for (const locale of Object.values(catalog)) {
         assert.match(locale['library.books.play_book'], /\{title\}/);

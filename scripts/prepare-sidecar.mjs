@@ -2,7 +2,7 @@
 // Builds the hifimule-daemon and copies it to the Tauri sidecars directory
 // with the correct target-triple naming convention required by Tauri v2.
 
-import { execFileSync, execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -13,18 +13,9 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  bundleLinuxAudioRuntime,
-  ensureLinuxAudioRuntime,
-  linuxBuildEnvironment,
-  requiresHostAudioVerification,
-} from "./linux-audio-runtime.mjs";
-import { ensureWindowsAudioRuntime, prependWindowsPath, stageWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
-import { ensureMacosAudioRuntime } from "./macos-audio-runtime.mjs";
-import {
-  withAudioRuntimeVerification,
-  withoutAudioRuntimeVerification,
-} from "./verify-audio-runtime.mjs";
+import { bundleLinuxAudioRuntime } from "./linux-audio-runtime.mjs";
+import { stageWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
+import { runDaemonBuild } from "./build-daemon.mjs";
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -57,55 +48,12 @@ if (!existsSync(join(uiDir, "node_modules"))) {
   });
 }
 
-// Build the daemon in release mode. Linux deliberately uses a private, pinned
-// FFmpeg prefix because supported distro releases may provide an older ABI.
-let audioPrefix;
-let buildEnv = withoutAudioRuntimeVerification(process.env);
-if (process.platform === "linux") {
-  audioPrefix = ensureLinuxAudioRuntime(targetTriple);
-  buildEnv.HIFIMULE_FFMPEG_PREFIX = audioPrefix;
-  buildEnv.FFMPEG_DIR = audioPrefix;
-  Object.assign(buildEnv, linuxBuildEnvironment(targetTriple, buildEnv));
-  buildEnv.PKG_CONFIG_PATH = [
-    join(audioPrefix, "lib", "pkgconfig"),
-    process.env.PKG_CONFIG_PATH,
-  ].filter(Boolean).join(":");
-  buildEnv.LD_LIBRARY_PATH = [join(audioPrefix, "lib"), process.env.LD_LIBRARY_PATH]
-    .filter(Boolean)
-    .join(":");
-}
-if (process.platform === "win32") {
-  audioPrefix = ensureWindowsAudioRuntime(targetTriple, { env: buildEnv });
-  buildEnv.FFMPEG_DIR = audioPrefix;
-  buildEnv = prependWindowsPath(buildEnv, join(audioPrefix, "bin"));
-  stageWindowsAudioRuntime(audioPrefix, targetTriple);
-  buildEnv = withAudioRuntimeVerification(buildEnv);
-}
-if (process.platform === "darwin") {
-  audioPrefix = ensureMacosAudioRuntime(targetTriple);
-  buildEnv.HIFIMULE_FFMPEG_PREFIX = audioPrefix;
-  buildEnv.FFMPEG_DIR = audioPrefix;
-  buildEnv.PKG_CONFIG_PATH = [join(audioPrefix, "lib", "pkgconfig"), process.env.PKG_CONFIG_PATH]
-    .filter(Boolean)
-    .join(":");
-  buildEnv.DYLD_LIBRARY_PATH = [join(audioPrefix, "lib"), process.env.DYLD_LIBRARY_PATH]
-    .filter(Boolean)
-    .join(":");
-}
-if (requiresHostAudioVerification(process.platform)) {
-  execFileSync(
-    "node",
-    ["scripts/verify-audio-runtime.mjs", ...(audioPrefix ? ["--prefix", audioPrefix] : [])],
-    { cwd: projectRoot, stdio: "inherit", env: buildEnv },
-  );
-  buildEnv = withAudioRuntimeVerification(buildEnv);
-}
 console.log("Building hifimule-daemon...");
-execSync("cargo build --release -p hifimule-daemon", {
-  cwd: projectRoot,
-  stdio: "inherit",
-  env: buildEnv,
-});
+const { env: buildEnv } = runDaemonBuild();
+const audioPrefix = buildEnv.FFMPEG_DIR;
+if (process.platform === "win32") {
+  stageWindowsAudioRuntime(audioPrefix, targetTriple);
+}
 
 // Determine source and destination paths
 const ext = process.platform === "win32" ? ".exe" : "";

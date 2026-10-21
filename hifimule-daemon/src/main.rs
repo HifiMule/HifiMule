@@ -1824,13 +1824,6 @@ async fn get_selected_provider(
     Some((provider, server_id))
 }
 
-fn scoped_favorite_target_id<'a>(basket_item: &'a device::BasketItem, prefix: &str) -> &'a str {
-    basket_item
-        .id
-        .strip_prefix(prefix)
-        .unwrap_or(&basket_item.id)
-}
-
 fn finish_auto_sync_manifest(
     manifest: &mut device::DeviceManifest,
     completed_profile: Option<&str>,
@@ -2301,148 +2294,33 @@ async fn resolve_provider_favorite_item(
     provider: Arc<dyn providers::MediaProvider>,
     basket_item: &device::BasketItem,
 ) -> anyhow::Result<Vec<sync::DesiredItem>> {
-    let favorites = provider
-        .list_favorite_items(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    match basket_item.item_type.as_str() {
-        "FavoriteAlbum" => {
-            let album_id = scoped_favorite_target_id(basket_item, "favorites:album:");
-            Ok(favorites
-                .songs
-                .iter()
-                .filter(|song| song.album_id.as_deref() == Some(album_id))
-                .map(provider_song_to_desired)
-                .collect())
-        }
-        "FavoriteArtist" => {
-            let artist_id = scoped_favorite_target_id(basket_item, "favorites:artist:");
-            let mut desired_items = Vec::new();
-            for album in favorites
-                .albums
-                .iter()
-                .filter(|album| album.artist_id.as_deref() == Some(artist_id))
-            {
-                match provider.get_album(&album.id).await {
-                    Ok(album_with_tracks) => {
-                        desired_items.extend(
-                            album_with_tracks
-                                .tracks
-                                .iter()
-                                .map(provider_song_to_desired),
-                        );
-                    }
-                    Err(e) => {
-                        daemon_log!(
-                            "[AutoSync] Failed to expand favorite album {}: {}",
-                            album.id,
-                            e
-                        );
-                    }
-                }
-            }
-            desired_items.extend(
-                favorites
-                    .songs
-                    .iter()
-                    .filter(|song| song.artist_id.as_deref() == Some(artist_id))
-                    .map(provider_song_to_desired),
-            );
-            Ok(desired_items)
-        }
-        _ => Ok(Vec::new()),
-    }
+    rpc::provider_favorite_sync_items_for_basket_item(
+        provider,
+        basket_item,
+        provider_song_to_desired,
+        true,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{}", error.message))
 }
 
 async fn resolve_provider_item(
     provider: Arc<dyn providers::MediaProvider>,
     item_id: &str,
 ) -> anyhow::Result<(Vec<sync::DesiredItem>, Option<sync::PlaylistSyncItem>)> {
-    if let Ok(album) = provider.get_album(item_id).await {
-        return Ok((
-            album.tracks.iter().map(provider_song_to_desired).collect(),
-            None,
-        ));
-    }
-
-    if let Ok(playlist) = provider.get_playlist(item_id).await {
-        let tracks = playlist
-            .tracks
-            .iter()
-            .map(provider_song_to_desired)
-            .collect::<Vec<_>>();
-        let playlist_item = sync::PlaylistSyncItem {
-            jellyfin_id: playlist.playlist.id.clone(),
-            name: playlist.playlist.name.clone(),
-            tracks: playlist
-                .tracks
-                .iter()
-                .map(|t| sync::PlaylistTrackInfo {
-                    jellyfin_id: t.id.clone(),
-                    artist: t.artist_name.clone(),
-                    run_time_seconds: i64::from(t.duration_seconds),
-                })
-                .collect(),
-        };
-        return Ok((tracks, Some(playlist_item)));
-    }
-
-    if let Ok(artist) = provider.get_artist(item_id).await {
-        let mut tracks = Vec::new();
-        for album in artist.albums {
-            match provider.get_album(&album.id).await {
-                Ok(album_with_tracks) => {
-                    tracks.extend(
-                        album_with_tracks
-                            .tracks
-                            .iter()
-                            .map(provider_song_to_desired),
-                    );
-                }
-                Err(e) => {
-                    daemon_log!(
-                        "[AutoSync] Failed to expand artist album {}: {}",
-                        album.id,
-                        e
-                    );
-                }
-            }
-        }
-        return Ok((tracks, None));
-    }
-
-    match provider.get_song(item_id).await {
-        Ok(song) => return Ok((vec![provider_song_to_desired(&song)], None)),
-        Err(providers::ProviderError::UnsupportedCapability(_))
-        | Err(providers::ProviderError::NotFound { .. }) => {}
-        Err(e) => return Err(anyhow::anyhow!("{}", e)),
-    }
-
-    Err(anyhow::anyhow!("Item {} not found via provider", item_id))
+    rpc::provider_music_sync_items_for_id(provider, item_id, provider_song_to_desired, true)
+        .await
+        .map_err(|error| anyhow::anyhow!("{}", error.message))?
+        .ok_or_else(|| anyhow::anyhow!("Item {} not found via provider", item_id))
 }
 
 fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::DesiredItem {
-    let size_bytes = song
+    let mut item = rpc::provider_song_to_desired_item(song);
+    item.size_bytes = song
         .bitrate_kbps
         .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
         .unwrap_or(0);
-    sync::DesiredItem {source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
-        duration_seconds: song.duration_seconds,
-        media_role: crate::device::MediaRole::Music,
-        jellyfin_id: song.id.clone(),
-        name: song.title.clone(),
-        album: song.album_title.clone(),
-        artist: song.artist_name.clone(),
-        size_bytes,
-        etag: None,
-        provider_album_id: song.album_id.clone(),
-        provider_content_type: song.content_type.clone(),
-        provider_suffix: song.suffix.clone(),
-        original_bitrate: crate::sync::song_audio_bitrate_bps(song),
-        track_number: song.track_number,
-        server_id: None,
-    }
+    item
 }
 
 fn load_icon(bytes: &[u8], name: &str) -> anyhow::Result<Icon> {

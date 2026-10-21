@@ -4,13 +4,14 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-const compiled = ts.transpileModule(readFileSync(new URL('../src/components/MediaCard.ts', import.meta.url), 'utf8'), {
+const compile = name => ts.transpileModule(readFileSync(new URL(`../src/components/${name}.ts`, import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
+const compiled = compile('MediaCard');
+const compiledTrackPlay = compile('TrackPlayButton');
+const compiledAlbumPlay = compile('AlbumPlayButton');
+const compiledPlaybackAction = compile('playbackAction');
 const tick = () => new Promise(resolve => setImmediate(resolve));
-const compiledTrackPlay = ts.transpileModule(readFileSync(new URL('../src/components/TrackPlayButton.ts', import.meta.url), 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
 
 function harness() {
     let document;
@@ -64,14 +65,20 @@ function harness() {
     };
     const requests = [], toasts = [], items = new Map(), exports = {};
     const rpcCall = (method, params) => new Promise((resolve, reject) => requests.push({ method, params, resolve, reject }));
-    const trackPlay = {};
-    vm.runInNewContext(compiledTrackPlay, {
-        exports: trackPlay, document,
-        require: name => name === '../rpc'
-            ? { playbackPlayTrack: (serverId, trackId) => rpcCall('playback.playTrack', { serverId, trackId }) }
-            : name === '../i18n' ? { t: (key, params) => `${key}: ${params.title}` }
-            : { showToast: message => toasts.push(message) },
+    const action = {}, trackPlay = {}, albumPlay = {};
+    vm.runInNewContext(compiledPlaybackAction, {
+        exports: action, document, require: () => ({ showToast: message => toasts.push(message) }),
     });
+    for (const [source, exports] of [[compiledTrackPlay, trackPlay], [compiledAlbumPlay, albumPlay]]) {
+        vm.runInNewContext(source, {
+            exports, document,
+            require: name => name === './playbackAction' ? action
+                : name === '../rpc' ? {
+                    playbackPlayTrack: (serverId, trackId) => rpcCall('playback.playTrack', { serverId, trackId }),
+                    playbackPlayAlbum: (serverId, albumId) => rpcCall('playback.playAlbum', { serverId, albumId }),
+                } : name === '../i18n' ? { t: (key, params) => `${key}: ${params.title}` } : {},
+        });
+    }
     const basketStore = { has: id => items.has(id), add: item => items.set(item.id, item), remove: id => items.delete(id),
         admitPhysicalTargetMutation: () => true, getActiveServerId: () => 'server' };
     vm.runInNewContext(compiled, {
@@ -84,28 +91,33 @@ function harness() {
             : name === '../toast' ? { showToast: message => toasts.push(message) }
             : name === '../state/libraryCache' ? { invalidatePlaylistsCache() {} }
             : name === './RadioPlayButton' ? { createRadioPlayButton: () => null }
-            : name === './AlbumPlayButton' ? { createAlbumPlayButton: () => new Element('sl-icon-button') }
+            : name === './AlbumPlayButton' ? albumPlay
             : name === './TrackPlayButton' ? trackPlay
             : name === '../state/mediaSyncSelection' ? { bookBasketItem: id => ({ id }) } : {},
     });
     return { MediaCard: exports.MediaCard, Element, document, requests, toasts, items };
 }
 
-test('BookPart cards play their source through the shared button without music-only actions', async () => {
-    const h = harness();
-    const card = h.MediaCard.create({ id: 'part-2', name: 'Chapitre é — 夜', type: 'BookPart', serverId: 'books-server' }, 'items', false, () => {});
-    const actions = card.querySelector('.card-content').children;
-    assert.equal(actions.length, 1, 'Book parts have play, without preview or queue actions');
-    const play = actions[0];
-    assert.equal(play.label, 'library.books.play_part: Chapitre é — 夜');
-    const playing = play.emit('click');
-    assert.equal(h.requests.length, 1);
-    assert.equal(h.requests[0].method, 'playback.playTrack');
-    assert.deepEqual({ ...h.requests[0].params }, { serverId: 'books-server', trackId: 'part-2' });
-    h.requests[0].resolve();
-    await playing;
-    assert.equal(play.disabled, false);
-});
+for (const [type, id, label, method, idKey] of [
+    ['Book', 'book-1', 'play_book', 'playback.playAlbum', 'albumId'],
+    ['BookPart', 'part-2', 'play_part', 'playback.playTrack', 'trackId'],
+]) {
+    test(`${type} cards play their source through the shared button without music-only actions`, async () => {
+        const h = harness();
+        const card = h.MediaCard.create({ id, name: 'Chapitre é — 夜', type, serverId: 'books-server' }, 'items', false, () => {});
+        const actions = card.querySelector('.card-content').children;
+        assert.equal(actions.length, 1, 'Books and parts have play, without preview or queue actions');
+        const play = actions[0];
+        assert.equal(play.label, `library.books.${label}: Chapitre é — 夜`);
+        const playing = play.emit('click');
+        assert.equal(h.requests.length, 1);
+        assert.equal(h.requests[0].method, method);
+        assert.deepEqual({ ...h.requests[0].params }, { serverId: 'books-server', [idKey]: id });
+        h.requests[0].resolve();
+        await playing;
+        assert.equal(play.disabled, false);
+    });
+}
 
 test('production card refresh updates the accessible action in both directions', () => {
     const h = harness();

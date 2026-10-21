@@ -763,10 +763,6 @@ export async function fetchPodcastShow(showId: string, startIndex = 0, limit = 5
     return rpcCall('browse.getPodcastShow', { showId, startIndex, limit });
 }
 
-export async function fetchPodcastEpisode(episodeId: string): Promise<{ episode: PodcastEpisode }> {
-    return rpcCall('browse.getPodcastEpisode', { episodeId });
-}
-
 export async function searchPodcasts(query: string): Promise<{ shows: PodcastShow[]; episodes: PodcastEpisode[]; possiblyTruncated: boolean }> {
     return rpcCall('browse.search', { query });
 }

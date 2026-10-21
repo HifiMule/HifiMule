@@ -104,7 +104,6 @@ pub struct AppState {
     pub server_manager: Arc<tokio::sync::RwLock<crate::server_manager::ServerManager>>,
     pub db: Arc<crate::db::Database>,
     pub device_manager: Arc<crate::device::DeviceManager>,
-    pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     pub size_cache: Arc<tokio::sync::RwLock<HashMap<String, u64>>>,
     pub sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
     pub last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
@@ -290,7 +289,6 @@ pub async fn run_server(
         server_manager,
         db,
         device_manager,
-        last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
         size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         sync_operation_manager,
         last_scrobbler_result,
@@ -2116,12 +2114,6 @@ fn current_server_config(
     })
 }
 
-/// The currently selected server's machine-local UUID, if any.
-#[allow(dead_code)]
-fn current_server_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
-    Ok(current_server_config(state)?.map(|c| c.id))
-}
-
 /// The currently selected server's PORTABLE id (Story 2.13), if any. Used to tag
 /// newly synced items and to route untagged basket items so manifest tags are
 /// always portable.
@@ -3425,7 +3417,6 @@ async fn handle_server_connect(
         mgr.load_from_db(&state.db);
         mgr.providers.insert(local_id.clone(), provider.clone());
     }
-    *state.last_connection_check.lock().await = None;
 
     // Story 2.13: `serverId` now carries the PORTABLE id (semantic flip), and
     // `localId` exposes the machine-local UUID for callers that key on it.
@@ -3769,7 +3760,6 @@ async fn handle_audiobookshelf_commit(
         .providers
         .insert(local_id.clone(), Arc::new(provider));
     drop(manager);
-    *state.last_connection_check.lock().await = None;
     Ok(serde_json::json!({
         "ok": true,
         "localId": local_id,
@@ -3855,7 +3845,6 @@ async fn handle_server_reauthenticate(
     .map_err(storage_error_to_rpc)?;
     manager.providers.insert(id.to_string(), Arc::new(provider));
     drop(manager);
-    *state.last_connection_check.lock().await = None;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -3867,7 +3856,6 @@ async fn handle_server_logout(state: &AppState) -> Result<Value, JsonRpcError> {
         let mut mgr = state.server_manager.write().await;
         *mgr = crate::server_manager::ServerManager::new();
     }
-    *state.last_connection_check.lock().await = None;
 
     state
         .db
@@ -4019,7 +4007,6 @@ async fn handle_server_select(
     sync_selected_config(state, id)?;
 
     state.server_manager.write().await.load_from_db(&state.db);
-    *state.last_connection_check.lock().await = None;
 
     // Lazily connect (and cache) the selected provider so the library can reload.
     get_provider_for_server(state, id).await?;
@@ -4079,7 +4066,6 @@ async fn handle_server_remove(
     }
 
     state.server_manager.write().await.load_from_db(&state.db);
-    *state.last_connection_check.lock().await = None;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -4626,7 +4612,12 @@ async fn handle_basket_estimate(state: &AppState, params: Option<Value>) -> Resu
             provider
         };
         let mut tracks = if matches!(item.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum") {
-            provider_favorite_sync_items_for_basket_item(provider.clone(), item).await?
+            provider_favorite_sync_items_for_basket_item(
+                provider.clone(),
+                item,
+                provider_song_to_desired_item,
+                false,
+            ).await?
         } else {
             provider_sync_items_for_id(provider.clone(), &item.id).await?.0
         };
@@ -5005,7 +4996,7 @@ fn provider_track_size(track: &Song) -> u64 {
     })
 }
 
-fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
+pub(crate) fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
     crate::sync::DesiredItem {source_audio: crate::sync::source_audio_for_song(song), disc_number: song.disc_number,
         duration_seconds: song.duration_seconds,
         media_role: crate::device::MediaRole::Music,
@@ -5340,9 +5331,11 @@ fn scoped_favorite_target_id<'a>(
         .unwrap_or(&basket_item.id)
 }
 
-async fn provider_favorite_sync_items_for_basket_item(
+pub(crate) async fn provider_favorite_sync_items_for_basket_item(
     provider: Arc<dyn MediaProvider>,
     basket_item: &crate::device::BasketItem,
+    to_desired: fn(&Song) -> crate::sync::DesiredItem,
+    skip_album_errors: bool,
 ) -> Result<Vec<crate::sync::DesiredItem>, JsonRpcError> {
     let favorites = provider
         .list_favorite_items(None)
@@ -5356,7 +5349,7 @@ async fn provider_favorite_sync_items_for_basket_item(
                 .songs
                 .iter()
                 .filter(|song| song.album_id.as_deref() == Some(album_id))
-                .map(provider_song_to_desired_item)
+                .map(to_desired)
                 .collect())
         }
         "FavoriteArtist" => {
@@ -5367,18 +5360,26 @@ async fn provider_favorite_sync_items_for_basket_item(
                 .iter()
                 .filter(|album| album.artist_id.as_deref() == Some(artist_id))
             {
-                let album = provider
-                    .get_album(&album.id)
-                    .await
-                    .map_err(provider_error_to_rpc)?;
-                desired_items.extend(album.tracks.iter().map(provider_song_to_desired_item));
+                let album = match provider.get_album(&album.id).await {
+                    Ok(album) => album,
+                    Err(error) if skip_album_errors => {
+                        crate::daemon_log!(
+                            "[AutoSync] Failed to expand favorite album {}: {}",
+                            album.id,
+                            error
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(provider_error_to_rpc(error)),
+                };
+                desired_items.extend(album.tracks.iter().map(to_desired));
             }
             desired_items.extend(
                 favorites
                     .songs
                     .iter()
                     .filter(|song| song.artist_id.as_deref() == Some(artist_id))
-                    .map(provider_song_to_desired_item),
+                    .map(to_desired),
             );
             Ok(desired_items)
         }
@@ -5514,23 +5515,46 @@ async fn provider_sync_items_for_id_inner(
     if item_id.starts_with("abs-author-") {
         return provider_artist_sync_items(provider, item_id).await;
     }
+    if let Some(items) = provider_music_sync_items_for_id(
+        provider.clone(),
+        item_id,
+        provider_song_to_desired_item,
+        false,
+    )
+    .await?
+    {
+        return Ok(items);
+    }
+
+    if let Some(tracks) = provider_genre_sync_items_for_id(provider.clone(), item_id).await? {
+        return Ok((tracks, None));
+    }
+
+    Err(JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: format!("Sync aborted: Failed to fetch item {item_id}: Not found"),
+        data: None,
+    })
+}
+
+pub(crate) async fn provider_music_sync_items_for_id(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+    to_desired: fn(&Song) -> crate::sync::DesiredItem,
+    skip_album_errors: bool,
+) -> Result<
+    Option<(
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    )>,
+    JsonRpcError,
+> {
     if let Ok(album) = provider.get_album(item_id).await {
-        return Ok((
-            album
-                .tracks
-                .iter()
-                .map(provider_song_to_desired_item)
-                .collect(),
-            None,
-        ));
+        return Ok(Some((album.tracks.iter().map(to_desired).collect(), None)));
     }
 
     if let Ok(playlist) = provider.get_playlist(item_id).await {
-        let tracks = playlist
-            .tracks
-            .iter()
-            .map(provider_song_to_desired_item)
-            .collect::<Vec<_>>();
+        let tracks = playlist.tracks.iter().map(to_desired).collect::<Vec<_>>();
         let playlist_item = crate::sync::PlaylistSyncItem {
             jellyfin_id: playlist.playlist.id.clone(),
             name: playlist.playlist.name.clone(),
@@ -5544,28 +5568,27 @@ async fn provider_sync_items_for_id_inner(
                 })
                 .collect(),
         };
-        return Ok((tracks, Some(playlist_item)));
+        return Ok(Some((tracks, Some(playlist_item))));
     }
 
     if let Ok(artist) = provider.get_artist(item_id).await {
-        return provider_artist_albums_to_sync_items(provider, artist.albums).await;
+        return provider_artist_albums_to_sync_items(
+            provider,
+            artist.albums,
+            to_desired,
+            skip_album_errors,
+        )
+        .await
+        .map(Some);
     }
 
     match provider.get_song(item_id).await {
-        Ok(song) => return Ok((vec![provider_song_to_desired_item(&song)], None)),
+        Ok(song) => return Ok(Some((vec![to_desired(&song)], None))),
         Err(ProviderError::UnsupportedCapability(_)) | Err(ProviderError::NotFound { .. }) => {}
         Err(error) => return Err(provider_error_to_rpc(error)),
     }
 
-    if let Some(tracks) = provider_genre_sync_items_for_id(provider.clone(), item_id).await? {
-        return Ok((tracks, None));
-    }
-
-    Err(JsonRpcError {
-        code: ERR_CONNECTION_FAILED,
-        message: format!("Sync aborted: Failed to fetch item {item_id}: Not found"),
-        data: None,
-    })
+    Ok(None)
 }
 
 async fn provider_artist_sync_items(
@@ -5582,12 +5605,20 @@ async fn provider_artist_sync_items(
         .get_artist(artist_id)
         .await
         .map_err(provider_error_to_rpc)?;
-    provider_artist_albums_to_sync_items(provider, artist.albums).await
+    provider_artist_albums_to_sync_items(
+        provider,
+        artist.albums,
+        provider_song_to_desired_item,
+        false,
+    )
+    .await
 }
 
 async fn provider_artist_albums_to_sync_items(
     provider: Arc<dyn MediaProvider>,
     albums: Vec<Album>,
+    to_desired: fn(&Song) -> crate::sync::DesiredItem,
+    skip_album_errors: bool,
 ) -> Result<
     (
         Vec<crate::sync::DesiredItem>,
@@ -5598,13 +5629,21 @@ async fn provider_artist_albums_to_sync_items(
     let mut tracks = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for album in albums {
-        let detail = provider
-            .get_album(&album.id)
-            .await
-            .map_err(provider_error_to_rpc)?;
+        let detail = match provider.get_album(&album.id).await {
+            Ok(detail) => detail,
+            Err(error) if skip_album_errors => {
+                crate::daemon_log!(
+                    "[AutoSync] Failed to expand artist album {}: {}",
+                    album.id,
+                    error
+                );
+                continue;
+            }
+            Err(error) => return Err(provider_error_to_rpc(error)),
+        };
         for track in &detail.tracks {
             if seen.insert(track.id.clone()) {
-                tracks.push(provider_song_to_desired_item(track));
+                tracks.push(to_desired(track));
             }
         }
     }
@@ -5664,8 +5703,13 @@ async fn provider_calculate_delta(
 
     for item_id in item_ids {
         if let Some(basket_item) = favorite_basket_by_id.get(item_id) {
-            let tracks =
-                provider_favorite_sync_items_for_basket_item(provider.clone(), basket_item).await?;
+            let tracks = provider_favorite_sync_items_for_basket_item(
+                provider.clone(),
+                basket_item,
+                provider_song_to_desired_item,
+                false,
+            )
+            .await?;
             for item in tracks {
                 if seen_ids.insert(item.jellyfin_id.clone()) {
                     desired_items.push(item);
@@ -5811,22 +5855,10 @@ async fn provider_calculate_delta(
                 if seen_ids.insert(item_id) {
                     af_item_ids.insert(item.id.clone());
                     autofill_playlist_tracks.push(autofill_playlist_track(&item));
-                    desired_items.push(crate::sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
-                        duration_seconds: item.duration_seconds,
-                        media_role: crate::device::MediaRole::Music,
-                        jellyfin_id: item.id,
-                        name: item.name,
-                        album: item.album,
-                        artist: item.artist,
-                        size_bytes: item.size_bytes,
-                        etag: None,
-                        provider_album_id: item.provider_album_id,
-                        provider_content_type: item.provider_content_type,
-                        provider_suffix: item.provider_suffix,
-                        original_bitrate: item.original_bitrate,
-                        track_number: item.track_number,
-                        server_id: None,
-                    });
+                    let album_id = item.provider_album_id.clone();
+                    desired_items.push(auto_fill_to_desired_item(
+                        item, None, crate::device::MediaRole::Music, album_id,
+                    ));
                 }
             }
         }
@@ -6515,6 +6547,32 @@ fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor> {
     }
 }
 
+fn auto_fill_to_desired_item(
+    item: crate::auto_fill::AutoFillItem,
+    server_id: Option<String>,
+    media_role: crate::device::MediaRole,
+    provider_album_id: Option<String>,
+) -> crate::sync::DesiredItem {
+    crate::sync::DesiredItem {
+        source_audio: item.source_audio,
+        disc_number: item.disc_number,
+        duration_seconds: item.duration_seconds,
+        media_role,
+        jellyfin_id: item.id,
+        name: item.name,
+        album: item.album,
+        artist: item.artist,
+        size_bytes: item.size_bytes,
+        etag: None,
+        provider_album_id,
+        provider_content_type: item.provider_content_type,
+        provider_suffix: item.provider_suffix,
+        original_bitrate: item.original_bitrate,
+        track_number: item.track_number,
+        server_id,
+    }
+}
+
 /// Merges one slot's auto-fill results into the running desired set (Story 12.3).
 /// Manual items and earlier slots have already populated `seen_ids`, so any id
 /// seen before is skipped — manual items win dedup and slots dedup across each
@@ -6536,22 +6594,13 @@ fn push_fill_items_dedup(
         if seen_ids.insert(item.id.clone()) {
             let size = item.size_bytes;
             autofill_playlist_tracks.push(autofill_playlist_track(&item));
-            desired_items.push(crate::sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
-                duration_seconds: item.duration_seconds,
+            let album_id = item.provider_album_id.clone();
+            desired_items.push(auto_fill_to_desired_item(
+                item,
+                Some(server_id.to_string()),
                 media_role,
-                jellyfin_id: item.id,
-                name: item.name,
-                album: item.album,
-                artist: item.artist,
-                size_bytes: item.size_bytes,
-                etag: None,
-                provider_album_id: item.provider_album_id,
-                provider_content_type: item.provider_content_type,
-                provider_suffix: item.provider_suffix,
-                original_bitrate: item.original_bitrate,
-                track_number: item.track_number,
-                server_id: Some(server_id.to_string()),
-            });
+                album_id,
+            ));
             if let Some(r) = remaining.as_mut() {
                 *r = r.saturating_sub(size);
             }
@@ -7251,9 +7300,13 @@ async fn multi_provider_calculate_delta(
         let group_start = desired_items.len();
         for id in ids {
             if let Some(basket_item) = favorite_basket_by_id.get(id) {
-                let tracks =
-                    provider_favorite_sync_items_for_basket_item(provider.clone(), basket_item)
-                        .await?;
+                let tracks = provider_favorite_sync_items_for_basket_item(
+                    provider.clone(),
+                    basket_item,
+                    provider_song_to_desired_item,
+                    false,
+                )
+                .await?;
                 for mut item in tracks {
                     register_sync_track_owner(&mut track_owners, &item.jellyfin_id, Some(server_id))?;
                     if seen_ids.insert(item.jellyfin_id.clone()) {
@@ -7938,22 +7991,9 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
                     if seen_ids.insert(item_id) {
                         af_item_ids.insert(item.id.clone());
                         autofill_playlist_tracks.push(autofill_playlist_track(&item));
-                        desired_items.push(crate::sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
-                            duration_seconds: item.duration_seconds,
-                            media_role: crate::device::MediaRole::Music,
-                            jellyfin_id: item.id,
-                            name: item.name,
-                            album: item.album,
-                            artist: item.artist,
-                            size_bytes: item.size_bytes,
-                            etag: None,
-                            provider_album_id: None,
-                            provider_content_type: item.provider_content_type,
-                            provider_suffix: item.provider_suffix,
-                            original_bitrate: item.original_bitrate,
-                            track_number: item.track_number,
-                            server_id: None,
-                        });
+                        desired_items.push(auto_fill_to_desired_item(
+                            item, None, crate::device::MediaRole::Music, None,
+                        ));
                     }
                 }
             }
@@ -10695,7 +10735,6 @@ mod tests {
             )),
             db,
             device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
@@ -13424,9 +13463,6 @@ mod tests {
         .await
         .unwrap();
 
-        let _lock_cache = state.last_connection_check.lock().await;
-        drop(_lock_cache);
-
         handle_server_connect(
             &state,
             Some(json!({ "url": server.url(), "serverType": "subsonic", "username": "u2", "password": "p2" })),
@@ -14422,24 +14458,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_test_connection_params() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         let params = json!({
             "url": "http://invalid-url-123",
@@ -14455,24 +14474,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_invalid_method() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -14489,24 +14491,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_set_device_profile() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         let params = json!({
             "deviceId": "test-device",
@@ -14533,24 +14518,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_get_item_counts_basic() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         // We can't easily mock the network call inside the RPC handler without a mock server or traits,
         // but we can test the parameter parsing and error handling for now.
@@ -14581,24 +14549,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_get_item_sizes_missing_params() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         // Test missing params
         let request = JsonRpcRequest {
@@ -14741,24 +14692,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_calculate_delta_missing_params() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         // Test missing params
         let request = JsonRpcRequest {
@@ -14786,24 +14720,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_calculate_delta_no_device() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         // No device connected — should return error
         let request = JsonRpcRequest {
@@ -14967,24 +14884,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_get_device_status_map_no_device() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
         let synced_ids = result["syncedItemIds"].as_array().unwrap();
@@ -14994,7 +14894,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_get_device_status_map_with_synced_items() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // Simulate device with synced items
         let manifest = crate::device::DeviceManifest {
@@ -15068,23 +14969,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
         let synced_ids = result["syncedItemIds"].as_array().unwrap();
@@ -15098,24 +14982,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_get_resume_state_no_device() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+        let state = make_test_state(db.clone());
+
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], false);
         assert!(result["pendingItemIds"].as_array().unwrap().is_empty());
@@ -15125,7 +14993,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_get_resume_state_clean_device() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         let dir = tempfile::tempdir().unwrap();
         let manifest = crate::device::DeviceManifest {
@@ -15155,23 +15024,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], false);
         assert!(result["pendingItemIds"].as_array().unwrap().is_empty());
@@ -15181,7 +15033,8 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_get_resume_state_dirty_device() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         let dir = tempfile::tempdir().unwrap();
         // No .tmp files in Music/ — cleanedTmpFiles should be 0
@@ -15216,23 +15069,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], true);
         let ids = result["pendingItemIds"].as_array().unwrap();
@@ -15244,26 +15080,11 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_get_daemon_state_includes_dirty_manifest_field() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // No device — dirtyManifest should be false
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager: device_manager.clone(),
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(
             result["dirtyManifest"], false,
@@ -15300,23 +15121,9 @@ mod tests {
             .await
             .unwrap();
 
-        let state2 = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+        let mut state2 = make_test_state(db.clone());
+        Arc::get_mut(&mut state2).unwrap().device_manager = device_manager;
+
         let result2 = handle_get_daemon_state(&state2).await.unwrap();
         assert_eq!(
             result2["dirtyManifest"], true,
@@ -15328,26 +15135,11 @@ mod tests {
     async fn test_rpc_get_daemon_state_includes_pending_device_path() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // No unrecognized device → pendingDevicePath should be null
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager: device_manager.clone(),
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert!(
             result["pendingDevicePath"].is_null(),
@@ -15418,7 +15210,8 @@ mod tests {
         crate::api::CredentialManager::save_credentials(&url, token, Some("Me")).unwrap();
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
         device_manager
             .handle_device_detected(
                 std::path::PathBuf::from("/tmp/dev"),
@@ -15447,23 +15240,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -15526,7 +15302,8 @@ mod tests {
         crate::api::CredentialManager::save_credentials(&url, token, Some("Me")).unwrap();
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // Simulate a connected device
         let manifest = crate::device::DeviceManifest {
@@ -15558,23 +15335,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
 
         // Make request
         let params = json!({
@@ -15610,24 +15370,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_device_initialize_missing_params() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+        let state = make_test_state(db.clone());
 
         // No params → ERR_INVALID_PARAMS
         let res = handle_device_initialize(&state, None).await;
@@ -15648,24 +15391,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_device_initialize_no_unrecognized_device() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+        let state = make_test_state(db.clone());
 
         // No unrecognized device registered → ERR_INVALID_PARAMS (caught before reaching storage)
         let params = json!({ "pendingId": "missing", "observedDestinationRevision": "0", "folderPath": "", "profileId": "user-1", "name": "My Device" });
@@ -15678,7 +15404,8 @@ mod tests {
     async fn test_rpc_device_initialize_success_root() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // Simulate an unrecognized device
         device_manager
@@ -15689,23 +15416,6 @@ mod tests {
             )
             .await;
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager: device_manager.clone(),
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
 
         // Initialize with empty folderPath (device root)
         let destinations = device_manager.get_destination_snapshot().await;
@@ -15752,7 +15462,8 @@ mod tests {
     async fn test_rpc_device_initialize_success_subfolder() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         device_manager
             .handle_device_unrecognized(
@@ -15762,23 +15473,6 @@ mod tests {
             )
             .await;
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager: device_manager.clone(),
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
 
         // Initialize with a subfolder
         let destinations = device_manager.get_destination_snapshot().await;
@@ -15816,7 +15510,8 @@ mod tests {
         db.upsert_device_mapping(device_id, Some("Test"), Some("user-1"), None)
             .unwrap();
 
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // Simulate device connected with a tempdir for manifest writes
         let dir = tempfile::tempdir().unwrap();
@@ -15853,23 +15548,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager: device_manager.clone(),
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
 
         // Enable auto-sync via RPC
         let params = Some(json!({
@@ -15919,7 +15597,8 @@ mod tests {
         db.upsert_device_mapping(device_id, Some("Test"), Some("user-1"), None)
             .unwrap();
 
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         let manifest = crate::device::DeviceManifest {
             device_id: device_id.to_string(),
@@ -15950,23 +15629,6 @@ mod tests {
             .await
             .unwrap();
 
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
 
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(
@@ -15978,26 +15640,11 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_get_daemon_state_includes_active_operation_id() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = make_test_state(db.clone());
+        let device_manager = state.device_manager.clone();
 
         // No running operation → activeOperationId should be null
-        let state = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db: db.clone(),
-            device_manager: device_manager.clone(),
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(
             result["activeOperationId"],
@@ -16041,23 +15688,10 @@ mod tests {
         let op_id = "test-uuid-1234".to_string();
         manager.create_operation(op_id.clone(), 5).await;
 
-        let state2 = AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: manager,
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        };
+        let mut state2 = make_test_state(db.clone());
+        Arc::get_mut(&mut state2).unwrap().device_manager = device_manager;
+        Arc::get_mut(&mut state2).unwrap().sync_operation_manager = manager;
+
         let result2 = handle_get_daemon_state(&state2).await.unwrap();
         assert_eq!(
             result2["activeOperationId"],
@@ -16069,25 +15703,7 @@ mod tests {
     // ===== Story 2.7: device.list and device.select tests =====
 
     fn make_app_state_for_device_tests() -> Arc<AppState> {
-        let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        })
+        make_test_state(Arc::new(crate::db::Database::memory().unwrap()))
     }
 
     #[tokio::test]
@@ -16243,24 +15859,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_daemon_health() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
-        let state = Arc::new(AppState {
-            jellyfin_client: JellyfinClient::new(),
-            server_manager: Arc::new(tokio::sync::RwLock::new(
-                crate::server_manager::ServerManager::new(),
-            )),
-            db,
-            device_manager,
-            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
-            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
-            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
-            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
-        });
+        let state = make_test_state(db.clone());
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -17336,6 +16935,48 @@ mod tests {
                 .map(|item| item.jellyfin_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["part-1", "shared", "part-2"]
+        );
+        let mut albums = vec![provider.albums["book-1"].album.clone()];
+        albums.push(crate::domain::models::Album {
+            id: "missing-album".into(),
+            ..albums[0].clone()
+        });
+        albums.push(provider.albums["book-2"].album.clone());
+        assert!(
+            provider_artist_albums_to_sync_items(
+                provider.clone(),
+                albums.clone(),
+                provider_song_to_desired_item,
+                false,
+            )
+            .await
+            .is_err(),
+            "RPC must abort on a failed child album"
+        );
+        let (partial, playlist) = provider_artist_albums_to_sync_items(
+            provider.clone(),
+            albums,
+            crate::provider_song_to_desired,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(playlist.is_none());
+        assert_eq!(
+            partial
+                .iter()
+                .map(|item| item.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["part-1", "shared", "part-2"],
+            "auto-sync keeps successful albums and deduplicates tracks"
+        );
+        assert_eq!(
+            partial[0].size_bytes, 0,
+            "auto-sync keeps its bitrate-based size estimate"
+        );
+        assert_eq!(
+            items[0].size_bytes, 100,
+            "RPC keeps the provider's reported size"
         );
         let count = provider_legacy_item_count(
             provider.clone() as Arc<dyn MediaProvider>,

@@ -147,13 +147,6 @@ test("Build and release jobs install bindgen's Linux header toolchain", () => {
   }
 });
 
-test("sidecar cargo build receives the validated Linux bindgen environment", () => {
-  const prepare = readFileSync(join(root, "scripts/prepare-sidecar.mjs"), "utf8");
-  const configure = prepare.indexOf("Object.assign(buildEnv, linuxBuildEnvironment(targetTriple, buildEnv))");
-  const cargoBuild = prepare.indexOf("cargo build --release -p hifimule-daemon");
-  assert.ok(configure >= 0 && cargoBuild > configure, "Linux bindgen environment must be configured before cargo build");
-  assert.match(prepare.slice(cargoBuild), /env: buildEnv/);
-});
 
 test("Linux CI environment writes the marker only after exact verification", () => {
   const output = join(mkdtempSync(join(tmpdir(), "hifimule-linux-env-")), "github-env");

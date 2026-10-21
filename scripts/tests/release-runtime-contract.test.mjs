@@ -62,7 +62,7 @@ test("macOS builds provision controlled source and every platform verifies insta
   for (const workflow of [release, build]) assert.match(workflow, /macos-audio-runtime\.mjs env/);
   assert.match(release, /windows-audio-runtime\.mjs verify-bundle/);
   assert.match(release, /macos-audio-runtime\.mjs verify-bundle/);
-  assert.match(read("scripts/prepare-sidecar.mjs"), /ensureMacosAudioRuntime/);
+  assert.match(read("scripts/prepare-sidecar.mjs"), /runDaemonBuild\(\)/);
   assert.match(read("scripts/build-daemon.mjs"), /ensureMacosAudioRuntime/);
 });
 

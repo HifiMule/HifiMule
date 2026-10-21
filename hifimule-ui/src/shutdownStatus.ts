@@ -15,23 +15,6 @@ export function shutdownMessageKey(
         : 'lifecycle.shutdown_progress';
 }
 
-/** Prevent overlapping health requests while still allowing explicit refresh. */
-export class ShutdownPollGate {
-    private pending = false;
-
-    constructor(private readonly request: () => Promise<void>) {}
-
-    async poll(): Promise<void> {
-        if (this.pending) return;
-        this.pending = true;
-        try {
-            await this.request();
-        } finally {
-            this.pending = false;
-        }
-    }
-}
-
 /** One timer, one request, at least one second between starts (including Refresh). */
 export class ShutdownPoller {
     private timer: ReturnType<typeof setTimeout> | undefined;

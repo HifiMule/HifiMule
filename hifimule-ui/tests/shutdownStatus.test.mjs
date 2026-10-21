@@ -8,7 +8,7 @@ const source = await readFile(new URL('../src/shutdownStatus.ts', import.meta.ur
 const js = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
-const { shutdownMessageKey, ShutdownPollGate, ShutdownPoller, canRetryQuit, canRetryCheckpoint } = await import(
+const { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } = await import(
     `data:text/javascript;base64,${Buffer.from(js).toString('base64')}`
 );
 
@@ -20,24 +20,6 @@ test('deadline state takes precedence over ordinary progress', () => {
         shutdownMessageKey({ deadlineExceeded: false }, 'QUIT_PERSISTENCE_FAILED'),
         'lifecycle.quit_persistence_failed',
     );
-});
-
-test('shutdown polling permits only one request at a time', async () => {
-    let release;
-    let calls = 0;
-    const gate = new ShutdownPollGate(async () => {
-        calls += 1;
-        await new Promise(resolve => { release = resolve; });
-    });
-    const first = gate.poll();
-    await gate.poll();
-    assert.equal(calls, 1);
-    release();
-    await first;
-    const second = gate.poll();
-    assert.equal(calls, 2);
-    release();
-    await second;
 });
 
 function clock() {
