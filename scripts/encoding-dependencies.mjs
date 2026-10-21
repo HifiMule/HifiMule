@@ -28,7 +28,9 @@ export function buildEncodingDependencies({ cache, work, prefix, target, env = p
         renameSync(temporary, archive);
       } finally { rmSync(temporary, { force: true }); }
     }
-    run(windows ? 'tar.exe' : 'tar', ['-xf', archive, '-C', work]);
+    // MSYS2 GNU tar interprets the colon in an absolute Windows archive path
+    // as a remote host. A local filename also works with Windows' BSD tar.
+    run(windows ? 'tar.exe' : 'tar', ['-xf', dep.archive, '-C', resolve(work)], cache);
     const source = join(work, dep.directory);
     if (!windows) {
       if (target.includes('apple')) {
