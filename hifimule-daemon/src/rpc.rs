@@ -5669,6 +5669,122 @@ fn planned_manual_selection_bytes(items: &[crate::sync::DesiredItem], manifest: 
     }
 }
 
+async fn provider_basket_sync_items_for_id(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+    favorites: &HashMap<String, crate::device::BasketItem>,
+) -> Result<
+    (
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    ),
+    JsonRpcError,
+> {
+    if let Some(item) = favorites.get(item_id) {
+        let tracks = provider_favorite_sync_items_for_basket_item(
+            provider,
+            item,
+            provider_song_to_desired_item,
+            false,
+        )
+        .await?;
+        Ok((tracks, None))
+    } else {
+        provider_sync_items_for_id(provider, item_id).await
+    }
+}
+
+async fn remaining_auto_fill_bytes(
+    state: &AppState,
+    manifest: &crate::device::DeviceManifest,
+    params: &Value,
+    desired_items: &[crate::sync::DesiredItem],
+) -> Result<Option<u64>, JsonRpcError> {
+    let capacity_manifest = verified_capacity_manifest(state, manifest).await?;
+    let (profile, preferred) = preview_media_profile(state, manifest).await?;
+    let selected_bytes = planned_manual_selection_bytes(
+        desired_items,
+        &capacity_manifest,
+        profile.as_ref(),
+        preferred,
+        params.get("force").and_then(Value::as_bool) == Some(true),
+    );
+    let synced_bytes = capacity_manifest
+        .synced_items
+        .iter()
+        .map(|item| item.size_bytes)
+        .fold(0, u64::saturating_add);
+    Ok(free_bytes_for_sync_device(state, &manifest.device_id)
+        .await
+        .map(|free| {
+            free.saturating_add(synced_bytes)
+                .saturating_sub(selected_bytes)
+        }))
+}
+
+fn auto_fill_slot_budget(
+    requested: Option<u64>,
+    remaining: Option<u64>,
+) -> Result<u64, JsonRpcError> {
+    match (requested, remaining) {
+        (Some(requested), Some(remaining)) => Ok(requested.min(remaining)),
+        (Some(requested), None) => Ok(requested),
+        (None, Some(remaining)) => Ok(remaining),
+        (None, None) => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Cannot determine device capacity for auto-fill".into(),
+            data: None,
+        }),
+    }
+}
+
+async fn prepare_auto_fill_slot(
+    state: &AppState,
+    manifest: &crate::device::DeviceManifest,
+    server_id: Option<&str>,
+    exclude_item_ids: Vec<String>,
+    budget: u64,
+) -> Result<(crate::auto_fill::AutoFillParams, bool), JsonRpcError> {
+    let now = now_unix_secs();
+    let (history, rotation_cursor, pity_streak) = match server_id {
+        Some(id) => build_autofill_history(&state.db, &manifest.device_id, id, now),
+        None => (
+            crate::auto_fill::HistorySnapshot {
+                now,
+                ..Default::default()
+            },
+            0,
+            0,
+        ),
+    };
+    let params = crate::auto_fill::AutoFillParams {
+        preferred_audio_container: preview_media_profile(state, manifest)
+            .await?
+            .1
+            .map(str::to_string),
+        output_profile: load_selected_transcoding_profile(
+            manifest.transcoding_profile_id.as_deref(),
+        )
+        .map_err(|e| sync_plan_error(anyhow::anyhow!(e)))?,
+        exclude_item_ids,
+        max_fill_bytes: budget,
+        device_id: manifest.device_id.clone(),
+        server_id: server_id.unwrap_or_default().to_string(),
+        now_unix: now,
+        history,
+        rotation_cursor,
+        seed: now as u64,
+        pity_streak,
+        local: now_civil(),
+    };
+    let pity_fired = server_id
+        .and_then(|id| manifest.auto_fill.pipeline_for(id))
+        .is_some_and(|pipeline| {
+            crate::auto_fill::pipeline::pity_reserve_bytes(&pipeline.pity, pity_streak, budget) > 0
+        });
+    Ok((params, pity_fired))
+}
+
 async fn provider_calculate_delta(
     _state: &AppState,
     provider: Arc<dyn MediaProvider>,
@@ -5689,7 +5805,7 @@ async fn provider_calculate_delta(
     let auto_fill_enabled = auto_fill_descriptor.is_some();
 
     let mut desired_items = Vec::new();
-    let mut playlist_sync_items = Vec::new();
+    let mut preparation = SyncDeltaPreparation::default();
     let mut seen_ids = HashSet::new();
 
     phases.next("basket_expansion");
@@ -5702,25 +5818,11 @@ async fn provider_calculate_delta(
         .collect();
 
     for item_id in item_ids {
-        if let Some(basket_item) = favorite_basket_by_id.get(item_id) {
-            let tracks = provider_favorite_sync_items_for_basket_item(
-                provider.clone(),
-                basket_item,
-                provider_song_to_desired_item,
-                false,
-            )
-            .await?;
-            for item in tracks {
-                if seen_ids.insert(item.jellyfin_id.clone()) {
-                    desired_items.push(item);
-                }
-            }
-            continue;
-        }
-
-        let (tracks, playlist) = provider_sync_items_for_id(provider.clone(), item_id).await?;
+        let (tracks, playlist) = provider_basket_sync_items_for_id(
+            provider.clone(), item_id, &favorite_basket_by_id,
+        ).await?;
         if let Some(playlist) = playlist {
-            playlist_sync_items.push(playlist);
+            preparation.playlists.push(playlist);
         }
         for item in tracks {
             if seen_ids.insert(item.jellyfin_id.clone()) {
@@ -5736,39 +5838,11 @@ async fn provider_calculate_delta(
     // Step 2: If auto-fill is enabled, fill remaining space after basket items.
     // When basket is empty this is a pure auto-fill (device fully managed by auto-fill).
     // When basket has items this augments them — playlists/albums stay, free space is filled.
-    // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
-    let mut af_tier_map: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
-    // track, patched onto delta.adds below (mirrors `af_tier_map`). Only populated when a transcode
-    // profile is active for the slot — passthrough tracks never get a forced re-encode.
-    let mut af_bitrate_map: std::collections::HashMap<(String, Option<String>), u32> =
-        std::collections::HashMap::new();
-    // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run
-    // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
-    // the sync-completion recorder resets the dry-streak only for servers that actually fired.
-    let mut af_pity_fired: Vec<String> = Vec::new();
     let mut autofill_playlist_tracks = Vec::new();
     if auto_fill_enabled {
-        // If the UI provided maxBytes, use it directly — it already represents the intended
-        // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
-        // compute server-side as (free + existing synced - basket).
-        let capacity_manifest = verified_capacity_manifest(_state, manifest).await?;
-        let (profile, preferred) = preview_media_profile(_state, manifest).await?;
-        let basket_size = planned_manual_selection_bytes(&desired_items, &capacity_manifest, profile.as_ref(), preferred,
-            params.get("force").and_then(Value::as_bool) == Some(true));
-        let ceiling = free_bytes_for_sync_device(_state, &manifest.device_id).await.map(|free|
-            free.saturating_add(capacity_manifest.synced_items.iter().map(|item| item.size_bytes).fold(0, u64::saturating_add))
-                .saturating_sub(basket_size));
+        let ceiling = remaining_auto_fill_bytes(_state, manifest, params, &desired_items).await?;
         let requested = auto_fill_descriptor.as_ref().and_then(|descriptor| descriptor.max_bytes);
-        let auto_fill_budget = match (requested, ceiling) {
-            (Some(requested), Some(ceiling)) => requested.min(ceiling),
-            (Some(requested), None) => requested,
-            (None, Some(ceiling)) => ceiling,
-            (None, None) => return Err(JsonRpcError { code: ERR_CONNECTION_FAILED,
-                message: "Cannot determine device capacity for auto-fill".into(), data: None }),
-        };
+        let auto_fill_budget = auto_fill_slot_budget(requested, ceiling)?;
         crate::daemon_log!(
             "[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes",
             item_ids.len(),
@@ -5780,56 +5854,14 @@ async fn provider_calculate_delta(
                 .iter()
                 .map(|i| i.jellyfin_id.clone())
                 .collect();
-            // Story 12.4: route the selected server's slot through the shared seam, reading its
-            // configured pipeline (portable serverId). Default-equivalent → fast path (AC 8).
             let selected_portable = current_server_portable_id(_state).ok().flatten();
-            // Story 13.1: supply the DB-sourced history snapshot + rotation cursor so the Memory
-            // stage (cooldown/played/stable-core/tiers) is live for this slot.
-            let now = now_unix_secs();
-            let (history, rotation_cursor, pity_streak) = match selected_portable.as_deref() {
-                Some(sid) => build_autofill_history(&_state.db, &manifest.device_id, sid, now),
-                None => (
-                    crate::auto_fill::HistorySnapshot {
-                        now,
-                        ..Default::default()
-                    },
-                    0,
-                    0,
-                ),
-            };
-            let fill_params = crate::auto_fill::AutoFillParams {
-                preferred_audio_container: preview_media_profile(_state, manifest).await?.1.map(str::to_string),
-                output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
-                exclude_item_ids: exclude_ids,
-                max_fill_bytes: auto_fill_budget,
-                device_id: manifest.device_id.clone(),
-                server_id: selected_portable.clone().unwrap_or_default(),
-                now_unix: now,
-                history,
-                rotation_cursor,
-                // Story 13.4: mint the seed from `now` (varies per run, deterministic within it).
-                seed: now as u64,
-                pity_streak,
-                // Story 13.5: mint local civil time at this engine fill site (drives the Context stage).
-                local: now_civil(),
-            };
-            let pipeline_ref = selected_portable
-                .as_deref()
+            let (fill_params, pity_fired) = prepare_auto_fill_slot(
+                _state, manifest, selected_portable.as_deref(), exclude_ids, auto_fill_budget,
+            ).await?;
+            let pipeline_opt = selected_portable.as_deref()
                 .and_then(|id| manifest.auto_fill.pipeline_for(id));
-            // The fetch layer derives encoding from the actual capacity/headroom ceiling
-            // and returns that decision on each selected item.
-            let pipeline_opt = pipeline_ref;
-            // Story 13.4 review: record whether the pity reserve genuinely fired for this slot
-            // (same gate the engine uses, with this run's budget) so the recorder resets the
-            // dry-streak only on a real fire.
-            if let (Some(sid), Some(pipeline)) = (selected_portable.as_deref(), pipeline_opt)
-                && crate::auto_fill::pipeline::pity_reserve_bytes(
-                    &pipeline.pity,
-                    pity_streak,
-                    auto_fill_budget,
-                ) > 0
-            {
-                af_pity_fired.push(sid.to_string());
+            if pity_fired && let Some(sid) = &selected_portable {
+                preparation.pity_fired_servers.push(sid.clone());
             }
             let fill_items = expand_auto_fill_slot(provider.clone(), pipeline_opt, fill_params)
                 .await
@@ -5844,16 +5876,16 @@ async fn provider_calculate_delta(
             );
             for item in fill_items {
                 if let Some(tier) = item.tier.clone() {
-                    af_tier_map.insert(item.id.clone(), tier);
+                    preparation.tiers.insert(item.id.clone(), tier);
                 }
                 // Story 13.5 #20: stamp the slot's derived bitrate onto this auto-fill track so the
                 // sync transcode applies it to this item only (manual items carry nothing).
                 if let Some(kbps) = item.max_bitrate_override_kbps {
-                    af_bitrate_map.insert((item.id.clone(), selected_portable.clone()), kbps);
+                    preparation.bitrate_overrides.insert((item.id.clone(), selected_portable.clone()), kbps);
                 }
                 let item_id = item.id.clone();
                 if seen_ids.insert(item_id) {
-                    af_item_ids.insert(item.id.clone());
+                    preparation.auto_fill_ids.insert(item.id.clone());
                     autofill_playlist_tracks.push(autofill_playlist_track(&item));
                     let album_id = item.provider_album_id.clone();
                     desired_items.push(auto_fill_to_desired_item(
@@ -5864,23 +5896,17 @@ async fn provider_calculate_delta(
         }
     }
     if !autofill_playlist_tracks.is_empty() {
-        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
+        preparation.playlists.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
-    phases.finish("success", af_item_ids.len());
+    phases.finish("success", preparation.auto_fill_ids.len());
     // Story 2.13: tag untagged items with the selected server's portable id.
     tag_untagged_with_selected_portable(_state, &mut desired_items)?;
     for item in &mut desired_items {
         item.media_role = media_role;
     }
 
-    let mut delta = finish_sync_delta(_state, &desired_items, manifest, params, SyncDeltaPreparation {
-        playlists: playlist_sync_items,
-        auto_fill_ids: af_item_ids,
-        tiers: af_tier_map,
-        bitrate_overrides: af_bitrate_map,
-        pity_fired_servers: af_pity_fired,
-    }).await?;
+    let mut delta = finish_sync_delta(_state, &desired_items, manifest, params, preparation).await?;
     preflight_state_media_adds(_state, manifest, &mut delta, Some(provider)).await?;
 
     publish_sync_delta(_state, delta, manifest, params).await
@@ -7289,7 +7315,7 @@ async fn multi_provider_calculate_delta(
     }
 
     let mut desired_items: Vec<crate::sync::DesiredItem> = Vec::new();
-    let mut playlist_sync_items = Vec::new();
+    let mut preparation = SyncDeltaPreparation::default();
     let mut seen_ids = HashSet::new();
     let mut track_owners = sync_track_owners(manifest)?;
 
@@ -7299,27 +7325,11 @@ async fn multi_provider_calculate_delta(
         phases.next("basket_expansion");
         let group_start = desired_items.len();
         for id in ids {
-            if let Some(basket_item) = favorite_basket_by_id.get(id) {
-                let tracks = provider_favorite_sync_items_for_basket_item(
-                    provider.clone(),
-                    basket_item,
-                    provider_song_to_desired_item,
-                    false,
-                )
-                .await?;
-                for mut item in tracks {
-                    register_sync_track_owner(&mut track_owners, &item.jellyfin_id, Some(server_id))?;
-                    if seen_ids.insert(item.jellyfin_id.clone()) {
-                        item.server_id = Some(server_id.clone());
-                        item.media_role = provider_media_role(provider.as_ref());
-                        desired_items.push(item);
-                    }
-                }
-                continue;
-            }
-            let (tracks, playlist) = provider_sync_items_for_id(provider.clone(), id).await?;
+            let (tracks, playlist) = provider_basket_sync_items_for_id(
+                provider.clone(), id, &favorite_basket_by_id,
+            ).await?;
             if let Some(playlist) = playlist {
-                playlist_sync_items.push(playlist);
+                preparation.playlists.push(playlist);
             }
             for mut item in tracks {
                 register_sync_track_owner(&mut track_owners, &item.jellyfin_id, Some(server_id))?;
@@ -7341,39 +7351,9 @@ async fn multi_provider_calculate_delta(
     // already-selected ids (manual + earlier slots). Slots share one remaining
     // capacity budget so combined fill never oversubscribes the device (AC4).
     let descriptors = parse_auto_fill_descriptors(params);
-    // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
-    let mut af_tier_map: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
-    // track across all slots, patched onto delta.adds (mirrors `af_tier_map`).
-    let mut af_bitrate_map: std::collections::HashMap<(String, Option<String>), u32> =
-        std::collections::HashMap::new();
-    // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
-    let mut af_pity_fired: Vec<String> = Vec::new();
     let mut autofill_playlist_tracks = Vec::new();
     if !descriptors.is_empty() {
-        // Shared budget = device free + already-synced − already-selected bytes
-        // (mirrors `provider_calculate_delta`'s server-side derivation at
-        // rpc.rs:2599-2616). `None` when device storage is unavailable; that is
-        // tolerated only for slots that supply their own `maxBytes` — matching the
-        // pre-12.3 multi path, which used the UI `maxBytes` without querying storage.
-        let capacity_manifest = verified_capacity_manifest(state, manifest).await?;
-        let (profile, preferred) = preview_media_profile(state, manifest).await?;
-        let selected_bytes = planned_manual_selection_bytes(&desired_items, &capacity_manifest, profile.as_ref(), preferred,
-            params.get("force").and_then(Value::as_bool) == Some(true));
-        let mut remaining: Option<u64> =
-            match free_bytes_for_sync_device(state, &manifest.device_id).await {
-                Some(free_bytes) => {
-                    let synced: u64 = capacity_manifest.synced_items.iter().map(|s| s.size_bytes).fold(0, u64::saturating_add);
-                    Some(
-                        free_bytes
-                            .saturating_add(synced)
-                            .saturating_sub(selected_bytes),
-                    )
-                }
-                None => None,
-            };
+        let mut remaining = remaining_auto_fill_bytes(state, manifest, params, &desired_items).await?;
 
         for desc in &descriptors {
             let af_server = match desc.server_id.clone().or_else(|| selected_id.clone()) {
@@ -7386,21 +7366,7 @@ async fn multi_provider_calculate_delta(
                 }
             };
 
-            // Effective slot budget: cap the descriptor's own maxBytes (if any) by
-            // the shared remaining capacity. For a single slot this is byte-for-byte
-            // identical to today (min(maxBytes, free − manual) == maxBytes).
-            let budget = match (desc.max_bytes, remaining) {
-                (Some(mb), Some(r)) => mb.min(r),
-                (Some(mb), None) => mb,
-                (None, Some(r)) => r,
-                (None, None) => {
-                    return Err(JsonRpcError {
-                        code: ERR_CONNECTION_FAILED,
-                        message: "Cannot determine device capacity for auto-fill".to_string(),
-                        data: None,
-                    });
-                }
-            };
+            let budget = auto_fill_slot_budget(desc.max_bytes, remaining)?;
             if budget == 0 {
                 continue;
             }
@@ -7428,41 +7394,12 @@ async fn multi_provider_calculate_delta(
             // Exclusions belong to this source. Cross-source equal IDs must
             // remain visible so the ownership guard can report the ambiguity.
             let exclude_ids = autofill_exclusions_for_server(&desired_items, &af_server, &desc.exclude_item_ids);
-            // Story 13.1: DB-sourced history snapshot + rotation cursor for this slot's server.
-            let now = now_unix_secs();
-            let (history, rotation_cursor, pity_streak) =
-                build_autofill_history(&state.db, &manifest.device_id, &af_server, now);
-            let fill_params = crate::auto_fill::AutoFillParams {
-                preferred_audio_container: preview_media_profile(state, manifest).await?.1.map(str::to_string),
-                output_profile: load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?,
-                exclude_item_ids: exclude_ids,
-                max_fill_bytes: budget,
-                device_id: manifest.device_id.clone(),
-                server_id: af_server.clone(),
-                now_unix: now,
-                history,
-                rotation_cursor,
-                seed: now as u64,
-                pity_streak,
-                // Story 13.5: engine fill site → mint local civil time for the Context stage.
-                local: now_civil(),
-            };
-            // Story 12.4: route this slot through the shared seam — the configurable engine
-            // when this server has a non-default pipeline, else the default fast path.
-            let pipeline_ref = manifest.auto_fill.pipeline_for(&af_server);
-            // The fetch layer derives encoding from the actual capacity/headroom ceiling
-            // and returns that decision on each selected item.
-            let pipeline_opt = pipeline_ref;
-            // Story 13.4 review: did the pity reserve genuinely fire for this slot (same gate the
-            // engine uses, with this slot's budget)? Drives the dry-streak reset at sync completion.
-            if let Some(pipeline) = pipeline_opt
-                && crate::auto_fill::pipeline::pity_reserve_bytes(
-                    &pipeline.pity,
-                    pity_streak,
-                    budget,
-                ) > 0
-            {
-                af_pity_fired.push(af_server.clone());
+            let (fill_params, pity_fired) = prepare_auto_fill_slot(
+                state, manifest, Some(&af_server), exclude_ids, budget,
+            ).await?;
+            let pipeline_opt = manifest.auto_fill.pipeline_for(&af_server);
+            if pity_fired {
+                preparation.pity_fired_servers.push(af_server.clone());
             }
             let fill_items =
                 match expand_auto_fill_slot(provider.clone(), pipeline_opt, fill_params).await {
@@ -7488,12 +7425,12 @@ async fn multi_provider_calculate_delta(
             for item in &fill_items {
                 register_sync_track_owner(&mut track_owners, &item.id, Some(&af_server))?;
                 if let Some(tier) = item.tier.clone() {
-                    af_tier_map.insert(item.id.clone(), tier);
+                    preparation.tiers.insert(item.id.clone(), tier);
                 }
                 // Story 13.5 #20: stamp the slot's derived bitrate onto each auto-fill track (manual
                 // items carry nothing), so the sync transcode applies it to these items only.
                 if let Some(kbps) = item.max_bitrate_override_kbps {
-                    af_bitrate_map.insert((item.id.clone(), Some(af_server.clone())), kbps);
+                    preparation.bitrate_overrides.insert((item.id.clone(), Some(af_server.clone())), kbps);
                 }
             }
             let first_added = desired_items.len();
@@ -7506,7 +7443,7 @@ async fn multi_provider_calculate_delta(
                 &mut remaining,
                 &mut autofill_playlist_tracks,
             );
-            af_item_ids.extend(
+            preparation.auto_fill_ids.extend(
                 desired_items[first_added..]
                     .iter()
                     .map(|item| item.jellyfin_id.clone()),
@@ -7514,17 +7451,11 @@ async fn multi_provider_calculate_delta(
         }
     }
     if !autofill_playlist_tracks.is_empty() {
-        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
+        preparation.playlists.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
-    phases.finish("success", af_item_ids.len());
-    let mut delta = finish_sync_delta(state, &desired_items, manifest, params, SyncDeltaPreparation {
-        playlists: playlist_sync_items,
-        auto_fill_ids: af_item_ids,
-        tiers: af_tier_map,
-        bitrate_overrides: af_bitrate_map,
-        pity_fired_servers: af_pity_fired,
-    }).await?;
+    phases.finish("success", preparation.auto_fill_ids.len());
+    let mut delta = finish_sync_delta(state, &desired_items, manifest, params, preparation).await?;
     preflight_state_media_adds(state, manifest, &mut delta, None).await?;
     publish_sync_delta(state, delta, manifest, params).await
     }.await;
@@ -14204,6 +14135,23 @@ mod tests {
             "no device → autoFill is null, got: {}",
             daemon_state["autoFill"]
         );
+    }
+
+    #[test]
+    fn test_auto_fill_slot_budget() {
+        for (requested, remaining, expected) in [
+            (Some(100), Some(80), 80),
+            (Some(50), Some(80), 50),
+            (Some(100), None, 100),
+            (None, Some(80), 80),
+            (Some(100), Some(0), 0),
+            (Some(0), None, 0),
+        ] {
+            assert_eq!(auto_fill_slot_budget(requested, remaining).unwrap(), expected);
+        }
+        let error = auto_fill_slot_budget(None, None).unwrap_err();
+        assert_eq!(error.code, ERR_CONNECTION_FAILED);
+        assert_eq!(error.message, "Cannot determine device capacity for auto-fill");
     }
 
     // Story 12.3 AC1: normalize the dual-shape `autoFill` param into descriptors.

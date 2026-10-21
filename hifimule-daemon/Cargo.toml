@@ -58,7 +58,6 @@ souvlaki.workspace = true
 [target.'cfg(windows)'.dependencies]
 # Required by windows 0.58 notification-interface implementation macros.
 windows-core = "=0.58.0"
-windows-service = "0.7"
 windows = { version = "0.58", features = [
     "Win32_Devices_PortableDevices",
     "Win32_Foundation",

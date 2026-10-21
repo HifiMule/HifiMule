@@ -210,14 +210,13 @@ fn main() -> Result<()> {
 
     #[cfg(windows)]
     {
-        if install_service {
-            return service::install().map_err(|e| e.into());
+        if install_service || service_mode {
+            anyhow::bail!(
+                "LEGACY_DAEMON_RUNNING: Windows service mode cannot own a signed-in desktop profile; uninstall the legacy service and launch HifiMule normally"
+            );
         }
         if uninstall_service {
-            return service::uninstall().map_err(|e| e.into());
-        }
-        if service_mode {
-            return service::run().map_err(|e| e.into());
+            return service::uninstall();
         }
     }
 

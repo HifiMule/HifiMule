@@ -308,14 +308,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let info = serde_json::from_str::<SystemInfo>(&text)?;
-        Ok(info)
+        Ok(response.json::<SystemInfo>().await?)
     }
 
     pub async fn get_views(
@@ -333,13 +331,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let views_response = serde_json::from_str::<JellyfinViewsResponse>(&text)?;
+        let views_response = response.json::<JellyfinViewsResponse>().await?;
         Ok(views_response.items)
     }
 
@@ -386,14 +383,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-        Ok(items_response)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -456,14 +451,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-        Ok(items_response)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 
     pub async fn get_item_details(
@@ -487,14 +480,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let item = serde_json::from_str::<JellyfinItem>(&text)?;
-        Ok(item)
+        Ok(response.json::<JellyfinItem>().await?)
     }
 
     pub async fn get_items_by_ids(
@@ -523,13 +514,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        let items_response = response.json::<JellyfinItemsResponse>().await?;
         Ok(items_response.items)
     }
 
@@ -554,14 +544,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let item = serde_json::from_str::<JellyfinItem>(&text)?;
-        Ok(item)
+        Ok(response.json::<JellyfinItem>().await?)
     }
 
     pub async fn get_child_items_with_sizes(
@@ -585,13 +573,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        let items_response = response.json::<JellyfinItemsResponse>().await?;
         Ok(items_response.items)
     }
 
@@ -623,14 +610,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-        Ok(items_response)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 
     #[allow(dead_code)]
@@ -655,14 +640,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-        Ok(items_response)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -692,11 +675,10 @@ impl JellyfinClient {
             .send()
             .await?;
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
-        Ok(serde_json::from_str(&text)?)
+        Ok(response.json().await?)
     }
 
     /// Get total size in bytes for each item. For containers (Albums, Playlists, Artists),
@@ -849,14 +831,12 @@ impl JellyfinClient {
             .await?;
 
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Authentication failed: {}", status));
         }
 
-        let result = serde_json::from_str::<AuthenticationResult>(&text)?;
-        Ok(result)
+        Ok(response.json::<AuthenticationResult>().await?)
     }
 
     pub async fn search_audio_items(
@@ -900,14 +880,12 @@ impl JellyfinClient {
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-        Ok(items_response)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 
     pub async fn report_item_played(
@@ -1283,11 +1261,10 @@ impl JellyfinClient {
         );
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
-        Ok(serde_json::from_str::<JellyfinItemsResponse>(&text)?)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 
     /// Fetch audio items sorted by `PlayCount` descending (frequently played).
@@ -1451,12 +1428,11 @@ impl JellyfinClient {
             .await?;
 
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let value: serde_json::Value = serde_json::from_str(&text)?;
+        let value: serde_json::Value = response.json().await?;
         value["Id"]
             .as_str()
             .map(|s| s.to_string())
@@ -1540,12 +1516,11 @@ impl JellyfinClient {
 
         let response = self.client.get(endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        let items_response = response.json::<JellyfinItemsResponse>().await?;
         Ok(items_response.items)
     }
 
@@ -1606,13 +1581,13 @@ impl JellyfinClient {
 
         let response = self.client.get(endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
 
         if !status.is_success() {
+            let text = response.text().await?;
             return Err(anyhow!("Server returned status: {} — {}", status, text));
         }
 
-        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        let items_response = response.json::<JellyfinItemsResponse>().await?;
         Ok(items_response.items)
     }
 
@@ -1740,11 +1715,10 @@ impl JellyfinClient {
         );
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
-        let text = response.text().await?;
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
-        Ok(serde_json::from_str::<JellyfinItemsResponse>(&text)?)
+        Ok(response.json::<JellyfinItemsResponse>().await?)
     }
 }
 

@@ -91,6 +91,9 @@ impl JellyfinProvider {
             .chain()
             .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
         {
+            if transport.is_decode() {
+                return ProviderError::Deserialization(format!("{error:#}"));
+            }
             crate::log_to_file(&format!(
                 "[jellyfin transport] {}",
                 super::transport_failure_diagnostic(transport)
