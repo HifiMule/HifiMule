@@ -1,3 +1,4 @@
+import { escapeAttr } from '../html';
 import { invalidatePlaylistsCache } from '../state/libraryCache';
 import './cardArtwork';
 import type { CardArtwork } from './cardArtwork';
@@ -82,11 +83,11 @@ export class MediaCard {
         let yearHtml = '';
         if (isBrowseItem) {
             const bi = item as BrowseDisplayItem;
-            if (bi.subtitle) subtitleHtml = `<div class="card-subtitle">${this.escapeHtml(bi.subtitle)}</div>`;
+            if (bi.subtitle) subtitleHtml = `<div class="card-subtitle">${escapeAttr(bi.subtitle)}</div>`;
             if (bi.year) yearHtml = `<div class="card-year">${bi.year}</div>`;
         } else {
             const ji = item as JellyfinItem;
-            if (ji.AlbumArtist) subtitleHtml = `<div class="card-subtitle">${this.escapeHtml(ji.AlbumArtist)}</div>`;
+            if (ji.AlbumArtist) subtitleHtml = `<div class="card-subtitle">${escapeAttr(ji.AlbumArtist)}</div>`;
             if (ji.ProductionYear) yearHtml = `<div class="card-year">${ji.ProductionYear}</div>`;
             if ((item as JellyfinView).Type === 'CollectionFolder') subtitleHtml = `<div class="card-subtitle">${t('ui.library.title')}</div>`;
         }
@@ -101,7 +102,7 @@ export class MediaCard {
                             name="${isSelected ? 'dash-circle-fill' : 'plus-circle-fill'}"
                             class="basket-toggle-btn"
                             variant="${isSelected ? 'danger' : 'primary'}"
-                            label="${this.escapeHtml(`${t(isSelected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${itemName}`)}"
+                            label="${escapeAttr(`${t(isSelected ? 'tracks.view.remove_from_basket' : 'tracks.view.add_to_basket')} — ${itemName}`)}"
                             ${btnDisabled ? 'disabled' : ''}
                         ></sl-icon-button>
                     </div>
@@ -111,7 +112,7 @@ export class MediaCard {
                 <div class="track-count-placeholder"></div>
             </hm-card-artwork>
             <div class="card-content">
-                <button type="button" class="card-open" title="${this.escapeHtml(itemName)}">${this.escapeHtml(itemName)}${isSynced ? `<span class="sr-only"> — ${t('library.media.synced')}</span>` : ''}</button>
+                <button type="button" class="card-open" title="${escapeAttr(itemName)}">${escapeAttr(itemName)}${isSynced ? `<span class="sr-only"> — ${t('library.media.synced')}</span>` : ''}</button>
                 ${subtitleHtml}
                 ${yearHtml}
             </div>
@@ -493,7 +494,7 @@ export class MediaCard {
                 placeholder="${t('basket.playlist.name_placeholder')}"
                 autofocus
                 clearable
-                value="${MediaCard.escapeHtml(suggestedName)}"
+                value="${escapeAttr(suggestedName)}"
             ></sl-input>
             <sl-alert id="ctx-playlist-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
             <sl-button slot="footer" variant="default" id="ctx-playlist-cancel">${t('basket.actions.cancel')}</sl-button>
@@ -686,12 +687,5 @@ export class MediaCard {
                 }
             }
         });
-    }
-
-    private static escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        // Escape double-quotes too — value is interpolated into a quoted HTML attribute.
-        return div.innerHTML.replace(/"/g, '&quot;');
     }
 }

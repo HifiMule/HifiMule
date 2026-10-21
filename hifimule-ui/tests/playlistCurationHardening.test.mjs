@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -14,6 +15,7 @@ function harness(message = '') {
     vm.runInNewContext(compiled, {
         exports,
         require(name) {
+            if (name === '../html') return html;
             if (name === '../rpc') return { fetchBrowsePlaylist: async () => { throw new Error(message); } };
             if (name === '../i18n') return { t: (key, params = {}) => Object.entries(params).reduce((text, [key, value]) => text.replaceAll('{'+key+'}', value), catalog[language][key] ?? key) };
             return {};

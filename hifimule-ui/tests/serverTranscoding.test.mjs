@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -14,7 +15,7 @@ function harness(location) {
   let reject = false;
   vm.runInNewContext(ts.transpileModule(readFileSync(new URL('../src/components/ServerHub.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{
     exports, document:{createElement:()=>dialog,body:{appendChild(){}}},customElements:{whenDefined:async()=>{}},
-    require:name=>name==='../rpc'?{serverUpdate:async params=>{calls.push(params);if(reject)throw new Error('offline');}}:name==='../serverIdentity'?{SERVER_ICON_OPTIONS:['music-note'],formatServerIdentity:()=>({label:'Music',icon:'music-note',secondaryText:'server'})}:name==='../i18n'?{t:key=>key}:{},
+    require:name=>name==='../html'?html:name==='../rpc'?{serverUpdate:async params=>{calls.push(params);if(reject)throw new Error('offline');}}:name==='../serverIdentity'?{SERVER_ICON_OPTIONS:['music-note'],formatServerIdentity:()=>({label:'Music',icon:'music-note',secondaryText:'server'})}:name==='../i18n'?{t:key=>key}:{},
   });
   const hub=Object.create(exports.ServerHub.prototype);hub.servers=[{id:'one',transcodingLocation:location}];hub.refresh=async()=>{};hub.onServerChanged=()=>{};
   hub.handleEdit('one');return {listeners,calls,dialog,save,cancel,error,select,setReject(){reject=true;}};

@@ -812,3 +812,25 @@ async fn retry_reopens_the_same_occurrence_at_its_committed_cursor_and_reports_r
     assert_eq!(repeated.position_ms, 2_345);
     assert_eq!(repeated.playback.error.unwrap().code, "RESUME_UNAVAILABLE");
 }
+
+#[tokio::test(start_paused = true)]
+async fn source_resolution_timeout_drops_pending_provider_work() {
+    let f = Fixture::new();
+    let admitted = f
+        .session
+        .native_control(NativeControlIntent::Play, None)
+        .unwrap();
+    let resolved = resolve_source(
+        &f.service.server_manager,
+        &f.service.db,
+        &f.session,
+        &admitted.generation_id,
+        &admitted.current.unwrap().source,
+        admitted.resume_epoch,
+        std::time::Instant::now() + std::time::Duration::from_millis(50),
+    )
+    .await;
+    assert!(matches!(resolved, Some(Err(_))));
+    assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
+    notified(&f.provider.finished).await;
+}

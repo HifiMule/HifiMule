@@ -1,3 +1,4 @@
+import { escapeAttr } from '../src/html.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -26,9 +27,9 @@ class Element {
 async function setup(selected, current = {}) {
     const calls = []; const dialog = new Element();
     const rpc = async (method, params) => { calls.push({ method, params }); return method === 'device_profiles.list' ? [] : {}; };
-    const { BasketSidebar } = new Function('basketEstimateKey', 'rpcCall', 'basketStore', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(basketEstimateKey, rpc, { getItems: () => [] }, key => key, { createElement: () => dialog, body: { appendChild() {} } }, { whenDefined: async () => {} });
+    const { BasketSidebar } = new Function('escapeAttr', 'deviceIconLabel', 'basketEstimateKey', 'rpcCall', 'basketStore', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(escapeAttr, icon => icon, basketEstimateKey, rpc, { getItems: () => [] }, key => key, { createElement: () => dialog, body: { appendChild() {} } }, { whenDefined: async () => {} });
     const sidebar = Object.create(BasketSidebar.prototype);
-    Object.assign(sidebar, { currentDevice: current, selectedDeviceSummary: () => ({ deviceId: 'device', ...selected }), escapeHtml: value => value, iconLabel: value => value, refreshAndRender: async () => {} });
+    Object.assign(sidebar, { currentDevice: current, selectedDeviceSummary: () => ({ deviceId: 'device', ...selected }), refreshAndRender: async () => {} });
     await sidebar.openDeviceSettings();
     return { sidebar, dialog, calls };
 }

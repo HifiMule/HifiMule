@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -40,7 +41,7 @@ function harness() {
         FormData: class { get(key) { return { url: url.value, username: 'listener', password: 'secret' }[key] ?? null; } },
         customElements: { whenDefined: async () => {} },
         setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id),
-        require: name => name === './rpc' ? {
+        require: name => name === './html' ? html : name === './rpc' ? {
             rpcCall: (method, params) => { calls.push({ method, params }); return rpc(method, params); },
             audiobookshelfCancelSetup: id => { calls.push({ method: 'cancel', id }); return cancel(); },
             audiobookshelfCommit: params => { calls.push({ method: 'commit', params }); return commitRpc(); },

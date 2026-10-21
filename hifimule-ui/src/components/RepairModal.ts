@@ -1,3 +1,4 @@
+import { escapeHtml, escapeAttr } from '../html';
 // Repair Modal Component
 // Provides a side-by-side discrepancy view for fixing dirty manifests.
 
@@ -189,15 +190,15 @@ export class RepairModal {
         const folder = pathParts.slice(0, -1).join('/');
 
         return `
-            <div class="repair-item" data-id="${this.escapeAttr(item.jellyfinId)}" data-path="${this.escapeAttr(item.localPath)}">
+            <div class="repair-item" data-id="${escapeAttr(item.jellyfinId)}" data-path="${escapeAttr(item.localPath)}">
                 <div class="repair-item-info">
-                    <span class="repair-item-name" title="${this.escapeAttr(item.name)}">${this.escapeHtml(item.name)}</span>
-                    <span class="repair-item-path" title="${this.escapeAttr(item.localPath)}">${this.escapeHtml(folder)}/<strong>${this.escapeHtml(filename)}</strong></span>
+                    <span class="repair-item-name" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</span>
+                    <span class="repair-item-path" title="${escapeAttr(item.localPath)}">${escapeHtml(folder)}/<strong>${escapeHtml(filename)}</strong></span>
                 </div>
                 <div class="repair-item-actions">
                     <sl-button class="prune-single-btn" size="small" variant="danger" outline
-                               data-id="${this.escapeAttr(item.jellyfinId)}"
-                               title="${this.escapeAttr(t('repair.remove_from_manifest'))}">
+                               data-id="${escapeAttr(item.jellyfinId)}"
+                               title="${escapeAttr(t('repair.remove_from_manifest'))}">
                         <sl-icon name="trash" slot="prefix"></sl-icon>
                         ${t('repair.prune')}
                     </sl-button>
@@ -210,19 +211,19 @@ export class RepairModal {
         const pathParts = item.localPath.split('/');
         const filename = pathParts[pathParts.length - 1];
         const folder = pathParts.slice(0, -1).join('/');
-        const relinkTitle = this.escapeAttr(hasMissing
+        const relinkTitle = escapeAttr(hasMissing
             ? t('repair.relink_title')
             : t('repair.relink_unavailable'));
 
         return `
-            <div class="repair-item orphaned" data-path="${this.escapeAttr(item.localPath)}">
+            <div class="repair-item orphaned" data-path="${escapeAttr(item.localPath)}">
                 <div class="repair-item-info">
-                    <span class="repair-item-name" title="${this.escapeAttr(item.name)}">${this.escapeHtml(item.name)}</span>
-                    <span class="repair-item-path" title="${this.escapeAttr(item.localPath)}">${this.escapeHtml(folder)}/<strong>${this.escapeHtml(filename)}</strong></span>
+                    <span class="repair-item-name" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</span>
+                    <span class="repair-item-path" title="${escapeAttr(item.localPath)}">${escapeHtml(folder)}/<strong>${escapeHtml(filename)}</strong></span>
                 </div>
                 <div class="repair-item-actions">
                     <sl-button class="relink-btn" size="small" variant="warning" outline
-                               data-path="${this.escapeAttr(item.localPath)}"
+                               data-path="${escapeAttr(item.localPath)}"
                                ${!hasMissing ? 'disabled' : ''}
                                title="${relinkTitle}">
                         <sl-icon name="link-45deg" slot="prefix"></sl-icon>
@@ -240,7 +241,7 @@ export class RepairModal {
         body.innerHTML = `
             <div class="repair-error" role="alert">
                 <sl-icon name="exclamation-triangle-fill" style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
-                <p>${t('repair.scan_failed', { message: this.escapeHtml(message) })}</p>
+                <p>${t('repair.scan_failed', { message: escapeHtml(message) })}</p>
                 <sl-button id="repair-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
             </div>
         `;
@@ -316,9 +317,9 @@ export class RepairModal {
         if (!actionsDiv) return;
 
         actionsDiv.innerHTML = `
-            <sl-select class="relink-select" size="small" hoist label="${this.escapeAttr(t('repair.link_to'))}" placeholder="${this.escapeAttr(t('repair.link_to'))}">
+            <sl-select class="relink-select" size="small" hoist label="${escapeAttr(t('repair.link_to'))}" placeholder="${escapeAttr(t('repair.link_to'))}">
                 ${this.discrepancies.missing.map(m =>
-            `<sl-option value="${this.escapeAttr(m.jellyfinId)}">${this.escapeHtml(m.name)}</sl-option>`
+            `<sl-option value="${escapeAttr(m.jellyfinId)}">${escapeHtml(m.name)}</sl-option>`
         ).join('')}
             </sl-select>
         `;
@@ -365,15 +366,5 @@ export class RepairModal {
         } finally {
             this.setBusy(false);
         }
-    }
-
-    private escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    private escapeAttr(text: string): string {
-        return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 }

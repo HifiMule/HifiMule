@@ -763,10 +763,6 @@ impl OwnerGuard {
         })
     }
 
-    pub fn runtime_dir(&self) -> &Path {
-        &self.runtime
-    }
-
     pub fn launch_generation(&self) -> Result<u64, LifecycleError> {
         read_generation(&self.app_data)
     }
@@ -1480,10 +1476,6 @@ fn validate_windows_path(path: &Path) -> Result<(), LifecycleError> {
         }
     }
     Ok(())
-}
-
-pub fn monotonic_ticket_expiry() -> u128 {
-    monotonic_millis().saturating_add(STARTUP_DEADLINE.as_millis())
 }
 
 #[cfg(unix)]

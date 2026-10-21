@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -11,7 +12,7 @@ function harness() {
  const body={isConnected:true,innerHTML:'',contains:()=>false,setAttribute(){},removeAttribute(){},querySelector:()=>null};
  const confirm={disabled:false}; const calls=[]; const renders=[];
  let rpc=()=>new Promise(()=>{});
- const ctx={exports:{},Error,Promise,document:{activeElement:null},require:name=>name==='../rpc'?{rpcCall:method=>{calls.push(method);return rpc(method);}}:name==='../lifecycleDeadline'?deadline.exports:name==='../i18n'?{t:key=>key}: {}};
+ const ctx={exports:{},Error,Promise,document:{activeElement:null},require:name=>name==='../html'?html:name==='../rpc'?{rpcCall:method=>{calls.push(method);return rpc(method);}}:name==='../lifecycleDeadline'?deadline.exports:name==='../i18n'?{t:key=>key}: {}};
  vm.runInNewContext(transpile('../src/components/InitDeviceModal.ts'),ctx);
  const modal=new ctx.exports.InitDeviceModal({}); modal.dialog={querySelector:selector=>selector==='.init-device-body'?body:confirm};
  modal.renderContent=(_body,user,profiles)=>renders.push({user,profiles});modal.renderError=(_body,error)=>renders.push({error});

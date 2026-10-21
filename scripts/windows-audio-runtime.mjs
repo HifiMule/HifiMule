@@ -1,7 +1,8 @@
+import { acquireRuntimeLock } from "./runtime-lock.mjs";
 import { buildEncodingDependencies, encodingDependencyReceipt, windowsTarExecutable } from "./encoding-dependencies.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -279,19 +280,6 @@ export function buildOfficialSource(archive, staging, target, options = {}) {
   } finally { rmSync(sourceRoot, { recursive: true, force: true }); }
 }
 
-function lock(path) {
-  const deadline = Date.now() + 30 * 60_000;
-  while (true) {
-    try { mkdirSync(path); writeFileSync(join(path, "owner.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); return () => rmSync(path, { recursive: true, force: true }); }
-    catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (Date.now() - statSync(path).mtimeMs > 60 * 60_000) { rmSync(path, { recursive: true, force: true }); continue; }
-      if (Date.now() >= deadline) fail(`Timed out waiting for Windows audio runtime lock: ${path}`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
-    }
-  }
-}
-
 export function ensureWindowsAudioRuntime(target, options = {}) {
   if (!targets[target]) fail(`Unsupported Windows playback target: ${target}`);
   const env = options.env ?? process.env;
@@ -309,7 +297,7 @@ export function ensureWindowsAudioRuntime(target, options = {}) {
   const verifySignature = options.verifySignature ?? ((archivePath, signaturePath, keyPath) => verifyOfficialSignature(archivePath, signaturePath, keyPath, runtimeOptions));
   const buildSource = options.buildSource ?? ((archivePath, staging, selectedTarget) => buildOfficialSource(archivePath, staging, selectedTarget, runtimeOptions));
   mkdirSync(join(cacheRoot, "sources"), { recursive: true });
-  const unlock = lock(`${prefix}.lock`);
+  const unlock = acquireRuntimeLock(`${prefix}.lock`);
   try {
     if (existsSync(prefix)) { try { return verifyWindowsAudioRuntime(prefix, target).prefix; } catch { rmSync(prefix, { recursive: true, force: true }); } }
     const buildEnv = options.buildSource ? env : windowsBuildEnvironment(target, env, options);

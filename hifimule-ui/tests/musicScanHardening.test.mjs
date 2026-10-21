@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -28,14 +29,14 @@ function harness() {
     }).outputText, {
         exports, Date, Error,
         setInterval: fn => { timers.add(fn); return fn; }, clearInterval: fn => timers.delete(fn),
-        require: name => name === '../rpc' ? { rpcCall: method => new Promise((resolve, reject) => pending.push({ method, resolve, reject })) }
+        require: name => name === '../html' ? html : name === '../rpc' ? { rpcCall: method => new Promise((resolve, reject) => pending.push({ method, resolve, reject })) }
             : name === '../i18n' ? { t: (key, params) => key + (params ? JSON.stringify(params) : '') }
             : name === '../lifecycleDeadline' ? { withDeadline: promise => promise }
             : { basketStore: { setDaemonContext() {}, hydrateFromDaemon() {} } },
     });
     const modal = new exports.InitDeviceModal({}, () => finished++);
     const dialog = new Element('dialog'); dialog.hide = () => { dialog.hidden = true; };
-    modal.dialog = dialog; modal.escapeHtml = value => value;
+    modal.dialog = dialog;
     const body = new Element('body');
     modal.showMusicScan(body, 'scan', 'device');
     return { modal, dialog, body, pending, timers, elements, get focused() { return focused; }, get finished() { return finished; } };

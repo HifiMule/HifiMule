@@ -1,3 +1,4 @@
+import { escapeAttr } from '../src/html.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -20,8 +21,8 @@ class Element {
 function setup(rpc){
     const window={setInterval:()=>1,clearInterval:()=>{}};
     const basketEvents=[];const basketStore={setDaemonContext:(...args)=>basketEvents.push(['context',...args]),hydrateFromDaemon:(items)=>basketEvents.push(['hydrate',items])};
-    const {InitDeviceModal}=new Function('rpcCall','t','window','document','basketStore','withDeadline','setInterval','clearInterval',`${script}\nreturn {InitDeviceModal};`)(rpc,(key)=>key,window,{createElement:()=>new Element()},basketStore,promise=>promise,window.setInterval,window.clearInterval);
-    const modal=Object.create(InitDeviceModal.prototype);modal.escapeHtml=value=>value;modal.dialog=new Element();modal.dialog.innerHTML='<button id="init-device-confirm-btn"></button><button id="init-device-cancel-btn"></button>';
+    const {InitDeviceModal}=new Function('escapeAttr','rpcCall','t','window','document','basketStore','withDeadline','setInterval','clearInterval',`${script}\nreturn {InitDeviceModal};`)(escapeAttr,rpc,(key)=>key,window,{createElement:()=>new Element()},basketStore,promise=>promise,window.setInterval,window.clearInterval);
+    const modal=Object.create(InitDeviceModal.prototype);modal.dialog=new Element();modal.dialog.innerHTML='<button id="init-device-confirm-btn"></button><button id="init-device-cancel-btn"></button>';
     let completed=0;modal.onComplete=()=>{basketEvents.push(['complete']);completed++;};
     const body=new Element();modal.showMusicScan(body,'captured-scan','device-1');return {modal,body,basketEvents,completed:()=>completed};
 }

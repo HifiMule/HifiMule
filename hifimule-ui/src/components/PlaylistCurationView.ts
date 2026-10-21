@@ -1,3 +1,4 @@
+import { escapeHtml, escapeAttr } from '../html';
 import { fetchBrowsePlaylist, fetchBrowseSearch, BrowseTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { showToast, ERROR_TOAST_DURATION } from '../toast';
@@ -122,15 +123,15 @@ export class PlaylistCurationView {
                 </div>
                 ${artists.map(artist => `
                  <div class="curation-artist-row${artist === selectedArtist ? ' curation-selected' : ''}"
-                      data-artist="${this.escapeAttr(artist)}">
+                      data-artist="${escapeAttr(artist)}">
                      <button type="button" class="curation-row-select curation-row-label"
                       aria-pressed="${artist === selectedArtist ? 'true' : 'false'}">
-                     <span class="curation-row-label" title="${this.escapeAttr(artist || t('playlist.curation.unknown_artist'))}">${this.escapeHtml(artist || t('playlist.curation.unknown_artist'))}</span></button>
+                     <span class="curation-row-label" title="${escapeAttr(artist || t('playlist.curation.unknown_artist'))}">${escapeHtml(artist || t('playlist.curation.unknown_artist'))}</span></button>
                      <sl-icon-button
                          class="curation-remove-artist curation-row-action"
                          name="x-circle"
-                         data-artist="${this.escapeAttr(artist)}"
-                         label="${this.escapeAttr(t('playlist.curation.remove_artist_named', { name: artist || t('playlist.curation.unknown_artist') }))}"
+                         data-artist="${escapeAttr(artist)}"
+                         label="${escapeAttr(t('playlist.curation.remove_artist_named', { name: artist || t('playlist.curation.unknown_artist') }))}"
                          ${this.isMutating ? 'disabled' : ''}
                      ></sl-icon-button>
                  </div>
@@ -148,17 +149,17 @@ export class PlaylistCurationView {
                 </div>
                 ${albums.map(album => `
                  <div class="curation-album-row${album === this.selectedAlbum ? ' curation-album-focused' : ''}"
-                      data-artist="${this.escapeAttr(selectedArtist)}"
-                      data-album="${this.escapeAttr(album)}">
+                      data-artist="${escapeAttr(selectedArtist)}"
+                      data-album="${escapeAttr(album)}">
                      <button type="button" class="curation-row-select curation-row-label"
                       aria-pressed="${album === this.selectedAlbum ? 'true' : 'false'}">
-                     <span class="curation-row-label" title="${this.escapeAttr(album || t('playlist.curation.unknown_album'))}">${this.escapeHtml(album || t('playlist.curation.unknown_album'))}</span></button>
+                     <span class="curation-row-label" title="${escapeAttr(album || t('playlist.curation.unknown_album'))}">${escapeHtml(album || t('playlist.curation.unknown_album'))}</span></button>
                      <sl-icon-button
                          class="curation-remove-album curation-row-action"
                          name="x-circle"
-                         data-artist="${this.escapeAttr(selectedArtist)}"
-                         data-album="${this.escapeAttr(album)}"
-                         label="${this.escapeAttr(t('playlist.curation.remove_album_named', { name: album || t('playlist.curation.unknown_album') }))}"
+                         data-artist="${escapeAttr(selectedArtist)}"
+                         data-album="${escapeAttr(album)}"
+                         label="${escapeAttr(t('playlist.curation.remove_album_named', { name: album || t('playlist.curation.unknown_album') }))}"
                          ${this.isMutating ? 'disabled' : ''}
                      ></sl-icon-button>
                  </div>
@@ -172,21 +173,21 @@ export class PlaylistCurationView {
         return panelTracks.map((track, panelIdx) => `
             <div class="curation-track-row" data-panel-index="${panelIdx}" tabindex="-1">
                 <span class="curation-track-pos">#${(positionById.get(track.id) ?? 0) + 1}</span>
-                <span class="curation-row-label" title="${this.escapeAttr(track.title)}">${this.escapeHtml(track.title)}</span>
+                <span class="curation-row-label" title="${escapeAttr(track.title)}">${escapeHtml(track.title)}</span>
                 <span class="curation-track-duration">${formatDuration(track.duration ?? 0)}</span>
                 ${this.supportsPlaylistWrite ? `
                     <sl-icon-button class="curation-move-up curation-row-action" name="chevron-up"
-                        data-panel-index="${panelIdx}" label="${this.escapeAttr(t('playlist.curation.move_up_named', { name: track.title }))}"
+                        data-panel-index="${panelIdx}" label="${escapeAttr(t('playlist.curation.move_up_named', { name: track.title }))}"
                         ${panelIdx === 0 || this.isMutating ? 'disabled' : ''}></sl-icon-button>
                     <sl-icon-button class="curation-move-down curation-row-action" name="chevron-down"
-                        data-panel-index="${panelIdx}" label="${this.escapeAttr(t('playlist.curation.move_down_named', { name: track.title }))}"
+                        data-panel-index="${panelIdx}" label="${escapeAttr(t('playlist.curation.move_down_named', { name: track.title }))}"
                         ${panelIdx === panelTracks.length - 1 || this.isMutating ? 'disabled' : ''}></sl-icon-button>
                 ` : ''}
                 <sl-icon-button
                     class="curation-remove-track curation-row-action"
                     name="x-circle"
-                    data-track-id="${this.escapeAttr(track.id)}"
-                    label="${this.escapeAttr(t('playlist.curation.remove_track_named', { name: track.title }))}"
+                    data-track-id="${escapeAttr(track.id)}"
+                    label="${escapeAttr(t('playlist.curation.remove_track_named', { name: track.title }))}"
                     ${this.isMutating ? 'disabled' : ''}
                 ></sl-icon-button>
             </div>
@@ -251,7 +252,7 @@ export class PlaylistCurationView {
                         ? `<sl-input
                                id="playlist-rename-input"
                                label="${t('playlist.curation.rename_hint')}"
-                               value="${this.escapeAttr(this.playlistName)}"
+                               value="${escapeAttr(this.playlistName)}"
                                size="small"
                                class="curation-rename-input"
                            ></sl-input>
@@ -273,9 +274,9 @@ export class PlaylistCurationView {
                                class="playlist-name-title curation-playlist-name"
                                role="button"
                                tabindex="0"
-                               aria-label="${this.escapeAttr(this.playlistName)} — ${t('playlist.curation.rename_hint')}"
+                               aria-label="${escapeAttr(this.playlistName)} — ${t('playlist.curation.rename_hint')}"
                                title="${t('playlist.curation.rename_hint')}"
-                           >${this.escapeHtml(this.playlistName)}</span>`
+                           >${escapeHtml(this.playlistName)}</span>`
                     }
                     ${this.supportsPlaylistWrite
                         ? `<sl-icon-button
@@ -287,7 +288,7 @@ export class PlaylistCurationView {
                     }
                 </div>
                 <sl-dialog id="playlist-delete-dialog" label="${t('playlist.curation.delete_title')}">
-                    <p>${t('playlist.curation.delete_body', { name: this.escapeHtml(this.playlistName) })}</p>
+                    <p>${t('playlist.curation.delete_body', { name: escapeHtml(this.playlistName) })}</p>
                     <sl-button slot="footer" class="playlist-delete-cancel" variant="default">
                         ${t('playlist.curation.delete_cancel_btn')}
                     </sl-button>
@@ -785,8 +786,8 @@ export class PlaylistCurationView {
                 const info = document.createElement('div');
                 info.className = 'curation-track-result-info';
                 info.innerHTML = `
-                    <div class="curation-track-result-title">${this.escapeHtml(track.title)}</div>
-                    <div class="curation-track-result-meta">${this.escapeHtml(track.artistName || '')} · ${this.escapeHtml(track.albumName || '')}</div>
+                    <div class="curation-track-result-title">${escapeHtml(track.title)}</div>
+                    <div class="curation-track-result-meta">${escapeHtml(track.artistName || '')} · ${escapeHtml(track.albumName || '')}</div>
                 `;
 
                 row.appendChild(cb);
@@ -899,22 +900,5 @@ export class PlaylistCurationView {
                 dialog.remove();
             }
         });
-    }
-
-    // ─── Helpers ───────────────────────────────────────────────────────────────
-
-    private escapeHtml(s: string): string {
-        return s
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    }
-
-    private escapeAttr(s: string): string {
-        return s
-            .replace(/&/g, '&amp;')
-            .replace(/"/g, '&quot;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
     }
 }

@@ -1,3 +1,5 @@
+import { acquireRuntimeLock } from "./runtime-lock.mjs";
+export { acquireRuntimeLock as acquireLinuxAudioRuntimeLock } from "./runtime-lock.mjs";
 import { buildEncodingDependencies, encodingDependencyReceipt } from "./encoding-dependencies.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -135,19 +137,6 @@ export function linuxBuildEnvironment(target, baseEnv = process.env, options = {
   return result;
 }
 function sha(path) { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
-export function acquireLinuxAudioRuntimeLock(path) {
-  mkdirSync(dirname(path), { recursive: true });
-  const deadline = Date.now() + 30 * 60_000;
-  while (true) {
-    try { mkdirSync(path); writeFileSync(join(path, "owner.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); return () => rmSync(path, { recursive: true, force: true }); }
-    catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (Date.now() - statSync(path).mtimeMs > 60 * 60_000) { rmSync(path, { recursive: true, force: true }); continue; }
-      if (Date.now() >= deadline) throw new Error(`Timed out waiting for audio runtime lock: ${path}`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
-    }
-  }
-}
 function download(archive) {
   const temp = `${archive}.${process.pid}.${randomUUID()}.tmp`;
   try { run("curl", ["--fail", "--location", "--retry", "3", "--output", temp, manifest.sourceUrl], { stdio: "inherit" }); if (sha(temp) !== manifest.sourceSha256) throw new Error("FFmpeg source checksum mismatch"); renameSync(temp, archive); }
@@ -170,7 +159,7 @@ export function ensureLinuxAudioRuntime(target) {
   const override = process.env.HIFIMULE_FFMPEG_PREFIX;
   const prefix = resolve(override || join(root, "target/audio-runtime", `ffmpeg-${manifest.ffmpegRelease}-${target}`));
   if (override) return verifyLinuxAudioPrefix(prefix, target);
-  const unlock = acquireLinuxAudioRuntimeLock(`${prefix}.lock`);
+  const unlock = acquireRuntimeLock(`${prefix}.lock`);
   try {
     if (existsSync(prefix)) { try { return verifyLinuxAudioPrefix(prefix, target); } catch { rmSync(prefix, { recursive: true, force: true }); } }
     const cache = join(root, "target/audio-runtime/sources");

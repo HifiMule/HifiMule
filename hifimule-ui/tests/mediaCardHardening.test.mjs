@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -85,7 +86,7 @@ function harness() {
         exports, document, console: { error() {}, warn() {} },
         customElements: { whenDefined: async () => {} }, requestAnimationFrame: fn => fn(),
         window: Object.assign(new Element(), { innerWidth: 900, innerHeight: 640 }),
-        require: name => name === '../rpc' ? { rpcCall, fetchBrowseAlbum: id => rpcCall('book', { id }) }
+        require: name => name === '../html' ? html : name === '../rpc' ? { rpcCall, fetchBrowseAlbum: id => rpcCall('book', { id }) }
             : name === '../state/basket' ? { basketStore }
             : name === '../i18n' ? { t: (key, params) => params?.message ?? key }
             : name === '../toast' ? { showToast: message => toasts.push(message) }

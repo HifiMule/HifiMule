@@ -282,70 +282,33 @@ fn rank_and_truncate_with_profile(
     profile: Option<&serde_json::Value>,
     preferred: Option<&str>,
 ) -> (Vec<AutoFillItem>, bool) {
-    let mut result = Vec::new();
-    let mut cumulative_bytes: u64 = 0;
-
-    if max_fill_bytes == 0 { return (result, true); }
+    let mut state = ProviderFillState::new(HashSet::new(), max_fill_bytes);
+    state.output_profile = profile.cloned();
+    state.preferred_audio_container = preferred.map(str::to_owned);
+    if max_fill_bytes == 0 {
+        return (state.into_result(), true);
+    }
     for track in tracks {
-        let song = crate::providers::jellyfin::song_from_item(track.clone());
-        let size_bytes = crate::sync::planned_song_bytes_with_preferred(&song, profile, preferred, None);
-
-        if size_bytes == 0 {
-            continue;
-        }
-
-        if size_bytes > max_fill_bytes.saturating_sub(cumulative_bytes) {
-            continue;
-        }
-
-        let is_favorite = track
-            .user_data
-            .as_ref()
-            .map(|u| u.is_favorite)
-            .unwrap_or(false);
-        let play_count = track.user_data.as_ref().map(|u| u.play_count).unwrap_or(0);
-
-        let priority_reason = if is_favorite {
+        // Keep the legacy basket artist and MIME hint while sharing song budgeting.
+        let artist = track.album_artist.clone().or_else(|| {
+            track.artists.as_ref().and_then(|artists| artists.first()).cloned()
+        });
+        let mut song = crate::providers::jellyfin::song_from_item(track);
+        song.artist_name = artist;
+        song.content_type = song.suffix.as_ref().map(|suffix| format!("audio/{suffix}"));
+        let priority_reason = if song.is_favorite.unwrap_or(false) {
             "favorite".to_string()
-        } else if play_count > 0 {
-            format!("playCount:{}", play_count)
+        } else if song.play_count.unwrap_or(0) > 0 {
+            format!("playCount:{}", song.play_count.unwrap())
         } else {
             "new".to_string()
         };
-
-        cumulative_bytes += size_bytes;
-        result.push(AutoFillItem {max_bitrate_override_kbps: None, source_audio: crate::sync::source_audio_for_song(&song), disc_number: track.parent_index_number,
-            original_bitrate: crate::sync::song_audio_bitrate_bps(&song),
-            duration_seconds: (track.run_time_ticks.unwrap_or(0).max(0)/10_000_000) as u32,
-        id: track.id,
-            name: track.name,
-            album: track.album,
-            artist: track
-                .album_artist
-                .or_else(|| track.artists.and_then(|a| a.into_iter().next())),
-            provider_album_id: track.album_id,
-            provider_content_type: track
-                .media_sources
-                .as_ref()
-                .and_then(|sources| sources.first())
-                .and_then(|source| source.container.clone())
-                .or_else(|| track.container.clone())
-                .map(|suffix| format!("audio/{suffix}")),
-            provider_suffix: track
-                .media_sources
-                .as_ref()
-                .and_then(|sources| sources.first())
-                .and_then(|source| source.container.clone())
-                .or(track.container),
-            track_number: track.index_number,
-            size_bytes,
-            priority_reason,
-            tier: None,
-        });
+        if !state.try_add(song, priority_reason) {
+            break;
+        }
     }
-
-    let full = cumulative_bytes >= max_fill_bytes;
-    (result, full)
+    let full = state.cumulative_bytes >= max_fill_bytes;
+    (state.into_result(), full)
 }
 
 /// Accumulates auto-fill items for the provider path, tracking budget and dedup state.
@@ -628,6 +591,11 @@ mod tests {
     fn test_rank_and_truncate_preserves_provider_album_metadata() {
         let mut track = make_track("a", true, 0, "2024-01-01", 3_000_000);
         track.album_id = Some("album1".to_string());
+        track.album_artist = Some("Album artist".to_string());
+        track.artists = Some(vec!["Track artist".to_string()]);
+        track.index_number = Some(7);
+        track.parent_index_number = Some(2);
+        track.run_time_ticks = Some(420_000_000);
         track.container = Some("fallback-container".to_string());
         track.media_sources = Some(vec![MediaSource {
             size: Some(3_000_000),
@@ -640,6 +608,11 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].provider_album_id.as_deref(), Some("album1"));
+        assert_eq!(result[0].artist.as_deref(), Some("Album artist"));
+        assert_eq!(result[0].track_number, Some(7));
+        assert_eq!(result[0].disc_number, Some(2));
+        assert_eq!(result[0].duration_seconds, 42);
+        assert_eq!(result[0].priority_reason, "favorite");
         assert_eq!(
             result[0].provider_content_type.as_deref(),
             Some("audio/mp3")
@@ -697,7 +670,7 @@ mod tests {
         let tracks = vec![
             make_track("a", false, 0, "2024-01-01", 1_000_000), // 1MB — fits
             make_track("b", false, 0, "2024-01-01", 4_000_000), // 4MB — exceeds remaining 2MB → skip
-            make_track("c", false, 0, "2024-01-01", 500_000),   // 0.5MB — fits the remaining space
+            make_track("c", true, 0, "2024-01-01", 500_000),   // 0.5MB — fits the remaining space
         ];
         let (result, capacity_reached) = rank_and_truncate(tracks, 3_000_000);
         assert_eq!(

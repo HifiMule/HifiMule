@@ -1,3 +1,4 @@
+import { escapeAttr } from '../html';
 // Story 12.6: Auto-Fill pipeline-builder configuration panel.
 //
 // A modal dialog, scoped to a single server, that edits an in-memory `AutoFillPipeline` and on
@@ -81,14 +82,6 @@ const GB = 1024 * 1024 * 1024;
 const ALL_SOURCE_KINDS: SourceKind[] = ['library', 'favorites', 'history', 'playlist'];
 const UNITS: Unit[] = ['track', 'album', 'artist'];
 
-function escapeHtml(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
 
 export interface AutoFillPanelOptions {
     serverId: string;
@@ -225,7 +218,7 @@ export class AutoFillPanel {
                             <strong>${t('basket.autofill.podcast_pick_shows')}</strong>
                             <div class="auto-fill-source-list">
                                 ${(this.opts.podcastShows ?? []).map((show) => `
-                                    <sl-checkbox class="af-podcast-show" value="${escapeHtml(show.id)}" ${p.podcastRetention.showIds.includes(show.id) ? 'checked' : ''}>${escapeHtml(show.title)}</sl-checkbox>
+                                    <sl-checkbox class="af-podcast-show" value="${escapeAttr(show.id)}" ${p.podcastRetention.showIds.includes(show.id) ? 'checked' : ''}>${escapeAttr(show.title)}</sl-checkbox>
                                 `).join('') || `<span>${t('basket.autofill.podcast_no_shows')}</span>`}
                             </div>
                         </div>
@@ -297,7 +290,7 @@ export class AutoFillPanel {
             return `<sl-spinner></sl-spinner> <span>${t('basket.autofill.preview_loading')}</span>`;
         }
         if (this.previewError) {
-            return `<span class="auto-fill-preview-error">${escapeHtml(this.previewError)}</span>`;
+            return `<span class="auto-fill-preview-error">${escapeAttr(this.previewError)}</span>`;
         }
         if (this.previewNoSpace) {
             return `<span class="auto-fill-preview-empty">${t('basket.autofill.preview_no_space')}</span>`;
@@ -338,7 +331,7 @@ export class AutoFillPanel {
             <sl-input id="af-exclude-genres" clearable
                 label="${t('basket.autofill.exclude_genres')}"
                 help-text="${t('basket.autofill.genres_hint')}"
-                value="${escapeHtml(this.excludeGenresInput)}"></sl-input>
+                value="${escapeAttr(this.excludeGenresInput)}"></sl-input>
         `);
     }
 
@@ -347,14 +340,14 @@ export class AutoFillPanel {
             <sl-input id="af-budget-gb" type="number" min="0" step="any" clearable
                 label="${t('basket.autofill.size_budget')}"
                 help-text="${t('basket.autofill.size_budget_hint')}"
-                value="${escapeHtml(this.budgetGbInput)}"></sl-input>
+                value="${escapeAttr(this.budgetGbInput)}"></sl-input>
             ${this.advancedOpen ? `
                 <sl-input id="af-duration-hours" type="number" min="0" step="0.5" clearable
                     label="${t('basket.autofill.target_duration_hours')}"
-                    value="${escapeHtml(this.durationHoursInput)}"></sl-input>
+                    value="${escapeAttr(this.durationHoursInput)}"></sl-input>
                 <sl-input id="af-headroom-gb" type="number" min="0" step="any" clearable
                     label="${t('basket.autofill.headroom_gb')}"
-                    value="${escapeHtml(this.headroomGbInput)}"></sl-input>
+                    value="${escapeAttr(this.headroomGbInput)}"></sl-input>
                 <sl-switch id="af-encoding-from-goals" size="small" ${this.pipeline.budget.encodingFromGoals ? 'checked' : ''}>
                     ${t('basket.autofill.encoding_from_goals')}
                 </sl-switch>
@@ -461,27 +454,27 @@ export class AutoFillPanel {
                         <sl-option value="months">${t('basket.autofill.context_window_months')}</sl-option>
                         <sl-option value="dateRange">${t('basket.autofill.context_window_date_range')}</sl-option>
                     </sl-select>
-                    <sl-icon-button class="af-context-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: `${t('basket.autofill.context')} ${i + 1}` }))}" data-index="${i}"></sl-icon-button>
+                    <sl-icon-button class="af-context-remove" name="x" label="${escapeAttr(t('basket.autofill.remove_named', { name: `${t('basket.autofill.context')} ${i + 1}` }))}" data-index="${i}"></sl-icon-button>
                 </div>
                 ${this.renderContextWindowFields(r.window, i)}
                 <sl-input class="af-ctx-source-refs" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_source_refs')}"
-                    value="${escapeHtml((r.sourceRefs ?? []).join(', '))}"></sl-input>
+                    value="${escapeAttr((r.sourceRefs ?? []).join(', '))}"></sl-input>
                 <sl-input class="af-ctx-weight" type="number" min="0" step="0.5" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_weight')}"
                     value="${typeof r.weight === 'number' ? r.weight : ''}"></sl-input>
                 <sl-input class="af-ctx-inc-genres" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_include_genres')}"
-                    value="${escapeHtml((r.includeGenres ?? []).join(', '))}"></sl-input>
+                    value="${escapeAttr((r.includeGenres ?? []).join(', '))}"></sl-input>
                 <sl-input class="af-ctx-exc-genres" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_exclude_genres')}"
-                    value="${escapeHtml((r.excludeGenres ?? []).join(', '))}"></sl-input>
+                    value="${escapeAttr((r.excludeGenres ?? []).join(', '))}"></sl-input>
                 <sl-input class="af-ctx-inc-tags" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_include_tags')}"
-                    value="${escapeHtml((r.includeTags ?? []).join(', '))}"></sl-input>
+                    value="${escapeAttr((r.includeTags ?? []).join(', '))}"></sl-input>
                 <sl-input class="af-ctx-exc-tags" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_exclude_tags')}"
-                    value="${escapeHtml((r.excludeTags ?? []).join(', '))}"></sl-input>
+                    value="${escapeAttr((r.excludeTags ?? []).join(', '))}"></sl-input>
             </div>
         `;
     }
@@ -501,7 +494,7 @@ export class AutoFillPanel {
                 <sl-input class="af-ctx-months" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_months')}"
                     help-text="${t('basket.autofill.context_months_hint')}"
-                    value="${escapeHtml(w.months.months.join(', '))}"></sl-input>`;
+                    value="${escapeAttr(w.months.months.join(', '))}"></sl-input>`;
         }
         return `
             <div class="auto-fill-context-window-fields">
@@ -597,9 +590,9 @@ export class AutoFillPanel {
         const rows = used.map((trait, i) => `
             <div class="auto-fill-ordering-row" data-index="${i}">
                 <span class="af-ordering-label">${i + 1}. ${t('basket.autofill.version_trait_' + trait)}</span>
-                <sl-icon-button class="af-version-up" name="chevron-up" label="${escapeHtml(t('basket.autofill.move_up_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-version-down" name="chevron-down" label="${escapeHtml(t('basket.autofill.move_down_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-version-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}"></sl-icon-button>
+                <sl-icon-button class="af-version-up" name="chevron-up" label="${escapeAttr(t('basket.autofill.move_up_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-version-down" name="chevron-down" label="${escapeAttr(t('basket.autofill.move_down_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-version-remove" name="x" label="${escapeAttr(t('basket.autofill.remove_named', { name: t('basket.autofill.version_trait_' + trait) }))}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
         return `
@@ -631,7 +624,7 @@ export class AutoFillPanel {
         return this.renderStage(t('basket.autofill.memory'), `
             <sl-input id="af-cooldown" type="number" min="0" step="1" clearable
                 label="${t('basket.autofill.cooldown_weeks')}"
-                value="${escapeHtml(this.cooldownInput)}"></sl-input>
+                value="${escapeAttr(this.cooldownInput)}"></sl-input>
             <sl-switch id="af-played-exclusion" size="small" ${mem.playedExclusion ? 'checked' : ''}>
                 ${t('basket.autofill.played_exclusion')}
             </sl-switch>
@@ -666,11 +659,11 @@ export class AutoFillPanel {
                 </sl-select>
                 ${tier.kind === 'playlist' && this.playlistsSupported ? `
                     <sl-select label="${t('basket.autofill.pick_playlist')} ${i + 1}" class="af-tier-ref af-compact-labeled" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
-                        value="${escapeHtml(tier.ref ?? '')}" data-index="${i}">
-                        ${this.opts.playlists.map((pl) => `<sl-option value="${escapeHtml(pl.id)}">${escapeHtml(pl.name)}</sl-option>`).join('')}
+                        value="${escapeAttr(tier.ref ?? '')}" data-index="${i}">
+                        ${this.opts.playlists.map((pl) => `<sl-option value="${escapeAttr(pl.id)}">${escapeAttr(pl.name)}</sl-option>`).join('')}
                     </sl-select>
                 ` : ''}
-                <sl-icon-button class="af-tier-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: `${t('basket.autofill.tiers')} ${i + 1}` }))}" data-index="${i}"></sl-icon-button>
+                <sl-icon-button class="af-tier-remove" name="x" label="${escapeAttr(t('basket.autofill.remove_named', { name: `${t('basket.autofill.tiers')} ${i + 1}` }))}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
         return `
@@ -707,23 +700,23 @@ export class AutoFillPanel {
             const sharePct = typeof src.share === 'number' ? Math.round(src.share * 100) : '';
             return `
                 <div class="auto-fill-source-row" data-group="${group}" data-index="${i}">
-                    <sl-select label="${escapeHtml(label)} ${i + 1}" class="af-source-kind af-compact-labeled" size="small" value="${src.kind}" data-group="${group}" data-index="${i}">
+                    <sl-select label="${escapeAttr(label)} ${i + 1}" class="af-source-kind af-compact-labeled" size="small" value="${src.kind}" data-group="${group}" data-index="${i}">
                         ${kinds.map((k) => `<sl-option value="${k}">${t('basket.autofill.source_' + k)}</sl-option>`).join('')}
                     </sl-select>
                     ${src.kind === 'playlist' && this.playlistsSupported ? `
                         <sl-select label="${t('basket.autofill.pick_playlist')} ${i + 1}" class="af-source-ref af-compact-labeled" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
-                            value="${escapeHtml(src.ref ?? '')}" data-group="${group}" data-index="${i}">
-                            ${this.opts.playlists.map((pl) => `<sl-option value="${escapeHtml(pl.id)}">${escapeHtml(pl.name)}</sl-option>`).join('')}
+                            value="${escapeAttr(src.ref ?? '')}" data-group="${group}" data-index="${i}">
+                            ${this.opts.playlists.map((pl) => `<sl-option value="${escapeAttr(pl.id)}">${escapeAttr(pl.name)}</sl-option>`).join('')}
                         </sl-select>
                     ` : ''}
                     ${showShares ? `
                         <div class="af-share-cell">
-                            <sl-range label="${escapeHtml(label)} ${i + 1}" class="af-source-share af-labeled-range" min="0" max="100" step="5"
+                            <sl-range label="${escapeAttr(label)} ${i + 1}" class="af-source-share af-labeled-range" min="0" max="100" step="5"
                                 value="${sharePct === '' ? 0 : sharePct}" data-group="${group}" data-index="${i}"></sl-range>
                             <span class="af-share-value">${sharePct === '' ? '—' : sharePct + '%'}</span>
                         </div>
                     ` : ''}
-                    <sl-icon-button class="af-source-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: `${label} ${i + 1}: ${t('basket.autofill.source_' + src.kind)}` }))}"
+                    <sl-icon-button class="af-source-remove" name="x" label="${escapeAttr(t('basket.autofill.remove_named', { name: `${label} ${i + 1}: ${t('basket.autofill.source_' + src.kind)}` }))}"
                         data-group="${group}" data-index="${i}"></sl-icon-button>
                 </div>
             `;
@@ -733,7 +726,7 @@ export class AutoFillPanel {
                 <label class="auto-fill-substage-label">${label}</label>
                 ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_sources')}</div>`}
                 <sl-button class="af-source-add" size="small" variant="text" data-group="${group}">
-                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>${t('basket.autofill.add_source')}<span class="sr-only">: ${escapeHtml(label)}</span>
+                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>${t('basket.autofill.add_source')}<span class="sr-only">: ${escapeAttr(label)}</span>
                 </sl-button>
             </div>
         `;
@@ -745,9 +738,9 @@ export class AutoFillPanel {
         const rows = used.map((key, i) => `
             <div class="auto-fill-ordering-row" data-index="${i}">
                 <span class="af-ordering-label">${i + 1}. ${t('basket.autofill.ordering_' + key)}</span>
-                <sl-icon-button class="af-ordering-up" name="chevron-up" label="${escapeHtml(t('basket.autofill.move_up_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-ordering-down" name="chevron-down" label="${escapeHtml(t('basket.autofill.move_down_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
-                <sl-icon-button class="af-ordering-remove" name="x" label="${escapeHtml(t('basket.autofill.remove_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}"></sl-icon-button>
+                <sl-icon-button class="af-ordering-up" name="chevron-up" label="${escapeAttr(t('basket.autofill.move_up_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-ordering-down" name="chevron-down" label="${escapeAttr(t('basket.autofill.move_down_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-ordering-remove" name="x" label="${escapeAttr(t('basket.autofill.remove_named', { name: t('basket.autofill.ordering_' + key) }))}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
         return this.renderStage(t('basket.autofill.ordering'), `

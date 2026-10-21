@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -8,7 +9,7 @@ function load(path, require = () => ({})) {
     const exports = {};
     vm.runInNewContext(ts.transpileModule(readFileSync(new URL(path, import.meta.url), 'utf8'), {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    }).outputText, { exports, require, clearTimeout });
+    }).outputText, { exports, require: name => name === '../html' ? html : require(name), clearTimeout });
     return exports;
 }
 

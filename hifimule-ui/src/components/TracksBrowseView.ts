@@ -1,3 +1,4 @@
+import { escapeHtml, escapeAttr } from '../html';
 import { createTrackPlayButton } from './TrackPlayButton';
 import { libraryLoadStatus } from './libraryLoadStatus';
 import {
@@ -483,7 +484,7 @@ export class TracksBrowseView {
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
         row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
-        row.innerHTML = `<span class="curation-row-label" title="${this.escapeAttr(artist.name)}">${this.escapeHtml(artist.name)}</span>`;
+        row.innerHTML = `<span class="curation-row-label" title="${escapeAttr(artist.name)}">${escapeHtml(artist.name)}</span>`;
         row.addEventListener('click', () => this.selectArtist(artist.id));
         row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.selectArtist(artist.id); } });
         return row;
@@ -1033,13 +1034,5 @@ export class TracksBrowseView {
         if (als) als.scrollTop = this.albumScrollTop;
         const tp = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (tp) tp.scrollTop = this.trackScrollTop;
-    }
-
-    private escapeHtml(s: string): string {
-        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    private escapeAttr(s: string): string {
-        return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 }

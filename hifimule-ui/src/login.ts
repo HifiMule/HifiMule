@@ -1,3 +1,4 @@
+import { escapeAttr } from './html';
 import {
     audiobookshelfCancelSetup,
     audiobookshelfCommit,
@@ -27,13 +28,6 @@ function serverTypeBadge(type: string | null): BadgeSpec | null {
     }
 }
 
-function escapeHtml(text: string): string {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
 
 export interface LoginViewOptions {
     /** 'first-run' takes over the whole window; 'add' / 'reauth' present the form
@@ -55,8 +49,8 @@ export interface LoginViewOptions {
 
 function iconPickerHtml(selectedIcon: string): string {
     return SERVER_ICON_OPTIONS.map(icon => `
-        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${escapeHtml(icon)}" title="${escapeHtml(icon)}" aria-label="${escapeHtml(icon)}" aria-pressed="${icon === selectedIcon}">
-            <sl-icon name="${escapeHtml(icon)}"></sl-icon>
+        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${escapeAttr(icon)}" title="${escapeAttr(icon)}" aria-label="${escapeAttr(icon)}" aria-pressed="${icon === selectedIcon}">
+            <sl-icon name="${escapeAttr(icon)}"></sl-icon>
         </button>
     `).join('');
 }
@@ -65,7 +59,7 @@ function loginFormHtml(options: LoginViewOptions, showIdentity = true): string {
     const prefillUrl = options.prefillUrl;
     const scopedReauth = options.mode === 'reauth' && options.serverType === 'audiobookshelf';
     const urlAttrs = prefillUrl
-        ? `value="${escapeHtml(prefillUrl)}" readonly`
+        ? `value="${escapeAttr(prefillUrl)}" readonly`
         : '';
     const defaultIcon = defaultServerIcon('unknown');
     const identityFields = showIdentity ? `
@@ -92,7 +86,7 @@ function loginFormHtml(options: LoginViewOptions, showIdentity = true): string {
                 <sl-input name="url" label="${t('login.server_url')}" placeholder="${t('login.server_url_placeholder')}" ${urlAttrs} required></sl-input>
                 <div id="server-type-indicator" aria-live="polite"></div>
             </div>
-            <sl-input name="username" label="${t('login.username')}" value="${escapeHtml(options.prefillUsername ?? '')}" required></sl-input>
+            <sl-input name="username" label="${t('login.username')}" value="${escapeAttr(options.prefillUsername ?? '')}" required></sl-input>
             ` : `<p>${t('login.audiobookshelf.reauth_password_only')}</p>`}
             <sl-input name="password" type="password" label="${t('login.password')}" required password-toggle></sl-input>
             ${identityFields}
@@ -357,8 +351,8 @@ function renderAudiobookshelfPicker(
         <p>${t('login.audiobookshelf.choose_library_hint')}</p>
         <sl-radio-group name="audiobookshelf-library" label="${t('login.audiobookshelf.library_label')}" required>
             ${libraries.map(choice => `
-                <sl-radio value="${escapeHtml(choice.choiceId)}">
-                    <span>${escapeHtml(choice.name)}</span>
+                <sl-radio value="${escapeAttr(choice.choiceId)}">
+                    <span>${escapeAttr(choice.name)}</span>
                     <sl-badge pill variant="neutral">${t(audiobookshelfRoleLabelKey(choice.role))}</sl-badge>
                 </sl-radio>
             `).join('')}

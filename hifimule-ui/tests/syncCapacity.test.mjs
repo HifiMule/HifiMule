@@ -1,3 +1,4 @@
+import { escapeAttr } from '../src/html.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -15,7 +16,7 @@ const basketScript = ts.transpile(basketSource, { target: ts.ScriptTarget.ES2022
 const { BasketStore } = new Function(`${basketScript}\nreturn { BasketStore };`)();
 // Exercise the capacity renderer without mounting its browser event handlers.
 const script = ts.transpile(sidebarSource.replace(/^import .*;\r?\n/gm, '').replace(/export class /g, 'class '), { target: ts.ScriptTarget.ES2022 });
-const { renderCapacityBar, renderSizeReserve, displaySelectionSize } = new Function('t', 'syncCapacity', `${script}\nreturn { renderCapacityBar, renderSizeReserve, displaySelectionSize };`)((key, params) => `${key}:${params?.size ?? ''}`, syncCapacity);
+const { renderCapacityBar, renderSizeReserve, displaySelectionSize } = new Function('escapeAttr', 't', 'syncCapacity', `${script}\nreturn { renderCapacityBar, renderSizeReserve, displaySelectionSize };`)(escapeAttr, (key, params) => `${key}:${params?.size ?? ''}`, syncCapacity);
 
 test('selected content can reclaim existing managed autofill without double counting selected files', () => {
     const storage = { totalBytes: 20 * 2 ** 30, freeBytes: 2 ** 30, usedBytes: 19 * 2 ** 30 };

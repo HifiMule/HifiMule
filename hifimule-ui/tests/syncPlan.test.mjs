@@ -1,3 +1,4 @@
+import { escapeAttr } from '../src/html.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -16,7 +17,7 @@ test('starting a sync exchanges a prepared token without sending track metadata 
         if (method === 'sync_execute') return { operationId: 'operation-1' };
         return { planId: 'plan-1', blockedCount: 0, destructiveCleanupCount: 0, destructiveCleanupThreshold: 100, changeReasons: [] };
     };
-    const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key);
+    const { BasketSidebar } = new Function('escapeAttr', 'selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(escapeAttr, selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key);
     const sidebar = Object.create(BasketSidebar.prototype);
     Object.assign(sidebar, { isSyncing: false, refreshCapacityEstimate: async () => {}, render() {}, attachToRunningSync: async () => false, itemIdsWithIncrementalChanges: async ids => ids, startPolling() {}, showError(message) { throw new Error(message); } });
     await sidebar.handleStartSync();
@@ -35,7 +36,7 @@ function sidebarWith(calls, summary, overrides = {}) {
         if (method === 'sync_execute') throw new Error('Prepared sync plan expired; prepare sync again');
         throw new Error(`Unexpected RPC ${method}`);
     };
-    const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key);
+    const { BasketSidebar } = new Function('escapeAttr', 'selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', `${script}\nreturn { BasketSidebar };`)(escapeAttr, selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key);
     const sidebar = Object.create(BasketSidebar.prototype);
     Object.assign(sidebar, { isSyncing: false, refreshCapacityEstimate: async () => {}, render() {}, attachToRunningSync: async () => false, itemIdsWithIncrementalChanges: async ids => ids, stopPolling() {}, startPolling() {}, showError(message) { this.errorMessage = message; }, ...overrides });
     return sidebar;
@@ -94,9 +95,9 @@ test('a rejected page request after Continue or Cancel cannot repaint the closed
         };
         const dialog = { querySelector: selector => node(selector.slice(1)), addEventListener(event, fn) { listeners.set(event, fn); }, hide() { listeners.get('sl-after-hide')(); }, remove() { this.removed = true; }, show() {} };
         const document = { createElement: () => dialog, body: { appendChild() {} } };
-        const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(selectionSize, () => detail, { getItems: () => [] }, () => false, key => key, document, { whenDefined: async () => {} });
+        const { BasketSidebar } = new Function('escapeAttr', 'selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(escapeAttr, selectionSize, () => detail, { getItems: () => [] }, () => false, key => key, document, { whenDefined: async () => {} });
         const sidebar = Object.create(BasketSidebar.prototype);
-        Object.assign(sidebar, { escapeHtml: value => value, showError(message) { this.errorMessage = message; } });
+        Object.assign(sidebar, { showError(message) { this.errorMessage = message; } });
         const result = sidebar.confirmBlockedMedia([{ name: 'First' }], { planId: 'owned', total: 501, nextOffset: 500 });
         node('blocked-next').click();
         node(action).click();
@@ -119,7 +120,7 @@ test('sync click logs its first blocked state check while repeat and recovery po
         return { activeOperationId: 'already-running' };
     };
     const window = { setTimeout: resolve => resolve() };
-    const { BasketSidebar } = new Function('selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'window', `${script}\nreturn { BasketSidebar };`)(selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key, window);
+    const { BasketSidebar } = new Function('escapeAttr', 'selectionSize', 'rpcCall', 'basketStore', 'isAutoFillSlotId', 't', 'window', `${script}\nreturn { BasketSidebar };`)(escapeAttr, selectionSize, rpcCall, { getItems: () => [] }, () => false, key => key, window);
     const sidebar = Object.create(BasketSidebar.prototype);
     Object.assign(sidebar, { isSyncing: false, isDestroyed: false, render() {}, startPolling() {} });
     const starting = sidebar.handleStartSync();

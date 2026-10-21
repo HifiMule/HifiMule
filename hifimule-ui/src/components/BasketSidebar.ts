@@ -1,3 +1,5 @@
+import { deviceIconLabel } from '../deviceIcon';
+import { escapeAttr } from '../html';
 // Basket Sidebar Component
 // Displays the list of items selected for synchronization.
 
@@ -163,10 +165,10 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     const projectedColor = zone === 'green' ? 'var(--accent)'
         : zone === 'amber' ? 'var(--amber-warn)'
             : 'var(--sl-color-danger-500)';
-    const barDescription = [t('basket.capacity.selection', { size: formatSize(projectedBytes) }),
+    const barDescription = escapeAttr([t('basket.capacity.selection', { size: formatSize(projectedBytes) }),
         size?.expectedBytes !== undefined ? t('basket.size.expected', { size: formatSize(size.expectedBytes) }) : '',
         size?.reserveBytes !== undefined ? t('basket.size.reserve', { size: formatReserveSize(size.reserveBytes) }) : '', autofillMessage, statusMessage]
-        .filter(Boolean).join('; ').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        .filter(Boolean).join('; '));
 
     return `
         <div class="capacity-section capacity-zone-${zone}">
@@ -723,7 +725,7 @@ export class BasketSidebar {
             ?? current.transcoding_profile_id
             ?? 'passthrough';
         const profileOptions = profiles
-            .map(profile => `<sl-option value="${this.escapeHtml(profile.id)}">${this.escapeHtml(profile.name)}</sl-option>`)
+            .map(profile => `<sl-option value="${escapeAttr(profile.id)}">${escapeAttr(profile.name)}</sl-option>`)
             .join('');
         const selectedProfile = profiles.find(profile => profile.id === selectedProfileId)
             ?? profiles.find(profile => profile.id === 'passthrough');
@@ -734,7 +736,7 @@ export class BasketSidebar {
         dialog.className = 'device-settings-dialog';
         dialog.innerHTML = `
             <div class="device-settings-form">
-                <sl-input id="device-settings-name" label="${t('basket.device.name')}" value="${this.escapeHtml(selected.name || selected.deviceId)}"></sl-input>
+                <sl-input id="device-settings-name" label="${t('basket.device.name')}" value="${escapeAttr(selected.name || selected.deviceId)}"></sl-input>
                 <div>
                     <div id="device-settings-icon-label" class="device-settings-label">${t('basket.device.icon')}</div>
                     <div id="device-settings-icon-picker" class="device-settings-icon-picker" role="group" aria-labelledby="device-settings-icon-label">
@@ -742,16 +744,16 @@ export class BasketSidebar {
                             <button type="button" aria-pressed="${icon === selectedIcon}" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}"
                                  data-icon="${icon}">
                                 <sl-icon name="${icon}" aria-hidden="true"></sl-icon>
-                                <span>${this.iconLabel(icon)}</span>
+                                <span>${deviceIconLabel(icon)}</span>
                             </button>
                         `).join('')}
                     </div>
                 </div>
-                <sl-select id="device-settings-transcoding-profile" label="${t('basket.device.transcoding_profile')}" value="${this.escapeHtml(selectedProfileId)}">
+                <sl-select id="device-settings-transcoding-profile" label="${t('basket.device.transcoding_profile')}" value="${escapeAttr(selectedProfileId)}">
                     ${profileOptions}
                 </sl-select>
                 <div id="device-settings-transcoding-desc" class="device-settings-description">
-                    ${this.escapeHtml(selectedProfile?.description ?? '')}
+                    ${escapeAttr(selectedProfile?.description ?? '')}
                 </div>
                 ${canConfirmPassthrough ? `
                     <div id="device-settings-profile-recovery">
@@ -760,10 +762,10 @@ export class BasketSidebar {
                         <sl-button id="device-settings-profile-recover" disabled>${t('basket.device.profile_recovery_action')}</sl-button>
                     </div>
                 ` : ''}
-                <sl-input id="device-settings-music" label="${t('basket.device.music_folder')}" value="${this.escapeHtml(musicFolder)}"></sl-input>
-                <sl-input id="device-settings-audiobook" label="${t('basket.device.audiobook_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(audiobookFolder)}"></sl-input>
-                <sl-input id="device-settings-podcast" label="${t('basket.device.podcast_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(podcastFolder)}"></sl-input>
-                <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
+                <sl-input id="device-settings-music" label="${t('basket.device.music_folder')}" value="${escapeAttr(musicFolder)}"></sl-input>
+                <sl-input id="device-settings-audiobook" label="${t('basket.device.audiobook_folder')}" placeholder="${escapeAttr(musicFolder)}" value="${escapeAttr(audiobookFolder)}"></sl-input>
+                <sl-input id="device-settings-podcast" label="${t('basket.device.podcast_folder')}" placeholder="${escapeAttr(musicFolder)}" value="${escapeAttr(podcastFolder)}"></sl-input>
+                <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${escapeAttr(musicFolder)}" value="${escapeAttr(playlistFolder ?? '')}"></sl-input>
                 <sl-checkbox id="device-settings-reconcile" ${reconcileBeforeSync ? 'checked' : ''} help-text="${t('basket.device.reconcile_hint')}">${t('basket.device.reconcile_before_sync')}</sl-checkbox>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
@@ -1069,7 +1071,7 @@ export class BasketSidebar {
                     ${folders.map(f => `
                         <div class="folder-item ${f.isManaged ? 'folder-managed' : 'folder-protected'}">
                             <sl-icon name="${f.isManaged ? 'unlock' : 'shield-lock'}" class="folder-icon"></sl-icon>
-                            <span class="folder-name" title="${this.escapeHtml(f.name)}">${this.escapeHtml(f.name)}</span>
+                            <span class="folder-name" title="${escapeAttr(f.name)}">${escapeAttr(f.name)}</span>
                             <span class="folder-status">${f.isManaged ? t('basket.device.managed') : t('basket.device.protected')}</span>
                         </div>
                     `).join('')}
@@ -1638,7 +1640,7 @@ export class BasketSidebar {
             const reasonList = reasons.length > 0
                 ? `<p><strong>${t('basket.confirm.reason_summary')}</strong></p>
                 <ul class="cleanup-reasons">${reasons.map((entry) => `
-                    <li><strong>${entry.count}</strong> ${this.escapeHtml(entry.reason)}</li>
+                    <li><strong>${entry.count}</strong> ${escapeAttr(entry.reason)}</li>
                 `).join('')}</ul>`
                 : '';
             dialog.innerHTML = `
@@ -1780,7 +1782,7 @@ export class BasketSidebar {
             dialog.innerHTML = `
                 <p>${t('basket.sync.blocked_help')}</p>
                 <p id="blocked-page-count">${blocked.length} / ${page?.total ?? blocked.length}</p>
-                <ul id="blocked-page-items">${blocked.map((item) => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(t('library.books.compatibility_blocked'))} — ${this.escapeHtml(reason(item))}</li>`).join('')}</ul>
+                <ul id="blocked-page-items">${blocked.map((item) => `<li><strong>${escapeAttr(item.name ?? '')}</strong>: ${escapeAttr(t('library.books.compatibility_blocked'))} — ${escapeAttr(reason(item))}</li>`).join('')}</ul>
                 ${page ? '<sl-button id="blocked-previous">←</sl-button><sl-button id="blocked-next">→</sl-button>' : ''}
                 <sl-button slot="footer" variant="default" id="blocked-cancel">${t('basket.actions.cancel')}</sl-button>
                 <sl-button slot="footer" variant="primary" id="blocked-continue">${t('basket.actions.start_sync')}</sl-button>
@@ -1802,7 +1804,7 @@ export class BasketSidebar {
                         if (closed) return;
                         offset = requested;
                         nextOffset = result.nextOffset;
-                        dialog.querySelector('#blocked-page-items').innerHTML = result.items.map(item => `<li><strong>${this.escapeHtml(item.name ?? '')}</strong>: ${this.escapeHtml(reason(item))}</li>`).join('');
+                        dialog.querySelector('#blocked-page-items').innerHTML = result.items.map(item => `<li><strong>${escapeAttr(item.name ?? '')}</strong>: ${escapeAttr(reason(item))}</li>`).join('');
                         dialog.querySelector('#blocked-page-count').textContent = `${offset + 1}–${offset + result.items.length} / ${page.total}`;
                         updateButtons();
                     } catch (error) {
@@ -1866,11 +1868,11 @@ export class BasketSidebar {
                         label="${t('basket.sync.progress_percent', { pct })}"></sl-progress-bar>
                     <div class="sync-current-file">
                         <sl-icon name="arrow-down-circle" style="color: var(--sl-color-primary-600);"></sl-icon>
-                        <span id="sync-current-file-name" title="${this.escapeHtml(op.currentFile || '')}">${this.escapeHtml(currentFileName)}</span>
+                        <span id="sync-current-file-name" title="${escapeAttr(op.currentFile || '')}">${escapeAttr(currentFileName)}</span>
                     </div>
                     <div id="sync-file-counter" class="sync-file-counter">${t('basket.sync.file_counter', { completed: op.filesCompleted, total: op.filesTotal })}</div>
-                    <div id="sync-eta" class="sync-eta">${this.escapeHtml(this.etaText)}</div>
-                    <div id="sync-speeds" class="sync-speeds">${this.escapeHtml(speedText)}</div>
+                    <div id="sync-eta" class="sync-eta">${escapeAttr(this.etaText)}</div>
+                    <div id="sync-speeds" class="sync-speeds">${escapeAttr(speedText)}</div>
                 </div>
                 <div class="basket-footer">
                     <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;">
@@ -1938,7 +1940,7 @@ export class BasketSidebar {
                 <sl-icon name="check-circle-fill"
                     style="font-size: 2.5rem; color: var(--sl-color-success-600);"></sl-icon>
                 <p class="sync-status-label">${t('basket.sync.complete')}</p>
-                ${summary ? `<p class="sync-summary-label">${this.escapeHtml(summary)}</p>` : ''}
+                ${summary ? `<p class="sync-summary-label">${escapeAttr(summary)}</p>` : ''}
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-done-btn" variant="primary" style="width: 100%;">
@@ -1959,7 +1961,7 @@ export class BasketSidebar {
     private renderSyncError(errors: string[]) {
         const focused = this.container.contains(document.activeElement) ? document.activeElement : null;
         const errorList = errors.length > 0
-            ? errors.map(msg => `<li>${this.escapeHtml(msg)}</li>`).join('')
+            ? errors.map(msg => `<li>${escapeAttr(msg)}</li>`).join('')
             : `<li>${t('basket.sync.failed_retry')}</li>`;
 
         this.container.innerHTML = `
@@ -2103,7 +2105,7 @@ export class BasketSidebar {
     /** Remove control, hidden for locked (non-selected-server) items (AC35). */
     private removeButtonFor(item: BasketItem, id: string): string {
         if (basketStore.isItemLocked(item)) return '';
-        return `<sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(id)}" label="${this.escapeHtml(t('basket.actions.remove_named', { name: item.name }))}"></sl-icon-button>`;
+        return `<sl-icon-button name="x" class="remove-item-btn" data-id="${escapeAttr(id)}" label="${escapeAttr(t('basket.actions.remove_named', { name: item.name }))}"></sl-icon-button>`;
     }
 
     private lockedCardClass(item: BasketItem): string {
@@ -2128,17 +2130,17 @@ export class BasketSidebar {
             })
             : t('basket.autofill.slot_readout', { server: identity.label, size: formatSize(item.sizeBytes) });
         return `
-            <div class="basket-item-card basket-item-auto-fill-slot${this.lockedCardClass(item)}" data-id="${this.escapeHtml(item.id)}">
+            <div class="basket-item-card basket-item-auto-fill-slot${this.lockedCardClass(item)}" data-id="${escapeAttr(item.id)}">
                 <div class="basket-item-auto-fill-icon">
                     <sl-icon name="stars"></sl-icon>
                 </div>
                 <div class="basket-item-info">
                     <div class="basket-item-name">
-                        <sl-icon name="${this.escapeHtml(identity.icon)}" class="basket-item-server-badge" title="${this.escapeHtml(identity.tooltip)}"></sl-icon>
+                        <sl-icon name="${escapeAttr(identity.icon)}" class="basket-item-server-badge" title="${escapeAttr(identity.tooltip)}"></sl-icon>
                         ${t('basket.autofill.slot')}
                     </div>
                     <div class="basket-item-meta">
-                        ${this.escapeHtml(readout)}
+                        ${escapeAttr(readout)}
                         ${showFallbackHint ? `<span class="auto-fill-fallback-hint">${t('basket.autofill.fallback_hint')}</span>` : ''}
                     </div>
                 </div>
@@ -2149,12 +2151,12 @@ export class BasketSidebar {
 
     private renderArtistCard(item: BasketItem): string {
         return `
-            <div class="basket-item-card basket-item-artist${this.lockedCardClass(item)}" data-id="${this.escapeHtml(item.id)}">
+            <div class="basket-item-card basket-item-artist${this.lockedCardClass(item)}" data-id="${escapeAttr(item.id)}">
                 <div class="basket-item-artist-icon">
                     <sl-icon name="person-fill"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-name">${escapeAttr(item.name)}</div>
                     <div class="basket-item-meta">
                         ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: displaySelectionSize(this.plannedItemSize(item)) })}
                         ${renderSizeReserve(this.plannedItemSize(item))}
@@ -2167,12 +2169,12 @@ export class BasketSidebar {
 
     private renderGenreCard(item: BasketItem): string {
         return `
-            <div class="basket-item-card basket-item-genre${this.lockedCardClass(item)}" data-id="${this.escapeHtml(item.id)}">
+            <div class="basket-item-card basket-item-genre${this.lockedCardClass(item)}" data-id="${escapeAttr(item.id)}">
                 <div class="basket-item-genre-icon">
                     <sl-icon name="music-note-beamed"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-name">${escapeAttr(item.name)}</div>
                     <div class="basket-item-meta">
                         ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: displaySelectionSize(this.plannedItemSize(item)) })}
                         ${renderSizeReserve(this.plannedItemSize(item))}
@@ -2210,9 +2212,9 @@ export class BasketSidebar {
             .map(group => {
                 const identity = this.serverDisplayIdentity(group.serverId);
                 return `
-                <div class="basket-server-group-label" title="${this.escapeHtml(identity.tooltip)}">
-                    <sl-icon name="${this.escapeHtml(identity.icon)}"></sl-icon>
-                    <span>${this.escapeHtml(identity.label)}</span>
+                <div class="basket-server-group-label" title="${escapeAttr(identity.tooltip)}">
+                    <sl-icon name="${escapeAttr(identity.icon)}"></sl-icon>
+                    <span>${escapeAttr(identity.label)}</span>
                 </div>
                 ${group.items.map(item => this.renderItem(item)).join('')}
             `;
@@ -2238,7 +2240,7 @@ export class BasketSidebar {
                 ${this.basketItemImage(item)}
                 <div class="basket-item-info">
                     <div class="basket-item-name">
-                        ${this.escapeHtml(item.name)}
+                        ${escapeAttr(item.name)}
                     </div>
                     <div class="basket-item-meta">
                         ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: displaySelectionSize(this.plannedItemSize(item)) })}
@@ -2256,9 +2258,9 @@ export class BasketSidebar {
      * loader skips them). */
     private basketItemImage(item: BasketItem): string {
         if (basketStore.isItemLocked(item)) {
-            return `<div class="basket-item-image basket-item-image--locked" title="${this.escapeHtml(t('basket.locked_hint'))}"><sl-icon name="lock-fill"></sl-icon></div>`;
+            return `<div class="basket-item-image basket-item-image--locked" title="${escapeAttr(t('basket.locked_hint'))}"><sl-icon name="lock-fill"></sl-icon></div>`;
         }
-        return `<div class="basket-item-image" data-image-id="${this.escapeHtml(item.id)}"></div>`;
+        return `<div class="basket-item-image" data-image-id="${escapeAttr(item.id)}"></div>`;
     }
 
     /** Reuse visible artwork across redraws, scoped to the active provider. */
@@ -2447,25 +2449,5 @@ export class BasketSidebar {
         });
 
         customElements.whenDefined('sl-dialog').then(() => dialog.show());
-    }
-
-    private escapeHtml(text: string): string {
-        return text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
-
-    private iconLabel(icon: string): string {
-        const labels: Record<string, string> = {
-            'usb-drive': t('basket.icon.usb_drive'),
-            'phone-fill': t('basket.icon.phone'),
-            'watch': t('basket.icon.watch'),
-            'sd-card': t('basket.icon.sd_card'),
-            'headphones': t('basket.icon.headphones'),
-            'music-note-list': t('basket.icon.music_player'),
-        };
-        return labels[icon] ?? icon;
     }
 }

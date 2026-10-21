@@ -162,28 +162,16 @@ impl PlaybackCommandService {
         let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
-            let resolve = async {
-                let provider = crate::server_manager::get_provider_by_server_id(
-                    &manager,
-                    &db,
-                    &current.source.server_id,
-                )
-                .await?;
-                provider.resolve_playback(&current.source.track_id).await
-            };
-            let resolved = tokio::select! {
-                result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
-                _ = async {
-                    while playback.generation_guard(&generation).is_some()
-                        && playback.control_epoch() == resume_epoch
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    }
-                } => None,
-            };
-            if playback.control_epoch() != resume_epoch {
-                return;
-            }
+            let resolved = resolve_source(
+                &manager,
+                &db,
+                &playback,
+                &generation,
+                &current.source,
+                resume_epoch,
+                deadline,
+            )
+            .await;
             let failure = match resolved {
                 Some(Ok(Ok(description))) => {
                     let Some((gain, admitted_suffix)) = resolved_gain(
@@ -287,28 +275,16 @@ impl PlaybackCommandService {
         let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
-            let resolve = async {
-                let provider = crate::server_manager::get_provider_by_server_id(
-                    &manager,
-                    &db,
-                    &current.source.server_id,
-                )
-                .await?;
-                provider.resolve_playback(&current.source.track_id).await
-            };
-            let resolved = tokio::select! {
-                result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
-                _ = async {
-                    while playback.generation_guard(&generation).is_some()
-                        && playback.control_epoch() == back_epoch
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    }
-                } => None,
-            };
-            if playback.control_epoch() != back_epoch {
-                return;
-            }
+            let resolved = resolve_source(
+                &manager,
+                &db,
+                &playback,
+                &generation,
+                &current.source,
+                back_epoch,
+                deadline,
+            )
+            .await;
             let failure = match resolved {
                 Some(Ok(Ok(description))) => {
                     let Some((gain, admitted_suffix)) = resolved_gain(
@@ -410,28 +386,16 @@ impl PlaybackCommandService {
         let queue_revision = snapshot.queue_revision.parse::<u64>().unwrap_or_default();
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
-            let resolve = async {
-                let provider = crate::server_manager::get_provider_by_server_id(
-                    &manager,
-                    &db,
-                    &current.source.server_id,
-                )
-                .await?;
-                provider.resolve_playback(&current.source.track_id).await
-            };
-            let resolved = tokio::select! {
-                result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
-                _ = async {
-                    while playback.generation_guard(&generation).is_some()
-                        && playback.control_epoch() == seek_epoch
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    }
-                } => None,
-            };
-            if playback.control_epoch() != seek_epoch {
-                return;
-            }
+            let resolved = resolve_source(
+                &manager,
+                &db,
+                &playback,
+                &generation,
+                &current.source,
+                seek_epoch,
+                deadline,
+            )
+            .await;
             let failure = match resolved {
                 Some(Ok(Ok(description))) => {
                     let Some((gain, admitted_suffix)) = resolved_gain(
@@ -496,6 +460,42 @@ impl PlaybackCommandService {
             }
         });
     }
+}
+
+async fn resolve_source(
+    manager: &Arc<tokio::sync::RwLock<ServerManager>>,
+    db: &Arc<Database>,
+    playback: &PlaybackSession,
+    generation: &str,
+    source: &super::model::TrackSource,
+    epoch: u64,
+    deadline: std::time::Instant,
+) -> Option<
+    Result<
+        Result<crate::providers::PlaybackDescription, crate::providers::ProviderError>,
+        tokio::time::error::Elapsed,
+    >,
+> {
+    let resolve = async {
+        let provider =
+            crate::server_manager::get_provider_by_server_id(manager, db, &source.server_id)
+                .await?;
+        provider.resolve_playback(&source.track_id).await
+    };
+    let resolved = tokio::select! {
+        result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
+        _ = async {
+            while playback.generation_guard(generation).is_some()
+                && playback.control_epoch() == epoch
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        } => None,
+    };
+    if playback.control_epoch() != epoch {
+        return None;
+    }
+    resolved
 }
 
 pub(crate) fn authorize_prepared_back(

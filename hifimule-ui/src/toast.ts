@@ -1,3 +1,4 @@
+import { escapeHtml } from './html';
 // Toast notifications — lightweight wrapper around Shoelace's sl-alert.toast().
 // Wait for the registered custom element before toasting on first use.
 
@@ -15,11 +16,6 @@ const VARIANT_ICONS: Record<ToastVariant, string> = {
     danger: 'exclamation-octagon',
 };
 
-function escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
 
 export function showToast(
     message: string,

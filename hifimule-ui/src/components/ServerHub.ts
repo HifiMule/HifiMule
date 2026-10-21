@@ -1,3 +1,4 @@
+import { escapeAttr } from '../html';
 // Server Hub (Story 2.11)
 // Compact header component listing all configured servers, allowing the user to
 // switch the active one, add a new server (inline login), or remove one.
@@ -58,16 +59,16 @@ export class ServerHub {
             const identity = formatServerIdentity(s);
             return `
             <sl-menu-item class="server-hub-row ${s.id === this.selectedId ? 'active' : ''}"
-                          data-id="${this.escape(s.id)}" type="checkbox" ${s.id === this.selectedId ? 'checked' : ''}>
-                <sl-icon slot="prefix" name="${this.escape(identity.icon)}"></sl-icon>
-                <span class="server-hub-row-text" title="${this.escape(identity.tooltip)}">
-                    <span class="server-hub-row-name">${this.escape(identity.label)}</span>
-                    <span class="server-hub-row-meta">${this.escape(identity.secondaryText)}</span>
+                          data-id="${escapeAttr(s.id)}" type="checkbox" ${s.id === this.selectedId ? 'checked' : ''}>
+                <sl-icon slot="prefix" name="${escapeAttr(identity.icon)}"></sl-icon>
+                <span class="server-hub-row-text" title="${escapeAttr(identity.tooltip)}">
+                    <span class="server-hub-row-name">${escapeAttr(identity.label)}</span>
+                    <span class="server-hub-row-meta">${escapeAttr(identity.secondaryText)}</span>
                 </span>
                 <sl-icon-button slot="suffix" name="pencil" class="server-hub-edit"
-                                data-id="${this.escape(s.id)}" label="${t('serverHub.edit')}"></sl-icon-button>
+                                data-id="${escapeAttr(s.id)}" label="${t('serverHub.edit')}"></sl-icon-button>
                 <sl-icon-button slot="suffix" name="trash" class="server-hub-remove"
-                                data-id="${this.escape(s.id)}" label="${t('serverHub.remove')}"></sl-icon-button>
+                                data-id="${escapeAttr(s.id)}" label="${t('serverHub.remove')}"></sl-icon-button>
             </sl-menu-item>
         `;
         }).join('');
@@ -75,9 +76,9 @@ export class ServerHub {
         this.container.innerHTML = `
             <div class="server-hub">
                 <sl-dropdown placement="bottom-end" hoist>
-                    <div slot="trigger" class="server-connection-chip" role="button" tabindex="0" title="${this.escape(selectedIdentity?.tooltip ?? triggerLabel)}">
-                        ${selectedIdentity ? `<sl-icon name="${this.escape(selectedIdentity.icon)}"></sl-icon>` : ''}
-                        <span>${this.escape(triggerLabel)}</span>
+                    <div slot="trigger" class="server-connection-chip" role="button" tabindex="0" title="${escapeAttr(selectedIdentity?.tooltip ?? triggerLabel)}">
+                        ${selectedIdentity ? `<sl-icon name="${escapeAttr(selectedIdentity.icon)}"></sl-icon>` : ''}
+                        <span>${escapeAttr(triggerLabel)}</span>
                         <sl-icon name="chevron-down"></sl-icon>
                     </div>
                     <sl-menu>
@@ -150,14 +151,14 @@ export class ServerHub {
                     label="${t('serverHub.identity_name')}"
                     maxlength="40"
                     required
-                    value="${this.escape(identity.label)}">
+                    value="${escapeAttr(identity.label)}">
                 </sl-input>
-                <div class="device-settings-description">${this.escape(identity.secondaryText)}</div>
+                <div class="device-settings-description">${escapeAttr(identity.secondaryText)}</div>
                 <label class="device-settings-label">${t('serverHub.identity_icon')}</label>
                 <div class="device-settings-icon-picker server-identity-icon-picker">
                     ${SERVER_ICON_OPTIONS.map(icon => `
-                        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${this.escape(icon)}" title="${this.escape(icon)}" aria-label="${this.escape(icon)}" aria-pressed="${icon === selectedIcon}">
-                            <sl-icon name="${this.escape(icon)}"></sl-icon>
+                        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${escapeAttr(icon)}" title="${escapeAttr(icon)}" aria-label="${escapeAttr(icon)}" aria-pressed="${icon === selectedIcon}">
+                            <sl-icon name="${escapeAttr(icon)}"></sl-icon>
                         </button>
                     `).join('')}
                 </div>
@@ -280,7 +281,7 @@ export class ServerHub {
             : '';
         dialog.innerHTML = `
             ${warning}
-            <p style="overflow-wrap:anywhere">${this.escape(t('serverHub.remove_confirm', { server: identity.label }))}</p>
+            <p style="overflow-wrap:anywhere">${escapeAttr(t('serverHub.remove_confirm', { server: identity.label }))}</p>
             <sl-button slot="footer" variant="default" id="server-remove-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="danger" id="server-remove-confirm">${t('serverHub.remove')}</sl-button>
         `;
@@ -350,11 +351,4 @@ export class ServerHub {
         }
     }
 
-    private escape(text: string): string {
-        return text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
 }

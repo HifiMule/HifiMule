@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -10,7 +11,7 @@ function harness() {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText, {
         exports, console: { error() {} }, CSS: { escape: value => value },
-        require: name => name === '../rpc' ? { rpcCall: (method) => new Promise((resolve, reject) => pending.push({ method, resolve, reject })) }
+        require: name => name === '../html' ? html : name === '../rpc' ? { rpcCall: (method) => new Promise((resolve, reject) => pending.push({ method, resolve, reject })) }
             : name === '../i18n' ? { t: (key, params) => params ? ({ key, ...params }) : key }
             : { showToast: value => notices.push(value) },
     });
@@ -78,7 +79,6 @@ test('reopening cannot replace the dialog during a manifest write', async () => 
 test('multi-item relink waits for the combobox before focusing and wires the chosen entry', async () => {
     const { modal } = harness();
     let ready, focused = false, change, written;
-    modal.escapeHtml = value => value; // Fixed plain-text options; DOM escaping is outside this focus test.
     const select = {
         updateComplete: new Promise(resolve => { ready = resolve; }),
         isConnected: true, value: 'second',

@@ -1,3 +1,4 @@
+import { escapeHtml } from './html';
 import '@shoelace-style/shoelace/dist/themes/dark.css';
 import './shoelace';
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
@@ -265,7 +266,7 @@ function renderLifecycleFailure(error: unknown): void {
             <section class="login-card" style="padding:2rem;max-width:36rem">
                 <h2>${t('lifecycle.startup_failed_title')}</h2>
                 <p>${t('lifecycle.startup_failed_body')}</p>
-                <p class="error-text">${escapeLifecycleText(message)}</p>
+                <p class="error-text">${escapeHtml(message)}</p>
                 <div style="display:flex;gap:.75rem">
                     <button id="lifecycle-retry" type="button">${t('lifecycle.retry')}</button>
                     <button id="lifecycle-close" type="button">${t('lifecycle.close')}</button>
@@ -283,12 +284,6 @@ function renderLifecycleFailure(error: unknown): void {
     document.getElementById('lifecycle-close')?.addEventListener('click', () => {
         void import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_ui'));
     });
-}
-
-function escapeLifecycleText(value: string): string {
-    const element = document.createElement('span');
-    element.textContent = value;
-    return element.innerHTML;
 }
 
 /**

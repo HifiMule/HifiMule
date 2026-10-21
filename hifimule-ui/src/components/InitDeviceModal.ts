@@ -1,3 +1,5 @@
+import { deviceIconLabel } from '../deviceIcon';
+import { escapeAttr } from '../html';
 // Initialize Device Modal Component
 // Guides the user through initializing a new unrecognized device for sync.
 // Follows the RepairModal.ts pattern: sl-dialog, class-based, open() method, onComplete callback.
@@ -143,7 +145,7 @@ export class InitDeviceModal {
         }
 
         const profileOptions = (profiles || []).map(p => 
-            `<sl-option value="${this.escapeHtml(p.id)}">${this.escapeHtml(p.name)}</sl-option>`
+            `<sl-option value="${escapeAttr(p.id)}">${escapeAttr(p.name)}</sl-option>`
         ).join('');
         const defaultPassthroughDesc = (profiles || []).find(p => p.id === 'passthrough')?.description || '';
         const defaultPassthrough = (profiles || []).find(p => p.id === 'passthrough');
@@ -158,10 +160,10 @@ export class InitDeviceModal {
                 <div style="margin-bottom: 1.25rem;">
                     <sl-input
                         id="init-device-name-input" label="${t('device.init.name')}" required
-                        placeholder="${this.escapeHtml(t('device.init.default_name'))}"
-                        help-text="${this.escapeHtml(t('device.init.name_hint'))}"
+                        placeholder="${escapeAttr(t('device.init.default_name'))}"
+                        help-text="${escapeAttr(t('device.init.name_hint'))}"
                         maxlength="40"
-                        value="${this.escapeHtml(this._defaultName ?? t('device.init.default_name'))}"
+                        value="${escapeAttr(this._defaultName ?? t('device.init.default_name'))}"
                         clearable
                     ></sl-input>
                 </div>
@@ -180,7 +182,7 @@ export class InitDeviceModal {
                                         background: ${icon === 'usb-drive' ? 'var(--sl-color-primary-50)' : 'transparent'};
                                         transition: border-color 0.15s, background 0.15s;">
                                 <sl-icon name="${icon}" style="font-size: 1.5rem;"></sl-icon>
-                                <span style="font-size: 0.65rem; opacity: 0.7;">${this.iconLabel(icon)}</span>
+                                <span style="font-size: 0.65rem; opacity: 0.7;">${deviceIconLabel(icon)}</span>
                             </button>
                         `).join('')}
                     </div>
@@ -188,23 +190,23 @@ export class InitDeviceModal {
                 <div style="margin-bottom: 1.25rem;">
                     <sl-select id="init-transcoding-profile" label="${t('basket.device.transcoding_profile')}" value="passthrough">
                         ${profileOptions}
-                        <span slot="help-text" id="init-transcoding-desc">${this.escapeHtml(defaultPassthroughDesc)}</span>
+                        <span slot="help-text" id="init-transcoding-desc">${escapeAttr(defaultPassthroughDesc)}</span>
                     </sl-select>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <sl-input
                         id="init-folder-input" label="${t('device.init.music_folder')}"
-                        help-text="${this.escapeHtml(t('device.init.music_hint'))}"
-                        placeholder="${this.escapeHtml(t('device.init.music_placeholder'))}"
-                        value="${this.escapeHtml(defaultPassthrough?.defaultMusicFolder ?? '')}"
+                        help-text="${escapeAttr(t('device.init.music_hint'))}"
+                        placeholder="${escapeAttr(t('device.init.music_placeholder'))}"
+                        value="${escapeAttr(defaultPassthrough?.defaultMusicFolder ?? '')}"
                         clearable
                     ></sl-input>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <sl-input
                         id="init-playlist-folder-input" label="${t('device.init.playlist_folder')}"
-                        placeholder="${this.escapeHtml(t('device.init.playlist_placeholder'))}"
-                        value="${this.escapeHtml(defaultPassthrough?.defaultPlaylistFolder ?? '')}"
+                        placeholder="${escapeAttr(t('device.init.playlist_placeholder'))}"
+                        value="${escapeAttr(defaultPassthrough?.defaultPlaylistFolder ?? '')}"
                         clearable
                     ></sl-input>
                 </div>
@@ -218,7 +220,7 @@ export class InitDeviceModal {
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">${t('device.init.linked_profile')}</div>
                     <div style="font-size: 0.85rem;">
                         <sl-icon name="person-fill" style="vertical-align: middle; margin-right: 0.3rem;"></sl-icon>
-                        <span id="init-user-display">${this.escapeHtml(userId)}</span>
+                        <span id="init-user-display">${escapeAttr(userId)}</span>
                     </div>
                 </div>
             </div>
@@ -237,7 +239,7 @@ export class InitDeviceModal {
                 const selectedId = e.target.value;
                 const profile = (profiles || []).find(p => p.id === selectedId);
                 if (profile) {
-                    descEl.innerHTML = this.escapeHtml(profile.description ?? '');
+                    descEl.innerHTML = escapeAttr(profile.description ?? '');
                     if (!foldersEdited) {
                         musicFolderInput.value = profile.defaultMusicFolder ?? '';
                         playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
@@ -279,7 +281,7 @@ export class InitDeviceModal {
         body.innerHTML = `
             <div class="init-device-error">
                 <sl-icon name="exclamation-triangle-fill" style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
-                <p role="alert">${this.escapeHtml(t('device.init.load_error', { message }))}</p>
+                <p role="alert">${escapeAttr(t('device.init.load_error', { message }))}</p>
                 <sl-button id="init-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
             </div>
         `;
@@ -302,7 +304,7 @@ export class InitDeviceModal {
                 <sl-alert variant="danger" open>
                     <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
                     <strong>${t('device.init.failed')}</strong><br>
-                    ${this.escapeHtml(message)}
+                    ${escapeAttr(message)}
                 </sl-alert>
                 <div style="display: flex; gap: 0.5rem; margin-top: 1rem; justify-content: flex-end;">
                     <sl-button id="init-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
@@ -497,7 +499,7 @@ export class InitDeviceModal {
                     error.textContent = '';
                     const summary = t('device.scan.result', { imported: result.imported, unmatched: result.unmatched, ambiguous: result.ambiguous, incompatible: result.incompatible });
                     announcement.textContent = summary;
-                    content.innerHTML = `<p>${this.escapeHtml(summary)}</p><sl-button id="scan-done" variant="primary">${t('device.scan.done')}</sl-button>`;
+                    content.innerHTML = `<p>${escapeAttr(summary)}</p><sl-button id="scan-done" variant="primary">${t('device.scan.done')}</sl-button>`;
                     void focus('#scan-done');
                     const done = content.querySelector('#scan-done') as any;
                     done.addEventListener('click', async () => {
@@ -552,23 +554,5 @@ export class InitDeviceModal {
             description: english[descriptionKey] && profile.description === english[descriptionKey]
                 ? t(descriptionKey) : profile.description,
         };
-    }
-
-    private iconLabel(icon: string): string {
-        const labels: Record<string, string> = {
-            'usb-drive': t('basket.icon.usb_drive'),
-            'phone-fill': t('basket.icon.phone'),
-            'watch': t('basket.icon.watch'),
-            'sd-card': t('basket.icon.sd_card'),
-            'headphones': t('basket.icon.headphones'),
-            'music-note-list': t('basket.icon.music_player'),
-        };
-        return labels[icon] ?? icon;
-    }
-
-    private escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 }

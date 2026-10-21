@@ -1,3 +1,4 @@
+import * as html from '../src/html.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -22,7 +23,7 @@ function harness() {
         document: { createElement: () => dialog, body: { appendChild() {} } },
         customElements: { whenDefined: async () => {} },
         window: { dispatchEvent: e => events.push(e) }, CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
-        require: name => name === '../rpc' ? { serverRemove: () => { removeCalls++; return pending; }, rpcCall: async () => { throw 'offline'; } }
+        require: name => name === '../html' ? html : name === '../rpc' ? { serverRemove: () => { removeCalls++; return pending; }, rpcCall: async () => { throw 'offline'; } }
             : name === '../state/basket' ? { basketStore: { removeItemsForServer: id => { removed.push(id); return 0; } } }
             : name === '../i18n' ? { t: (key, params) => params?.server ?? key }
             : name === '../serverIdentity' ? { formatServerIdentity: s => ({ label: s.name }) } : {},
@@ -70,7 +71,7 @@ function refreshHarness() {
     const source = readFileSync(new URL('../src/components/ServerHub.ts', import.meta.url), 'utf8');
     vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
         exports, console: { error() {} },
-        require: name => name === '../rpc' ? { serverList: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) }
+        require: name => name === '../html' ? html : name === '../rpc' ? { serverList: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) }
             : name === '../state/basket' ? { basketStore: { reconcileServerIds() {} } } : {},
     });
     const hub = Object.create(exports.ServerHub.prototype);
