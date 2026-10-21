@@ -1460,100 +1460,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn edit_playback_upcoming(
-        &self,
-        session: &PersistedSession,
-        ordered_upcoming: &[Occurrence],
-        removed_occurrence_ids: &[String],
-    ) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let tx = conn.transaction()?;
-        let (stored_revision, stored_current): (i64, Option<String>) = tx.query_row(
-            "SELECT queue_revision,current_occurrence_id FROM playback_sessions WHERE singleton_id=1 AND session_id=?1",
-            [&session.session_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let prior_revision = session
-            .queue_revision
-            .checked_sub(1)
-            .ok_or_else(|| anyhow!("queue revision underflow"))?;
-        if stored_revision != i64::try_from(prior_revision)?
-            || stored_current != session.current_occurrence_id
-        {
-            return Err(anyhow!("authoritative queue changed"));
-        }
-        let current_id = stored_current.ok_or_else(|| anyhow!("current occurrence is required"))?;
-        let current_ordinal: i64 = tx.query_row(
-            "SELECT ordinal FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
-            params![session.session_id, current_id],
-            |row| row.get(0),
-        )?;
-        let existing: Vec<String> = {
-            let mut statement = tx.prepare(
-                "SELECT occurrence_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal",
-            )?;
-            statement
-                .query_map(params![session.session_id, current_ordinal], |row| {
-                    row.get(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut expected = existing.clone();
-        expected.retain(|id| !removed_occurrence_ids.contains(id));
-        let proposed: Vec<&str> = ordered_upcoming
-            .iter()
-            .map(|row| row.occurrence_id.as_str())
-            .collect();
-        if expected.len() != proposed.len()
-            || expected.iter().any(|id| !proposed.contains(&id.as_str()))
-        {
-            return Err(anyhow!("edited queue membership changed"));
-        }
-        for occurrence_id in removed_occurrence_ids {
-            let changed = tx.execute(
-                "DELETE FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2 AND ordinal>?3",
-                params![session.session_id, occurrence_id, current_ordinal],
-            )?;
-            if changed != 1 {
-                return Err(anyhow!("removed occurrence is no longer upcoming"));
-            }
-            tx.execute(
-                "DELETE FROM playback_radio_origin WHERE occurrence_id=?1 AND session_id=?2",
-                params![occurrence_id, session.session_id],
-            )?;
-        }
-        if !ordered_upcoming.is_empty() {
-            let max_ordinal: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(ordinal),0) FROM playback_occurrences WHERE session_id=?1",
-                [&session.session_id],
-                |row| row.get(0),
-            )?;
-            let offset = max_ordinal
-                .checked_add(i64::try_from(ordered_upcoming.len())?)
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| anyhow!("playback ordinal overflow"))?;
-            tx.execute(
-                "UPDATE playback_occurrences SET ordinal=ordinal+?1 WHERE session_id=?2 AND ordinal>?3",
-                params![offset, session.session_id, current_ordinal],
-            )?;
-            for (index, occurrence) in ordered_upcoming.iter().enumerate() {
-                let ordinal = current_ordinal
-                    .checked_add(i64::try_from(index)? + 1)
-                    .ok_or_else(|| anyhow!("playback ordinal overflow"))?;
-                let changed = tx.execute(
-                    "UPDATE playback_occurrences SET ordinal=?1 WHERE session_id=?2 AND occurrence_id=?3",
-                    params![ordinal, session.session_id, occurrence.occurrence_id],
-                )?;
-                if changed != 1 {
-                    return Err(anyhow!("moved occurrence is absent"));
-                }
-            }
-        }
-        update_session(&tx, session)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn remove_playback_upcoming(
         &self,
         session: &PersistedSession,
@@ -3493,7 +3399,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_edit_abort_restores_deleted_rows_ordinals_revision_and_current_policy() {
+    fn queue_remove_and_move_abort_restore_rows_ordinals_revision_and_current_policy() {
         let db = Database::memory().unwrap();
         db.init_playback().unwrap();
         let rows: Vec<_> = (0..5)
@@ -3509,9 +3415,8 @@ mod tests {
         ).unwrap();
         let mut edited = committed.clone();
         edited.queue_revision += 1;
-        let ordered = [rows[4].clone(), rows[2].clone()];
         let removed = [rows[3].occurrence_id.clone()];
-        // Fail after DELETE and all ordinal rewrites, at the final session update.
+        // Fail after row changes, at the final session update for each operation.
         db.conn
             .lock()
             .unwrap()
@@ -3520,45 +3425,67 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'injected queue edit failure'); END;",
             )
             .unwrap();
-        assert!(
-            db.edit_playback_upcoming(&edited, &ordered, &removed)
-                .is_err()
-        );
-        let unchanged = db.playback_page(&committed.session_id, None, 200).unwrap();
-        assert_eq!(
-            unchanged
-                .iter()
-                .map(|row| (&row.occurrence_id, row.ordinal, &row.source))
-                .collect::<Vec<_>>(),
-            rows.iter()
-                .map(|row| (&row.occurrence_id, row.ordinal, &row.source))
-                .collect::<Vec<_>>()
-        );
-        let restored = db.load_playback_session().unwrap().unwrap();
-        assert_eq!(restored.queue_revision, committed.queue_revision);
-        assert_eq!(
-            restored.current_occurrence_id,
-            committed.current_occurrence_id
-        );
-        assert_eq!(restored.position_ms, committed.position_ms);
-        assert_eq!(restored.current_gain_bits, committed.current_gain_bits);
-        assert_eq!(
-            restored.current_qualified_suffix,
-            committed.current_qualified_suffix
-        );
-        assert_eq!(
-            db.playback_outcome(&rows[0].occurrence_id)
-                .unwrap()
-                .as_deref(),
-            Some("naturalCompletion")
-        );
+        for remove in [true, false] {
+            let result = if remove {
+                db.remove_playback_upcoming(&edited, rows[1].ordinal, &removed)
+            } else {
+                db.move_playback_upcoming(
+                    &edited,
+                    rows[1].ordinal,
+                    &rows[4].occurrence_id,
+                    Some(&rows[2].occurrence_id),
+                )
+            };
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("injected queue edit failure")
+            );
+            let unchanged = db.playback_page(&committed.session_id, None, 200).unwrap();
+            assert_eq!(
+                unchanged
+                    .iter()
+                    .map(|row| (&row.occurrence_id, row.ordinal, &row.source))
+                    .collect::<Vec<_>>(),
+                rows.iter()
+                    .map(|row| (&row.occurrence_id, row.ordinal, &row.source))
+                    .collect::<Vec<_>>()
+            );
+            let restored = db.load_playback_session().unwrap().unwrap();
+            assert_eq!(restored.queue_revision, committed.queue_revision);
+            assert_eq!(
+                restored.current_occurrence_id,
+                committed.current_occurrence_id
+            );
+            assert_eq!(restored.position_ms, committed.position_ms);
+            assert_eq!(restored.current_gain_bits, committed.current_gain_bits);
+            assert_eq!(
+                restored.current_qualified_suffix,
+                committed.current_qualified_suffix
+            );
+            assert_eq!(
+                db.playback_outcome(&rows[0].occurrence_id)
+                    .unwrap()
+                    .as_deref(),
+                Some("naturalCompletion")
+            );
+        }
         db.conn
             .lock()
             .unwrap()
             .execute_batch("DROP TRIGGER abort_queue_edit")
             .unwrap();
-        db.edit_playback_upcoming(&edited, &ordered, &removed)
+        db.remove_playback_upcoming(&edited, rows[1].ordinal, &removed)
             .unwrap();
+        edited.queue_revision += 1;
+        db.move_playback_upcoming(
+            &edited,
+            rows[1].ordinal,
+            &rows[4].occurrence_id,
+            Some(&rows[2].occurrence_id),
+        )
+        .unwrap();
         let after = db.playback_page(&committed.session_id, None, 200).unwrap();
         assert_eq!(
             after
@@ -3578,7 +3505,7 @@ mod tests {
         );
         assert_eq!(
             db.load_playback_session().unwrap().unwrap().queue_revision,
-            5
+            6
         );
     }
 
