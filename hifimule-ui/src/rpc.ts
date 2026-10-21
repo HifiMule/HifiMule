@@ -6,23 +6,10 @@ function getErrorMessage(error: unknown): string {
     const localized = localizeKnownRpcError(error);
     if (localized) return localized;
 
-    if (error instanceof Error && error.message.trim()) {
-        return error.message;
-    }
-
-    if (typeof error === 'string' && error.trim()) {
-        return error;
-    }
+    const message = rawErrorMessage(error);
+    if (message) return message;
 
     if (error && typeof error === 'object') {
-        const record = error as Record<string, unknown>;
-        for (const key of ['message', 'error', 'details']) {
-            const value = record[key];
-            if (typeof value === 'string' && value.trim()) {
-                return value;
-            }
-        }
-
         try {
             const serialized = JSON.stringify(error);
             if (serialized && serialized !== '{}') {
