@@ -2076,7 +2076,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower-http",
- "tracing",
  "tray-icon 0.19.3",
  "uuid",
  "windows 0.58.0",

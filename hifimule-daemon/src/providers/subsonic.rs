@@ -1775,7 +1775,6 @@ impl SubsonicClient {
             }
         }
 
-        tracing::debug!(url = %sanitize_subsonic_url(&url), "Subsonic request");
         Ok(url.into())
     }
 }
@@ -1814,25 +1813,6 @@ fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
             message: sanitize_subsonic_message(&error.to_string()),
         }
     }
-}
-
-pub(crate) fn sanitize_subsonic_url(url: &Url) -> String {
-    let Some(query) = url.query() else {
-        return url.to_string();
-    };
-    let new_query = query
-        .split('&')
-        .map(|pair| match pair.split_once('=') {
-            Some((key, _)) if SUBSONIC_SECRET_QUERY_KEYS.contains(&key) => {
-                format!("{key}={REDACTED}")
-            }
-            _ => pair.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("&");
-    let mut sanitized = url.clone();
-    sanitized.set_query(Some(&new_query));
-    sanitized.into()
 }
 
 pub(crate) fn sanitize_subsonic_message(message: &str) -> String {
@@ -2606,12 +2586,6 @@ mod tests {
             Matcher::UrlEncoded("c".into(), CLIENT_NAME.into()),
             Matcher::UrlEncoded("f".into(), "json".into()),
         ]
-    }
-
-    fn query_value(url: &Url, key: &str) -> Option<String> {
-        url.query_pairs()
-            .find(|(candidate, _)| candidate == key)
-            .map(|(_, value)| value.into_owned())
     }
 
     #[tokio::test]
@@ -3556,60 +3530,6 @@ mod tests {
         assert!(!download.contains(PASSWORD));
         assert!(!stream.contains(PASSWORD));
         assert!(!cover.contains(PASSWORD));
-    }
-
-    #[test]
-    fn sanitize_subsonic_url_redacts_only_auth_query_values() {
-        let url = Url::parse(
-            "http://music.example/rest/download.view?u=arthur&p=raw-password&t=token-value&s=salt-value&id=song1&v=1.16.1&c=hifimule&f=json",
-        )
-        .expect("url");
-
-        let sanitized = sanitize_subsonic_url(&url);
-        let parsed = Url::parse(&sanitized).expect("sanitized url remains parseable");
-
-        for key in ["u", "p", "t", "s"] {
-            assert_eq!(query_value(&parsed, key).as_deref(), Some(REDACTED));
-        }
-        assert_eq!(query_value(&parsed, "id").as_deref(), Some("song1"));
-        assert_eq!(query_value(&parsed, "v").as_deref(), Some(API_VERSION));
-        assert_eq!(query_value(&parsed, "c").as_deref(), Some(CLIENT_NAME));
-        assert_eq!(query_value(&parsed, "f").as_deref(), Some("json"));
-        assert!(!sanitized.contains("arthur"));
-        assert!(!sanitized.contains("raw-password"));
-        assert!(!sanitized.contains("token-value"));
-        assert!(!sanitized.contains("salt-value"));
-    }
-
-    #[test]
-    fn sanitize_subsonic_url_preserves_stream_profile_parameters() {
-        let url = Url::parse(
-            "http://music.example/rest/stream.view?u=arthur&t=token-value&s=salt-value&id=song1&format=mp3&maxBitRate=192&v=1.16.1&c=hifimule&f=json",
-        )
-        .expect("url");
-
-        let sanitized = sanitize_subsonic_url(&url);
-        let parsed = Url::parse(&sanitized).expect("sanitized url remains parseable");
-
-        assert_eq!(query_value(&parsed, "format").as_deref(), Some("mp3"));
-        assert_eq!(query_value(&parsed, "maxBitRate").as_deref(), Some("192"));
-        assert_eq!(query_value(&parsed, "id").as_deref(), Some("song1"));
-        assert_eq!(query_value(&parsed, "t").as_deref(), Some(REDACTED));
-        assert_eq!(query_value(&parsed, "s").as_deref(), Some(REDACTED));
-    }
-
-    #[test]
-    fn sanitize_subsonic_url_preserves_cover_art_id() {
-        let url = Url::parse(
-            "http://music.example/rest/getCoverArt.view?u=arthur&t=token-value&s=salt-value&id=cover1&v=1.16.1&c=hifimule&f=json",
-        )
-        .expect("url");
-
-        let sanitized = sanitize_subsonic_url(&url);
-        let parsed = Url::parse(&sanitized).expect("sanitized url remains parseable");
-
-        assert_eq!(query_value(&parsed, "id").as_deref(), Some("cover1"));
-        assert_eq!(query_value(&parsed, "u").as_deref(), Some(REDACTED));
     }
 
     #[test]
