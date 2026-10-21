@@ -1593,36 +1593,19 @@ fn push_auto_fill_items(
     for item in items {
         if seen_ids.insert(item.id.clone()) {
             if media_role == device::MediaRole::Music {
-                tracks.push(sync::PlaylistTrackInfo {
-                    jellyfin_id: item.id.clone(),
-                    artist: item.artist.clone(),
-                    run_time_seconds: -1,
-                });
+                tracks.push(rpc::autofill_playlist_track(&item));
             }
-            desired_items.push(sync::DesiredItem {source_audio: item.source_audio, disc_number: item.disc_number,
-                duration_seconds: item.duration_seconds,
+            let album_id = item.provider_album_id.clone();
+            desired_items.push(rpc::auto_fill_to_desired_item(
+                item,
+                None,
                 media_role,
-                jellyfin_id: item.id,
-                name: item.name,
-                album: item.album,
-                artist: item.artist,
-                size_bytes: item.size_bytes,
-                etag: None,
-                provider_album_id: item.provider_album_id,
-                provider_content_type: item.provider_content_type,
-                provider_suffix: item.provider_suffix,
-                original_bitrate: item.original_bitrate,
-                track_number: item.track_number,
-                server_id: None,
-            });
+                album_id,
+            ));
         }
     }
     if !tracks.is_empty() {
-        playlist_sync_items.push(sync::PlaylistSyncItem {
-            jellyfin_id: "__hifimule_autofill".to_string(),
-            name: "Autofill".to_string(),
-            tracks,
-        });
+        playlist_sync_items.push(rpc::autofill_playlist_item(tracks));
     }
 }
 
@@ -1726,8 +1709,10 @@ mod auto_sync_tests {
         }];
         let mut playlists = Vec::new();
 
+        let mut fill = fill_item("fill", Some(9));
+        fill.provider_album_id = Some("album-id".into());
         push_auto_fill_items(
-            vec![fill_item("manual", Some(1)), fill_item("fill", Some(9))],
+            vec![fill_item("manual", Some(1)), fill.clone(), fill],
             device::MediaRole::Music,
             &mut desired_items,
             &mut playlists,
@@ -1736,6 +1721,11 @@ mod auto_sync_tests {
         assert_eq!(desired_items.len(), 2);
         assert_eq!(desired_items[1].jellyfin_id, "fill");
         assert_eq!(desired_items[1].track_number, Some(9));
+        assert_eq!(
+            desired_items[1].provider_album_id.as_deref(),
+            Some("album-id")
+        );
+        assert_eq!(desired_items[1].server_id, None);
         assert_eq!(playlists.len(), 1);
         assert_eq!(playlists[0].name, "Autofill");
         assert_eq!(playlists[0].tracks.len(), 1);

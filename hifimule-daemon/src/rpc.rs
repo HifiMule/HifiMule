@@ -6547,7 +6547,7 @@ fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor> {
     }
 }
 
-fn auto_fill_to_desired_item(
+pub(crate) fn auto_fill_to_desired_item(
     item: crate::auto_fill::AutoFillItem,
     server_id: Option<String>,
     media_role: crate::device::MediaRole,
@@ -6610,7 +6610,7 @@ fn push_fill_items_dedup(
     added
 }
 
-fn autofill_playlist_track(
+pub(crate) fn autofill_playlist_track(
     item: &crate::auto_fill::AutoFillItem,
 ) -> crate::sync::PlaylistTrackInfo {
     crate::sync::PlaylistTrackInfo {
@@ -6620,7 +6620,7 @@ fn autofill_playlist_track(
     }
 }
 
-fn autofill_playlist_item(
+pub(crate) fn autofill_playlist_item(
     tracks: Vec<crate::sync::PlaylistTrackInfo>,
 ) -> crate::sync::PlaylistSyncItem {
     crate::sync::PlaylistSyncItem {

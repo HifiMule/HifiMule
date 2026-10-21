@@ -1,6 +1,6 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const COMPRESSED_CHUNK_BYTES: usize = 64 * 1024;
 pub const COMPRESSED_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
@@ -36,16 +36,6 @@ pub enum StreamReadError {
     Source(String),
 }
 
-impl StreamReadError {
-    fn kind(&self) -> StreamFailureKind {
-        match self {
-            Self::Timeout => StreamFailureKind::Timeout,
-            Self::Unsupported => StreamFailureKind::Unsupported,
-            Self::Source(_) => StreamFailureKind::Source,
-        }
-    }
-}
-
 impl From<String> for StreamReadError {
     fn from(message: String) -> Self {
         Self::Source(message)
@@ -79,7 +69,6 @@ pub enum StreamFailureKind {
 
 #[derive(Clone, Default)]
 pub struct StreamFailureState {
-    kind: Arc<AtomicU8>,
     error: Arc<std::sync::Mutex<Option<StreamReadError>>>,
 }
 
@@ -96,17 +85,6 @@ impl StreamFailureState {
             .error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.clone());
-        self.kind.store(error.kind() as u8, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    pub fn kind(&self) -> Option<StreamFailureKind> {
-        match self.kind.load(Ordering::Acquire) {
-            1 => Some(StreamFailureKind::Timeout),
-            2 => Some(StreamFailureKind::Source),
-            3 => Some(StreamFailureKind::Unsupported),
-            _ => None,
-        }
     }
 
     pub fn error(&self) -> Option<StreamReadError> {
@@ -445,8 +423,8 @@ mod tests {
             io::ErrorKind::Unsupported
         );
         assert_eq!(
-            reader.failure_state().kind(),
-            Some(StreamFailureKind::Unsupported)
+            reader.failure_state().error(),
+            Some(StreamReadError::Unsupported)
         );
     }
 
@@ -464,7 +442,6 @@ mod tests {
         let error = reader.read(&mut [0u8; 1]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(error.to_string(), "source made no byte progress");
-        assert_eq!(failure.kind(), Some(StreamFailureKind::Timeout));
         assert_eq!(failure.error(), Some(StreamReadError::Timeout));
     }
 

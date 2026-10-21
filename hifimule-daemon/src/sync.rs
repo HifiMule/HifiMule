@@ -1303,106 +1303,6 @@ pub struct PathConstructionResult {
     pub original_name: Option<String>,
 }
 
-/// Constructs a file path from Jellyfin item metadata.
-///
-/// Pattern: `{managed_path}/{AlbumArtist}/{Album}/{TrackNumber} - {Name}.{extension}`
-///
-/// Sanitizes path components to remove invalid filesystem characters and enforces
-/// legacy hardware path length limits (255 characters per component).
-#[allow(dead_code)]
-pub fn construct_file_path(
-    managed_path: &Path,
-    item: &crate::api::JellyfinItem,
-) -> Result<PathConstructionResult> {
-    construct_file_path_with_extension(managed_path, item, None)
-}
-
-fn construct_file_path_with_extension(
-    managed_path: &Path,
-    item: &crate::api::JellyfinItem,
-    extension_override: Option<&str>,
-) -> Result<PathConstructionResult> {
-    // Extract and sanitize components
-    let artist = item.album_artist.as_deref().unwrap_or("Unknown Artist");
-    let album = item.album.as_deref().unwrap_or("Unknown Album");
-    let track_name = &item.name;
-
-    // Format track number with zero padding if available
-    let track_number = item
-        .index_number
-        .map(|n| format!("{:02}", n))
-        .unwrap_or_else(|| String::from("00"));
-
-    // Determine file extension from Container field
-    let extension = extension_override.unwrap_or_else(|| source_container(item).unwrap_or("mp3"));
-
-    // Step 1: Sanitize path components (remove invalid chars)
-    let artist_clean = sanitize_path_component(artist);
-    let album_clean = sanitize_path_component(album);
-    let track_name_clean = sanitize_path_component(track_name);
-
-    // Step 2: Enforce per-component length limit for legacy hardware (FAT32/Rockbox)
-    // We initially use the max allowed, but we may need to shrink it if the total path exceeds MAX_PATH.
-    let mut current_max_component = MAX_PATH_COMPONENT_LEN;
-
-    // We will loop to iteratively shrink the component size if we hit MAX_PATH
-    loop {
-        let artist_final = truncate_component(&artist_clean, current_max_component);
-        let album_final = truncate_component(&album_clean, current_max_component);
-
-        // Build filename and check component length
-        let filename_base = format!("{} - {}", track_number, track_name_clean);
-        let filename_candidate = format!("{}.{}", filename_base, extension);
-
-        let (filename, original_name) =
-            if filename_candidate.chars().count() > current_max_component {
-                let truncated = truncate_filename(&filename_base, extension, current_max_component);
-                (truncated, Some(item.name.clone()))
-            } else {
-                (filename_candidate, None)
-            };
-
-        // Build final path
-        let path = managed_path
-            .join(&artist_final)
-            .join(&album_final)
-            .join(&filename);
-
-        // Check total path length against Windows MAX_PATH
-        // Provide a reasonable absolute path approximation if managed_path is relative
-        let approx_abs_len = match path.canonicalize() {
-            Ok(p) => p.to_string_lossy().chars().count(),
-            // If it doesn't exist yet, we approximate by converting it to an absolute path first
-            Err(_) => match std::env::current_dir() {
-                Ok(cwd) => cwd.join(&path).to_string_lossy().chars().count(),
-                Err(_) => path.to_string_lossy().chars().count() + 30, // rough guess for C:\Workspaces\...
-            },
-        };
-
-        if approx_abs_len > WINDOWS_MAX_PATH {
-            // Path is too long. We need to shrink the components.
-            // Shrinking aggressively to reach a safe length faster.
-            if current_max_component > 30 {
-                current_max_component = (current_max_component * 3) / 4; // Reduce by 25%
-                continue;
-            } else {
-                // Even with minimal components, it's too long. The managed_path itself is probably too long.
-                // We have to return what we have and let the OS error out, or return our own error.
-                return Err(anyhow::anyhow!(
-                    "Resulting path is too long for Windows MAX_PATH ({}), even after minimal truncation: {}",
-                    WINDOWS_MAX_PATH,
-                    path.display()
-                ));
-            }
-        }
-
-        return Ok(PathConstructionResult {
-            path,
-            original_name,
-        });
-    }
-}
-
 fn construct_desired_file_path(
     managed_path: &Path,
     item: &SyncAddItem,
@@ -1474,14 +1374,6 @@ fn construct_desired_file_path(
             original_name,
         });
     }
-}
-
-fn source_container(item: &crate::api::JellyfinItem) -> Option<&str> {
-    item.media_sources
-        .as_ref()
-        .and_then(|sources| sources.first())
-        .and_then(|s| s.container.as_deref())
-        .or(item.container.as_deref())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -6725,38 +6617,15 @@ mod tests {
 
     fn make_test_item(
         name: &str,
-        album_artist: Option<&str>,
+        artist: Option<&str>,
         album: Option<&str>,
-        index: Option<u32>,
-        container: Option<&str>,
-    ) -> crate::api::JellyfinItem {
-        crate::api::JellyfinItem {
-            id: "test-id".to_string(),
-            provider_ids: None,
-            name: name.to_string(),
-            item_type: "Audio".to_string(),
-            album: album.map(|s| s.to_string()),
-            album_artist: album_artist.map(|s| s.to_string()),
-            artists: None,
-            index_number: index,
-            parent_index_number: None,
-            parent_id: None,
-            album_id: None,
-            artist_items: None,
-            container: container.map(|s| s.to_string()),
-            production_year: None,
-            recursive_item_count: None,
-            song_count: None,
-            cumulative_run_time_ticks: None,
-            run_time_ticks: None,
-            bitrate: None,
-            media_sources: None,
-            image_tags: None,
-            etag: None,
-            user_data: None,
-            date_created: None,
-            playlist_item_id: None,
-        }
+        track_number: Option<u32>,
+        suffix: Option<&str>,
+    ) -> SyncAddItem {
+        let mut item = add_from_desired(&make_desired("test-id", name, album, artist));
+        item.track_number = track_number;
+        item.provider_suffix = suffix.map(str::to_string);
+        item
     }
 
     fn make_desired(
@@ -10053,37 +9922,17 @@ mod tests {
     // ===== Story 4.2 Tests =====
 
     #[test]
-    fn test_construct_file_path_basic() {
+    fn test_construct_desired_file_path_basic() {
         let managed = std::path::PathBuf::from("Music");
-        let item = crate::api::JellyfinItem {
-            id: "item1".to_string(),
-            provider_ids: None,
-            name: "Speak to Me".to_string(),
-            item_type: "Audio".to_string(),
-            album: Some("The Dark Side of the Moon".to_string()),
-            album_artist: Some("Pink Floyd".to_string()),
-            artists: None,
-            index_number: Some(1),
-            parent_index_number: None,
-            parent_id: None,
-            album_id: None,
-            artist_items: None,
-            container: Some("flac".to_string()),
-            production_year: None,
-            recursive_item_count: None,
-            song_count: None,
-            cumulative_run_time_ticks: None,
-            run_time_ticks: None,
-            bitrate: None,
-            media_sources: None,
-            image_tags: None,
-            etag: None,
-            user_data: None,
-            date_created: None,
-            playlist_item_id: None,
-        };
+        let item = make_test_item(
+            "Speak to Me",
+            Some("Pink Floyd"),
+            Some("The Dark Side of the Moon"),
+            Some(1),
+            Some("flac"),
+        );
 
-        let path = construct_file_path(&managed, &item).unwrap().path;
+        let path = construct_desired_file_path(&managed, &item, None).unwrap().path;
         let expected = managed
             .join("Pink Floyd")
             .join("The Dark Side of the Moon")
@@ -10092,37 +9941,11 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_file_path_missing_fields_uses_defaults() {
+    fn test_construct_desired_file_path_missing_fields_uses_defaults() {
         let managed = std::path::PathBuf::from("Music");
-        let item = crate::api::JellyfinItem {
-            id: "item2".to_string(),
-            provider_ids: None,
-            name: "Unknown Track".to_string(),
-            item_type: "Audio".to_string(),
-            album: None,
-            album_artist: None,
-            artists: None,
-            index_number: None,
-            parent_index_number: None,
-            parent_id: None,
-            album_id: None,
-            artist_items: None,
-            container: None,
-            production_year: None,
-            recursive_item_count: None,
-            song_count: None,
-            cumulative_run_time_ticks: None,
-            run_time_ticks: None,
-            bitrate: None,
-            media_sources: None,
-            image_tags: None,
-            etag: None,
-            user_data: None,
-            date_created: None,
-            playlist_item_id: None,
-        };
+        let item = make_test_item("Unknown Track", None, None, None, None);
 
-        let path = construct_file_path(&managed, &item).unwrap().path;
+        let path = construct_desired_file_path(&managed, &item, None).unwrap().path;
         let expected = managed
             .join("Unknown Artist")
             .join("Unknown Album")
@@ -10271,7 +10094,7 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_file_path_short_name_no_original_name() {
+    fn test_construct_desired_file_path_short_name_no_original_name() {
         let managed = std::path::PathBuf::from("Music");
         let item = make_test_item(
             "Short Track",
@@ -10280,7 +10103,7 @@ mod tests {
             Some(1),
             Some("flac"),
         );
-        let result = construct_file_path(&managed, &item).unwrap();
+        let result = construct_desired_file_path(&managed, &item, None).unwrap();
         assert!(
             result.original_name.is_none(),
             "original_name must be None for short names"
@@ -10288,7 +10111,7 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_file_path_long_filename_extension_preserved() {
+    fn test_construct_desired_file_path_long_filename_extension_preserved() {
         let long_track_name: String = "A".repeat(300);
         let managed = std::path::PathBuf::from("Music");
         let item = make_test_item(
@@ -10298,7 +10121,7 @@ mod tests {
             Some(1),
             Some("flac"),
         );
-        let result = construct_file_path(&managed, &item).unwrap();
+        let result = construct_desired_file_path(&managed, &item, None).unwrap();
 
         let filename = result.path.file_name().unwrap().to_string_lossy();
         assert!(
@@ -10319,7 +10142,7 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_file_path_extension_override() {
+    fn test_construct_desired_file_path_extension_override() {
         let managed = std::path::PathBuf::from("Music");
         let item = make_test_item(
             "K.",
@@ -10329,14 +10152,14 @@ mod tests {
             Some("flac"),
         );
 
-        let result = construct_file_path_with_extension(&managed, &item, Some("mp3")).unwrap();
+        let result = construct_desired_file_path(&managed, &item, Some("mp3")).unwrap();
         let filename = result.path.file_name().unwrap().to_string_lossy();
 
         assert_eq!(filename, "01 - K.mp3");
     }
 
     #[test]
-    fn test_construct_file_path_long_album_artist_truncated() {
+    fn test_construct_desired_file_path_long_album_artist_truncated() {
         let long_artist: String = "B".repeat(300);
         let long_album: String = "C".repeat(300);
         let managed = std::path::PathBuf::from("Music");
@@ -10347,7 +10170,7 @@ mod tests {
             Some(1),
             Some("mp3"),
         );
-        let result = construct_file_path(&managed, &item).unwrap();
+        let result = construct_desired_file_path(&managed, &item, None).unwrap();
 
         let components: Vec<_> = result.path.components().collect();
         // path = Music / artist / album / filename
