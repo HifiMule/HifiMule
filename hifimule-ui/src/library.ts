@@ -2380,18 +2380,23 @@ async function loadArtists(reset: boolean) {
     }
 }
 
-async function loadArtistsByLetter(letter: string) {
+async function loadByLetter<T extends { total: number }>(
+    letter: string,
+    fetchPage: (letter: string, libraryId: undefined, startIndex: number, limit: number) => Promise<T>,
+    mapItems: (result: T) => BrowseDisplayItem[],
+    reset: (reset: boolean) => Promise<void>,
+) {
     const container = document.getElementById('library-content');
     if (!container || state.loading) return;
 
     clearSelection();
     if (state.activeLetter === letter) {
         state.activeLetter = null;
-        await loadArtists(true);
+        await reset(true);
         return;
     }
 
-    const inListView = (state.listViewMode) === 'list';
+    const inListView = state.listViewMode === 'list';
 
     state.activeLetter = letter;
     state.loading = true;
@@ -2412,10 +2417,10 @@ async function loadArtistsByLetter(letter: string) {
     }
 
     try {
-        const result = await fetchBrowseArtists(letter, undefined, 0, 200);
-        state.items = mapArtists(result.artists);
+        const result = await fetchPage(letter, undefined, 0, 200);
+        state.items = mapItems(result);
         state.pagination.total = result.total;
-        state.pagination.startIndex = result.artists.length;
+        state.pagination.startIndex = state.items.length;
         renderCurrentView();
         if (inListView) container.scrollTop = 0;
     } catch (e) {
@@ -2427,51 +2432,12 @@ async function loadArtistsByLetter(letter: string) {
     }
 }
 
-async function loadAlbumsByLetter(letter: string) {
-    const container = document.getElementById('library-content');
-    if (!container || state.loading) return;
+function loadArtistsByLetter(letter: string) {
+    return loadByLetter(letter, fetchBrowseArtists, result => mapArtists(result.artists), loadArtists);
+}
 
-    clearSelection();
-    if (state.activeLetter === letter) {
-        state.activeLetter = null;
-        await loadAlbums(true);
-        return;
-    }
-
-    const inListView = (state.listViewMode) === 'list';
-
-    state.activeLetter = letter;
-    state.loading = true;
-    renderModeBar();
-
-    if (inListView) {
-        state.listLoading = true;
-        showListSpinner(container, state.items.length);
-    } else {
-        showSpinner(container);
-    }
-
-    await yieldTick();
-    if (!container.isConnected) {
-        state.loading = false;
-        state.listLoading = false;
-        return;
-    }
-
-    try {
-        const result = await fetchBrowseAlbums(letter, undefined, 0, 200);
-        state.items = mapAlbums(result.albums);
-        state.pagination.total = result.total;
-        state.pagination.startIndex = result.albums.length;
-        renderCurrentView();
-        if (inListView) container.scrollTop = 0;
-    } catch (e) {
-        renderError(e as Error);
-    } finally {
-        state.listLoading = false;
-        state.loading = false;
-        renderModeBar();
-    }
+function loadAlbumsByLetter(letter: string) {
+    return loadByLetter(letter, fetchBrowseAlbums, result => mapAlbums(result.albums), loadAlbums);
 }
 
 async function loadAlbums(reset: boolean) {
