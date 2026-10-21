@@ -36,6 +36,7 @@ function harness(items, { serverType = 'openSubsonic', force = false } = {}) {
   const sidebar = Object.assign(new exports.SyncStart(), {
     serverType, currentServerId: 'selected-server', lastHydratedDeviceId: 'device', forceSyncMode: force,
     autoFillPipelines: new Map(), render() {}, stopPolling() {}, selectedCapacity: () => undefined,
+    estimateCache: new Map(), capacityRevision: () => 'fixture-revision', refreshCapacityEstimate: async () => {},
     attachToRunningSync: async () => false, confirmBlockedPlan: async () => false,
     showError: message => { throw new Error(message); },
   });
@@ -61,7 +62,8 @@ test('library changes never expand the manual sync selection or override server 
         { id: 'playlist', serverId: 'selected-server' },
       ]);
       assert.deepEqual(plan.basketItems, items.slice(0, 3));
-      assert.deepEqual(plan.autoFill, [{ serverId: 'server-a', maxBytes: 1000, enabled: true, excludeItemIds: ['album'] }]);
+      // A slot's recorded size is stale UI state; preparation derives capacity without an estimate.
+      assert.deepEqual(plan.autoFill, [{ serverId: 'server-a', enabled: true, excludeItemIds: ['album'] }]);
       assert.equal(plan.force, force);
       assert.deepEqual(calls.map(call => call.method), ['sync_prepare', 'sync_plan_discard']);
     }
@@ -78,6 +80,7 @@ test('pure auto-fill leaves manual selection empty despite a previous sync token
   assert.deepEqual(plan.itemIds, []);
   assert.deepEqual(plan.basketItems, []);
   assert.equal(plan.autoFill.length, 1);
+  assert.equal(Object.hasOwn(plan.autoFill[0], 'maxBytes'), false);
   assert.deepEqual(plan.autoFill[0].excludeItemIds, []);
   assert.equal(calls.some(call => call.method === 'sync_detect_changes'), false);
 });
