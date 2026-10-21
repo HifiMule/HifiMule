@@ -1881,31 +1881,7 @@ impl AudiobookshelfProvider {
             .await
             .map_err(transport_error)?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let refresh = session.refresh_token.as_ref().ok_or_else(|| {
-                ProviderError::Auth("Audiobookshelf authentication expired".into())
-            })?;
-            let refreshed = self
-                .client
-                .post(format!("{}/auth/refresh", self.base_url))
-                .header("x-refresh-token", refresh.expose_secret())
-                .send()
-                .await
-                .map_err(transport_error)?;
-            check_auth_status(&refreshed)?;
-            let tokens: RefreshResponse = refreshed.json().await.map_err(deserialization_error)?;
-            if tokens.user.access_token.trim().is_empty() {
-                return Err(ProviderError::Deserialization(
-                    "Audiobookshelf refresh omitted access token".into(),
-                ));
-            }
-            session.access_token = SecretString::new(tokens.user.access_token);
-            if let Some(refresh_token) = tokens
-                .user
-                .refresh_token
-                .filter(|token| !token.trim().is_empty())
-            {
-                session.refresh_token = Some(SecretString::new(refresh_token));
-            }
+            refresh_auth(&self.client, &self.base_url, &mut session).await?;
             response = self
                 .client
                 .get(&endpoint)
@@ -1928,31 +1904,7 @@ impl AudiobookshelfProvider {
             .await
             .map_err(transport_error)?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let refresh = session.refresh_token.as_ref().ok_or_else(|| {
-                ProviderError::Auth("Audiobookshelf authentication expired".into())
-            })?;
-            let refreshed = self
-                .client
-                .post(format!("{}/auth/refresh", self.base_url))
-                .header("x-refresh-token", refresh.expose_secret())
-                .send()
-                .await
-                .map_err(transport_error)?;
-            check_auth_status(&refreshed)?;
-            let tokens: RefreshResponse = refreshed.json().await.map_err(deserialization_error)?;
-            if tokens.user.access_token.trim().is_empty() {
-                return Err(ProviderError::Deserialization(
-                    "Audiobookshelf refresh omitted access token".into(),
-                ));
-            }
-            session.access_token = SecretString::new(tokens.user.access_token);
-            if let Some(refresh_token) = tokens
-                .user
-                .refresh_token
-                .filter(|token| !token.trim().is_empty())
-            {
-                session.refresh_token = Some(SecretString::new(refresh_token));
-            }
+            refresh_auth(&self.client, &self.base_url, &mut session).await?;
             response = self
                 .client
                 .get(&endpoint)
