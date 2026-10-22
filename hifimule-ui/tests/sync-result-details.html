@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="fr" class="sl-theme-dark">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sync result details regression checks</title>
+<style>
+  body { overflow: auto !important; }
+  main { display: flex; align-items: flex-start; gap: 24px; padding: 24px; flex-wrap: wrap; }
+  #warnings { width: 410px; height: 640px; }
+  #errors { width: 330px; height: 500px; }
+  #short { width: 330px; height: 320px; }
+  #results { white-space: pre-wrap; padding: 0 24px; }
+  .sync-details-panel { animation: none !important; }
+</style>
+<main><section id="warnings" class="basket-view"></section><section id="errors" class="basket-view"></section><section id="short" class="basket-view"></section></main>
+<pre id="results" role="status">Running…</pre>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace';
+import '../src/styles.css';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+import { BasketSidebar } from '../src/components/BasketSidebar.ts';
+import { setLanguage, t } from '../src/i18n.ts';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+await setLanguage('fr');
+const messages = Array.from({ length: 12 }, (_, index) => `Local encoding failed for 'Track ${index + 1}' (${'846a451824d4b1bddba2b0e6651bdd0a'.repeat(2)}): Encoded duration does not match original: expected 80.840s, output 78.019s; probed source 80.840s, decoded 78.019s; duration estimation method AVFMT_DURATION_FROM_STREAM; expectation probed source`);
+const lines = [];
+const check = (ok, label) => {
+  lines.push(`${ok ? 'PASS' : 'FAIL'} ${label}`);
+  document.querySelector('#results').textContent = lines.join('\n');
+  if (!ok) throw new Error(label);
+};
+for (const id of ['warnings', 'errors', 'short']) {
+  const container = document.getElementById(id);
+  const sidebar = Object.create(BasketSidebar.prototype);
+  Object.assign(sidebar, { container, completedWarnings: messages, completedFilesCount: 545,
+    completedBytesCount: 13 * 1024 * 1024, announceSync() {}, restoreSyncFocus() {} });
+  if (id === 'warnings') sidebar.renderSyncComplete();
+  else sidebar.renderSyncError(messages);
+  const button = container.querySelector('#sync-select-messages');
+  await button.updateComplete;
+  const list = container.querySelector('.sync-error-list');
+  check(list.clientHeight >= (id === 'short' ? 64 : 120), `${id}: details use available height`);
+  check(list.scrollHeight > list.clientHeight, `${id}: long lists scroll`);
+  check(list.scrollWidth <= list.clientWidth, `${id}: long identifiers wrap without horizontal overflow`);
+  const footer = container.querySelector('.basket-footer');
+  const panel = container.querySelector('.sync-details-panel');
+  check(panel.getBoundingClientRect().bottom <= footer.getBoundingClientRect().top && getComputedStyle(panel).overflowY === 'auto', `${id}: messages cannot overlap footer actions`);
+  if (id !== 'short') check(container.scrollHeight <= container.clientHeight, `${id}: footer stays in the panel`);
+  button.click();
+  const selected = window.getSelection().toString();
+  check(messages.every(message => selected.includes(message)), `${id}: selection includes every full message, including offscreen entries`);
+  check(!selected.includes(t('basket.title')), `${id}: selection excludes surrounding controls`);
+  check(document.activeElement === list, `${id}: selected list receives keyboard focus`);
+  window.getSelection().removeAllRanges();
+  button.blur();
+}
+document.querySelector('#results').textContent += '\nREADY';
+</script></html>

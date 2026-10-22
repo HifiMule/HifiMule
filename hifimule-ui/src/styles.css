@@ -1366,23 +1366,35 @@ sl-input, sl-textarea, sl-select {
   width: 100%;
   font-size: 0.75rem;
   opacity: 0.8;
-  max-height: 120px;
   overflow-y: auto;
+  user-select: text;
 }
 
 .sync-error-list li {
   padding: 0.2rem 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.sync-warning-list li {
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
-  overflow-wrap: anywhere;
+.sync-details-panel {
+  min-height: 0;
+  justify-content: flex-start;
+  overflow-y: auto;
+}
+
+.sync-details-panel > :not(.sync-error-list) {
+  flex-shrink: 0;
+}
+
+#sync-select-messages {
+  align-self: flex-end;
+}
+
+.sync-details-panel .sync-error-list {
+  flex: 1;
+  min-height: 4rem;
+  margin: 0;
 }
 
 /* ========================

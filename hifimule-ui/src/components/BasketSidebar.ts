@@ -1944,12 +1944,14 @@ export class BasketSidebar {
                 <h2>${t('basket.title')}</h2>
                 <sl-badge variant="neutral" pill>0</sl-badge>
             </div>
-            <div class="sync-success-panel">
+            <div class="sync-success-panel${warnings.length ? ' sync-details-panel' : ''}">
                 <sl-icon name="${warnings.length ? 'exclamation-triangle-fill' : 'check-circle-fill'}"
                     style="font-size: 2.5rem; color: var(${warnings.length ? '--sl-color-warning-600' : '--sl-color-success-600'});"></sl-icon>
                 <p class="sync-status-label">${title}</p>
                 ${summary ? `<p class="sync-summary-label">${escapeAttr(summary)}</p>` : ''}
-                ${warnings.length ? `<ul class="sync-error-list sync-warning-list">${warnings.map(message => `<li>${escapeAttr(message)}</li>`).join('')}</ul>` : ''}
+                ${warnings.length ? `
+                    <sl-icon-button id="sync-select-messages" name="textarea-t" label="${escapeAttr(t('basket.actions.select_all_messages'))}" title="${escapeAttr(t('basket.actions.select_all_messages'))}"></sl-icon-button>
+                    <ul class="sync-error-list sync-warning-list" tabindex="0">${warnings.map(message => `<li>${escapeAttr(message)}</li>`).join('')}</ul>` : ''}
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-done-btn" variant="primary" style="width: 100%;">
@@ -1960,6 +1962,7 @@ export class BasketSidebar {
         `;
 
         this.announceSync([title, summary, ...warnings].filter(Boolean).join(' '));
+        this.attachSyncMessageSelection();
         this.restoreSyncFocus(focused, '#sync-done-btn');
         this.container.querySelector('#sync-done-btn')?.addEventListener('click', () => {
             this.showSyncComplete = false;
@@ -1977,11 +1980,12 @@ export class BasketSidebar {
             <div class="basket-header">
                 <h2>${t('basket.title')}</h2>
             </div>
-            <div class="sync-error-panel">
+            <div class="sync-error-panel sync-details-panel">
                 <sl-icon name="exclamation-triangle-fill"
                     style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
                 <p class="sync-status-label">${t('basket.sync.failed')}</p>
-                <ul class="sync-error-list">${errorList}</ul>
+                <sl-icon-button id="sync-select-messages" name="textarea-t" label="${escapeAttr(t('basket.actions.select_all_messages'))}" title="${escapeAttr(t('basket.actions.select_all_messages'))}"></sl-icon-button>
+                <ul class="sync-error-list" tabindex="0">${errorList}</ul>
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-retry-btn" variant="primary" style="width: 100%; margin-bottom: 0.5rem;">
@@ -1995,6 +1999,7 @@ export class BasketSidebar {
         `;
 
         this.announceSync([t('basket.sync.failed'), ...errors].join(' '));
+        this.attachSyncMessageSelection();
         this.restoreSyncFocus(focused, '#sync-retry-btn');
         this.container.querySelector('#sync-retry-btn')?.addEventListener('click', () => {
             this.syncErrorMessages = null;
@@ -2003,6 +2008,19 @@ export class BasketSidebar {
         this.container.querySelector('#sync-dismiss-btn')?.addEventListener('click', () => {
             this.syncErrorMessages = null;
             this.refreshAndRender();
+        });
+    }
+
+    private attachSyncMessageSelection() {
+        this.container.querySelector('#sync-select-messages')?.addEventListener('click', () => {
+            const list = this.container.querySelector<HTMLElement>('.sync-error-list');
+            const selection = window.getSelection();
+            if (!list || !selection) return;
+            list.focus({ preventScroll: true });
+            const range = document.createRange();
+            range.selectNodeContents(list);
+            selection.removeAllRanges();
+            selection.addRange(range);
         });
     }
 
