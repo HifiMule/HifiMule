@@ -47,7 +47,7 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     }
     /// Native directory metadata is available only to mounted transports.
     async fn folder_icon(&self, _folder: &str, _kind: &str, _jpeg: Option<&[u8]>, _owned: Option<&str>) -> Result<Option<String>> {
-        anyhow::bail!("Native folder icons require a compatible host and mass-storage connection")
+        Ok(_owned.map(str::to_owned))
     }
     /// Publish new artwork without assuming ownership of an existing file.
     async fn publish_artwork(&self, path: &str, data: &[u8]) -> Result<()> {

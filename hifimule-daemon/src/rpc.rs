@@ -8402,8 +8402,8 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
     };
 
     let mut artwork_providers = std::collections::HashMap::new();
-    if manifest.folder_artwork.enabled {
-        let mut ids: std::collections::BTreeSet<String> = manifest.synced_items.iter().filter_map(|i|i.server_id.clone()).collect();
+    if manifest.folder_artwork.enabled && !delta.adds.is_empty() {
+        let mut ids: std::collections::BTreeSet<String> = add_servers.iter().cloned().collect();
         ids.extend(manifest.folder_artwork_records.values().filter_map(|r|r.source.as_ref().and_then(|s|s.server_id.clone())));
         ids.extend(selected_for_exec.iter().cloned());
         for id in ids {
@@ -9596,10 +9596,6 @@ fn parse_folder_artwork(
         let enabled = value.as_bool().ok_or_else(invalid)?;
         match key.as_str() {
             "enabled" => settings.enabled = enabled,
-            "windows" => settings.windows = enabled,
-            "macos" => settings.macos = enabled,
-            "kde" => settings.kde = enabled,
-            "gnome" => settings.gnome = enabled,
             _ => return Err(invalid()),
         }
     }
@@ -12069,7 +12065,7 @@ mod tests {
         assert_eq!(updated.playlist_path, None);
         assert_eq!(updated.resolved_playlist_path(), Some("Audio"));
         assert_eq!(updated.folder_artwork, crate::device::FolderArtwork::default());
-        let preferences = json!({"enabled":true,"windows":true,"macos":true,"kde":true,"gnome":true});
+        let preferences = json!({"enabled":true});
         let result = handle_device_update_manifest(&state,Some(json!({"deviceId":"dev-1","folderArtwork":preferences}))).await.unwrap();
         assert_eq!(result["relocationRequired"],false);
         handle_device_update_manifest(&state,Some(json!({"deviceId":"dev-1"}))).await.unwrap();
@@ -12079,11 +12075,11 @@ mod tests {
         let persisted: crate::device::DeviceManifest = crate::device::manifest_codec::decode_test_manifest(&std::fs::read(dir.path().join(".hifimule.json.zst")).unwrap()).unwrap();
         assert_eq!(persisted.folder_artwork,saved.folder_artwork);
         handle_device_update_manifest(&state, Some(json!({
-            "deviceId": "dev-1", "folderArtwork": {"enabled":false,"macos":false}
+            "deviceId": "dev-1", "folderArtwork": {"enabled":false}
         }))).await.unwrap();
         let partial = state.device_manager.get_current_device().await.unwrap();
         assert_eq!(partial.folder_artwork, crate::device::FolderArtwork {
-            enabled: false, windows: true, macos: false, kde: true, gnome: true,
+            enabled: false,
         });
         let dirty = updated.transcoding_profile_dirty;
         for value in [true, false] {
@@ -12126,6 +12122,7 @@ mod tests {
             json!({ "deviceId": "dev-1", "folderArtwork": null }),
             json!({ "deviceId": "dev-1", "folderArtwork": {"enabled":"true"} }),
             json!({ "deviceId": "dev-1", "folderArtwork": {"unknown":true} }),
+            json!({ "deviceId": "dev-1", "folderArtwork": {"windows":true} }),
             json!({ "deviceId": "dev-1", "reconcileBeforeSync": "true" }),
             json!({ "deviceId": "dev-1", "reconcileBeforeSync": 1 }),
             json!({ "deviceId": "dev-1", "reconcileBeforeSync": null }),
@@ -15531,8 +15528,8 @@ mod tests {
     #[tokio::test]
     async fn device_initialize_preferences_persist_exact_values_and_partial_defaults() {
         for (reconcile, artwork) in [
-            (true, json!({"enabled":true,"windows":true,"macos":false,"kde":true,"gnome":false})),
-            (false, json!({"enabled":false,"windows":true})),
+            (true, json!({"enabled":true})),
+            (false, json!({"enabled":false})),
             (true, json!({})),
         ] {
             let dir = tempfile::tempdir().unwrap();

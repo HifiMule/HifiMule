@@ -4393,6 +4393,20 @@ async fn execute_plan_sync_buffered(
     let mut writer_timing = TransferTotals::default();
     let mut writer_failed = false;
     let mut selected_destinations: HashMap<String, (String, crate::device::MediaRole)> = HashMap::new();
+    let mut artwork_manifest = target.manifest.clone();
+    artwork_manifest.synced_items.retain(|item| {
+        !deleted_ids.contains(&item.jellyfin_id)
+            && !replaced_ids.contains(&item.jellyfin_id)
+            && !rekeyed_ids.contains(&item.jellyfin_id)
+    });
+    let (mut folder_artwork, artwork_warnings) = artwork::Incremental::new(
+        artwork_manifest, &device_io, &operation_manager, &operation_id, checkpoint,
+    ).await;
+    for warning in artwork_warnings {
+        crate::daemon_log!("{}", warning);
+        let _ = warning_journal.record(&warning);
+        sync_warnings.push(warning);
+    }
     loop {
         let wait_started = std::time::Instant::now();
         let next = tokio::select! {
@@ -4643,19 +4657,6 @@ async fn execute_plan_sync_buffered(
                     track_number: staged.add_item.track_number,
                     server_id: staged.add_item.server_id.clone(),
                 };
-                completed_bytes_arc.fetch_add(
-                    staged.add_item.size_bytes,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
-                operation_manager
-                    .modify_operation(&operation_id, |operation| {
-                        operation.files_completed += 1;
-                        operation.bytes_transferred = cumulative;
-                        operation.average_writing_speed_mb_s =
-                            Some(average_write_timing.speed_mb_s);
-                    })
-                    .await;
                 let replacement_id = force_id_changes.get(&staged.add_item.jellyfin_id).unwrap_or(&staged.add_item.jellyfin_id);
                 let replacement_delete: Option<SyncDeleteItem> = match delta.get("delete", replacement_id) {
                     Ok(item) => item,
@@ -4705,7 +4706,7 @@ async fn execute_plan_sync_buffered(
                                         replacement_cleanup_failed || item.jellyfin_id != *old
                                     })
                         });
-                        m.synced_items.push(synced_item);
+                        m.synced_items.push(synced_item.clone());
                     })
                     .await
                 {
@@ -4714,14 +4715,31 @@ async fn execute_plan_sync_buffered(
                         filename: staged.add_item.name.clone(),
                         error_message: format!("Per-file manifest write failed: {e}"),
                     });
-                    operation_manager
-                        .modify_operation(&operation_id, |operation| {
-                            operation.files_completed = operation.files_completed.saturating_sub(1);
-                        })
-                        .await;
                     let _ = operation_manager.request_cancel(&operation_id).await;
                     writer_failed = true;
                 } else {
+                    let warnings = folder_artwork.touch(
+                        &synced_item, staged.add_item.artwork.clone(), &device_io, &provider,
+                        &providers_by_server, &operation_manager, &operation_id, checkpoint,
+                    ).await;
+                    for warning in warnings {
+                        crate::daemon_log!("{}", warning);
+                        let _ = warning_journal.record(&warning);
+                        sync_warnings.push(warning);
+                    }
+                    completed_bytes_arc.fetch_add(
+                        staged.add_item.size_bytes,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
+                    operation_manager
+                        .modify_operation(&operation_id, |operation| {
+                            operation.files_completed += 1;
+                            operation.bytes_transferred = cumulative;
+                            operation.average_writing_speed_mb_s =
+                                Some(average_write_timing.speed_mb_s);
+                        })
+                        .await;
                     selected_destinations.insert(destination_key.clone(), (staged.add_item.jellyfin_id.clone(), staged.add_item.media_role));
                     if staged.add_item.media_role == crate::device::MediaRole::Music {
                         destination_hints.write().unwrap_or_else(|p| p.into_inner())
@@ -5051,10 +5069,9 @@ async fn execute_plan_sync_buffered(
     provenance_log.finish(crate::sync_logging::outcome(errors.len() > provenance_errors_before, operation_manager.is_cancelled(&operation_id).await), delta.provenance.len());
     if !operation_manager.is_cancelled(&operation_id).await
         && let Some(mut snapshot) = device_manager.get_manifest_for_device(&operation_device_id).await
-        && (snapshot.folder_artwork.enabled || !snapshot.folder_artwork_records.is_empty())
+        && !snapshot.folder_artwork_records.is_empty()
     {
-        let warnings = artwork::run(&mut snapshot, delta, &device_io, &provider, &providers_by_server,
-            &operation_manager, &operation_id, checkpoint).await;
+        let warnings = artwork::cleanup(&mut snapshot, &device_io, &operation_manager, &operation_id, checkpoint).await;
         for warning in warnings {
             crate::daemon_log!("{}", warning);
             let _ = warning_journal.record(&warning);
@@ -8311,6 +8328,9 @@ mod tests {
         refused_delete: std::sync::Mutex<Option<String>>,
         first_write_started: Notify,
         release_first_write: Notify,
+        block_artwork: AtomicBool,
+        artwork_started: Notify,
+        release_artwork: Notify,
     }
 
     impl std::fmt::Debug for BlockingFirstWriteDeviceIo {
@@ -8333,6 +8353,9 @@ mod tests {
                 refused_delete: std::sync::Mutex::new(None),
                 first_write_started: Notify::new(),
                 release_first_write: Notify::new(),
+                block_artwork: AtomicBool::new(false),
+                artwork_started: Notify::new(),
+                release_artwork: Notify::new(),
             })
         }
 
@@ -8345,6 +8368,275 @@ mod tests {
         fn release_first_write(&self) {
             self.release_first_write.notify_one();
         }
+    }
+
+    #[tokio::test]
+    async fn inline_artwork_excludes_deleted_competing_candidates() {
+        let mut server = mockito::Server::new_async().await;
+        let download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let old = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "a-old".into()))
+            .expect(0)
+            .create_async()
+            .await;
+        let current = server.mock("GET", "/rest/getAlbum.view").match_query(mockito::Matcher::UrlEncoded("id".into(), "z-new".into()))
+            .with_status(200).with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","album":{"id":"z-new","name":"One","coverArt":"cover","song":[]}}}"#)
+            .expect(1).create_async().await;
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(20, 10)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let cover = server
+            .mock("GET", "/rest/getCoverArt.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(jpeg.get_ref())
+            .expect(1)
+            .create_async()
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(root.path()).await;
+        std::fs::create_dir_all(root.path().join("Music/Artist/One")).unwrap();
+        let old_path = "Music/Artist/One/old.mp3";
+        std::fs::write(root.path().join(old_path), b"old").unwrap();
+        std::fs::write(root.path().join("Music/Artist/folder.jpg"), jpeg.get_ref()).unwrap();
+        devices
+            .update_manifest(|manifest| {
+                manifest.folder_artwork.enabled = true;
+                manifest.folder_artwork_records.insert(
+                    "Music/Artist".into(),
+                    crate::device::FolderArtworkRecord {
+                        jpeg_hash: Some(blake3::hash(jpeg.get_ref()).to_hex().to_string()),
+                        ..Default::default()
+                    },
+                );
+                let mut item = make_synced_item("old-track", "Old", Some("One"), Some("Artist"));
+                item.local_path = old_path.into();
+                item.provider_album_id = Some("a-old".into());
+                manifest.synced_items.push(item);
+            })
+            .await
+            .unwrap();
+        let mut add = add_item_with_provider_format("new-track", "mp3", "audio/mpeg", 4);
+        add.album = Some("One".into());
+        add.provider_album_id = Some("z-new".into());
+        let delta = SyncDelta {
+            adds: vec![add],
+            deletes: vec![SyncDeleteItem {
+                jellyfin_id: "old-track".into(),
+                local_path: old_path.into(),
+                name: "Old".into(),
+                reason_code: None,
+                reason: None,
+            }],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            blocked: vec![],
+            provenance_updates: HashMap::new(),
+            pity_fired_servers: vec![],
+        };
+        let operations = Arc::new(SyncOperationManager::new());
+        let operation = unique_operation_id("artwork-delete-candidate");
+        operations.create_operation(operation.clone(), 2).await;
+        let (written, errors) = execute_test_provider_sync(
+            &delta,
+            root.path(),
+            ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: HashMap::new(),
+            },
+            operations.clone(),
+            operation.clone(),
+            devices.clone(),
+            io,
+        )
+        .await
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(written.len(), 1);
+        assert!(
+            operations
+                .get_operation(&operation)
+                .await
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
+        assert_eq!(
+            devices
+                .get_current_device()
+                .await
+                .unwrap()
+                .folder_artwork_records["Music/Artist/One"]
+                .source
+                .as_ref()
+                .unwrap()
+                .entity_id,
+            "z-new"
+        );
+        old.assert_async().await;
+        current.assert_async().await;
+        download.assert_async().await;
+        cover.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn artwork_runs_before_next_audio_write_and_final_progress_including_full_sync() {
+        let mut server = mockito::Server::new_async().await;
+        let download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(4)
+            .create_async()
+            .await;
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(20, 10)
+            .write_to(&mut image, image::ImageFormat::Jpeg)
+            .unwrap();
+        let cover = server
+            .mock("GET", "/rest/getCoverArt.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(image.into_inner())
+            .expect(6)
+            .create_async()
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let (devices, io) = setup_provider_sync_device(root.path()).await;
+        devices
+            .update_manifest(|manifest| {
+                manifest.folder_artwork.enabled = true;
+                for folder in ["Music/Artist", "Music/Artist/One", "Music/Artist/Two"] {
+                    manifest.folder_artwork_records.insert(
+                        folder.into(),
+                        crate::device::FolderArtworkRecord {
+                            source: Some(crate::device::FolderArtworkSource {
+                                server_id: None,
+                                entity_id: folder.into(),
+                                artist: folder == "Music/Artist",
+                                cover_id: Some("cover".into()),
+                            }),
+                            ..Default::default()
+                        },
+                    );
+                }
+            })
+            .await
+            .unwrap();
+        for round in 0..2 {
+            let trace = BlockingFirstWriteDeviceIo::new(io.clone());
+            trace.block_artwork.store(true, Ordering::SeqCst);
+            trace.release_first_write();
+            let operations = Arc::new(SyncOperationManager::new());
+            let operation = unique_operation_id("inline-artwork");
+            operations.create_operation(operation.clone(), 2).await;
+            let adds = ["One", "Two"]
+                .into_iter()
+                .map(|album| {
+                    let mut add = add_item_with_provider_format(album, "mp3", "audio/mpeg", 4);
+                    add.album = Some(album.into());
+                    add.reason_code = Some(
+                        if round == 0 {
+                            "new-selection"
+                        } else {
+                            "force-sync"
+                        }
+                        .into(),
+                    );
+                    add
+                })
+                .collect();
+            let delta = SyncDelta {
+                adds,
+                deletes: vec![],
+                id_changes: vec![],
+                unchanged: 0,
+                playlists: vec![],
+                blocked: vec![],
+                provenance_updates: HashMap::new(),
+                pity_fired_servers: vec![],
+            };
+            let source = ProviderSyncSource {
+                local_encoding_servers: HashSet::new(),
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: HashMap::new(),
+            };
+            let job = {
+                let root = root.path().to_owned();
+                let operations = operations.clone();
+                let operation = operation.clone();
+                let devices = devices.clone();
+                let trace = trace.clone();
+                tokio::spawn(async move {
+                    execute_test_provider_sync(
+                        &delta, &root, source, operations, operation, devices, trace,
+                    )
+                    .await
+                })
+            };
+            for (artwork_index, completed) in [0, 0, 1].into_iter().enumerate() {
+                tokio::time::timeout(Duration::from_secs(10), trace.artwork_started.notified())
+                    .await
+                    .unwrap();
+                let progress = operations.get_operation(&operation).await.unwrap();
+                assert_eq!(
+                    progress.files_completed, completed,
+                    "round {round}, artwork {artwork_index}"
+                );
+                assert_eq!(progress.bytes_transferred, completed as u64 * 4);
+                assert_eq!(
+                    trace.writes.load(Ordering::SeqCst),
+                    completed + 1,
+                    "artwork must precede the next audio write"
+                );
+                assert_eq!(
+                    devices
+                        .get_current_device()
+                        .await
+                        .unwrap()
+                        .synced_items
+                        .len(),
+                    if round == 0 { completed + 1 } else { 2 },
+                    "audio must already be checkpointed"
+                );
+                trace.release_artwork.notify_one();
+            }
+            let (written, errors) = tokio::time::timeout(Duration::from_secs(10), job)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(written.len(), 2);
+            let progress = operations.get_operation(&operation).await.unwrap();
+            assert_eq!(progress.files_completed, 2);
+            assert_eq!(progress.bytes_transferred, 8);
+            assert!(progress.warnings.is_empty(), "{:?}", progress.warnings);
+            let manifest = devices.get_current_device().await.unwrap();
+            assert_eq!(manifest.folder_artwork_records.len(), 3);
+            for folder in manifest.folder_artwork_records.keys() {
+                // A full sync re-copies retained tracks and repairs missing owned images.
+                std::fs::remove_file(root.path().join(folder).join("folder.jpg")).unwrap();
+            }
+        }
+        download.assert_async().await;
+        cover.assert_async().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -8373,6 +8665,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::device_io::DeviceIO for BlockingFirstWriteDeviceIo {
+        async fn folder_identity(&self, path: &str) -> anyhow::Result<Option<String>> {
+            self.inner.folder_identity(path).await
+        }
+
+        async fn publish_artwork(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {
+            if self.block_artwork.load(Ordering::SeqCst) {
+                self.artwork_started.notify_one();
+                self.release_artwork.notified().await;
+            }
+            self.inner.publish_artwork(path, bytes).await
+        }
+
         async fn begin_sync_job(&self) -> anyhow::Result<()> {
             self.inner.begin_sync_job().await
         }

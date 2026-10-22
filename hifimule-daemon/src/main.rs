@@ -2023,7 +2023,7 @@ async fn run_auto_sync_logged(
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 
-    if !auto_sync_delta_has_work(&delta, total_files) && !manifest.folder_artwork.enabled && manifest.folder_artwork_records.is_empty() {
+    if !auto_sync_delta_has_work(&delta, total_files) && manifest.folder_artwork_records.is_empty() {
         terminal = "noop";
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         let _ = state_tx.send(DaemonState::Idle);

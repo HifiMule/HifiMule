@@ -2977,7 +2977,7 @@ async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
 
     let pending = manager.get_unrecognized_device_snapshot().await.unwrap();
     let revision = manager.get_destination_snapshot().await.revision;
-    let artwork = FolderArtwork { enabled: true, windows: false, macos: true, kde: false, gnome: true };
+    let artwork = FolderArtwork { enabled: true };
     let manifest = manager
         .initialize_pending_device(
             &pending.pending_id, revision, "", None, None, "Garmin Watch".to_string(), None,
@@ -5020,7 +5020,7 @@ async fn device_initialize_preferences_commit_to_first_write_of_unselected_pendi
     assert!(manager.select_device(selected_dir.path().into()).await);
     let pending_id = manager.get_pending_devices_snapshot().await[0].pending_id.clone();
     let revision = manager.get_destination_snapshot().await.revision;
-    let artwork = FolderArtwork { enabled: false, windows: true, macos: false, kde: true, gnome: false };
+    let artwork = FolderArtwork { enabled: false };
     let task = {
         let manager = manager.clone();
         let artwork = artwork.clone();
@@ -5558,6 +5558,18 @@ fn folder_artwork_legacy_defaults_and_compressed_ownership_roundtrip() {
     let decoded: DeviceManifest=manifest_codec::decode_test_manifest(&manifest_codec::encode(&manifest).unwrap()).unwrap();
     assert_eq!(decoded.folder_artwork,manifest.folder_artwork);
     assert_eq!(decoded.folder_artwork_records,manifest.folder_artwork_records);
+    let mut legacy = serde_json::to_value(&manifest).unwrap();
+    legacy["folderArtwork"] = serde_json::json!({"enabled": true, "windows": true, "macos": false, "kde": false, "gnome": true});
+    let loaded: DeviceManifest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(loaded.folder_artwork_records, manifest.folder_artwork_records);
+    assert_eq!(serde_json::to_value(&loaded.folder_artwork).unwrap(), serde_json::json!({"enabled": true}));
+    let saved = manifest_codec::encode(&loaded).unwrap();
+    let saved: DeviceManifest = manifest_codec::decode_test_manifest(&saved).unwrap();
+    assert_eq!(saved.folder_artwork, FolderArtwork { enabled: true });
+    for invalid in [serde_json::json!({"enabled": true, "windows": "true"}), serde_json::json!({"enabled": true, "other": true})] {
+        legacy["folderArtwork"] = invalid;
+        assert!(serde_json::from_value::<DeviceManifest>(legacy.clone()).is_err());
+    }
     let mut target = crate::sync::SyncTarget { path: std::path::PathBuf::from("test"), manifest:decoded, io:Arc::new(crate::device_io::MscBackend::new("test".into())), observation:1 };
     crate::sync_plan::compact_target(&mut target);
     assert_eq!(target.manifest.folder_artwork_records,manifest.folder_artwork_records);

@@ -395,23 +395,222 @@ async fn owned_bytes(io: &dyn DeviceIO, path: &str, expected: &str) -> Result<Ow
     Ok(OwnedBytes::Unchanged(bytes))
 }
 
-/// Metadata ownership is staged immediately after each folder, including cancellation
-/// arriving after publication. Audio track checkpoints are not rewritten by artwork.
-pub(crate) async fn run(
+/// Incremental artwork state, initialized once. Folder identities and candidate
+/// metadata are indexed once rather than scanning the plan or manifest per track.
+pub(crate) struct Incremental {
+    manifest: DeviceManifest,
+    folders: BTreeMap<String, Vec<Candidate>>,
+    identities: HashMap<String, String>,
+    attempted: HashSet<String>,
+    paths: HashMap<String, String>,
+    eligible_artists: HashSet<String>,
+    artist_covers: HashMap<(Option<String>, String), Option<String>>,
+}
+impl Incremental {
+    pub(crate) async fn new(
+        mut manifest: DeviceManifest,
+        io: &Arc<dyn DeviceIO>,
+        manager: &SyncOperationManager,
+        operation: &str,
+        checkpoint: &crate::device::SyncManifestSession,
+    ) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        let folders = if manifest.folder_artwork.enabled {
+            match grouped_folders(
+                &mut manifest,
+                io.as_ref(),
+                manager,
+                operation,
+                checkpoint,
+                &mut warnings,
+            )
+            .await
+            {
+                Ok((folders, _)) => folders,
+                Err(_) => {
+                    warnings
+                        .push("[Artwork] Folder grouping interrupted; ownership retained".into());
+                    BTreeMap::new()
+                }
+            }
+        } else {
+            BTreeMap::new()
+        };
+        let mut identities = HashMap::new();
+        if manifest.folder_artwork.enabled {
+            for folder in folders.keys().chain(manifest.folder_artwork_records.keys()) {
+                if let Ok(Some(identity)) = io.folder_identity(folder).await {
+                    identities.entry(identity).or_insert_with(|| folder.clone());
+                }
+            }
+        }
+        // Retained descendants are only needed by the final cleanup snapshot.
+        manifest.synced_items.clear();
+        (
+            Self {
+                manifest,
+                folders,
+                identities,
+                attempted: HashSet::new(),
+                paths: HashMap::new(),
+                eligible_artists: HashSet::new(),
+                artist_covers: HashMap::new(),
+            },
+            warnings,
+        )
+    }
+
+    async fn identity(&mut self, folder: &str, io: &dyn DeviceIO) -> Result<Option<String>> {
+        if let Some(identity) = self.paths.get(folder) {
+            return Ok(Some(identity.clone()));
+        }
+        let identity = io.folder_identity(folder).await?;
+        if let Some(identity) = &identity {
+            self.paths.insert(folder.to_owned(), identity.clone());
+        }
+        Ok(identity)
+    }
+
+    pub(crate) async fn touch(
+        &mut self,
+        item: &crate::device::SyncedItem,
+        known: Option<TrackArtwork>,
+        io: &Arc<dyn DeviceIO>,
+        fallback: &Arc<dyn MediaProvider>,
+        providers: &HashMap<String, Arc<dyn MediaProvider>>,
+        manager: &SyncOperationManager,
+        operation: &str,
+        checkpoint: &crate::device::SyncManifestSession,
+    ) -> Vec<String> {
+        if !self.manifest.folder_artwork.enabled || item.media_role != MediaRole::Music {
+            return Vec::new();
+        }
+        let path = normalized_device_folder(&item.local_path);
+        if validate_device_relative_path(&path).is_err() {
+            return Vec::new();
+        }
+        let Some((album, _)) = path.rsplit_once('/') else {
+            return Vec::new();
+        };
+        let Some((artist, _)) = album.rsplit_once('/') else {
+            return Vec::new();
+        };
+        let mut touched = BTreeMap::new();
+        let mut warnings = Vec::new();
+        if !self.eligible_artists.contains(artist) {
+            let Some(root) = self
+                .manifest
+                .media_path(MediaRole::Music)
+                .map(normalized_device_folder)
+                .filter(|root| !root.is_empty())
+            else {
+                return warnings;
+            };
+            let Ok(Some(root_identity)) = self.identity(&root, io.as_ref()).await else {
+                return warnings;
+            };
+            // The artist must be strictly below the physical music root. Resolving
+            // ancestors preserves case/alias semantics without string-prefix guesses.
+            let mut ancestor = artist.rsplit_once('/').map(|(parent, _)| parent);
+            let mut eligible = false;
+            while let Some(parent) = ancestor {
+                if self
+                    .identity(parent, io.as_ref())
+                    .await
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    == Some(&root_identity)
+                {
+                    eligible = true;
+                    break;
+                }
+                ancestor = parent.rsplit_once('/').map(|(parent, _)| parent);
+            }
+            if !eligible {
+                return warnings;
+            }
+            self.eligible_artists.insert(artist.to_owned());
+        }
+        for (folder, is_artist) in [(artist, true), (album, false)] {
+            if manager.is_cancelled(operation).await {
+                break;
+            }
+            let identity = match self.identity(folder, io.as_ref()).await {
+                Ok(Some(identity)) => identity,
+                Ok(None) => continue,
+                Err(_) => {
+                    warnings.push(format!(
+                        "[Artwork] {folder}: folder identity unavailable; retry next sync"
+                    ));
+                    continue;
+                }
+            };
+            let canonical = self
+                .identities
+                .entry(identity)
+                .or_insert_with(|| folder.to_owned())
+                .clone();
+            if !self.attempted.insert(canonical.clone()) {
+                continue;
+            }
+            let mut candidates = self.folders.remove(&canonical).unwrap_or_default();
+            // Current track metadata supersedes the pre-sync indexed candidate,
+            // including album identity changes at an unchanged physical path.
+            candidates.retain(|candidate| {
+                candidate.server != item.server_id || candidate.track != item.jellyfin_id
+            });
+            candidates.push(Candidate {
+                server: item.server_id.clone(),
+                album: item.provider_album_id.clone(),
+                track: item.jellyfin_id.clone(),
+                artist: is_artist,
+                known: known.clone(),
+            });
+            candidates.sort_by(|a, b| {
+                (&a.server, &a.album, &a.track).cmp(&(&b.server, &b.album, &b.track))
+            });
+            candidates.dedup_by(|a, b| {
+                a.server == b.server
+                    && a.album.is_some()
+                    && a.album == b.album
+                    && a.artist == b.artist
+            });
+            touched.insert(canonical, candidates);
+        }
+        if touched.is_empty() {
+            return warnings;
+        }
+        warnings.extend(
+            create_folders(
+                &mut self.manifest,
+                touched,
+                &mut self.artist_covers,
+                io,
+                fallback,
+                providers,
+                manager,
+                operation,
+                checkpoint,
+            )
+            .await,
+        );
+        warnings
+    }
+}
+
+/// Final artwork work retires obsolete ownership only; unchanged folders are not
+/// backfilled. Resolve aliases again after audio deletions before pruning folders.
+pub(crate) async fn cleanup(
     manifest: &mut DeviceManifest,
-    plan: &crate::sync_plan::SyncPlan,
     io: &Arc<dyn DeviceIO>,
-    fallback: &Arc<dyn MediaProvider>,
-    providers: &HashMap<String, Arc<dyn MediaProvider>>,
     manager: &SyncOperationManager,
     operation: &str,
     checkpoint: &crate::device::SyncManifestSession,
 ) -> Vec<String> {
-    let mut progress = crate::sync_logging::Step::current("folder_artwork");
-    crate::daemon_log!("[Artwork] Resolving synced folders");
+    let mut progress = crate::sync_logging::Step::current("folder_artwork_cleanup");
     let mut warnings = Vec::new();
-    let mut artist_covers = HashMap::new();
-    let (mut folders, live) = match grouped_folders(
+    let live = match grouped_folders(
         manifest,
         io.as_ref(),
         manager,
@@ -421,35 +620,12 @@ pub(crate) async fn run(
     )
     .await
     {
-        Ok(grouped) => grouped,
+        Ok((_, live)) => live,
         Err(_) => {
             warnings.push("[Artwork] Folder grouping interrupted; ownership retained".into());
-            progress.finish(
-                if manager.is_cancelled(operation).await { "cancelled" } else { "failed" },
-                0,
-            );
             return warnings;
         }
     };
-    if manifest.folder_artwork.enabled {
-        // Additions preserve known identities through the disk-backed plan; retained
-        // legacy tracks resolve by provider ID only when their folder needs artwork.
-        let mut known_by_id = HashMap::new();
-        if let Ok(adds) = plan.adds.iter() {
-            for add in adds.flatten() {
-                if let Some(known) = add.artwork {
-                    known_by_id.insert((add.server_id, add.jellyfin_id), known);
-                }
-            }
-        }
-        for values in folders.values_mut() {
-            for candidate in values {
-                candidate.known = known_by_id
-                    .get(&(candidate.server.clone(), candidate.track.clone()))
-                    .cloned();
-            }
-        }
-    }
     let obsolete: Vec<_> = manifest
         .folder_artwork_records
         .keys()
@@ -523,15 +699,31 @@ pub(crate) async fn run(
             return warnings;
         }
     }
-    if !manifest.folder_artwork.enabled {
-        crate::daemon_log!("[Artwork] Thumbnail creation disabled; cleanup finished");
-        let cancelled = manager.is_cancelled(operation).await;
-        progress.finish(
-            if cancelled { "cancelled" } else if warnings.is_empty() { "skipped" } else { "warnings" },
-            0,
-        );
-        return warnings;
-    }
+    progress.finish(
+        if warnings.is_empty() {
+            "success"
+        } else {
+            "warnings"
+        },
+        0,
+    );
+    warnings
+}
+
+/// Checkpoint every newly published output before track completion is reported.
+async fn create_folders(
+    manifest: &mut DeviceManifest,
+    folders: BTreeMap<String, Vec<Candidate>>,
+    artist_covers: &mut HashMap<(Option<String>, String), Option<String>>,
+    io: &Arc<dyn DeviceIO>,
+    fallback: &Arc<dyn MediaProvider>,
+    providers: &HashMap<String, Arc<dyn MediaProvider>>,
+    manager: &SyncOperationManager,
+    operation: &str,
+    checkpoint: &crate::device::SyncManifestSession,
+) -> Vec<String> {
+    let mut progress = crate::sync_logging::Step::current("folder_artwork");
+    let mut warnings = Vec::new();
     let total = folders.len();
     let mut processed = 0;
     crate::daemon_log!("[Artwork] Checking {total} folders for thumbnails");
@@ -565,7 +757,7 @@ pub(crate) async fn run(
                     for candidate in &candidates {
                         let Some(provider) = provider_for(candidate.server.as_deref(), fallback, providers) else { continue };
                         let resolved = tokio::select! {
-                            result = tokio::time::timeout(Duration::from_secs(15), resolve(candidate, provider.as_ref(), &mut artist_covers)) => result,
+                            result = tokio::time::timeout(Duration::from_secs(15), resolve(candidate, provider.as_ref(), artist_covers)) => result,
                             _ = wait_for_operation_cancellation(manager, operation) => return Ok(()),
                         };
                         match resolved {
@@ -600,8 +792,8 @@ pub(crate) async fn run(
                 crate::daemon_log!("[Artwork] {folder}: folder.jpg saved");
                 image
             };
-            for (kind, enabled) in [("windows",manifest.folder_artwork.windows),("macos",manifest.folder_artwork.macos),("kde",manifest.folder_artwork.kde),("gnome",manifest.folder_artwork.gnome)] {
-                if !enabled || manager.is_cancelled(operation).await { continue; }
+            for kind in ["windows", "macos", "kde", "gnome"] {
+                if manager.is_cancelled(operation).await { continue; }
                 let old = record.native.get(kind).map(String::as_str);
                 crate::daemon_log!("[Artwork] {folder}: applying {kind} folder icon");
                 match io.folder_icon(&folder, kind, Some(&bytes), old).await {
@@ -658,7 +850,6 @@ mod tests {
             ..Default::default()
         };
         manifest.folder_artwork.enabled = true;
-        manifest.folder_artwork.kde = true;
         for id in ["track", "track2"] {
             manifest.synced_items.push(serde_json::from_value(serde_json::json!({
                 "providerItemId":id,"name":id,"album":"Album","artist":"Artist",
@@ -691,8 +882,170 @@ mod tests {
         .unwrap();
         crate::sync_plan::SyncPlan::from_delta(delta, manifest).unwrap()
     }
+    // Explicitly simulate updates to existing tracks for focused lifecycle tests.
+    // Production creates artwork only through Incremental::touch in the audio writer.
+    async fn touch_all(
+        manifest: &mut DeviceManifest,
+        _plan: &crate::sync_plan::SyncPlan,
+        io: &Arc<dyn DeviceIO>,
+        fallback: &Arc<dyn MediaProvider>,
+        providers: &HashMap<String, Arc<dyn MediaProvider>>,
+        manager: &SyncOperationManager,
+        operation: &str,
+        checkpoint: &crate::device::SyncManifestSession,
+    ) -> Vec<String> {
+        let (mut state, mut warnings) =
+            Incremental::new(manifest.clone(), io, manager, operation, checkpoint).await;
+        for item in &manifest.synced_items {
+            warnings.extend(
+                state
+                    .touch(
+                        item, None, io, fallback, providers, manager, operation, checkpoint,
+                    )
+                    .await,
+            );
+        }
+        manifest.folder_artwork_records = state.manifest.folder_artwork_records;
+        if !manager.is_cancelled(operation).await {
+            warnings.extend(cleanup(manifest, io, manager, operation, checkpoint).await);
+        }
+        warnings
+    }
     #[tokio::test]
-    async fn retained_backfill_reuses_images_and_native_options_then_cleans_only_owned_outputs() {
+    async fn current_album_identity_replaces_indexed_metadata_at_same_path() {
+        let root = tempfile::tempdir().unwrap();
+        let (devices, base, checkpoint) = fixture(root.path()).await;
+        let io: Arc<dyn DeviceIO> = Arc::new(FaultIo {
+            base,
+            free: u64::MAX,
+            cancel: None,
+            fail_read: false.into(),
+            fail_stat: false.into(),
+            fold_case: false,
+        });
+        let mut manifest = devices.get_current_device().await.unwrap();
+        manifest.synced_items.truncate(1);
+        own_jpeg(&mut manifest, root.path(), "Music/Artist");
+        let manager = SyncOperationManager::new();
+        manager.create_operation("album-change".into(), 1).await;
+        let (mut state, warnings) =
+            Incremental::new(manifest.clone(), &io, &manager, "album-change", &checkpoint).await;
+        assert!(warnings.is_empty());
+        let mut server = mockito::Server::new_async().await;
+        let old = server
+            .mock("GET", "/Items/album")
+            .match_query(mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let current = server
+            .mock("GET", "/Items/z-new")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{"Id":"z-new","Name":"Album","Type":"MusicAlbum","ImageTags":{"Primary":"cover"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _children = server
+            .mock("GET", "/Items")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#)
+            .create_async()
+            .await;
+        let mut jpeg = Cursor::new(Vec::new());
+        image::RgbImage::new(20, 10)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let cover = server
+            .mock("GET", "/Items/z-new/Images/Primary")
+            .with_status(200)
+            .with_body(jpeg.get_ref())
+            .expect(1)
+            .create_async()
+            .await;
+        let provider: Arc<dyn MediaProvider> =
+            Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                crate::api::JellyfinClient::new(),
+                server.url(),
+                "artwork-test-token",
+                "user",
+            ));
+        let mut item = manifest.synced_items[0].clone();
+        item.provider_album_id = Some("z-new".into());
+        let warnings = state
+            .touch(
+                &item,
+                None,
+                &io,
+                &provider,
+                &HashMap::from([("source".into(), provider.clone())]),
+                &manager,
+                "album-change",
+                &checkpoint,
+            )
+            .await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            state.manifest.folder_artwork_records["Music/Artist/Album"]
+                .source
+                .as_ref()
+                .unwrap()
+                .entity_id,
+            "z-new"
+        );
+        old.assert_async().await;
+        current.assert_async().await;
+        cover.assert_async().await;
+        checkpoint.finish("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn touched_folders_require_artist_strictly_below_physical_music_root() {
+        let root = tempfile::tempdir().unwrap();
+        let (devices, io, checkpoint) = fixture(root.path()).await;
+        let manifest = devices.get_current_device().await.unwrap();
+        let manager = SyncOperationManager::new();
+        manager.create_operation("root-boundary".into(), 2).await;
+        let provider = inert_provider();
+        let (mut state, warnings) = Incremental::new(
+            manifest.clone(),
+            &io,
+            &manager,
+            "root-boundary",
+            &checkpoint,
+        )
+        .await;
+        assert!(warnings.is_empty());
+        for path in ["Music/Album/track.mp3", "Outside/Artist/Album/track.mp3"] {
+            std::fs::create_dir_all(root.path().join(path).parent().unwrap()).unwrap();
+            let mut item = manifest.synced_items[0].clone();
+            item.local_path = path.into();
+            assert!(
+                state
+                    .touch(
+                        &item,
+                        None,
+                        &io,
+                        &provider,
+                        &HashMap::new(),
+                        &manager,
+                        "root-boundary",
+                        &checkpoint
+                    )
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(state.attempted.is_empty());
+        assert!(state.manifest.folder_artwork_records.is_empty());
+        checkpoint.finish("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unchanged_sync_skips_backfill_then_updates_reuse_images_and_cleanup_owned_outputs() {
         let root = tempfile::tempdir().unwrap();
         let (devices, io, checkpoint) = fixture(root.path()).await;
         let mut server = mockito::Server::new_async().await;
@@ -771,7 +1124,15 @@ mod tests {
             crate::device::SyncManifestSession::new(devices.clone(), "artwork-device", &io, None)
                 .await
                 .unwrap();
+        assert!(manifest.folder_artwork_records.is_empty());
+        assert!(!root.path().join("Music/Artist/Album/folder.jpg").exists());
+        // Fixture tracks are metadata only; the unchanged run prunes their empty
+        // directories. A subsequent audio update recreates them before artwork.
+        std::fs::create_dir_all(root.path().join("Music/Artist/Album")).unwrap();
+        assert!(touch_all(&mut manifest, &plan, &io, &provider, &providers, &manager, "artwork", &checkpoint).await.is_empty());
         assert_eq!(manifest.folder_artwork_records.len(), 2);
+        assert!(root.path().join("Music/Artist/Album/desktop.ini").exists());
+        assert!(root.path().join("Music/Artist/Album/.hifimule-folder.ico").exists());
         assert_eq!(
             image::load_from_memory(
                 &std::fs::read(root.path().join("Music/Artist/Album/folder.jpg")).unwrap()
@@ -781,7 +1142,7 @@ mod tests {
             500
         );
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -794,8 +1155,7 @@ mod tests {
             .await
             .is_empty()
         );
-        manifest.folder_artwork.windows = true;
-        let warnings = run(
+        let warnings = touch_all(
             &mut manifest,
             &plan,
             &io,
@@ -806,10 +1166,7 @@ mod tests {
             &checkpoint,
         )
         .await;
-        #[cfg(not(windows))]
-        assert_eq!(warnings.len(), 2);
-        #[cfg(windows)]
-        assert!(warnings.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
         cover_album.assert_async().await;
         cover_artist.assert_async().await;
         album.assert_async().await;
@@ -818,7 +1175,7 @@ mod tests {
         // Disabling leaves existing files; removing the last track retires owned state.
         manifest.folder_artwork.enabled = false;
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -837,7 +1194,7 @@ mod tests {
         )
         .unwrap();
         manifest.synced_items.clear();
-        let warnings = run(
+        let warnings = touch_all(
             &mut manifest,
             &plan,
             &io,
@@ -888,7 +1245,8 @@ mod tests {
             if kind == "gnome" && owned == Some("foreign-host") {
                 return Ok(owned.map(str::to_owned));
             }
-            self.base.folder_icon(p, kind, jpeg, owned).await
+            let _ = (p, jpeg);
+            Ok(owned.map(str::to_owned))
         }
         async fn folder_identity(&self, p: &str) -> Result<Option<String>> {
             if self.fold_case {
@@ -976,8 +1334,7 @@ mod tests {
                 ));
             let providers = HashMap::from([("source".into(), provider.clone())]);
             let mut manifest = devices.get_current_device().await.unwrap();
-            manifest.folder_artwork.kde = false;
-            for folder in ["Music/Artist", "Music/Artist/Album"] {
+                for folder in ["Music/Artist", "Music/Artist/Album"] {
                 manifest.folder_artwork_records.insert(
                     folder.into(),
                     crate::device::FolderArtworkRecord {
@@ -992,7 +1349,7 @@ mod tests {
                 );
             }
             let plan = empty_plan(&manifest);
-            let warnings = run(
+            let warnings = touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1069,7 +1426,7 @@ mod tests {
             own_jpeg(&mut manifest, root.path(), "Music/Artist/Album");
             let plan = empty_plan(&manifest);
             let provider = inert_provider();
-            let warnings = run(
+            let warnings = touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1089,7 +1446,7 @@ mod tests {
             fault.fail_read.store(false, Ordering::Relaxed);
             fault.fail_stat.store(false, Ordering::Relaxed);
             assert!(
-                run(
+                touch_all(
                     &mut manifest,
                     &plan,
                     &io,
@@ -1120,7 +1477,7 @@ mod tests {
         let provider = inert_provider();
         let plan = empty_plan(&manifest);
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1141,7 +1498,7 @@ mod tests {
         assert!(root.path().join("Music/Artist/Album/folder.jpg").exists());
         manifest.synced_items.clear();
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1170,7 +1527,6 @@ mod tests {
             fold_case: true,
         });
         let mut manifest = devices.get_current_device().await.unwrap();
-        manifest.folder_artwork.kde = false;
         own_jpeg(&mut manifest, root.path(), "Music/Artist");
         own_jpeg(&mut manifest, root.path(), "Music/Artist/Album");
         manifest.synced_items[1].local_path = "music/artist/album/track2.mp3".into();
@@ -1179,7 +1535,7 @@ mod tests {
         let provider = inert_provider();
         let plan = empty_plan(&manifest);
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1194,7 +1550,7 @@ mod tests {
         );
         manifest.synced_items.remove(0);
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1249,7 +1605,7 @@ mod tests {
         let provider = inert_provider();
         let plan = empty_plan(&manifest);
         assert!(
-            run(
+            touch_all(
                 &mut manifest,
                 &plan,
                 &io,
@@ -1274,7 +1630,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (devices, io, checkpoint) = fixture(root.path()).await;
         let mut manifest = devices.get_current_device().await.unwrap();
-        manifest.folder_artwork.kde = false;
         let template = manifest.synced_items[0].clone();
         manifest.synced_items.clear();
         for album in ["a-no-cover", "b-failed", "z-healthy"] {
@@ -1327,7 +1682,7 @@ mod tests {
         let manager = SyncOperationManager::new();
         manager.create_operation("election".into(), 0).await;
         let plan = empty_plan(&manifest);
-        let warnings = run(
+        let warnings = touch_all(
             &mut manifest,
             &plan,
             &io,
@@ -1370,7 +1725,7 @@ mod tests {
         manager.create_operation("artwork".into(), 0).await;
         let mut manifest = devices.get_current_device().await.unwrap();
         let plan = empty_plan(&manifest);
-        let warnings = run(
+        let warnings = touch_all(
             &mut manifest,
             &plan,
             &io,

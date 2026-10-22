@@ -178,21 +178,19 @@ pub(crate) fn apply(
                 (None, None) => Ok(None),
             }
         }
-        #[cfg(windows)]
         "windows" => windows(&folder, jpeg, owned),
         #[cfg(target_os = "macos")]
         "macos" => macos(&folder, jpeg, owned),
         #[cfg(target_os = "linux")]
-        "gnome" => gnome(&folder, jpeg, owned),
-        _ => bail!(
-            "{kind} icons are pending: a compatible host and mass-storage connection are required"
-        ),
+        "gnome" if gnome_available() => gnome(&folder, jpeg, owned),
+        _ => Ok(owned.map(str::to_owned)),
     }
 }
 
-#[cfg(windows)]
 fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Option<String>> {
+    #[cfg(windows)]
     use std::os::windows::ffi::OsStrExt;
+    #[cfg(windows)]
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
         FILE_ATTRIBUTE_SYSTEM, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
@@ -201,8 +199,10 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
     struct State {
         ini: String,
         ico: String,
-        previous: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<u32>,
     }
+    #[cfg(windows)]
     fn attrs(path: &Path) -> Result<u32> {
         let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let value = unsafe { GetFileAttributesW(name.as_ptr()) };
@@ -212,6 +212,7 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
         );
         Ok(value)
     }
+    #[cfg(windows)]
     fn set_attrs(path: &Path, value: u32) -> Result<()> {
         let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         ensure!(
@@ -228,6 +229,22 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
         }
         Ok(())
     }
+    #[cfg(not(windows))]
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    #[cfg(not(windows))]
+    const FILE_ATTRIBUTE_READONLY: u32 = 1;
+    #[cfg(not(windows))]
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
+    #[cfg(not(windows))]
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 4;
+    #[cfg(not(windows))]
+    fn attrs(_: &Path) -> Result<u32> {
+        Ok(0)
+    }
+    #[cfg(not(windows))]
+    fn set_attrs(_: &Path, _: u32) -> Result<()> {
+        Ok(())
+    }
     let ini = folder.join("desktop.ini");
     let ico = folder.join(".hifimule-folder.ico");
     let old: Option<State> = owned.map(serde_json::from_str).transpose()?;
@@ -241,10 +258,12 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
         );
         if ini_bytes.is_some() && ico_bytes.is_some() {
             ensure!(
-                attrs(folder)? & FILE_ATTRIBUTE_READONLY != 0,
+                !cfg!(windows)
+                    || old.previous.is_none()
+                    || attrs(folder)? & FILE_ATTRIBUTE_READONLY != 0,
                 "Modified Windows folder attributes preserved"
             );
-            if jpeg.is_some() {
+            if jpeg.is_some() && (!cfg!(windows) || old.previous.is_some()) {
                 return Ok(owned.map(str::to_owned));
             }
         }
@@ -255,6 +274,11 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
         );
     }
     if jpeg.is_none() {
+        // Attribute restoration requires Windows. Keep legacy activation evidence
+        // and the files it describes until a compatible host can retire them.
+        if !cfg!(windows) && old.as_ref().is_some_and(|old| old.previous.is_some()) {
+            return Ok(owned.map(str::to_owned));
+        }
         if let Some(old) = old {
             if ini_bytes.is_some() {
                 set_attrs(&ini, FILE_ATTRIBUTE_NORMAL)?;
@@ -264,16 +288,27 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
                 set_attrs(&ico, FILE_ATTRIBUTE_NORMAL)?;
                 std::fs::remove_file(&ico)?;
             }
-            let value = (attrs(folder)? & !FILE_ATTRIBUTE_READONLY)
-                | (old.previous & FILE_ATTRIBUTE_READONLY);
-            set_attrs(folder, value)?;
+            if let Some(previous) = old.previous {
+                let value = (attrs(folder)? & !FILE_ATTRIBUTE_READONLY)
+                    | (previous & FILE_ATTRIBUTE_READONLY);
+                set_attrs(folder, value)?;
+            }
         }
         return Ok(None);
     }
-    let previous = old.as_ref().map_or(attrs(folder)?, |v| v.previous);
+    let previous = if cfg!(windows) {
+        Some(
+            old.as_ref()
+                .and_then(|v| v.previous)
+                .unwrap_or(attrs(folder)?),
+        )
+    } else {
+        old.as_ref().and_then(|v| v.previous)
+    };
     let mut encoded = std::io::Cursor::new(Vec::new());
     image::load_from_memory(jpeg.unwrap())?
         .thumbnail(256, 256)
+        .to_rgba8()
         .write_to(&mut encoded, image::ImageFormat::Ico)?;
     let ini_data: Vec<u8> = std::iter::once(0xfeff)
         .chain(
@@ -316,17 +351,19 @@ fn windows(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Op
         if let Ok(current) = attrs(folder) {
             let _ = set_attrs(
                 folder,
-                (current & !FILE_ATTRIBUTE_READONLY) | (previous & FILE_ATTRIBUTE_READONLY),
+                (current & !FILE_ATTRIBUTE_READONLY)
+                    | (previous.unwrap_or_default() & FILE_ATTRIBUTE_READONLY),
             );
         }
         return Err(error);
     }
     Ok(Some(serde_json::to_string(&State {
-        ini: hash(&ini_data),
-        ico: hash(encoded.get_ref()),
+        ini: hash(ini_bytes.as_deref().unwrap_or(&ini_data)),
+        ico: hash(ico_bytes.as_deref().unwrap_or(encoded.get_ref())),
         previous,
     })?))
 }
+
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct GnomeOwnership {
@@ -381,6 +418,12 @@ fn check_gnome_owner(
     Ok(())
 }
 #[cfg(target_os = "linux")]
+fn gnome_available() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        && std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase().contains("gnome")
+}
+
+#[cfg(target_os = "linux")]
 fn gnome_scope() -> Result<String> {
     let machine =
         machine_uid::get().map_err(|_| anyhow::anyhow!("GNOME ownership scope unavailable"))?;
@@ -429,11 +472,9 @@ fn gnome(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Opti
                 "--",
             ])
             .arg(folder),
-    )?;
-    ensure!(
-        result.status.success(),
-        "GNOME icon pending: GIO metadata is unavailable"
     );
+    let Ok(result) = result else { return Ok(owned.map(str::to_owned)) };
+    if !result.status.success() { return Ok(owned.map(str::to_owned)); }
     let text = String::from_utf8_lossy(&result.stdout);
     let themed = text
         .lines()
@@ -464,10 +505,9 @@ fn gnome(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Opti
     if jpeg.is_some() {
         command.arg("folder.jpg");
     }
-    ensure!(
-        gio_output(&mut command)?.status.success(),
-        "GNOME icon pending: GVfs metadata cannot be updated"
-    );
+    if !gio_output(&mut command).is_ok_and(|output| output.status.success()) {
+        return Ok(owned.map(str::to_owned));
+    }
     gnome_record(owned, &scope, jpeg.map(|_| "folder.jpg"))
 }
 
@@ -580,6 +620,141 @@ fn macos(folder: &Path, jpeg: Option<&[u8]>, owned: Option<&str>) -> Result<Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_sidecars_prepare_reuse_and_preserve_user_changes_on_every_host() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Album");
+        std::fs::create_dir(&folder).unwrap();
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(20, 10)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let token = apply(root.path(), "Album", "windows", Some(jpeg.get_ref()), None)
+            .unwrap()
+            .unwrap();
+        assert!(folder.join("desktop.ini").exists());
+        assert_eq!(
+            image::open(folder.join(".hifimule-folder.ico"))
+                .unwrap()
+                .width(),
+            256
+        );
+        let state: serde_json::Value = serde_json::from_str(&token).unwrap();
+        assert_eq!(state.get("previous").is_some(), cfg!(windows));
+        assert_eq!(
+            apply(
+                root.path(),
+                "Album",
+                "windows",
+                Some(jpeg.get_ref()),
+                Some(&token)
+            )
+            .unwrap(),
+            Some(token.clone())
+        );
+        apply(root.path(), "Album", "windows", None, Some(&token)).unwrap();
+        assert!(!folder.join("desktop.ini").exists());
+        assert!(!folder.join(".hifimule-folder.ico").exists());
+        std::fs::write(folder.join("desktop.ini"), b"user customization").unwrap();
+        assert!(apply(root.path(), "Album", "windows", Some(jpeg.get_ref()), None).is_err());
+        assert_eq!(
+            std::fs::read(folder.join("desktop.ini")).unwrap(),
+            b"user customization"
+        );
+    }
+
+    #[test]
+    fn windows_sidecar_repair_keeps_actual_legacy_rgb_ico_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Album");
+        std::fs::create_dir(&folder).unwrap();
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::new(20, 10));
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
+        let mut legacy_ico = std::io::Cursor::new(Vec::new());
+        image
+            .thumbnail(256, 256)
+            .write_to(&mut legacy_ico, image::ImageFormat::Ico)
+            .unwrap();
+        std::fs::write(folder.join(".hifimule-folder.ico"), legacy_ico.get_ref()).unwrap();
+        let old = serde_json::json!({"ini": "missing", "ico": hash(legacy_ico.get_ref())}).to_string();
+        let repaired = apply(
+            root.path(),
+            "Album",
+            "windows",
+            Some(jpeg.get_ref()),
+            Some(&old),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read(folder.join(".hifimule-folder.ico")).unwrap(),
+            *legacy_ico.get_ref()
+        );
+        let ownership: serde_json::Value = serde_json::from_str(&repaired).unwrap();
+        assert_eq!(ownership["ico"], hash(legacy_ico.get_ref()));
+        assert_eq!(
+            ownership["ini"],
+            hash(&std::fs::read(folder.join("desktop.ini")).unwrap())
+        );
+        assert_eq!(
+            apply(
+                root.path(),
+                "Album",
+                "windows",
+                Some(jpeg.get_ref()),
+                Some(&repaired)
+            )
+            .unwrap(),
+            Some(repaired.clone())
+        );
+        assert!(
+            apply(root.path(), "Album", "windows", None, Some(&repaired))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!folder.join("desktop.ini").exists());
+        assert!(!folder.join(".hifimule-folder.ico").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn portable_windows_token_cleanup_preserves_unowned_readonly_attribute() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Album");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("desktop.ini"), b"portable ini").unwrap();
+        std::fs::write(folder.join(".hifimule-folder.ico"), b"portable ico").unwrap();
+        let token =
+            serde_json::json!({"ini": hash(b"portable ini"), "ico": hash(b"portable ico")}).to_string();
+        let mut permissions = std::fs::metadata(&folder).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&folder, permissions).unwrap();
+        assert!(
+            apply(root.path(), "Album", "windows", None, Some(&token))
+                .unwrap()
+                .is_none()
+        );
+        let mut permissions = std::fs::metadata(&folder).unwrap().permissions();
+        assert!(permissions.readonly());
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&folder, permissions).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_activation_evidence_is_retained_on_foreign_hosts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Album")).unwrap();
+        let token = r#"{"ini":"old","ico":"old","previous":16}"#;
+        assert_eq!(
+            apply(root.path(), "Album", "windows", None, Some(token))
+                .unwrap()
+                .as_deref(),
+            Some(token)
+        );
+    }
 
     #[test]
     fn artwork_publication_preserves_existing_file_and_directory() {

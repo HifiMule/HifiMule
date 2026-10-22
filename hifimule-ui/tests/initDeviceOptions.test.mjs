@@ -44,11 +44,11 @@ function setup() {
 }
 test('creation shows localized reconciliation and artwork choices with every option off', () => {
     const { body } = setup();
-    for (const id of ['reconcile', 'artwork', ...['windows', 'macos', 'kde', 'gnome'].map(kind => `artwork-${kind}`)]) {
+    for (const id of ['reconcile', 'artwork']) {
         assert.equal(body.querySelector(`#init-device-${id}`).checked, false);
     }
-    assert.equal(body.querySelector('#init-device-artwork-additions').hidden, true);
-    for (const key of ['reconcile_before_sync', 'reconcile_hint', 'artwork', 'artwork_hint', ...['windows', 'macos', 'kde', 'gnome'].flatMap(kind => [`artwork_${kind}`, `artwork_${kind}_hint`])]) {
+    for (const kind of ['windows', 'macos', 'kde', 'gnome']) assert.equal(body.querySelector(`#init-device-artwork-${kind}`), undefined);
+    for (const key of ['reconcile_before_sync', 'reconcile_hint', 'artwork', 'artwork_hint']) {
         assert.ok(body.html.includes(`basket.device.${key}`));
         const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
         for (const language of ['en', 'fr', 'es', 'de']) assert.ok(catalog[language][`basket.device.${key}`]);
@@ -59,34 +59,20 @@ test('untouched creation explicitly saves all preferences off', async () => {
     await modal.handleConfirm('listener', 'usb-drive', { value: 'Player' });
     const params = JSON.parse(JSON.stringify(calls[0].params));
     assert.equal(params.reconcileBeforeSync, false);
-    assert.deepEqual(params.folderArtwork, { enabled: false, windows: false, macos: false, kde: false, gnome: false });
-});
-test('thumbnail hide/show preserves independent native icon selections', () => {
-    const { body } = setup();
-    const master = body.querySelector('#init-device-artwork');
-    const additions = body.querySelector('#init-device-artwork-additions');
-    body.querySelector('#init-device-artwork-windows').checked = true;
-    for (const enabled of [true, false, true]) {
-        master.checked = enabled; master.emit('sl-change');
-        assert.equal(additions.hidden, !enabled);
-        assert.equal(body.querySelector('#init-device-artwork-windows').checked, true);
-        assert.equal(body.querySelector('#init-device-artwork-macos').checked, false);
-    }
+    assert.deepEqual(params.folderArtwork, { enabled: false });
 });
 test('creation captures enabled and disabled preferences before submitting in the single request', async () => {
     for (const enabled of [true, false]) {
         const { modal, body, calls } = setup();
         body.querySelector('#init-device-reconcile').checked = enabled;
         body.querySelector('#init-device-artwork').checked = enabled;
-        body.querySelector('#init-device-artwork-windows').checked = true;
-        body.querySelector('#init-device-artwork-kde').checked = true;
         await modal.handleConfirm('listener', 'usb-drive', { value: 'Player' });
         assert.equal(body.querySelector('#init-device-reconcile'), undefined, 'submission replaces the form');
         assert.equal(calls.length, 1);
         assert.equal(calls[0].method, 'device_initialize');
         const params = JSON.parse(JSON.stringify(calls[0].params));
         assert.equal(params.reconcileBeforeSync, enabled);
-        assert.deepEqual(params.folderArtwork, { enabled, windows: true, macos: false, kde: true, gnome: false });
+        assert.deepEqual(params.folderArtwork, { enabled });
         assert.equal(params.pendingId, 'pending-target');
         assert.equal(params.observedDestinationRevision, '7');
     }

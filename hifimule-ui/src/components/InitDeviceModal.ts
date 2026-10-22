@@ -221,9 +221,6 @@ export class InitDeviceModal {
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <sl-checkbox id="init-device-artwork" help-text="${escapeAttr(t('basket.device.artwork_hint'))}">${t('basket.device.artwork')}</sl-checkbox>
-                    <div id="init-device-artwork-additions" hidden style="margin-top: 0.75rem; padding-left: 1.5rem;">
-                        ${(['windows', 'macos', 'kde', 'gnome'] as const).map(kind => `<sl-checkbox id="init-device-artwork-${kind}" style="display: block; margin-bottom: 0.75rem;" help-text="${escapeAttr(t(`basket.device.artwork_${kind}_hint`))}">${t(`basket.device.artwork_${kind}`)}</sl-checkbox>`).join('')}
-                    </div>
                 </div>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">${t('device.init.linked_profile')}</div>
@@ -234,12 +231,6 @@ export class InitDeviceModal {
                 </div>
             </div>
         `;
-
-        const artwork = body.querySelector('#init-device-artwork') as any;
-        const artworkAdditions = body.querySelector('#init-device-artwork-additions') as HTMLElement;
-        artwork?.addEventListener('sl-change', () => {
-            artworkAdditions.hidden = !artwork.checked;
-        });
 
         // Update description when selection changes
         const selectEl = body.querySelector('#init-transcoding-profile') as any;
@@ -347,10 +338,7 @@ export class InitDeviceModal {
         const podcastFolderPath: string = (this.dialog?.querySelector('#init-podcast-folder-input') as any)?.value?.trim() ?? '';
 
         const reconcileBeforeSync = (body.querySelector('#init-device-reconcile') as any)?.checked === true;
-        const folderArtwork = Object.fromEntries(['enabled', 'windows', 'macos', 'kde', 'gnome'].map(kind => [
-            kind,
-            (body.querySelector(kind === 'enabled' ? '#init-device-artwork' : `#init-device-artwork-${kind}`) as any)?.checked === true,
-        ]));
+        const folderArtwork = { enabled: (body.querySelector('#init-device-artwork') as any)?.checked === true };
 
         const profileSelect = this.dialog?.querySelector('#init-transcoding-profile') as any;
         let transcodingProfileId = profileSelect?.value;

@@ -133,16 +133,37 @@ pub struct PlaylistManifestEntry {
     pub last_modified: String,  // ISO 8601 timestamp
 }
 
-/// Portable choices; native activation depends on the connected host and transport.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+/// Portable device preference; integrations are selected by the connected host.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct FolderArtwork {
     pub enabled: bool,
-    pub windows: bool,
-    pub macos: bool,
-    pub kde: bool,
-    pub gnome: bool,
 }
+impl<'de> Deserialize<'de> for FolderArtwork {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct LegacySettings {
+            enabled: bool,
+            windows: bool,
+            macos: bool,
+            kde: bool,
+            gnome: bool,
+        }
+        let settings = LegacySettings::deserialize(deserializer)?;
+        let _ = (
+            settings.windows,
+            settings.macos,
+            settings.kde,
+            settings.gnome,
+        );
+        Ok(Self {
+            enabled: settings.enabled,
+        })
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
