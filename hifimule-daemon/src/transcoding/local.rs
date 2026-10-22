@@ -687,10 +687,7 @@ fn encode_inner(
         "Original has invalid audio properties"
     );
     let source_duration = ictx.duration();
-    let duration_from_bitrate = unsafe {
-        (*ictx.as_ptr()).duration_estimation_method
-            == ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE
-    };
+    let duration_method = unsafe { (*ictx.as_ptr()).duration_estimation_method };
     let source_rate = decoder.rate();
     let encoder_codec = ff::encoder::find_by_name(target.encoder).unwrap().audio()?;
     let desired_rate = if target.encoder == "libopus" {
@@ -1165,25 +1162,43 @@ fn encode_inner(
     // Bitrate estimates can include trailing metadata bytes. Use the audio
     // actually decoded, while retaining reliable source headers to detect EOF
     // before the declared audio ends. Count at the source rate, before conversion.
-    let expected_duration = if duration_from_bitrate || source_duration <= 0 {
-        (u128::from(decoded_samples) * 1_000_000 / u128::from(source_rate)) as i64
-    } else {
-        source_duration
-    };
-    validate_duration(expected_duration, verify.duration())?;
+    let decoded_duration =
+        (u128::from(decoded_samples) * 1_000_000 / u128::from(source_rate)) as i64;
+    validate_duration(
+        source_duration,
+        decoded_duration,
+        duration_method,
+        verify.duration(),
+    )?;
     Ok(EncodeReport {
         output_bytes: std::fs::metadata(output)?.len(),
         recovery: recovery.report,
     })
 }
 
-fn validate_duration(expected: i64, actual: i64) -> Result<()> {
+fn validate_duration(
+    source: i64,
+    decoded: i64,
+    method: ff::ffi::AVDurationEstimationMethod,
+    actual: i64,
+) -> Result<()> {
+    let use_decoded =
+        source <= 0 || method == ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE;
+    let (expected, expectation) = if use_decoded {
+        (decoded, "decoded samples")
+    } else {
+        (source, "probed source")
+    };
     if expected > 0 && actual > 0 {
         ensure!(
             expected.abs_diff(actual) <= 2_000_000,
-            "Encoded duration does not match original: expected {:.3}s, output {:.3}s",
+            "Encoded duration does not match original: expected {:.3}s, output {:.3}s; probed source {:.3}s, decoded {:.3}s; duration estimation method {:?}; expectation {}",
             expected as f64 / 1_000_000.0,
-            actual as f64 / 1_000_000.0
+            actual as f64 / 1_000_000.0,
+            source as f64 / 1_000_000.0,
+            decoded as f64 / 1_000_000.0,
+            method,
+            expectation
         );
     }
     Ok(())
@@ -1341,7 +1356,16 @@ pub(crate) mod tests {
         let error = encode(&truncated, &output, &profile, &cancelled, 2_000_000).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("Encoded duration does not match original: expected"));
-        assert!(message.contains("output"));
+        assert!(message.contains(&format!(
+            "probed source {:.3}s",
+            original_duration as f64 / 1_000_000.0
+        )));
+        // The first 125 MP3 packets contain just under three seconds after
+        // decoder delay; both independent decode and output must expose that.
+        assert!(message.contains("decoded 2.977s"), "{message}");
+        assert!(message.contains("output 2.977s"), "{message}");
+        assert!(message.contains("AVFMT_DURATION_FROM_STREAM"), "{message}");
+        assert!(message.contains("expectation probed source"));
         assert!(!output.exists());
     }
 
@@ -1352,13 +1376,61 @@ pub(crate) mod tests {
         wav(&short, 3);
         ff::init().unwrap();
         let actual = format::input(&short).unwrap().duration();
-        let error = validate_duration(8_000_000, actual).unwrap_err();
+        let method = ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_STREAM;
+        let error = validate_duration(8_000_000, 8_000_000, method, actual).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Encoded duration does not match original: expected 8.000s, output 3.000s"
+            "Encoded duration does not match original: expected 8.000s, output 3.000s; probed source 8.000s, decoded 8.000s; duration estimation method AVFMT_DURATION_FROM_STREAM; expectation probed source"
         );
         // Preserve the existing allowance for codec padding and delay.
-        validate_duration(5_000_000, actual).unwrap();
+        validate_duration(5_000_000, 5_000_000, method, actual).unwrap();
+    }
+
+    #[test]
+    fn duration_validation_diagnostics_distinguish_estimated_missing_and_trusted_sources() {
+        use ff::ffi::AVDurationEstimationMethod::*;
+        for (source, method, expected, origin) in [
+            (
+                12_000_000,
+                AVFMT_DURATION_FROM_BITRATE,
+                "8.000",
+                "decoded samples",
+            ),
+            (
+                ff::ffi::AV_NOPTS_VALUE,
+                AVFMT_DURATION_FROM_STREAM,
+                "8.000",
+                "decoded samples",
+            ),
+            (
+                12_000_000,
+                AVFMT_DURATION_FROM_PTS,
+                "12.000",
+                "probed source",
+            ),
+        ] {
+            let message = validate_duration(source, 8_000_000, method, 3_000_000)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(&format!("expected {expected}s")),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!(
+                    "probed source {:.3}s",
+                    source as f64 / 1_000_000.0
+                )),
+                "{message}"
+            );
+            assert!(message.contains("decoded 8.000s"), "{message}");
+            assert!(message.contains("output 3.000s"), "{message}");
+            assert!(message.contains(&format!("method {method:?}")), "{message}");
+            assert!(
+                message.contains(&format!("expectation {origin}")),
+                "{message}"
+            );
+        }
     }
 
     #[test]

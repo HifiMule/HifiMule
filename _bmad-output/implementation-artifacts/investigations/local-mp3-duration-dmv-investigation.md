@@ -221,3 +221,64 @@ The user requested implementation after the diagnosis. `hifimule-daemon/src/tran
 Both supplied originals passed native 192 kbps MP3 conversion: 05 at 298.840816 seconds (7,257,564 bytes), 09 at 296.855510 seconds (7,201,325 bytes). Both reported zero invalid decode events/rejected bytes, and their original SHA-256 hashes remain unchanged. The temporary real-file test harness was removed. Permanent tests use synthetic audio only.
 
 The controlled-runtime daemon suite passed with localhost mock servers permitted: 1,661 unit tests plus 5 integration tests, zero failures, 14 ignored. All three independent reviews returned no actionable findings. See `../spec-fix-local-encoding-estimated-duration.md` for implementation verification and suggested review order. The missing incident-wide ID mapping and other-file evidence are unchanged; they are unnecessary to verify the supplied-file fix.
+
+## Follow-up: 2026-10-22 #2 — remaining failures after estimated-duration fix
+
+### New Evidence
+
+The user reports fewer errors after the fix, with four remaining expected/output duration pairs: 80.840/78.019 s, 118.067/115.078 s, 79.227/75.976 s, and 122.307/118.236 s. Auto-Fill rejects five each of `sample-aif-*`, `sample-wma-*`, and `sample-ac3-*` before decoding with an unrecognized non-audio Content-Type error. Other sources fail format opening or exceed existing bounded decode-recovery limits; several tracks complete with explicit recovery warnings.
+
+The current source contains the expected/actual duration error introduced by `f28a15a`. The working tree was clean at follow-up start. The local daemon log exists at `/Users/akartmann/Library/Application Support/HifiMule/daemon.log` but rotates by truncation at 1 MB (`hifimule-daemon/src/main.rs:28`); current contents retain only part of this run, including the packet error at byte 4,248,019 and three late recovery warnings. The four duration errors and sample Content-Type failures are absent from the retained excerpt.
+
+### Initial Hypotheses
+
+- **Open:** Missing MIME aliases or conflation of unknown audio and definite non-audio types reject supported original AIFF/WMA/AC3 sources. Confirm/refute by tracing header mapping and controlled-runtime codec support.
+- **Open:** Remaining duration mismatches use unreliable duration metadata classified by FFmpeg as stream-based, rather than bitrate-based. Requires an affected original and input duration method/sample count; the error alone cannot distinguish this from actual audio loss.
+- **Open:** Format-opening and recovery-budget failures reflect genuine damaged inputs, unsupported input formats, or incorrect HTTP bodies. Requires the individual originals and response metadata; do not increase budgets based on the messages alone.
+
+### Missing Evidence and Backlog
+
+1. Trace Content-Type admission and supported input formats; source and runtime evidence are available.
+2. Identify one remaining duration-mismatch item and inspect its original. Requested track IDs/file paths or the full log path asynchronously; retained log does not identify these failures.
+3. Correlate format-open/decode failures to originals; bare encoding-error log lines lack track name/ID and parallel processing prevents attribution from adjacent preparation logs alone.
+4. Keep successful recovery warnings distinct from failed sync items.
+
+### Status
+
+Active follow-up investigation. No additional production edits yet.
+
+### Confirmed Follow-up Findings
+
+1. **HTTP admission conflates unknown format mapping with non-audio.** The local original response is classified by `provider_audio_format(None, response_content_type)` and rejected when that narrow format map is empty and the MIME is neither missing nor generic binary (`hifimule-daemon/src/sync.rs:3827`, `:3830`). The mapper recognizes common output-compatible MP3/FLAC/AAC/OGG/Opus/WAV types but omits `audio/aiff`, `audio/x-aiff`, `audio/x-aif`, `audio/wma`, `audio/x-ms-wma`, `audio/ac3`, and `audio/x-ac3` (`hifimule-daemon/src/sync.rs:1896`, `:1995`, `:2044`). This is a confirmed source-code defect for valid supported originals. The exact response headers for the user's sample items remain unavailable, so incident attribution to a specific alias is deduced rather than directly observed.
+2. **AIFF and WMA input decoding is available.** The controlled runtime enables the AIFF/ASF demuxers and big-endian PCM plus WMA decoders (`hifimule-daemon/audio-runtime.json:13`). Independent runtime inspection confirmed these demuxers/decoders, and representative generated PCM16 AIFF and WMA v2 files decoded successfully. Existing fixtures/tests are at `hifimule-daemon/src/playback/decoder.rs:1168`, `:1344`. Runtime support does not guarantee every subtype or damaged source can decode.
+3. **AC3 is unsupported by the controlled runtime.** Neither its demuxer nor decoder is enabled in the disable-everything manifest, and independent runtime listings confirm absence. Merely accepting its MIME will move failure into decoding; it will not add support.
+4. **Remaining duration mismatch origin is unresolved.** The current error displays the chosen expected duration and output duration, but not whether the expectation came from trusted metadata or decoded samples (`hifimule-daemon/src/transcoding/local.rs:1168`, `:1180`). Differences are 2.821, 2.989, 3.251, and 4.071 seconds. The log values cannot distinguish stale stream duration metadata from actual audio loss or conversion problems. Preserve genuine-truncation protection pending an affected original.
+5. **Bare encoding failure lines lose attribution.** The failure object contains track name and ID, but Auto-Fill forwards only `error.error_message` as a warning (`hifimule-daemon/src/sync.rs:2985`, `:2991`). Parallel workers make adjacent preparation logs insufficient to identify the failed item. The retained log starts with `--- log truncated ---` and ends at 17:45:08 for run `b2917c59-46f7-478a-836f-9646d316eb15`; early mismatches and sample rejections are gone.
+6. **Recovery warnings describe completed encoding work, not an encoder failure.** Recovery warnings are emitted after successful encoding and queue admission (`hifimule-daemon/src/sync.rs:3006`). Retained examples include I Ran (ID `ad964076ebd0b879c6fcb00cf754367a`, 3 events/1,566 bytes), La Ballade du mois de juin (ID `ac0fb9ccf128c3a9464693038b075d04`, 1 event/16,932 bytes), and Humpin’ Around (ID `db3e0e00fb1e6331910e5bdee6b59289`, 4 events/2,926 bytes). Other fail-open and recovery-budget messages require original bytes to distinguish corrupt inputs, unexpected response bodies, and unsupported formats.
+
+### Updated Hypotheses
+
+- Missing MIME handling is **Confirmed** as a bug in local admission for supported AIFF/WMA originals; exact sample headers are still missing.
+- AC3 decoding support is **Refuted** for the current controlled runtime. It needs an explicit runtime expansion or an accurate unsupported-input report.
+- All remaining duration failures being the earlier bitrate-estimate bug remains **Open** and unproven; this fix already handles the bitrate-classified case.
+- All invalid-data messages indicating genuinely damaged music remains **Open**; the errors alone cannot prove that attribution.
+
+### Recommended Fix Direction
+
+Separate local-original MIME admission from strict device/server-output compatibility: permit audio media types and existing generic/OGG cases into native probing, continue blocking definite HTML/JSON/non-audio responses, and require a real decodable audio stream plus validated output before success. Cover representative AIFF/WMA originals in local-sync integration tests. Keep shared direct-play mapping strict. Add track name/ID to every local encoding failure and include input probed duration, decoded duration, FFmpeg estimation method and output duration in mismatch diagnostics. Do not increase duration tolerance or decode-recovery budgets on this evidence.
+
+Adding AC3 demuxer/decoder support is separate from MIME admission. No runtime expansion or additional production fix was made in this follow-up investigation.
+
+### Updated Conclusion
+
+**Confidence:** High for the AIFF/WMA admission defect and lack of AC3 runtime support; low for the cause of the four remaining duration errors and unassociated invalid-data failures. The available log is truncated, so an affected original or future identifiable diagnostic entry is required to resolve those causes.
+
+## Follow-up: 2026-10-22 #3 — MIME admission and diagnostics implemented
+
+The user selected the proposed MIME validation and diagnostics fix. Local original downloads now accept normalized audio media types for native probing, including AIFF/WMA, while preserving missing MIME, generic binary and application/ogg handling. Shared device/direct-play/server-output compatibility is unchanged. Definite non-audio responses remain rejected before native decoding and the rejection includes the actual Content-Type. A successfully decoded and profile-validated output remains mandatory before device admission.
+
+Every native encoding failure surfaced by sync now includes the track name and item ID in both manual errors and Auto-Fill warnings. Duration mismatch errors include expected and output durations, probed source duration, independently decoded duration, the FFmpeg estimation method and whether the expectation came from the source header or decoded samples. Existing two-second tolerance, reliable-header truncation checks, decode-recovery budgets and cleanup are unchanged. These diagnostics enable attribution of future occurrences; the earlier unidentified duration errors remain unresolved.
+
+Permanent tests use tracked synthetic AIFF/WMA/OGG fixtures and actual HTTP-to-native-MP3 conversion. Success/rejection matrices cover both operation modes, MIME variants and parameters, missing/generic types, invalid bodies labeled audio, unsupported/fake audio, cleanup, track identity and Auto-Fill continuation. Native tests cover duration provenance and actual truncated-source rejection.
+
+Verification: full controlled-runtime daemon suite passed with local mock sockets permitted: 1,665 unit tests plus 5 integration tests, zero failures, 14 ignored. Focused local sync tests passed (10, 1 ignored), as did all 21 native encoder tests. Three independent reviews returned no actionable findings. AC3 support and log retention were not expanded. See `../spec-fix-local-encoding-mime-and-diagnostics.md` for the review order.

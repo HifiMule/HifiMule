@@ -2054,6 +2054,25 @@ fn is_generic_binary_content_type(content_type: &str) -> bool {
     )
 }
 
+/// Original inputs only need permission to enter native probing. Their formats
+/// need not be playable on the device; the encoded output is validated separately.
+fn local_original_content_type_is_allowed(content_type: Option<&str>) -> bool {
+    let Some(content_type) = content_type else {
+        return true;
+    };
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type
+        .strip_prefix("audio/")
+        .is_some_and(|subtype| !subtype.is_empty())
+        || media_type == "application/ogg"
+        || is_generic_binary_content_type(&media_type)
+}
+
 /// Match the path the response-based logic will choose, or defer until its format is known.
 fn predictable_music_extension(
     compatibility: &AudioCompatibilityProfile,
@@ -2985,7 +3004,10 @@ async fn encode_and_enqueue(
             let error = SyncFileError {
                 jellyfin_id: track.add_item.jellyfin_id.clone(),
                 filename: track.add_item.name.clone(),
-                error_message: format!("Local encoding failed: {error:#}"),
+                error_message: format!(
+                    "Local encoding failed for '{}' ({}): {error:#}",
+                    track.add_item.name, track.add_item.jellyfin_id
+                ),
             };
             return if auto {
                 EncodingOutcome::Warning(error.error_message)
@@ -3828,12 +3850,16 @@ async fn execute_plan_sync_buffered(
             let extension_override = if let Some(target) = local_target.as_ref() {
                 // This response is the original, not the requested output. A
                 // definite non-audio response must never enter the decoder.
-                if response_format.is_empty()
-                    && response_content_type
-                        .is_some_and(|kind| !is_generic_binary_content_type(kind))
-                {
+                if !local_original_content_type_is_allowed(response_content_type) {
+                    let error_message = format!(
+                        "Original download returned an unrecognized non-audio content type: {}",
+                        response_content_type.unwrap_or_default()
+                    );
                     if add_item.is_auto_fill {
-                        warnings.push(format!("[Sync] Auto-Fill source failed for '{}': original download returned an unrecognized non-audio content type", add_item.name));
+                        warnings.push(format!(
+                            "[Sync] Auto-Fill source failed for '{}' ({}): {}",
+                            add_item.name, add_item.jellyfin_id, error_message
+                        ));
                         mark_operation_item_handled(
                             &producer_operation_manager,
                             &producer_operation_id,
@@ -3844,7 +3870,7 @@ async fn execute_plan_sync_buffered(
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
-                        error_message: "Original download returned an unrecognized non-audio content type".into(),
+                        error_message,
                     });
                     let _ = producer_operation_manager
                         .request_cancel(&producer_operation_id).await;
@@ -7905,6 +7931,306 @@ mod tests {
         album.assert_async().await;
         download.assert_async().await;
         remote.assert_async().await;
+    }
+
+    #[test]
+    fn local_encoding_mime_admission_is_independent_of_device_format_mapping() {
+        for content_type in [
+            None,
+            Some("audio/aiff"),
+            Some("audio/x-aiff"),
+            Some("audio/x-aif"),
+            Some(" AuDiO/X-MS-WMA ; codec=wmav2"),
+            Some("audio/wma"),
+            Some("audio/ac3"),
+            Some("audio/x-unknown"),
+            Some("application/ogg; codecs=vorbis"),
+            Some("APPLICATION/OCTET-STREAM; charset=binary"),
+            Some("binary/octet-stream"),
+        ] {
+            assert!(
+                local_original_content_type_is_allowed(content_type),
+                "{content_type:?}"
+            );
+        }
+        for content_type in [
+            "text/html",
+            "application/json",
+            "application/xml",
+            "text/xml",
+            "image/jpeg",
+            "video/mp4",
+            "audio/",
+            "",
+        ] {
+            assert!(
+                !local_original_content_type_is_allowed(Some(content_type)),
+                "{content_type}"
+            );
+        }
+        for content_type in [
+            "audio/aiff",
+            "audio/x-ms-wma",
+            "audio/ac3",
+            "audio/x-unknown",
+        ] {
+            assert!(
+                provider_audio_format(None, Some(content_type)).is_empty(),
+                "shared output mapping must remain strict: {content_type}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_encoding_original_mime_variants_commit_verified_mp3_in_both_modes() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for (fixture, content_type) in [
+            ("generated-pcm16.aif", Some("audio/aiff")),
+            ("generated-pcm16.aif", Some("audio/x-aiff")),
+            ("generated-pcm16.aif", Some(" AuDiO/X-AIF ; codec=pcm")),
+            ("generated-wmav1.wma", Some("audio/wma")),
+            ("generated-wmav2.wma", Some("audio/x-ms-wma")),
+            ("generated-wmav2.wma", Some("AuDiO/X-MS-WMA; codec=wmav2")),
+            (
+                "generated-vorbis.ogg",
+                Some("application/ogg; codecs=vorbis"),
+            ),
+            ("generated-pcm16.aif", None),
+            ("generated-pcm16.aif", Some("application/octet-stream")),
+            (
+                "generated-pcm16.aif",
+                Some("BINARY/OCTET-STREAM; charset=binary"),
+            ),
+            ("generated-pcm16.aif", Some("audio/x-unknown")),
+        ] {
+            let audio = std::fs::read(fixtures.join(fixture)).unwrap();
+            for auto in [false, true] {
+                let mut server = mockito::Server::new_async().await;
+                let mut download = server
+                    .mock("GET", "/rest/download.view")
+                    .match_query(mockito::Matcher::Any)
+                    .with_status(200)
+                    .with_body(audio.clone());
+                if let Some(content_type) = content_type {
+                    download = download.with_header("content-type", content_type);
+                }
+                let download = download.expect(1).create_async().await;
+                let remote = server
+                    .mock("GET", "/rest/stream.view")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let root = tempfile::tempdir().unwrap();
+                let (devices, io) = setup_provider_sync_device(root.path()).await;
+                let mut item = add_item_with_provider_format(
+                    "mime-original",
+                    "aif",
+                    "audio/aiff",
+                    audio.len() as u64,
+                );
+                item.duration_seconds = 2;
+                item.is_auto_fill = auto;
+                let delta = SyncDelta {
+                    provenance_updates: HashMap::new(),
+                    blocked: vec![],
+                    adds: vec![item],
+                    deletes: vec![],
+                    id_changes: vec![],
+                    unchanged: 0,
+                    playlists: vec![],
+                    pity_fired_servers: vec![],
+                };
+                let operations = Arc::new(SyncOperationManager::new());
+                let operation = unique_operation_id("local-original-mime");
+                operations.create_operation(operation.clone(), 1).await;
+                let (written, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                    local_encoding_servers: HashSet::from([String::new()]),
+                    provider: subsonic_provider(server.url()), providers_by_server: HashMap::new(),
+                    transcoding_profile: Some(serde_json::json!({"MaxStreamingBitrate":192000,
+                        "DirectPlayProfiles":[], "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]})),
+                }, operations.clone(), operation.clone(), devices.clone(), io).await.unwrap();
+                assert!(
+                    errors.is_empty(),
+                    "{fixture} {content_type:?} auto={auto}: {errors:?}"
+                );
+                assert_eq!(written.len(), 1, "{fixture} {content_type:?} auto={auto}");
+                let output = root.path().join(&written[0].local_path);
+                assert!(
+                    output
+                        .extension()
+                        .is_some_and(|extension| extension == "mp3")
+                );
+                let verified = ffmpeg_next::format::input(&output).unwrap();
+                assert_eq!(verified.format().name(), "mp3");
+                assert_eq!(
+                    verified
+                        .streams()
+                        .best(ffmpeg_next::media::Type::Audio)
+                        .unwrap()
+                        .parameters()
+                        .id(),
+                    ffmpeg_next::codec::Id::MP3
+                );
+                assert_eq!(
+                    devices
+                        .get_current_device()
+                        .await
+                        .unwrap()
+                        .synced_items
+                        .len(),
+                    1
+                );
+                assert!(!operations.is_cancelled(&operation).await);
+                assert!(provider_staging_dirs_for_operation(&operation).is_empty());
+                download.assert_async().await;
+                remote.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_encoding_mime_and_native_failures_preserve_identity_policy_and_cleanup() {
+        let audio = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated-pcm16.aif"),
+        )
+        .unwrap();
+        for (content_type, body, native_failure) in [
+            ("text/html; charset=utf-8", audio.clone(), false),
+            ("application/json", audio.clone(), false),
+            ("application/xml", audio.clone(), false),
+            ("text/xml", audio.clone(), false),
+            ("audio/aiff", b"<html>Not audio</html>".to_vec(), true),
+            ("audio/x-ms-wma", br#"{"error":"Not audio"}"#.to_vec(), true),
+            ("audio/ac3", b"unsupported or invalid audio".to_vec(), true),
+            ("application/octet-stream", b"not audio".to_vec(), true),
+        ] {
+            for auto in [false, true] {
+                let mut server = mockito::Server::new_async().await;
+                let download = server
+                    .mock("GET", "/rest/download.view")
+                    .match_query(mockito::Matcher::UrlEncoded(
+                        "id".into(),
+                        "mime-failure".into(),
+                    ))
+                    .with_status(200)
+                    .with_header("content-type", content_type)
+                    .with_body(body.clone())
+                    .expect(1)
+                    .create_async()
+                    .await;
+                let following = server
+                    .mock("GET", "/rest/download.view")
+                    .match_query(mockito::Matcher::UrlEncoded(
+                        "id".into(),
+                        "following".into(),
+                    ))
+                    .with_status(200)
+                    .with_header("content-type", "audio/aiff")
+                    .with_body(audio.clone())
+                    .expect(usize::from(auto))
+                    .create_async()
+                    .await;
+                let remote = server
+                    .mock("GET", "/rest/stream.view")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let root = tempfile::tempdir().unwrap();
+                let (devices, io) = setup_provider_sync_device(root.path()).await;
+                let mut item = add_item_with_provider_format(
+                    "mime-failure",
+                    "aif",
+                    "audio/aiff",
+                    body.len() as u64,
+                );
+                item.name = "Failed MIME fixture".into();
+                item.duration_seconds = 2;
+                item.is_auto_fill = auto;
+                let mut adds = vec![item];
+                if auto {
+                    let mut item = add_item_with_provider_format(
+                        "following",
+                        "aif",
+                        "audio/aiff",
+                        audio.len() as u64,
+                    );
+                    item.duration_seconds = 2;
+                    item.is_auto_fill = true;
+                    adds.push(item);
+                }
+                let delta = SyncDelta {
+                    provenance_updates: HashMap::new(),
+                    blocked: vec![],
+                    adds,
+                    deletes: vec![],
+                    id_changes: vec![],
+                    unchanged: 0,
+                    playlists: vec![],
+                    pity_fired_servers: vec![],
+                };
+                let operations = Arc::new(SyncOperationManager::new());
+                let operation = unique_operation_id("local-mime-failure");
+                operations
+                    .create_operation(operation.clone(), delta.adds.len())
+                    .await;
+                let (written, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                    local_encoding_servers: HashSet::from([String::new()]),
+                    provider: subsonic_provider(server.url()), providers_by_server: HashMap::new(),
+                    transcoding_profile: Some(serde_json::json!({"MaxStreamingBitrate":192000,
+                        "DirectPlayProfiles":[], "TranscodingProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]})),
+                }, operations.clone(), operation.clone(), devices.clone(), io).await.unwrap();
+                assert_eq!(
+                    written.len(),
+                    usize::from(auto),
+                    "{content_type} auto={auto}: {errors:?}"
+                );
+                let manifest = devices.get_current_device().await.unwrap();
+                assert_eq!(manifest.synced_items.len(), usize::from(auto));
+                assert!(
+                    manifest
+                        .synced_items
+                        .iter()
+                        .all(|item| item.jellyfin_id != "mime-failure")
+                );
+                assert_eq!(operations.is_cancelled(&operation).await, !auto);
+                let op = operations.get_operation(&operation).await.unwrap();
+                let message = if auto {
+                    assert!(errors.is_empty());
+                    assert_eq!(
+                        op.files_completed, 2,
+                        "failed Auto-Fill item must not stop the following track"
+                    );
+                    assert_eq!(op.warnings.len(), 1);
+                    &op.warnings[0]
+                } else {
+                    assert_eq!(errors.len(), 1);
+                    assert_eq!(errors[0].filename, "Failed MIME fixture");
+                    assert_eq!(errors[0].jellyfin_id, "mime-failure");
+                    &errors[0].error_message
+                };
+                if native_failure {
+                    assert!(
+                        message.contains(
+                            "Local encoding failed for 'Failed MIME fixture' (mime-failure)"
+                        ),
+                        "{message}"
+                    );
+                    assert!(message.contains("Cannot open original audio"), "{message}");
+                } else {
+                    assert!(
+                        message.contains("unrecognized non-audio content type"),
+                        "{message}"
+                    );
+                    assert!(message.contains(content_type), "{message}");
+                }
+                assert!(provider_staging_dirs_for_operation(&operation).is_empty());
+                download.assert_async().await;
+                following.assert_async().await;
+                remote.assert_async().await;
+            }
+        }
     }
 
     #[tokio::test]
