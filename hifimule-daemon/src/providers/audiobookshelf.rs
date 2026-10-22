@@ -156,6 +156,8 @@ struct AuthorDto {
     #[serde(default)]
     num_books: Option<u32>,
     #[serde(default)]
+    image_path: Option<String>,
+    #[serde(default)]
     library_items: Vec<BookDto>,
 }
 
@@ -1621,7 +1623,8 @@ impl AudiobookshelfProvider {
                 name: author.name,
                 album_count: author.num_books,
                 song_count: None,
-                cover_art_id: None,
+                cover_art_id: author.image_path.as_deref().filter(|path| !path.trim().is_empty())
+                    .map(|_| opaque_id("author-cover", &[library, &author.id, "image"])),
             });
         }
         artists.sort_by(|left, right| {
@@ -1694,7 +1697,9 @@ impl AudiobookshelfProvider {
                     )
                 })?),
                 song_count,
-                cover_art_id: albums.first().and_then(|album| album.cover_art_id.clone()),
+                cover_art_id: author.image_path.as_deref().filter(|path| !path.trim().is_empty())
+                    .map(|_| opaque_id("author-cover", &[library, source_id, "image"]))
+                    .or_else(|| albums.first().and_then(|album| album.cover_art_id.clone())),
             },
             albums,
         })
@@ -2701,7 +2706,8 @@ fn map_book_detail(
                     .metadata
                     .authors
                     .first()
-                    .and_then(|a| a.id.clone()),
+                    .and_then(|a| a.id.as_deref())
+                    .map(|id| opaque_id("author", &[library, id, "id"])),
                 artist_name: book.media.metadata.authors.first().map(|a| a.name.clone()),
                 album_id: Some(public_id.into()),
                 album_title: book.media.metadata.title.clone(),
@@ -2852,7 +2858,8 @@ fn book_album(library_id: &str, book: BookDto) -> Result<Album, ProviderError> {
     Ok(Album {
         id: opaque_id("album", &[library_id, &book.id, &book.media.id]),
         title: book.media.metadata.title.unwrap_or_default(),
-        artist_id: primary.and_then(|author| author.id.clone()),
+        artist_id: primary.and_then(|author| author.id.as_deref())
+            .map(|id| opaque_id("author", &[library_id, id, "id"])),
         artist_name: primary.map(|author| author.name.clone()),
         year: book
             .media
@@ -3661,6 +3668,26 @@ impl MediaProvider for AudiobookshelfProvider {
         &self,
         cover_art_id: &str,
     ) -> Result<reqwest::Response, ProviderError> {
+        if cover_art_id.starts_with("abs-author-cover-") {
+            let library = self.audiobook_library_id()?;
+            let (encoded_library, author_id, kind) = parse_opaque_id("author-cover", cover_art_id)?;
+            if encoded_library != library || kind != "image" {
+                return Err(ProviderError::NotFound { item_type: "author cover".into(), id: "unavailable".into() });
+            }
+            // Author endpoints are global; selected-library membership must still hold.
+            self.author_detail(&author_id).await?;
+            let mut url = reqwest::Url::parse(&format!("{}/api/authors", self.base_url))
+                .map_err(|_| ProviderError::Deserialization("invalid author origin".into()))?;
+            url.path_segments_mut()
+                .map_err(|_| ProviderError::Deserialization("invalid author path".into()))?
+                .push(&author_id).push("image");
+            url.query_pairs_mut()
+                .append_pair("format", "jpeg")
+                .append_pair("width", "500");
+            let response = self.protected_get(url.as_str()).await?;
+            check_status(&response)?;
+            return Ok(response);
+        }
         let (library, kind) = match self.library_role {
             Some(ProviderLibraryRole::Audiobook) => (self.audiobook_library_id()?, "cover"),
             Some(ProviderLibraryRole::Podcast) => (self.podcast_library_id()?, "podcast-cover"),
@@ -3694,7 +3721,7 @@ impl MediaProvider for AudiobookshelfProvider {
             }
         }
         let item = item_endpoint(&self.base_url, &item_id)?;
-        let endpoint = format!("{item}/cover");
+        let endpoint = format!("{item}/cover?format=jpeg&width=500");
         let response = self.protected_get(&endpoint).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Err(ProviderError::NotFound {
@@ -4817,6 +4844,7 @@ mod tests {
             .await;
         let _expired_cover = server
             .mock("GET", "/api/items/book-1/cover")
+            .match_query("format=jpeg&width=500")
             .match_header("authorization", "Bearer access-fixture")
             .with_status(401)
             .expect(1)
@@ -4833,6 +4861,7 @@ mod tests {
             .await;
         let _cover = server
             .mock("GET", "/api/items/book-1/cover")
+            .match_query("format=jpeg&width=500")
             .match_header("authorization", "Bearer refreshed")
             .with_status(200)
             .with_header("content-type", "image/jpeg")
@@ -4873,6 +4902,7 @@ mod tests {
             .await;
         server
             .mock("GET", "/api/items/show-1/cover")
+            .match_query("format=jpeg&width=500")
             .with_status(200)
             .with_header("content-type", "image/jpeg")
             .with_body(vec![1_u8, 2, 3])
@@ -4890,6 +4920,58 @@ mod tests {
         let cover = podcast_show("pod-id", &show).unwrap().cover_art_id.unwrap();
         let response = provider.fetch_cover_art(&cover).await.unwrap();
         assert_eq!(response.bytes().await.unwrap().as_ref(), &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn audiobookshelf_author_artwork_is_scoped_authenticated_and_falls_back_to_book() {
+        for (portrait, member, status) in [(true, true, 200), (false, true, 200), (true, false, 200), (true, true, 401), (true, true, 404), (true, true, 403), (true, true, 500)] {
+            let mut server = Server::new_async().await;
+            server.mock("POST", "/login").with_status(200).with_body(login_body()).create_async().await;
+            let book = serde_json::json!({"id":"book","libraryId":if member {"books"} else {"other"},"mediaType":"book","media":{"id":"media","coverPath":"private-cover","metadata":{"title":"Title","authors":[{"id":"author","name":"Author"}]},"numAudioFiles":1}});
+            let author = serde_json::json!({"id":"author","name":"Author","imagePath":if portrait {Some("private-portrait")} else {None},"libraryItems":[book]});
+            let detail = server.mock("GET", "/api/authors/author").match_query(Matcher::Any)
+                .match_header("authorization", "Bearer access-fixture")
+                .with_status(200).with_body(author.to_string()).expect(if portrait {2} else {1}).create_async().await;
+            let image = server.mock("GET", "/api/authors/author/image")
+                .match_query(Matcher::UrlEncoded("format".into(), "jpeg".into()))
+                .match_header("authorization", "Bearer access-fixture")
+                .with_status(status).with_body("private-response").expect(usize::from(portrait && member)).create_async().await;
+            let refreshed = server.mock("GET", "/api/authors/author/image")
+                .match_query(Matcher::UrlEncoded("format".into(), "jpeg".into()))
+                .match_header("authorization", "Bearer refreshed")
+                .with_status(200).expect(usize::from(status == 401)).create_async().await;
+            server.mock("POST", "/auth/refresh").with_status(200)
+                .with_body(r#"{"user":{"accessToken":"refreshed","refreshToken":"refresh-next"}}"#)
+                .expect(usize::from(status == 401)).create_async().await;
+            let provider = AudiobookshelfProvider::login(&server.url(), "user", "password").await.unwrap()
+                .scope_to("books".into(), ProviderLibraryRole::Audiobook).unwrap();
+            let id = opaque_id("author", &["books", "author", "id"]);
+            if member {
+                server.mock("GET", "/api/libraries/books/authors").with_status(200)
+                    .with_body(serde_json::json!({"authors":[author]}).to_string()).create_async().await;
+                let artists = provider.library_authors().await.unwrap();
+                assert_eq!(artists[0].cover_art_id, portrait.then(|| opaque_id("author-cover", &["books", "author", "image"])));
+            }
+            let result = provider.get_artist(&id).await;
+            if !member {
+                assert!(matches!(result, Err(ProviderError::NotFound { .. })));
+                assert!(provider.fetch_cover_art(&opaque_id("author-cover", &["books", "author", "image"])).await.is_err());
+            } else {
+                let artist = result.unwrap();
+                assert_eq!(artist.albums[0].artist_id.as_deref(), Some(id.as_str()));
+                let cover = artist.artist.cover_art_id.unwrap();
+                assert_eq!(cover, if portrait { opaque_id("author-cover", &["books", "author", "image"]) } else { opaque_id("cover", &["books", "book", "media"]) });
+                if portrait {
+                    let result = provider.fetch_cover_art(&cover).await;
+                    assert_eq!(result.is_ok(), status == 200 || status == 401);
+                    if let Err(error) = result { assert!(!error.to_string().contains("private-response")); }
+                }
+            }
+            assert!(provider.fetch_cover_art(&opaque_id("author-cover", &["foreign", "author", "image"])).await.is_err());
+            detail.assert_async().await;
+            image.assert_async().await;
+            refreshed.assert_async().await;
+        }
     }
 
     #[test]

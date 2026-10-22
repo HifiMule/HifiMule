@@ -5215,7 +5215,10 @@ fn podcast_episode_to_desired(
 ) -> crate::sync::DesiredItem {
     // Episode catalog details do not expose a byte size. Reserve 128 kbit/s,
     // using one hour when duration is missing; transfer checks actual capacity.
-    crate::sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+    crate::sync::DesiredItem { artwork: Some(crate::sync::artwork::TrackArtwork {
+            artist_id: None,
+            cover_id: episode.cover_art_id.clone(),
+        }),source_audio: Default::default(), disc_number: None,
         album_artist: None,
         duration_seconds: 0,
         media_role: crate::device::MediaRole::Podcast,
@@ -5249,6 +5252,18 @@ fn podcast_date_number(value: &Option<String>) -> Option<u32> {
                 .contains(&date.year())
                 .then(|| (date.year() as u32) * 10_000 + date.month() * 100 + date.day())
         })
+}
+
+#[cfg(test)]
+#[test]
+fn podcast_desired_artwork_keeps_provider_cover_and_show_identity() {
+    let episode = serde_json::from_value(serde_json::json!({
+        "type":"episode", "id":"episode", "showId":"show", "title":"Episode",
+        "coverArtId":"opaque-cover"
+    })).unwrap();
+    let desired = podcast_episode_to_desired(&episode, "Show");
+    assert_eq!(desired.provider_album_id.as_deref(), Some("show"));
+    assert_eq!(desired.artwork.unwrap().cover_id.as_deref(), Some("opaque-cover"));
 }
 
 #[cfg(test)]

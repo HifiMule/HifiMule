@@ -7030,7 +7030,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_tags_pipeline_uses_current_metadata_and_final_bytes_and_rejects_bad_audio() {
+    async fn sync_tags_and_artwork_pipeline_uses_current_metadata_and_final_bytes_and_rejects_bad_audio() {
         use crate::providers::ProviderLibraryRole;
         use id3::TagLike;
         let mut server = mockito::Server::new_async().await;
@@ -7062,6 +7062,23 @@ mod tests {
         let source_audio = include_bytes!("../tests/fixtures/audiobookshelf/tags/untagged.mp3");
         let dir = tempfile::tempdir().unwrap();
         let (devices, io) = setup_provider_sync_device(dir.path()).await;
+        devices.update_manifest(|manifest| {
+            manifest.folder_artwork.enabled = true;
+            for folder in ["Music/Artist", "Music/Artist/Album"] {
+                manifest.folder_artwork_records.insert(folder.into(), crate::device::FolderArtworkRecord {
+                    source: Some(crate::device::FolderArtworkSource {
+                        server_id: None, entity_id: "book".into(), artist: folder == "Music/Artist",
+                        cover_id: Some("abs-cover-6c.69.6d".into()),
+                    }), ..Default::default()
+                });
+            }
+        }).await.unwrap();
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(20, 10).write_to(&mut image, image::ImageFormat::Jpeg).unwrap();
+        let cover = server.mock("GET", "/api/items/i/cover")
+            .match_query("format=jpeg&width=500")
+            .match_header("authorization", "Bearer fixture-token")
+            .with_status(200).with_body(image.into_inner()).expect(2).create_async().await;
         let id = "abs-track-6c.69.6d.66"; // l / i / m / f
         let mut last_path = None;
         // Explicitly re-adding the same managed part is the existing force-sync
@@ -7160,6 +7177,9 @@ mod tests {
             if round < 2 {
                 assert!(errors.is_empty(), "{errors:?}");
                 assert_eq!(synced.len(), 1);
+                for folder in ["Music/Artist", "Music/Artist/Album"] {
+                    assert!(dir.path().join(folder).join("folder.jpg").exists());
+                }
                 let path = dir.path().join(&synced[0].local_path);
                 let tags = id3::Tag::read_from_path(&path).unwrap();
                 assert_eq!(tags.album(), Some(*title));
@@ -7203,6 +7223,7 @@ mod tests {
             drop((detail, play, probe, download, close, progress));
         }
         login.assert_async().await;
+        cover.assert_async().await;
     }
 
     #[tokio::test]

@@ -41,6 +41,7 @@ impl From<&Song> for TrackArtwork {
 
 #[derive(Clone)]
 struct Candidate {
+    role: MediaRole,
     server: Option<String>,
     album: Option<String>,
     track: String,
@@ -48,32 +49,60 @@ struct Candidate {
     known: Option<TrackArtwork>,
 }
 
+fn folder_targets(path: &str, role: MediaRole) -> Vec<(&str, bool)> {
+    let Some((content, _)) = path.rsplit_once('/') else { return Vec::new() };
+    if role == MediaRole::Podcast {
+        return vec![(content, false)];
+    }
+    let Some((creator, _)) = content.rsplit_once('/') else { return Vec::new() };
+    vec![(creator, true), (content, false)]
+}
+
+fn managed_roots(manifest: &DeviceManifest) -> std::collections::BTreeSet<String> {
+    manifest.media_paths().into_iter().chain(manifest.managed_paths.iter().map(String::as_str))
+        .map(normalized_device_folder).filter(|path| !path.is_empty()).collect()
+}
+
+fn eligible_folder(
+    folder: &str,
+    role: MediaRole,
+    artist: bool,
+    manifest: &DeviceManifest,
+    identities: &HashMap<String, String>,
+) -> bool {
+    let Some(identity) = identities.get(folder) else { return false };
+    if managed_roots(manifest).iter().any(|root| identities.get(root) == Some(identity)) {
+        return false;
+    }
+    let Some(root) = manifest.media_path(role).map(normalized_device_folder) else { return false };
+    let Some(root_identity) = identities.get(&root) else { return false };
+    // Two-level roles require their creator folder below the root as well.
+    let anchor = if !artist && role != MediaRole::Podcast {
+        let Some((parent, _)) = folder.rsplit_once('/') else { return false };
+        parent
+    } else { folder };
+    if identities.get(anchor) == Some(root_identity) { return false; }
+    let mut ancestor = anchor.rsplit_once('/').map(|(parent, _)| parent);
+    while let Some(parent) = ancestor {
+        if identities.get(parent) == Some(root_identity) { return true; }
+        ancestor = parent.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    false
+}
+
 fn live_folders(manifest: &DeviceManifest) -> BTreeMap<String, Vec<Candidate>> {
     let mut folders: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
-    for track in manifest
-        .synced_items
-        .iter()
-        .filter(|t| t.media_role == MediaRole::Music)
-    {
+    for track in &manifest.synced_items {
         let path = normalized_device_folder(&track.local_path);
         if validate_device_relative_path(&path).is_err() {
             continue;
         }
-        // Physical root membership is checked after the transport resolves aliases.
-        if path.split('/').count() < 3 {
-            continue;
-        }
-        let Some((album, _)) = path.rsplit_once('/') else {
-            continue;
-        };
-        let Some((artist, _)) = album.rsplit_once('/') else {
-            continue;
-        };
-        for (folder, is_artist) in [(album, false), (artist, true)] {
+        for (folder, is_artist) in folder_targets(&path, track.media_role) {
             folders
                 .entry(folder.to_owned())
                 .or_default()
                 .push(Candidate {
+                    role: track.media_role,
                     server: track.server_id.clone(),
                     album: track.provider_album_id.clone(),
                     track: track.jellyfin_id.clone(),
@@ -85,7 +114,7 @@ fn live_folders(manifest: &DeviceManifest) -> BTreeMap<String, Vec<Candidate>> {
     for candidates in folders.values_mut() {
         candidates
             .sort_by(|a, b| (&a.server, &a.album, &a.track).cmp(&(&b.server, &b.album, &b.track)));
-        candidates.dedup_by(|a, b| a.server == b.server && a.album.is_some() && a.album == b.album);
+        candidates.dedup_by(|a, b| a.role == b.role && a.server == b.server && a.album.is_some() && a.album == b.album);
     }
     folders
 }
@@ -113,15 +142,12 @@ async fn grouped_folders(
             parent = folder.rsplit_once('/').map(|(parent, _)| parent);
         }
     }
-    let root = manifest
-        .media_path(MediaRole::Music)
-        .map(normalized_device_folder)
-        .filter(|root| !root.is_empty());
+    let roots = managed_roots(manifest);
     let paths: std::collections::BTreeSet<_> = raw
         .keys()
         .chain(retained.iter())
         .chain(manifest.folder_artwork_records.keys())
-        .chain(root.iter())
+        .chain(roots.iter())
         .cloned()
         .collect();
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -149,6 +175,7 @@ async fn grouped_folders(
     }
     let mut folders: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
     let mut live = HashSet::new();
+    let root_identity_unavailable = roots.iter().any(|root| unavailable.contains(root));
     for paths in groups.into_values() {
         let owned: Vec<_> = paths
             .iter()
@@ -170,24 +197,11 @@ async fn grouped_folders(
             if missing.contains(path) || unavailable.contains(path) {
                 continue;
             }
-            let mut ancestor = path.rsplit_once('/').map(|(parent, _)| parent);
-            let mut current_root = false;
-            while let Some(parent) = ancestor {
-                if root
-                    .as_ref()
-                    .and_then(|root| identities.get(root))
-                    .is_some_and(|root_id| identities.get(parent) == Some(root_id))
-                {
-                    current_root = true;
-                    break;
-                }
-                ancestor = parent.rsplit_once('/').map(|(parent, _)| parent);
-            }
-            if current_root && let Some(candidates) = raw.remove(path) {
+            if !root_identity_unavailable && let Some(candidates) = raw.remove(path) {
                 folders
                     .entry(canonical.clone())
                     .or_default()
-                    .extend(candidates);
+                    .extend(candidates.into_iter().filter(|candidate| eligible_folder(path, candidate.role, candidate.artist, manifest, &identities)));
             }
         }
         if owned.len() > 1 {
@@ -237,7 +251,7 @@ async fn grouped_folders(
         candidates
             .sort_by(|a, b| (&a.server, &a.album, &a.track).cmp(&(&b.server, &b.album, &b.track)));
         candidates.dedup_by(|a, b| {
-            a.server == b.server && a.album.is_some() && a.album == b.album && a.artist == b.artist
+            a.role == b.role && a.server == b.server && a.album.is_some() && a.album == b.album && a.artist == b.artist
         });
     }
     Ok((folders, live))
@@ -259,6 +273,26 @@ async fn resolve(
     provider: &dyn MediaProvider,
     artist_covers: &mut HashMap<(Option<String>, String), Option<String>>,
 ) -> Result<Option<FolderArtworkSource>> {
+    if candidate.role == MediaRole::Podcast {
+        let (id, cover) = if let Some(id) = &candidate.album {
+            let cover = match candidate.known.as_ref().and_then(|known| known.cover_id.clone()) {
+                Some(cover) => Some(cover),
+                None => provider.get_podcast_show(id).await
+                    .map_err(|_| anyhow::anyhow!("Podcast artwork metadata unavailable"))?.show.cover_art_id,
+            };
+            (id.clone(), cover)
+        } else {
+            let episode = provider.get_podcast_episode(&candidate.track).await
+                .map_err(|_| anyhow::anyhow!("Podcast artwork metadata unavailable"))?;
+            let cover = match episode.cover_art_id {
+                Some(cover) => Some(cover),
+                None => provider.get_podcast_show(&episode.show_id).await
+                    .map_err(|_| anyhow::anyhow!("Podcast artwork metadata unavailable"))?.show.cover_art_id,
+            };
+            (episode.show_id, cover)
+        };
+        return Ok(Some(FolderArtworkSource { server_id: candidate.server.clone(), entity_id: id, artist: false, cover_id: cover }));
+    }
     let mut known = candidate.known.clone();
     let mut album_id = candidate.album.clone();
     if album_id.is_none()
@@ -403,7 +437,6 @@ pub(crate) struct Incremental {
     identities: HashMap<String, String>,
     attempted: HashSet<String>,
     paths: HashMap<String, String>,
-    eligible_artists: HashSet<String>,
     artist_covers: HashMap<(Option<String>, String), Option<String>>,
 }
 impl Incremental {
@@ -453,7 +486,6 @@ impl Incremental {
                 identities,
                 attempted: HashSet::new(),
                 paths: HashMap::new(),
-                eligible_artists: HashSet::new(),
                 artist_covers: HashMap::new(),
             },
             warnings,
@@ -482,57 +514,27 @@ impl Incremental {
         operation: &str,
         checkpoint: &crate::device::SyncManifestSession,
     ) -> Vec<String> {
-        if !self.manifest.folder_artwork.enabled || item.media_role != MediaRole::Music {
+        if !self.manifest.folder_artwork.enabled {
             return Vec::new();
         }
         let path = normalized_device_folder(&item.local_path);
         if validate_device_relative_path(&path).is_err() {
             return Vec::new();
         }
-        let Some((album, _)) = path.rsplit_once('/') else {
-            return Vec::new();
-        };
-        let Some((artist, _)) = album.rsplit_once('/') else {
-            return Vec::new();
-        };
         let mut touched = BTreeMap::new();
         let mut warnings = Vec::new();
-        if !self.eligible_artists.contains(artist) {
-            let Some(root) = self
-                .manifest
-                .media_path(MediaRole::Music)
-                .map(normalized_device_folder)
-                .filter(|root| !root.is_empty())
-            else {
+        for root in managed_roots(&self.manifest) {
+            if self.identity(&root, io.as_ref()).await.is_err() {
+                warnings.push(format!("[Artwork] {root}: root identity unavailable; ownership retained"));
                 return warnings;
-            };
-            let Ok(Some(root_identity)) = self.identity(&root, io.as_ref()).await else {
-                return warnings;
-            };
-            // The artist must be strictly below the physical music root. Resolving
-            // ancestors preserves case/alias semantics without string-prefix guesses.
-            let mut ancestor = artist.rsplit_once('/').map(|(parent, _)| parent);
-            let mut eligible = false;
+            }
+        }
+        for (folder, is_artist) in folder_targets(&path, item.media_role) {
+            let mut ancestor = folder.rsplit_once('/').map(|(parent, _)| parent);
             while let Some(parent) = ancestor {
-                if self
-                    .identity(parent, io.as_ref())
-                    .await
-                    .ok()
-                    .flatten()
-                    .as_ref()
-                    == Some(&root_identity)
-                {
-                    eligible = true;
-                    break;
-                }
+                let _ = self.identity(parent, io.as_ref()).await;
                 ancestor = parent.rsplit_once('/').map(|(parent, _)| parent);
             }
-            if !eligible {
-                return warnings;
-            }
-            self.eligible_artists.insert(artist.to_owned());
-        }
-        for (folder, is_artist) in [(artist, true), (album, false)] {
             if manager.is_cancelled(operation).await {
                 break;
             }
@@ -546,6 +548,9 @@ impl Incremental {
                     continue;
                 }
             };
+            if !eligible_folder(folder, item.media_role, is_artist, &self.manifest, &self.paths) {
+                continue;
+            }
             let canonical = self
                 .identities
                 .entry(identity)
@@ -561,6 +566,7 @@ impl Incremental {
                 candidate.server != item.server_id || candidate.track != item.jellyfin_id
             });
             candidates.push(Candidate {
+                role: item.media_role,
                 server: item.server_id.clone(),
                 album: item.provider_album_id.clone(),
                 track: item.jellyfin_id.clone(),
@@ -571,7 +577,8 @@ impl Incremental {
                 (&a.server, &a.album, &a.track).cmp(&(&b.server, &b.album, &b.track))
             });
             candidates.dedup_by(|a, b| {
-                a.server == b.server
+                a.role == b.role
+                    && a.server == b.server
                     && a.album.is_some()
                     && a.album == b.album
                     && a.artist == b.artist
@@ -836,6 +843,141 @@ async fn create_folders(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn artwork_targets_include_books_and_podcasts_without_role_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let (devices, _, checkpoint) = fixture(root.path()).await;
+        let mut manifest = devices.get_current_device().await.unwrap();
+        let mut book = manifest.synced_items[0].clone();
+        book.media_role = MediaRole::Audiobook;
+        book.local_path = "Books/Author/Title/part.mp3".into();
+        let mut episode = book.clone();
+        episode.media_role = MediaRole::Podcast;
+        episode.local_path = "Podcasts/Show/episode.mp3".into();
+        manifest.synced_items.extend([book, episode]);
+        let folders = live_folders(&manifest);
+        for folder in ["Music/Artist", "Music/Artist/Album", "Books/Author", "Books/Author/Title", "Podcasts/Show"] {
+            assert!(folders.contains_key(folder), "missing {folder}");
+        }
+        assert!(!folders.contains_key("Books"));
+        assert!(!folders.contains_key("Podcasts"));
+        checkpoint.finish("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn audiobookshelf_artwork_uses_shared_publication_reuse_and_cleanup_for_each_folder_type() {
+        use crate::providers::{audiobookshelf::AudiobookshelfProvider, ProviderLibraryRole};
+        for role in [MediaRole::Audiobook, MediaRole::Podcast] {
+            let root = tempfile::tempdir().unwrap();
+            let (devices, io, checkpoint) = fixture(root.path()).await;
+            let mut manifest = devices.get_current_device().await.unwrap();
+            let mut item = manifest.synced_items[0].clone();
+            let mut server = mockito::Server::new_async().await;
+            server.mock("POST", "/login").with_status(200)
+                .with_body(r#"{"user":{"accessToken":"access-fixture","refreshToken":"refresh-fixture"}}"#).create_async().await;
+            server.mock("GET", "/api/libraries").with_status(200)
+                .with_body(r#"{"libraries":[]}"#).create_async().await;
+            let (library_role, body, folders) = if role == MediaRole::Audiobook {
+                (ProviderLibraryRole::Audiobook, serde_json::json!({"id":"item","libraryId":"library","mediaType":"book","media":{"id":"media","coverPath":"private-cover","metadata":{"title":"Title","authors":[{"id":"author","name":"Author"}]},"audioFiles":[{"ino":"file","index":1,"duration":60}]}}),
+                    vec!["Content/Books/Author", "Content/Books/Author/Title"])
+            } else {
+                (ProviderLibraryRole::Podcast, serde_json::json!({"id":"item","libraryId":"library","mediaType":"podcast","media":{"id":"media","coverPath":"private-cover","metadata":{"title":"Show"},"episodes":[{"id":"episode","title":"Episode"}]}}),
+                    vec!["Content/Podcasts/Show"])
+            };
+            let item_metadata = server.mock("GET", "/api/items/item").match_query(mockito::Matcher::Any)
+                .match_header("authorization", "Bearer access-fixture")
+                .with_status(200).with_body(body.to_string()).create_async().await;
+            let author_metadata = server.mock("GET", "/api/authors/author").match_query(mockito::Matcher::Any)
+                .with_status(200).with_body(serde_json::json!({"id":"author","name":"Author","imagePath":"private-portrait","libraryItems":[body]}).to_string())
+                .create_async().await;
+            let mut image = Cursor::new(Vec::new());
+            image::RgbImage::new(700, 350).write_to(&mut image, image::ImageFormat::Png).unwrap();
+            let cover = server.mock("GET", "/api/items/item/cover")
+                .match_query("format=jpeg&width=500")
+                .match_header("authorization", "Bearer access-fixture")
+                .with_status(200).with_body(image.get_ref()).expect(1).create_async().await;
+            let portrait = server.mock("GET", "/api/authors/author/image")
+                .match_query("format=jpeg&width=500")
+                .match_header("authorization", "Bearer access-fixture")
+                .with_status(200).with_body(image.get_ref()).expect(usize::from(role == MediaRole::Audiobook)).create_async().await;
+            let provider: Arc<dyn MediaProvider> = Arc::new(AudiobookshelfProvider::discover(&server.url(), "user", "password").await.unwrap()
+                .provider.scope_to("library".into(), library_role).unwrap());
+            let public_id = |kind: &str| format!("abs-{kind}-6c696272617279.6974656d.6d65646961");
+            if role == MediaRole::Audiobook {
+                let album = provider.get_album(&public_id("album")).await.unwrap();
+                item.jellyfin_id = album.tracks[0].id.clone();
+                item.provider_album_id = Some(album.album.id);
+                manifest.audiobook_path = Some("Content/Books".into());
+            } else {
+                let show = provider.get_podcast_show(&public_id("show")).await.unwrap();
+                item.jellyfin_id = show.episodes[0].id.clone();
+                // Retained episode manifests may have no show/cover hint.
+                item.provider_album_id = None;
+                manifest.podcast_path = Some("Content/Podcasts".into());
+            }
+            item.media_role = role;
+            item.local_path = format!("{}/audio.mp3", folders.last().unwrap());
+            std::fs::create_dir_all(root.path().join(folders.last().unwrap())).unwrap();
+            manifest.synced_items = vec![item.clone()];
+            let manager = SyncOperationManager::new();
+            manager.create_operation("abs-artwork".into(), 1).await;
+            let plan = empty_plan(&manifest);
+            let providers = HashMap::from([("source".into(), provider.clone())]);
+            // Disabled and unchanged execution never fetch previews.
+            manifest.folder_artwork.enabled = false;
+            assert!(touch_all(&mut manifest, &plan, &io, &provider, &providers, &manager, "abs-artwork", &checkpoint).await.is_empty());
+            assert!(manifest.folder_artwork_records.is_empty());
+            manifest.folder_artwork.enabled = true;
+            assert!(cleanup(&mut manifest, &io, &manager, "abs-artwork", &checkpoint).await.is_empty());
+            assert!(manifest.folder_artwork_records.is_empty());
+            for _ in 0..2 {
+                let warnings = touch_all(&mut manifest, &plan, &io, &provider, &providers, &manager, "abs-artwork", &checkpoint).await;
+                assert!(warnings.is_empty(), "{warnings:?}");
+                assert_eq!(manifest.folder_artwork_records.len(), folders.len());
+                for folder in &folders {
+                    let bytes = std::fs::read(root.path().join(folder).join("folder.jpg")).unwrap();
+                    assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 500);
+                    assert!(root.path().join(folder).join("desktop.ini").exists());
+                    assert!(root.path().join(folder).join(".hifimule-folder.ico").exists());
+                }
+            }
+            cover.assert_async().await;
+            portrait.assert_async().await;
+            manifest.synced_items.clear();
+            assert!(cleanup(&mut manifest, &io, &manager, "abs-artwork", &checkpoint).await.is_empty());
+            assert!(manifest.folder_artwork_records.is_empty());
+            for folder in folders { assert!(!root.path().join(folder).join("folder.jpg").exists()); }
+            item_metadata.remove_async().await;
+            author_metadata.remove_async().await;
+            let mut missing = body;
+            missing["media"]["coverPath"] = serde_json::Value::Null;
+            server.mock("GET", "/api/items/item").match_query(mockito::Matcher::Any)
+                .with_status(200).with_body(missing.to_string()).create_async().await;
+            server.mock("GET", "/api/authors/author").match_query(mockito::Matcher::Any)
+                .with_status(200).with_body(serde_json::json!({"id":"author","name":"Author","libraryItems":[missing]}).to_string()).create_async().await;
+            manifest.synced_items = vec![item];
+            assert!(touch_all(&mut manifest, &plan, &io, &provider, &providers, &manager, "abs-artwork", &checkpoint).await.is_empty());
+            assert!(manifest.folder_artwork_records.is_empty());
+            checkpoint.finish("test").await.unwrap();
+        }
+    }
+
+    #[test]
+    fn artwork_physical_role_boundaries_exclude_every_managed_root_and_alias() {
+        let manifest = DeviceManifest { managed_paths: vec!["Media".into(), "Media/Books/Author/Title".into()], audiobook_path: Some("Media/Books".into()), podcast_path: Some("Media/Books/Author".into()), ..Default::default() };
+        let identities: HashMap<String, String> = [
+            ("Media", "root"), ("Media/Books", "books"), ("Media/Books/Author", "podcasts"),
+            ("Media/Books/Author/Title", "title"), ("Media/Books/Other", "other-author"),
+            ("media", "root"), ("media/books", "books"), ("media/books/other", "other-author"),
+            ("Outside", "outside"), ("Outside/Author", "outside-author"),
+        ].into_iter().map(|(path, id)| (path.into(), id.into())).collect();
+        assert!(eligible_folder("Media/Books/Other", MediaRole::Audiobook, true, &manifest, &identities));
+        assert!(eligible_folder("media/books/other", MediaRole::Audiobook, true, &manifest, &identities));
+        assert!(!eligible_folder("Media/Books/Author", MediaRole::Audiobook, true, &manifest, &identities));
+        assert!(!eligible_folder("Media/Books/Author/Title", MediaRole::Podcast, false, &manifest, &identities));
+        assert!(!eligible_folder("Media/Books/Other", MediaRole::Podcast, false, &manifest, &identities));
+        assert!(!eligible_folder("Outside/Author", MediaRole::Audiobook, true, &manifest, &identities));
+    }
     async fn fixture(
         root: &Path,
     ) -> (
