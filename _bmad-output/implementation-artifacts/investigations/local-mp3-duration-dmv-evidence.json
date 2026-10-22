@@ -1,0 +1,88 @@
+[
+  {
+    "name": "05 05 - DMV.mp3",
+    "sha256": "0e0ed981ef4ead97d4cd9df6f38474a21202312925e2135ba7904acf7491014a",
+    "runtime": "controlled FFmpeg 9.0.2",
+    "original": {
+      "format": {
+        "duration": "301.962438",
+        "size": "4920354"
+      },
+      "warnings": "[mp3 @ 0x7713034000] Estimating duration from bitrate, this may be inaccurate\n[mp3 @ 0x7713034000] Could not find codec parameters for stream 1 (Video: mjpeg, none): unspecified size\nConsider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\nUnsupported codec with id 7 for input stream 1\n"
+    },
+    "encoded_192k": {
+      "format": {
+        "duration": "298.840816",
+        "size": "7173476"
+      },
+      "warnings": ""
+    },
+    "without_ape_copy": {
+      "format": {
+        "duration": "298.848813",
+        "size": "4870536"
+      },
+      "warnings": "[mp3 @ 0x77eec30000] Estimating duration from bitrate, this may be inaccurate\n[mp3 @ 0x77eec30000] Could not find codec parameters for stream 1 (Video: mjpeg, none): unspecified size\nConsider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\nUnsupported codec with id 7 for input stream 1\n"
+    },
+    "source_minus_encoded_seconds": 3.121622000000002,
+    "daemon_guard_would_fail": true,
+    "original_decoded_pcm": {
+      "sha256": "be3ec1f2a24ff267aae8d33dbcc403c75e6fc6299ded56d97ac794f2cfeaefc5",
+      "samples": 13178880,
+      "sample_rate": 44100,
+      "seconds": 298.8408163265306
+    },
+    "without_ape_decoded_pcm": {
+      "sha256": "be3ec1f2a24ff267aae8d33dbcc403c75e6fc6299ded56d97ac794f2cfeaefc5",
+      "samples": 13178880,
+      "sample_rate": 44100,
+      "seconds": 298.8408163265306
+    },
+    "identical_decoded_pcm": true,
+    "ape_bytes_removed_in_copy": 49818,
+    "encoding_warnings": "[in#0/mp3 @ 0x770f014000] Estimating duration from bitrate, this may be inaccurate\n[in#0/mp3 @ 0x770f014000] Could not find codec parameters for stream 1 (Video: mjpeg, none): unspecified size\nConsider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\n"
+  },
+  {
+    "name": "09 09 - DMV.mp3",
+    "sha256": "de67eb8266ccff4eb793a66056f776c589f61d019452b63cdc1b8da946d5a647",
+    "runtime": "controlled FFmpeg 9.0.2",
+    "original": {
+      "format": {
+        "duration": "300.052625",
+        "size": "4881111"
+      },
+      "warnings": "[mp3 @ 0x7606c28000] Estimating duration from bitrate, this may be inaccurate\n[mp3 @ 0x7606c28000] Could not find codec parameters for stream 1 (Video: mjpeg, none): unspecified size\nConsider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\nUnsupported codec with id 7 for input stream 1\n"
+    },
+    "encoded_192k": {
+      "format": {
+        "duration": "296.855510",
+        "size": "7125829"
+      },
+      "warnings": ""
+    },
+    "without_ape_copy": {
+      "format": {
+        "duration": "296.863500",
+        "size": "4830085"
+      },
+      "warnings": "[mp3 @ 0x7604c28000] Estimating duration from bitrate, this may be inaccurate\n[mp3 @ 0x7604c28000] Could not find codec parameters for stream 1 (Video: mjpeg, none): unspecified size\nConsider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\nUnsupported codec with id 7 for input stream 1\n"
+    },
+    "source_minus_encoded_seconds": 3.1971149999999966,
+    "daemon_guard_would_fail": true,
+    "original_decoded_pcm": {
+      "sha256": "401ee5880c67e7911da150242ec3ff1600fad34bac5f87a659da26c8a90698b6",
+      "samples": 13091328,
+      "sample_rate": 44100,
+      "seconds": 296.8555102040816
+    },
+    "without_ape_decoded_pcm": {
+      "sha256": "401ee5880c67e7911da150242ec3ff1600fad34bac5f87a659da26c8a90698b6",
+      "samples": 13091328,
+      "sample_rate": 44100,
+      "seconds": 296.8555102040816
+    },
+    "identical_decoded_pcm": true,
+    "ape_bytes_removed_in_copy": 51026,
+    "encoding_warnings": "[in#0/mp3 @ 0x7b9d018000] Estimating duration from bitrate, this may be inaccurate\n[in#0/mp3 @ 0x7b9d018000] Could not find codec parameters for stream 1 (Video: mjpeg, none): unspecified size\nConsider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\n"
+  }
+]

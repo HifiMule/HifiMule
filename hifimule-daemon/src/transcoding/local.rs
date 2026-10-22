@@ -687,6 +687,11 @@ fn encode_inner(
         "Original has invalid audio properties"
     );
     let source_duration = ictx.duration();
+    let duration_from_bitrate = unsafe {
+        (*ictx.as_ptr()).duration_estimation_method
+            == ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE
+    };
+    let source_rate = decoder.rate();
     let encoder_codec = ff::encoder::find_by_name(target.encoder).unwrap().audio()?;
     let desired_rate = if target.encoder == "libopus" {
         48000
@@ -983,6 +988,7 @@ fn encode_inner(
         process_fifo(encoder, octx, false)
     };
     let mut recovery = DecodeRecovery::default();
+    let mut decoded_samples = 0u64;
     let mut receive = |decoder: &mut ff::decoder::Audio,
                        encoder: &mut ff::encoder::audio::Encoder,
                        octx: &mut format::context::Output,
@@ -1001,6 +1007,9 @@ fn encode_inner(
                         decoded.samples() <= 1_048_576,
                         "Original audio frame is too large"
                     );
+                    // Keep this independent of the converted/output sample
+                    // count so resampling or encoder loss remains detectable.
+                    decoded_samples += decoded.samples() as u64;
                     let capacity = ((decoded.samples() as u64 * rate as u64)
                         .div_ceil(decoder.rate() as u64)
                         + 256) as usize;
@@ -1153,16 +1162,31 @@ fn encode_inner(
             "Encoded audio bitrate exceeds profile ceiling"
         );
     }
-    if source_duration > 0 && verify.duration() > 0 {
-        ensure!(
-            (source_duration - verify.duration()).abs() <= 2_000_000,
-            "Encoded duration does not match original"
-        );
-    }
+    // Bitrate estimates can include trailing metadata bytes. Use the audio
+    // actually decoded, while retaining reliable source headers to detect EOF
+    // before the declared audio ends. Count at the source rate, before conversion.
+    let expected_duration = if duration_from_bitrate || source_duration <= 0 {
+        (u128::from(decoded_samples) * 1_000_000 / u128::from(source_rate)) as i64
+    } else {
+        source_duration
+    };
+    validate_duration(expected_duration, verify.duration())?;
     Ok(EncodeReport {
         output_bytes: std::fs::metadata(output)?.len(),
         recovery: recovery.report,
     })
+}
+
+fn validate_duration(expected: i64, actual: i64) -> Result<()> {
+    if expected > 0 && actual > 0 {
+        ensure!(
+            expected.abs_diff(actual) <= 2_000_000,
+            "Encoded duration does not match original: expected {:.3}s, output {:.3}s",
+            expected as f64 / 1_000_000.0,
+            actual as f64 / 1_000_000.0
+        );
+    }
+    Ok(())
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
@@ -1197,6 +1221,146 @@ pub(crate) mod tests {
         }
     }
 
+    fn pcm_bytes(path: &Path) -> Vec<u8> {
+        let bytes = std::fs::read(path).unwrap();
+        let start = bytes.windows(4).position(|b| b == b"data").unwrap();
+        bytes[start + 8..].to_vec()
+    }
+
+    #[test]
+    fn bitrate_duration_with_large_ape_tag_uses_decoded_audio_before_resampling() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.wav");
+        let generated = temp.path().join("generated.mp3");
+        let clean = temp.path().join("clean.mp3");
+        let tagged = temp.path().join("tagged.mp3");
+        wav(&source, 6);
+        let mp3 = TranscodeProfile {
+            container: Some("mp3".into()),
+            audio_codec: Some("mp3".into()),
+            max_bitrate_kbps: Some(192),
+            ..Default::default()
+        };
+        let cancelled = AtomicBool::new(false);
+        encode(&source, &generated, &mp3, &cancelled, 2_000_000).unwrap();
+        // Demuxed audio packets omit the muxer's Xing/Info frame. The raw
+        // MPEG stream therefore reproduces the originals' bitrate estimate.
+        let mut context = format::input(&generated).unwrap();
+        let index = context.streams().best(media::Type::Audio).unwrap().index();
+        let mut audio = Vec::new();
+        for (stream, packet) in context.packets() {
+            if stream.index() == index {
+                audio.extend_from_slice(packet.data().unwrap());
+            }
+        }
+        std::fs::write(&clean, &audio).unwrap();
+        // Valid APEv2 text item and footer, with its optional header omitted.
+        // 64 KiB at 192 kbps inflates the estimate by over two seconds.
+        let mut tags = Vec::new();
+        tags.extend_from_slice(&65_536u32.to_le_bytes());
+        tags.extend_from_slice(&0u32.to_le_bytes());
+        tags.extend_from_slice(b"Comment\0");
+        tags.extend_from_slice(&vec![b'a'; 65_536]);
+        let tag_size = (tags.len() + 32) as u32;
+        tags.extend_from_slice(b"APETAGEX");
+        for field in [2000, tag_size, 1, 0, 0, 0] {
+            tags.extend_from_slice(&field.to_le_bytes());
+        }
+        let mut tagged_bytes = audio.clone();
+        tagged_bytes.extend_from_slice(&tags);
+        std::fs::write(&tagged, &tagged_bytes).unwrap();
+        let probed = format::input(&tagged).unwrap();
+        assert_eq!(
+            unsafe { (*probed.as_ptr()).duration_estimation_method },
+            ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE
+        );
+        for rate in [48000, 24000] {
+            let pcm = TranscodeProfile {
+                container: Some("wav".into()),
+                audio_codec: Some("pcm_s16le".into()),
+                max_sample_rate_hz: Some(rate),
+                ..Default::default()
+            };
+            let reference = temp.path().join(format!("reference-{rate}.wav"));
+            let output = temp.path().join(format!("output-{rate}.wav"));
+            encode(&clean, &reference, &pcm, &cancelled, 2_000_000).unwrap();
+            let decoded_duration = format::input(&reference).unwrap().duration();
+            assert!(probed.duration() - decoded_duration > 2_000_000);
+            let report = encode_with_report(&tagged, &output, &pcm, &cancelled, 2_000_000)
+                .unwrap_or_else(|error| panic!("{rate} Hz: {error:#}"));
+            assert_eq!(report.recovery, RecoveryReport::default());
+            assert_eq!(pcm_bytes(&reference), pcm_bytes(&output));
+            let verified = format::input(&output).unwrap();
+            let stream = verified.streams().best(media::Type::Audio).unwrap();
+            let decoder = codec::context::Context::from_parameters(stream.parameters())
+                .unwrap()
+                .decoder()
+                .audio()
+                .unwrap();
+            assert_eq!(decoder.rate(), rate);
+        }
+        let output = temp.path().join("encoded.mp3");
+        encode(&tagged, &output, &mp3, &cancelled, 2_000_000).unwrap();
+        assert_eq!(std::fs::read(&tagged).unwrap(), tagged_bytes);
+        assert_eq!(std::fs::read(&clean).unwrap(), audio);
+    }
+
+    #[test]
+    fn reliable_mp3_duration_still_rejects_truncated_source_and_removes_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.wav");
+        let truncated = temp.path().join("truncated.mp3");
+        let output = temp.path().join("output.mp3");
+        wav(&source, 8);
+        let profile = TranscodeProfile {
+            container: Some("mp3".into()),
+            audio_codec: Some("mp3".into()),
+            max_bitrate_kbps: Some(192),
+            ..Default::default()
+        };
+        let cancelled = AtomicBool::new(false);
+        encode(&source, &truncated, &profile, &cancelled, 2_000_000).unwrap();
+        let mut context = format::input(&truncated).unwrap();
+        let original_duration = context.duration();
+        let end = context.packets().nth(125).unwrap().1.position();
+        drop(context);
+        // Keep the Xing header's frame count, but remove five seconds of audio
+        // on a packet boundary so no decoder error masks duration validation.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&truncated)
+            .unwrap()
+            .set_len(end as u64)
+            .unwrap();
+        let context = format::input(&truncated).unwrap();
+        assert_eq!(context.duration(), original_duration);
+        assert_ne!(
+            unsafe { (*context.as_ptr()).duration_estimation_method },
+            ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE
+        );
+        let error = encode(&truncated, &output, &profile, &cancelled, 2_000_000).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("Encoded duration does not match original: expected"));
+        assert!(message.contains("output"));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn duration_validation_rejects_a_genuinely_short_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let short = temp.path().join("short.wav");
+        wav(&short, 3);
+        ff::init().unwrap();
+        let actual = format::input(&short).unwrap().duration();
+        let error = validate_duration(8_000_000, actual).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Encoded duration does not match original: expected 8.000s, output 3.000s"
+        );
+        // Preserve the existing allowance for codec padding and delay.
+        validate_duration(5_000_000, actual).unwrap();
+    }
+
     #[test]
     fn mp3_with_supported_trailing_tags_encodes_without_losing_audio() {
         let temp = tempfile::tempdir().unwrap();
@@ -1222,11 +1386,6 @@ pub(crate) mod tests {
         encode(&clean, &reference, &pcm, &cancelled, 1_000_000).unwrap();
         // Compare decoded PCM, including its length, rather than only accepting
         // an output file: ignoring the trailer must preserve all audio samples.
-        let pcm_bytes = |path: &Path| {
-            let bytes = std::fs::read(path).unwrap();
-            let start = bytes.windows(4).position(|b| b == b"data").unwrap();
-            bytes[start + 8..].to_vec()
-        };
         for tags in [stacked_mp3_tags(), mllt_mp3_tags()] {
             let mut bytes = std::fs::read(&clean).unwrap();
             bytes.extend_from_slice(&tags);
