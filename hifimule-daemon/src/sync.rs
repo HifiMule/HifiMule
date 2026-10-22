@@ -4495,7 +4495,6 @@ async fn execute_plan_sync_buffered(
                 let message = format!("[Sync] Coalesced selected music '{}' with '{}' at '{}'; keeping one file",
                     add_item.jellyfin_id, owner, rel_path);
                 crate::daemon_log!("{}", message);
-                sync_warnings.push(message);
                 music_aliases.insert(add_item.jellyfin_id.clone(), owner.clone());
                 if let Some(residents) = selected_resident_music.get(&destination_key) {
                     for resident_id in residents {
@@ -4947,7 +4946,6 @@ async fn execute_plan_sync_buffered(
                 let message = format!("[Sync] Coalesced selected music '{}' with '{}' at '{}'; keeping one file",
                     id_change.new_jellyfin_id, owner, id_change.old_local_path);
                 crate::daemon_log!("{}", message);
-                sync_warnings.push(message);
                 continue;
             }
         }
@@ -12129,6 +12127,8 @@ mod tests {
             first_download.assert_async().await;
             second_download.assert_async().await;
             later_download.assert_async().await;
+            let operation = operations.get_operation(&id).await.unwrap();
+            assert!(!operation.warnings.iter().any(|warning| warning.contains("Coalesced selected music")), "{scenario}: {:?}", operation.warnings);
             if scenario == "move-failed" {
                 assert!(errors.iter().any(|e| e.error_message.contains("Failed to remove replaced file")), "{errors:?}");
                 assert!(old_path.exists());
