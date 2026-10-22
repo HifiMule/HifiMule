@@ -365,3 +365,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - **MSC deterministic sibling staging can encounter symlinks or races.** Existing `MscBackend` verified writes use a deterministic `.tmp` sibling. Harden temporary creation and canonical containment against concurrent filesystem changes separately; this replacement policy preserves the existing backend behavior.
 - **MTP replacement does not preserve old bytes across every failed upload.** Existing MTP backends can remove an old object before uploading its replacement. Design transport-appropriate staging/commit semantics separately; this change does not add an atomic replacement guarantee to MTP.
+
+## Deferred from: Audiobookshelf MP3 direct-copy fix (2026-10-22)
+
+- **Windows music path-policy tests fail on the unchanged baseline.** `sync::tests::music_destination_policy_preserves_other_media_and_inspection_errors` expects canonicalization error wording that differs on Windows. `sync::tests::selected_music_collisions_keep_one_owner_across_retry_force_and_missing_files` compares native relative paths with slash-normalized manifest paths. Both fail at baseline `cadc7fe40a29a05a02bc7d1111447bbeccecc0d3` and after this fix; baseline music test run: 32 passed, 2 failed. Evidence: `target/mp3-direct-copy-baseline.log`. Address platform-independent assertions in a focused follow-up.

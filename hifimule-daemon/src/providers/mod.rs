@@ -197,6 +197,7 @@ pub struct SyncBookTags {
 /// `request` keeps provider session cleanup alive until the staged read ends.
 #[derive(Debug, Clone)]
 pub struct SyncMediaRepresentation {
+    pub source_audio: crate::domain::models::SourceAudioProperties,
     pub codec: String,
     pub container: String,
     pub request: PlaybackRequest,
@@ -236,6 +237,7 @@ impl SyncMediaRepresentation {
             ));
         }
         Ok(Self {
+            source_audio: Default::default(),
             codec,
             container,
             request: representation.request,

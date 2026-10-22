@@ -1862,9 +1862,13 @@ pub fn sync_direct_media_compatible(
     device_profile: Option<&serde_json::Value>,
     preferred_audio_container: Option<&str>,
     media: &crate::providers::SyncMediaRepresentation,
+    max_bitrate_override_kbps: Option<u32>,
 ) -> bool {
-    audio_compatibility_profile(device_profile, preferred_audio_container)
-        .source_is_direct_compatible(&sync_media_audio_format(media))
+    direct_for_bitrate(
+        &audio_compatibility_profile(device_profile, preferred_audio_container),
+        &sync_media_audio_format(media), media.source_audio.audio_bitrate_bps,
+        max_bitrate_override_kbps, media.source_audio,
+    )
 }
 
 fn audio_requirement(
@@ -3498,7 +3502,7 @@ async fn execute_plan_sync_buffered(
                 let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
                 break;
             }
-            let add_item = match add_item {
+            let mut add_item = match add_item {
                 Ok(item) => item,
                 Err(error) => {
                     errors.push(SyncFileError { jellyfin_id:String::new(), filename:"sync-plan".into(), error_message:error.to_string() });
@@ -3571,6 +3575,12 @@ async fn execute_plan_sync_buffered(
             } else {
                 None
             };
+            if let Some(media) = direct_media.as_ref() {
+                // Current verified evidence supersedes the prepared plan, including
+                // when a formerly known property is now unavailable.
+                add_item.source_audio = media.source_audio;
+                add_item.original_bitrate = media.source_audio.audio_bitrate_bps;
+            }
             let source_format = if let Some(media) = direct_media.as_ref() {
                 sync_media_audio_format(media)
             } else {
@@ -7237,6 +7247,7 @@ mod tests {
         let size = audio.len() as u64;
         let reservation = crate::sync_tags::rewrite_reservation(size).unwrap();
         let media = crate::providers::SyncMediaRepresentation {
+                    source_audio: Default::default(),
             codec: "mp3".into(),
             container: "mp3".into(),
             request: crate::providers::PlaybackRequest {
@@ -7339,6 +7350,7 @@ mod tests {
                     operations.request_cancel(&operation).await;
                 }
                 let media = crate::providers::SyncMediaRepresentation {
+                    source_audio: Default::default(),
                     codec: "mp3".into(),
                     container: "mp3".into(),
                     request: crate::providers::PlaybackRequest {
@@ -7392,7 +7404,8 @@ mod tests {
 
     #[test]
     fn sync_direct_media_compatibility_uses_verified_codec() {
-        let media = crate::providers::SyncMediaRepresentation {
+        let mut media = crate::providers::SyncMediaRepresentation {
+            source_audio: Default::default(),
             book_tags: None,
             codec: "mp3".into(),
             container: "mp3".into(),
@@ -7407,8 +7420,20 @@ mod tests {
         };
         let mp3 = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"mp3","AudioCodec":"mp3"}]});
         let flac = serde_json::json!({"DirectPlayProfiles":[{"Type":"Audio","Container":"flac","AudioCodec":"flac"}]});
-        assert!(sync_direct_media_compatible(Some(&mp3), None, &media));
-        assert!(!sync_direct_media_compatible(Some(&flac), None, &media));
+        assert!(sync_direct_media_compatible(Some(&mp3), None, &media, None));
+        assert!(!sync_direct_media_compatible(Some(&flac), None, &media, None));
+        let presets: serde_json::Value = serde_json::from_slice(include_bytes!("../assets/device-profiles.json")).unwrap();
+        let mut profile = presets["profiles"].as_array().unwrap().iter().find(|p|p["id"]=="rockbox-mp3-192").unwrap()["deviceProfile"].clone();
+        profile["MaxAudioChannels"] = serde_json::json!(2);
+        profile["MaxAudioSampleRate"] = serde_json::json!(48000);
+        for (channels, rate, depth, allowed) in [(2,48000,16,true), (6,48000,16,false), (2,96000,16,false), (2,48000,24,false)] {
+            media.source_audio = crate::domain::models::SourceAudioProperties { channels:Some(channels), sample_rate_hz:Some(rate), bit_depth:Some(depth), audio_bitrate_bps:Some(128000), ..Default::default() };
+            assert_eq!(sync_direct_media_compatible(Some(&profile), None, &media, None), allowed);
+        }
+        media.source_audio = Default::default();
+        media.codec = "aac".into();
+        media.container = "m4a".into();
+        assert!(!sync_direct_media_compatible(Some(&profile), None, &media, None));
     }
 
     #[test]

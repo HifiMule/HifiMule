@@ -688,6 +688,8 @@ fn podcast_pub_date_millis(value: &str) -> Option<i64> {
 
 #[derive(Clone, Deserialize)]
 struct PodcastAudioFileDto {
+    #[serde(flatten)]
+    source_audio: SyncAudioPropertiesDto,
     #[serde(deserialize_with = "deserialize_nonempty")]
     ino: String,
     #[serde(default)]
@@ -856,8 +858,38 @@ struct BookAuthorDto {
     name: String,
 }
 
+/// Optional ABS AudioFile evidence. Invalid optional fields remain unknown,
+/// rather than breaking admission or rounding a bps ceiling through kbps.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncAudioPropertiesDto {
+    #[serde(default, deserialize_with = "deserialize_optional_positive_u32")]
+    bit_rate: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_positive_u32")]
+    channels: Option<u32>,
+}
+
+fn deserialize_optional_positive_u32<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0))
+}
+
+impl SyncAudioPropertiesDto {
+    fn properties(&self) -> crate::domain::models::SourceAudioProperties {
+        crate::domain::models::SourceAudioProperties {
+            audio_bitrate_bps: self.bit_rate,
+            channels: self.channels,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AudioFileDto {
+    #[serde(flatten)]
+    source_audio: SyncAudioPropertiesDto,
     #[serde(deserialize_with = "deserialize_nonempty")]
     ino: String,
     index: serde_json::Value,
@@ -1074,6 +1106,13 @@ impl AudiobookshelfProvider {
         &self,
         id: &str,
     ) -> Result<PlaybackDescription, ProviderError> {
+        self.resolve_podcast_media(id).await.map(|(playback, _)| playback)
+    }
+
+    async fn resolve_podcast_media(
+        &self,
+        id: &str,
+    ) -> Result<(PlaybackDescription, crate::domain::models::SourceAudioProperties), ProviderError> {
         let (library, item_id, media_id, episode_id) = parse_episode_id(id)?;
         let (item, episode) = self.podcast_episode_detail(id).await?;
         let audio_file = episode.audio_file.as_ref().ok_or_else(|| {
@@ -1128,17 +1167,12 @@ impl AudiobookshelfProvider {
         let verified = self
             .podcast_detail(&opaque_id("show", &[&library, &item_id, &media_id]))
             .await?;
-        if !verified.media.episodes.iter().any(|candidate| {
-            candidate.id == episode_id
-                && candidate
-                    .audio_file
-                    .as_ref()
-                    .is_some_and(|file| file.ino == audio_file.ino)
-        }) {
-            return Err(ProviderError::StaleConfiguration(
-                "Audiobookshelf episode media changed during playback admission".into(),
-            ));
-        }
+        let verified_file = verified.media.episodes.iter().find_map(|candidate| {
+            (candidate.id == episode_id).then_some(candidate.audio_file.as_ref()).flatten()
+                .filter(|file| file.ino == audio_file.ino)
+        }).ok_or_else(|| ProviderError::StaleConfiguration(
+            "Audiobookshelf episode media changed during playback admission".into(),
+        ))?;
         let mut matches = session
             .audio_tracks
             .into_iter()
@@ -1168,7 +1202,7 @@ impl AudiobookshelfProvider {
             &audio_file.ino,
         )?;
         let headers = self.verify_direct_media(&url, &track.mime_type).await?;
-        Ok(PlaybackDescription {
+        Ok((PlaybackDescription {
             song: podcast_episode_song(&episode_public),
             representations: vec![PlaybackRepresentation {
                 id: crate::providers::RepresentationId(format!("audiobookshelf-direct-{codec}")),
@@ -1196,7 +1230,7 @@ impl AudiobookshelfProvider {
                     expected_content_type: Some(track.mime_type),
                 },
             }],
-        })
+        }, verified_file.source_audio.properties()))
     }
 
     async fn protected_get(&self, endpoint: &str) -> Result<reqwest::Response, ProviderError> {
@@ -2652,6 +2686,7 @@ fn map_book_detail(
                     .audio_files
                     .iter()
                     .map(|file| AudioFileDto {
+                        source_audio: Default::default(),
                         ino: file.ino.clone(),
                         index: file.index.clone(),
                         duration: file.duration,
@@ -3529,10 +3564,15 @@ impl MediaProvider for AudiobookshelfProvider {
     ) -> Result<crate::providers::SyncMediaRepresentation, ProviderError> {
         // A direct session supplies authenticated media and cleanup, without
         // reading or writing the player's progress record.
-        let playback = self.resolve_playback(id).await?;
+        let (playback, source_audio) = if self.library_role == Some(ProviderLibraryRole::Podcast) {
+            self.resolve_podcast_media(id).await?
+        } else {
+            (self.resolve_playback(id).await?, Default::default())
+        };
         let mut media = crate::providers::SyncMediaRepresentation::from_playback_representations(
             playback.representations,
         )?;
+        media.source_audio = source_audio;
         if self.library_role == Some(ProviderLibraryRole::Audiobook) {
             let (library, item, media_id, file) = parse_track_id(id)?;
             let response = self
@@ -3541,6 +3581,9 @@ impl MediaProvider for AudiobookshelfProvider {
             check_status(&response)?;
             let book: BookDto = bounded_json(response, "book sync metadata").await?;
             media.book_tags = Some(sync_book_tags(&book, &library, &item, &media_id, &file)?);
+            // sync_book_tags has checked the complete identity and unique file list.
+            media.source_audio = book.media.audio_files.iter().find(|part| part.ino == file)
+                .expect("sync identity was validated").source_audio.properties();
         }
         Ok(media)
     }
@@ -7085,6 +7128,29 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(refresh_error, ProviderError::Deserialization(_)));
     }
+    #[test]
+    fn mp3_direct_copy_optional_audio_evidence_is_bounded_for_books_and_podcasts() {
+        for value in [serde_json::json!({}), serde_json::json!({"bitRate":null,"channels":null}),
+            serde_json::json!({"bitRate":0,"channels":0}), serde_json::json!({"bitRate":-1,"channels":-1}),
+            serde_json::json!({"bitRate":4294967296u64,"channels":4294967296u64}),
+            serde_json::json!({"bitRate":"128000","channels":"2"}), serde_json::json!({"bitRate":128000.5,"channels":2.5}),
+            serde_json::json!({"bitRate":128000,"channels":2})] {
+            let mut file = value.clone();
+            file["ino"] = "f".into();
+            file["index"] = 1.into();
+            let book: AudioFileDto = serde_json::from_value(file.clone()).unwrap();
+            let podcast: PodcastAudioFileDto = serde_json::from_value(file).unwrap();
+            let expected_bitrate = (value["bitRate"] == serde_json::json!(128000)).then_some(128000);
+            let expected_channels = (value["channels"] == serde_json::json!(2)).then_some(2);
+            for source in [book.source_audio.properties(), podcast.source_audio.properties()] {
+                assert_eq!(source.audio_bitrate_bps, expected_bitrate);
+                assert_eq!(source.channels, expected_channels);
+                assert_eq!(source.sample_rate_hz, None);
+                assert_eq!(source.bit_depth, None);
+            }
+        }
+    }
+
     #[test]
     fn audiobookshelf_sync_tags_validate_identity_and_server_order() {
         let value = serde_json::json!({"id":"item", "libraryId":"library", "mediaType":"book", "media": {

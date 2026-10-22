@@ -38,7 +38,7 @@
     {
       "id": "rockbox-mp3-192",
       "name": "Rockbox / iPod — MP3 192 kbps",
-      "description": "For devices with limited storage. Transcodes everything to MP3 192 kbps.",
+      "description": "For devices with limited storage. Copies MP3 within the 192 kbps ceiling; transcodes other audio to MP3 192 kbps.",
       "defaultMusicFolder": "Music",
       "defaultPlaylistFolder": "Playlists",
       "deviceProfile": {
@@ -46,7 +46,9 @@
         "MaxStreamingBitrate": 192000,
         "MusicStreamingTranscodingBitrate": 192000,
         "MaxAudioBitDepth": 16,
-        "DirectPlayProfiles": [],
+        "DirectPlayProfiles": [
+          { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" }
+        ],
         "TranscodingProfiles": [
           {
             "Container": "mp3",

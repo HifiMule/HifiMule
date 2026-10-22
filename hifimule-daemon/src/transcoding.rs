@@ -94,6 +94,7 @@ fn merge_profile_defaults(existing: &mut Value, defaults: &Value) -> Result<bool
                 .is_some_and(|id| id == default_id)
         }) {
             Some(existing_profile) => {
+                changed |= migrate_legacy_mp3_192(existing_profile, default_profile);
                 changed |= merge_missing_values(existing_profile, default_profile);
             }
             None => {
@@ -104,6 +105,30 @@ fn merge_profile_defaults(existing: &mut Value, defaults: &Value) -> Result<bool
     }
 
     Ok(changed)
+}
+
+/// Match the old description too, so later direct-play edits are not migrated again.
+fn migrate_legacy_mp3_192(existing: &mut Value, defaults: &Value) -> bool {
+    const LEGACY_DESCRIPTION: &str =
+        "For devices with limited storage. Transcodes everything to MP3 192 kbps.";
+    if existing["id"] != "rockbox-mp3-192" || existing["description"] != LEGACY_DESCRIPTION {
+        return false;
+    }
+    let mut legacy = serde_json::json!({
+        "Name":"HifiMule-Rockbox-192", "MaxStreamingBitrate":192000,
+        "MusicStreamingTranscodingBitrate":192000, "MaxAudioBitDepth":16,
+        "DirectPlayProfiles":[], "CodecProfiles":[],
+        "TranscodingProfiles":[{"Container":"mp3","Type":"Audio","AudioCodec":"mp3",
+            "Protocol":"http","EstimateContentLength":true,"EnableMpegtsM2TsMode":false}]
+    });
+    let with_depth = existing.get("deviceProfile") == Some(&legacy);
+    legacy.as_object_mut().unwrap().remove("MaxAudioBitDepth");
+    if !with_depth && existing.get("deviceProfile") != Some(&legacy) {
+        return false;
+    }
+    existing["deviceProfile"]["DirectPlayProfiles"] = defaults["deviceProfile"]["DirectPlayProfiles"].clone();
+    existing["description"] = defaults["description"].clone();
+    true
 }
 
 fn merge_missing_values(existing: &mut Value, defaults: &Value) -> bool {
@@ -139,6 +164,74 @@ fn merge_missing_object_values(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    const EMBEDDED: &[u8] = include_bytes!("../assets/device-profiles.json");
+
+    fn mp3_192_profile(value: &mut Value) -> &mut Value {
+        value["profiles"].as_array_mut().unwrap().iter_mut()
+            .find(|entry| entry["id"] == "rockbox-mp3-192").unwrap()
+    }
+
+    #[test]
+    fn mp3_direct_copy_preset_seed_and_legacy_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-profiles.json");
+        ensure_profiles_file_exists(&path, EMBEDDED).unwrap();
+        let mut seeded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let current = mp3_192_profile(&mut seeded).clone();
+        assert_eq!(current["deviceProfile"]["DirectPlayProfiles"], serde_json::json!([
+            {"Container":"mp3","Type":"Audio","AudioCodec":"mp3"}
+        ]));
+        for depth in [true, false] {
+            let mut existing = seeded.clone();
+            let legacy = mp3_192_profile(&mut existing);
+            legacy["name"] = "My portable".into();
+            legacy["defaultMusicFolder"] = "CustomMusic".into();
+            legacy["description"] =
+                "For devices with limited storage. Transcodes everything to MP3 192 kbps.".into();
+            legacy["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
+            if !depth { legacy["deviceProfile"].as_object_mut().unwrap().remove("MaxAudioBitDepth"); }
+            let merged = merge_profiles_json(&existing.to_string(), EMBEDDED).unwrap();
+            let mut merged_json: Value = serde_json::from_str(&merged).unwrap();
+            let repaired = mp3_192_profile(&mut merged_json);
+            assert_eq!(repaired["deviceProfile"], current["deviceProfile"]);
+            assert_eq!(repaired["name"], "My portable");
+            assert_eq!(repaired["defaultMusicFolder"], "CustomMusic");
+            assert_eq!(merge_profiles_json(&merged, EMBEDDED).unwrap(), merged);
+        }
+    }
+
+    #[test]
+    fn mp3_direct_copy_migration_preserves_later_direct_play_edit() {
+        let mut existing: Value = serde_json::from_slice(EMBEDDED).unwrap();
+        let entry = mp3_192_profile(&mut existing);
+        entry["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
+        let expected = entry.clone();
+        let mut merged: Value = serde_json::from_str(
+            &merge_profiles_json(&existing.to_string(), EMBEDDED).unwrap(),
+        ).unwrap();
+        assert_eq!(*mp3_192_profile(&mut merged), expected);
+    }
+
+    #[test]
+    fn mp3_direct_copy_migration_preserves_custom_force_transcode() {
+        let mut current: Value = serde_json::from_slice(EMBEDDED).unwrap();
+        for edit in ["Name", "MusicStreamingTranscodingBitrate", "customFlag"] {
+            let mut existing = current.clone();
+            let entry = mp3_192_profile(&mut existing);
+            entry["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
+            entry["deviceProfile"][edit] = serde_json::json!(123);
+            let expected = entry.clone();
+            let mut merged: Value = serde_json::from_str(&merge_profiles_json(&existing.to_string(), EMBEDDED).unwrap()).unwrap();
+            assert_eq!(*mp3_192_profile(&mut merged), expected);
+        }
+        let preset = mp3_192_profile(&mut current);
+        preset["id"] = "custom-force".into();
+        preset["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
+        let expected = preset.clone();
+        let merged: Value = serde_json::from_str(&merge_profiles_json(&current.to_string(), EMBEDDED).unwrap()).unwrap();
+        assert!(merged["profiles"].as_array().unwrap().contains(&expected));
+    }
 
     fn write_temp_profiles(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

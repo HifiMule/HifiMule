@@ -5032,7 +5032,7 @@ async fn blocked_provider_media_add(
     }
     let (reason_code, reason) = match provider.resolve_sync_media(&add.jellyfin_id).await {
         Ok(media)
-            if crate::sync::sync_direct_media_compatible(profile, preferred_container, &media) =>
+            if crate::sync::sync_direct_media_compatible(profile, preferred_container, &media, add.max_bitrate_override_kbps) =>
         {
             return None;
         }
@@ -10616,6 +10616,7 @@ async fn handle_destination_select(
 mod tests {
     use super::*;
     include!("rpc/sync_plan_tests.rs");
+    include!("rpc/mp3_direct_copy_tests.rs");
     use crate::api::credential_test_lock;
     use serde_json::json;
     use std::sync::Mutex;
@@ -16540,6 +16541,7 @@ mod tests {
             _id: &str,
         ) -> Result<crate::providers::SyncMediaRepresentation, ProviderError> {
             Ok(crate::providers::SyncMediaRepresentation {
+                    source_audio: Default::default(),
                 book_tags: None,
                 codec: "mp3".into(),
                 container: "mp3".into(),
