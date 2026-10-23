@@ -1675,12 +1675,19 @@ pub mod libmtp {
             "ogg" => LIBMTP_FILETYPE_OGG,
             "flac" => LIBMTP_FILETYPE_FLAC,
             "aac" => LIBMTP_FILETYPE_AAC,
-            "m4a" => LIBMTP_FILETYPE_M4A,
+            "m4a" | "m4b" => LIBMTP_FILETYPE_M4A,
             "mp4" => LIBMTP_FILETYPE_MP4,
             "wma" => LIBMTP_FILETYPE_WMA,
             "m3u" | "m3u8" => LIBMTP_FILETYPE_PLAYLIST,
             _ => LIBMTP_FILETYPE_UNKNOWN,
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn m4b_uses_mp4_audio_transfer_type() {
+        assert_eq!(filetype_for_extension("m4b"), LIBMTP_FILETYPE_M4A);
+        assert_eq!(filetype_for_extension("M4B"), LIBMTP_FILETYPE_M4A);
     }
     const LIBMTP_ERROR_NONE: c_int = 0;
 

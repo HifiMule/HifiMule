@@ -10617,6 +10617,7 @@ mod tests {
     use super::*;
     include!("rpc/sync_plan_tests.rs");
     include!("rpc/mp3_direct_copy_tests.rs");
+    include!("rpc/m4b_sync_tests.rs");
     use crate::api::credential_test_lock;
     use serde_json::json;
     use std::sync::Mutex;

@@ -95,6 +95,8 @@ fn merge_profile_defaults(existing: &mut Value, defaults: &Value) -> Result<bool
         }) {
             Some(existing_profile) => {
                 changed |= migrate_legacy_mp3_192(existing_profile, default_profile);
+                changed |= migrate_legacy_garmin_m4b(existing_profile, default_profile);
+                changed |= migrate_legacy_original_description(existing_profile, default_profile);
                 changed |= merge_missing_values(existing_profile, default_profile);
             }
             None => {
@@ -124,6 +126,38 @@ fn migrate_legacy_mp3_192(existing: &mut Value, defaults: &Value) -> bool {
     let with_depth = existing.get("deviceProfile") == Some(&legacy);
     legacy.as_object_mut().unwrap().remove("MaxAudioBitDepth");
     if !with_depth && existing.get("deviceProfile") != Some(&legacy) {
+        return false;
+    }
+    existing["deviceProfile"]["DirectPlayProfiles"] = defaults["deviceProfile"]["DirectPlayProfiles"].clone();
+    existing["description"] = defaults["description"].clone();
+    true
+}
+
+fn migrate_legacy_original_description(existing: &mut Value, defaults: &Value) -> bool {
+    if existing["id"] != "passthrough"
+        || existing["description"] != "Download files as-is from Jellyfin without transcoding."
+        || existing.get("deviceProfile") != Some(&Value::Null) {
+        return false;
+    }
+    existing["description"] = defaults["description"].clone();
+    true
+}
+
+fn migrate_legacy_garmin_m4b(existing: &mut Value, defaults: &Value) -> bool {
+    const LEGACY_DESCRIPTION: &str = "For Garmin watches with music storage (Forerunner, Fenix, Venu, Vivoactive). Passes through MP3 and AAC/M4A directly; transcodes FLAC, OGG, and other formats to MP3 320 kbps.";
+    if existing["id"] != "garmin-music" || existing["description"] != LEGACY_DESCRIPTION {
+        return false;
+    }
+    let legacy = serde_json::json!({
+        "Name":"HifiMule-Garmin", "MaxStreamingBitrate":320000,
+        "MusicStreamingTranscodingBitrate":320000, "MaxAudioChannels":2, "MaxAudioSampleRate":48000,
+        "DirectPlayProfiles":[{"Container":"mp3","Type":"Audio","AudioCodec":"mp3"},
+            {"Container":"mp4","Type":"Audio","AudioCodec":"aac"}],
+        "TranscodingProfiles":[{"Container":"mp3","Type":"Audio","AudioCodec":"mp3",
+            "Protocol":"http","EstimateContentLength":true,"EnableMpegtsM2TsMode":false}],
+        "CodecProfiles":[]
+    });
+    if existing.get("deviceProfile") != Some(&legacy) {
         return false;
     }
     existing["deviceProfile"]["DirectPlayProfiles"] = defaults["deviceProfile"]["DirectPlayProfiles"].clone();
@@ -170,6 +204,63 @@ mod tests {
     fn mp3_192_profile(value: &mut Value) -> &mut Value {
         value["profiles"].as_array_mut().unwrap().iter_mut()
             .find(|entry| entry["id"] == "rockbox-mp3-192").unwrap()
+    }
+
+    #[test]
+    fn m4b_original_description_migration_preserves_custom_profiles() {
+        for (description, device_profile, updated) in [
+            ("Download files as-is from Jellyfin without transcoding.", Value::Null, true),
+            ("My originals", Value::Null, false),
+            ("Download files as-is from Jellyfin without transcoding.", serde_json::json!({"DirectPlayProfiles":[]}), false),
+        ] {
+            let existing = serde_json::json!({"profiles":[{"id":"passthrough","name":"My choice",
+                "description":description,"deviceProfile":device_profile,"defaultMusicFolder":"CustomMusic"}]}).to_string();
+            let merged = merge_profiles_json(&existing, EMBEDDED).unwrap();
+            let value: Value = serde_json::from_str(&merged).unwrap();
+            let entry = &value["profiles"][0];
+            assert_eq!(entry["name"], "My choice");
+            assert_eq!(entry["defaultMusicFolder"], "CustomMusic");
+            assert_eq!(entry["description"] != description, updated);
+            assert_eq!(merge_profiles_json(&merged, EMBEDDED).unwrap(), merged);
+        }
+    }
+
+    #[test]
+    fn m4b_garmin_stock_migration_preserves_customizations_and_is_idempotent() {
+        let defaults: Value = serde_json::from_slice(EMBEDDED).unwrap();
+        let current = defaults["profiles"].as_array().unwrap().iter().find(|p| p["id"] == "garmin-music").unwrap();
+        let mut legacy = current.clone();
+        legacy["description"] = "For Garmin watches with music storage (Forerunner, Fenix, Venu, Vivoactive). Passes through MP3 and AAC/M4A directly; transcodes FLAC, OGG, and other formats to MP3 320 kbps.".into();
+        legacy["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([
+            {"Container":"mp3","Type":"Audio","AudioCodec":"mp3"},
+            {"Container":"mp4","Type":"Audio","AudioCodec":"aac"}
+        ]);
+        legacy["name"] = "My watch".into();
+        legacy["defaultMusicFolder"] = "CustomMusic".into();
+        for edit in [None, Some("DirectPlayProfiles"), Some("MaxAudioChannels"), Some("customFlag")] {
+            let mut existing = legacy.clone();
+            if let Some(key) = edit { existing["deviceProfile"][key] = serde_json::json!([]); }
+            let document = serde_json::json!({"profiles":[existing.clone()]}).to_string();
+            let merged = merge_profiles_json(&document, EMBEDDED).unwrap();
+            let value: Value = serde_json::from_str(&merged).unwrap();
+            let profiles = value["profiles"].as_array().unwrap();
+            let garmin = profiles.iter().find(|p| p["id"] == "garmin-music").unwrap();
+            assert_eq!(garmin["name"], "My watch");
+            assert_eq!(garmin["defaultMusicFolder"], "CustomMusic");
+            if edit.is_none() {
+                assert_eq!(garmin["deviceProfile"], current["deviceProfile"]);
+                assert!(garmin["deviceProfile"]["DirectPlayProfiles"].as_array().unwrap().iter().any(|p| p["Container"] == "m4b"));
+            } else { assert_eq!(garmin["deviceProfile"], existing["deviceProfile"]); }
+            for id in ["modern-dap-lossless-m4b", "rockbox-audiobooks-m4b", "audiobooks-m4b-mp3", "pocketbook-audiobooks", "android-voice-audiobooks"] {
+                assert_eq!(profiles.iter().filter(|p| p["id"] == id).count(), 1);
+            }
+            assert_eq!(merge_profiles_json(&merged, EMBEDDED).unwrap(), merged);
+        }
+        // A user removes M4B after upgrading: the updated description prevents re-migration.
+        let mut modified = current.clone();
+        modified["deviceProfile"]["DirectPlayProfiles"] = legacy["deviceProfile"]["DirectPlayProfiles"].clone();
+        let merged: Value = serde_json::from_str(&merge_profiles_json(&serde_json::json!({"profiles":[modified.clone()]}).to_string(), EMBEDDED).unwrap()).unwrap();
+        assert_eq!(merged["profiles"][0], modified);
     }
 
     #[test]

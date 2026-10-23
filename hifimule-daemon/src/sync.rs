@@ -1402,6 +1402,7 @@ struct AudioCompatibilityProfile {
     output_formats: Vec<AudioFormatRequirement>,
     transcode_profile: Option<TranscodeProfile>,
     limits: TranscodeProfile,
+    direct_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1429,6 +1430,10 @@ impl AudioFormatRequirement {
     }
 
     fn matches(&self, format: &AudioFormat) -> bool {
+        // MP4 MIME describes M4B bytes too, but does not authorize its extension.
+        if format.extension.as_deref() == Some("m4b") && !self.containers.contains("m4b") {
+            return false;
+        }
         let container_matches =
             self.containers.is_empty() || !format.containers.is_disjoint(&self.containers);
         let codec_matches = self.codecs.is_empty() || !format.codecs.is_disjoint(&self.codecs);
@@ -1436,7 +1441,8 @@ impl AudioFormatRequirement {
     }
 
     fn matches_ambiguous_mp4_audio(&self, format: &AudioFormat) -> bool {
-        if !format.codecs.is_empty() || self.codecs.is_empty() {
+        if format.extension.as_deref() == Some("m4b")
+            || !format.codecs.is_empty() || self.codecs.is_empty() {
             return false;
         }
         let source_is_mp4_audio =
@@ -1524,6 +1530,8 @@ fn audio_compatibility_profile(
             output_formats,
             transcode_profile,
             limits: audio_limits_from_device_profile(profile),
+            direct_bitrate_kbps: bitrate_kbps(&profile["MaxStreamingBitrate"])
+                .or_else(|| target_bitrate_kbps(profile)),
         };
     }
 
@@ -1546,6 +1554,7 @@ fn audio_compatibility_profile(
                 }),
             }),
             limits: TranscodeProfile::default(),
+            direct_bitrate_kbps: Some(if container.eq_ignore_ascii_case("mp3") { 320 } else { 256 }),
         };
     }
 
@@ -1561,15 +1570,20 @@ fn source_within_limits(source: crate::domain::models::SourceAudioProperties, pr
 }
 
 fn direct_for_bitrate(compatibility: &AudioCompatibilityProfile, format: &AudioFormat, source_bps: Option<u32>, override_kbps: Option<u32>, source: crate::domain::models::SourceAudioProperties) -> bool {
+    if !compatibility.is_constrained() {
+        return source_within_limits(source, &compatibility.limits);
+    }
     compatibility.source_is_direct_compatible(format)
         && source_within_limits(source, &compatibility.limits)
-        && compatibility.transcode_profile.as_ref().is_none_or(|profile| {
-            let mut requested = profile.clone();
-            requested.max_bitrate_kbps = override_kbps.or(profile.max_bitrate_kbps);
-            let effective = requested.normalized_for_source(source);
-            source_within_limits(source, profile)
-                && effective.max_bitrate_kbps.is_none_or(|ceiling| source_bps.is_none_or(|bps| bps <= ceiling.saturating_mul(1000)))
-        })
+        && lower_bitrate_ceiling(compatibility.direct_bitrate_kbps, override_kbps)
+            .is_none_or(|ceiling| source_bps.is_none_or(|bps| bps <= ceiling.saturating_mul(1000)))
+}
+
+fn lower_bitrate_ceiling(profile: Option<u32>, override_kbps: Option<u32>) -> Option<u32> {
+    match (profile, override_kbps) {
+        (Some(profile), Some(requested)) => Some(profile.min(requested)),
+        (profile, requested) => profile.or(requested),
+    }
 }
 
 pub fn song_audio_bitrate_bps(song: &crate::domain::models::Song) -> Option<u32> {
@@ -1636,7 +1650,7 @@ pub fn planned_audio_size(item: &SyncAddItem, profile: Option<&serde_json::Value
     }
     let duration = planned_duration_seconds(item);
     let mut target = compatibility.transcode_profile.clone().unwrap_or_default();
-    target.max_bitrate_kbps = item.max_bitrate_override_kbps.or(target.max_bitrate_kbps);
+    target.max_bitrate_kbps = lower_bitrate_ceiling(target.max_bitrate_kbps, item.max_bitrate_override_kbps);
     let target = target.normalized_for_source(item.source_audio);
     let payload = if target.is_lossless() {
         // A legacy Subsonic server may preserve the original resolution even
@@ -1788,12 +1802,16 @@ pub fn scanned_audio_compatible_with_properties(profile: Option<&serde_json::Val
     let compatibility = audio_compatibility_profile(profile, preferred);
     let mut format = provider_audio_format(Some(extension), None);
     format.codecs = [codec.to_ascii_lowercase()].into_iter().collect();
+    let ceiling = if compatibility.source_is_direct_compatible(&format) {
+        compatibility.direct_bitrate_kbps
+    } else {
+        compatibility.transcode_profile.as_ref()
+            .and_then(|profile| profile.normalized_for_source(source).max_bitrate_kbps)
+    };
     compatibility.output_is_compatible(&format)
         && source_within_limits(source, &compatibility.limits)
-        && compatibility.transcode_profile.as_ref().is_none_or(|p| {
-            source_within_limits(source, p) && p.normalized_for_source(source).max_bitrate_kbps
-                .is_none_or(|ceiling| bitrate.is_some_and(|bps| bps <= ceiling.saturating_mul(1050)))
-        })
+        && ceiling
+            .is_none_or(|ceiling| bitrate.is_some_and(|bps| bps <= ceiling.saturating_mul(1050)))
 }
 
 fn audio_limits_from_device_profile(profile: &serde_json::Value) -> TranscodeProfile {
@@ -1827,9 +1845,12 @@ pub(crate) fn transcode_profile_from_device_profile(profile: &serde_json::Value)
 }
 
 pub fn target_bitrate_kbps(profile: &serde_json::Value) -> Option<u32> {
-    let bitrate = profile["MusicStreamingTranscodingBitrate"]
-        .as_u64()
-        .or_else(|| profile["MaxStreamingBitrate"].as_u64())?;
+    bitrate_kbps(&profile["MusicStreamingTranscodingBitrate"])
+        .or_else(|| bitrate_kbps(&profile["MaxStreamingBitrate"]))
+}
+
+fn bitrate_kbps(value: &serde_json::Value) -> Option<u32> {
+    let bitrate = value.as_u64()?;
     if bitrate >= 1000 {
         u32::try_from(bitrate / 1000).ok().filter(|v| *v > 0)
     } else {
@@ -3387,7 +3408,7 @@ async fn execute_plan_sync_buffered(
         if compatibility.is_constrained() && !direct_for_bitrate(&compatibility, &format, item.original_bitrate, item.max_bitrate_override_kbps, item.source_audio) {
             if let Some(profile) = transcoding_profile.as_ref() { crate::transcoding::local::validate_profile(profile)?; }
             let mut profile = compatibility.transcode_profile.clone().context("Local conversion requires an audio target")?;
-            profile.max_bitrate_kbps = item.max_bitrate_override_kbps.or(profile.max_bitrate_kbps);
+            profile.max_bitrate_kbps = lower_bitrate_ceiling(profile.max_bitrate_kbps, item.max_bitrate_override_kbps);
             let normalized = crate::transcoding::local::normalized_for_source(&profile, item.source_audio);
             anyhow::ensure!(profile.max_bitrate_kbps.is_none_or(|ceiling| normalized.max_bitrate_kbps.is_none_or(|rate| rate <= ceiling)), "No local encoder bitrate meets the requested ceiling");
             crate::transcoding::local::resolve(&normalized)?;
@@ -3602,9 +3623,7 @@ async fn execute_plan_sync_buffered(
             let profile = if producer_compatibility.is_constrained() && !source_direct_compatible {
                 match producer_compatibility.transcode_profile.clone() {
                     Some(mut profile) => {
-                        if let Some(kbps) = add_item.max_bitrate_override_kbps {
-                            profile.max_bitrate_kbps = Some(kbps);
-                        }
+                        profile.max_bitrate_kbps = lower_bitrate_ceiling(profile.max_bitrate_kbps, add_item.max_bitrate_override_kbps);
                         Some(if producer_local_encoding {
                             crate::transcoding::local::normalized_for_source(&profile, add_item.source_audio)
                         } else { profile.normalized_for_source(add_item.source_audio) })
@@ -7400,6 +7419,125 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(limiter.used(), 0);
+    }
+
+    #[test]
+    fn m4b_requires_explicit_extension_and_verified_codec_even_with_mp4_mime() {
+        let mut source = provider_audio_format(Some("m4b"), Some("audio/mp4"));
+        add_audio_codec_keys(&mut source.codecs, "aac");
+        let aac = audio_requirement(Some("m4a"), Some("aac")).unwrap();
+        let m4b = audio_requirement(Some("m4b"), Some("aac")).unwrap();
+        let codec_only = audio_requirement(None, Some("aac")).unwrap();
+        assert!(!aac.matches(&source), "MP4 MIME must not bypass the M4B capability");
+        assert!(!codec_only.matches(&source), "M4B requires an explicit container");
+        assert!(m4b.matches(&source));
+        source.codecs = ["alac".into()].into_iter().collect();
+        assert!(!m4b.matches(&source));
+        source.codecs.clear();
+        let mixed = audio_requirement(Some("m4a,m4b"), Some("aac")).unwrap();
+        assert!(!mixed.matches(&source), "M4B extension/MIME cannot prove AAC");
+        let ordinary = provider_audio_format(Some("m4a"), Some("audio/mp4"));
+        assert!(aac.matches(&ordinary), "retain existing ambiguous M4A behavior");
+    }
+
+    #[test]
+    fn m4b_direct_copy_retains_custom_audio_limits_without_format_lists() {
+        let mut media = crate::providers::SyncMediaRepresentation {
+            source_audio: crate::domain::models::SourceAudioProperties {
+                channels: Some(6), ..Default::default()
+            },
+            codec: "aac".into(), container: "m4b".into(), book_tags: None,
+            request: crate::providers::PlaybackRequest {
+                url: reqwest::Url::parse("https://example.invalid/media").unwrap(),
+                headers: Default::default(), range_supported: true, cleanup: None, refresh: None,
+                expected_content_type: Some("audio/mp4".into()),
+            },
+        };
+        let profile = serde_json::json!({"MaxAudioChannels": 2});
+        assert!(!sync_direct_media_compatible(Some(&profile), None, &media, None));
+        media.source_audio.channels = Some(2);
+        assert!(sync_direct_media_compatible(Some(&profile), None, &media, None));
+        media.source_audio.channels = Some(6);
+        assert!(sync_direct_media_compatible(None, None, &media, None),
+            "Download Original remains unconstrained");
+    }
+
+    #[test]
+    fn m4b_scanned_conversion_only_profile_keeps_encoder_ceiling() {
+        let mut profile = serde_json::json!({
+            "MaxStreamingBitrate": 320000,
+            "MusicStreamingTranscodingBitrate": 96000,
+            "DirectPlayProfiles": [],
+            "TranscodingProfiles": [{"Type": "Audio", "Container": "mp3", "AudioCodec": "mp3"}]
+        });
+        for (bitrate, allowed) in [(96000, true), (100800, true), (100801, false), (128000, false), (320000, false)] {
+            assert_eq!(scanned_audio_compatible(Some(&profile), None, "mp3", "mp3", Some(bitrate)), allowed,
+                "conversion-only output at {bitrate} bps");
+        }
+        profile["DirectPlayProfiles"] = serde_json::json!([
+            {"Type": "Audio", "Container": "mp3", "AudioCodec": "mp3"}
+        ]);
+        assert!(scanned_audio_compatible(Some(&profile), None, "mp3", "mp3", Some(320000)),
+            "an explicitly direct-compatible source may use the higher direct ceiling");
+    }
+
+    #[test]
+    fn m4b_shipped_presets_keep_direct_and_conversion_bitrate_policies_separate() {
+        let presets: serde_json::Value = serde_json::from_slice(include_bytes!("../assets/device-profiles.json")).unwrap();
+        let profiles = presets["profiles"].as_array().unwrap();
+        let mut media = crate::providers::SyncMediaRepresentation {
+            source_audio: crate::domain::models::SourceAudioProperties {
+                audio_bitrate_bps: Some(128000), channels: Some(2), sample_rate_hz: Some(48000), ..Default::default()
+            },
+            codec: "aac".into(), container: "m4b".into(), book_tags: None,
+            request: crate::providers::PlaybackRequest {
+                url: reqwest::Url::parse("https://example.invalid/media").unwrap(),
+                headers: Default::default(), range_supported: true, cleanup: None, refresh: None,
+                expected_content_type: Some("audio/mp4".into()),
+            },
+        };
+        for (id, allowed) in [
+            ("modern-dap-lossless-m4b", true), ("rockbox-audiobooks-m4b", true),
+            ("audiobooks-m4b-mp3", true), ("pocketbook-audiobooks", true),
+            ("android-voice-audiobooks", true), ("garmin-music", true),
+            ("modern-dap-lossless", false), ("sony-walkman-aac-flac", false),
+            ("rockbox-mp3-320", false), ("rockbox-mp3-192", false),
+            ("generic-mp3-player", false), ("car-usb-mp3", false), ("spoken-word-mp3-96", false),
+        ] {
+            let entry = profiles.iter().find(|p| p["id"] == id).unwrap_or_else(|| panic!("missing profile {id}"));
+            let profile = &entry["deviceProfile"];
+            assert_eq!(sync_direct_media_compatible(Some(profile), None, &media, None), allowed, "{id}");
+            assert_eq!(scanned_audio_compatible_with_properties(Some(profile), None, "m4b", "aac", Some(128000), media.source_audio), allowed, "scan {id}");
+            if ["rockbox-audiobooks-m4b", "audiobooks-m4b-mp3", "pocketbook-audiobooks", "android-voice-audiobooks"].contains(&id) {
+                assert_eq!(target_bitrate_kbps(profile), Some(96));
+                assert_eq!(entry["defaultMusicFolder"], "Audiobooks");
+                assert_eq!(entry["defaultPlaylistFolder"], "Playlists");
+                assert!(!sync_direct_media_compatible(Some(profile), None, &media, Some(96)));
+                media.source_audio.audio_bitrate_bps = Some(320000);
+                assert!(sync_direct_media_compatible(Some(profile), None, &media, None));
+                media.source_audio.audio_bitrate_bps = Some(320001);
+                assert!(!sync_direct_media_compatible(Some(profile), None, &media, None));
+                assert!(!sync_direct_media_compatible(Some(profile), None, &media, Some(512)), "override cannot raise the device ceiling");
+                media.source_audio.audio_bitrate_bps = Some(128000);
+                media.source_audio.channels = Some(6);
+                assert!(!sync_direct_media_compatible(Some(profile), None, &media, None));
+                media.source_audio.channels = Some(2);
+                media.source_audio.sample_rate_hz = Some(48001);
+                assert!(!sync_direct_media_compatible(Some(profile), None, &media, None));
+                media.source_audio.sample_rate_hz = Some(48000);
+            }
+        }
+        for (id, codec, container, allowed) in [
+            ("pocketbook-audiobooks", "vorbis", "ogg", true),
+            ("pocketbook-audiobooks", "opus", "opus", false),
+            ("android-voice-audiobooks", "opus", "opus", true),
+            ("android-voice-audiobooks", "vorbis", "ogg", true),
+            ("audiobooks-m4b-mp3", "alac", "m4b", false),
+        ] {
+            media.codec = codec.into(); media.container = container.into();
+            let profile = &profiles.iter().find(|p| p["id"] == id).unwrap()["deviceProfile"];
+            assert_eq!(sync_direct_media_compatible(Some(profile), None, &media, None), allowed, "{id}/{codec}");
+        }
     }
 
     #[test]
@@ -12520,7 +12658,8 @@ mod tests {
         assert!(message.contains("Failed to inspect destination") && message.contains("Expected device file"), "{message}");
         let error = inspect_sync_destination(&io, root.path(), Some("Custom/Library"), MediaRole::Music,
             "Custom/Library/song.mp3/child.mp3", false, &empty).await.unwrap_err();
-        assert!(format!("{error:#}").contains("Failed to resolve destination path"));
+        // Unix rejects this during canonicalization; Windows can reach parent creation.
+        assert!(error.chain().any(|cause| cause.is::<std::io::Error>()), "{error:#}");
         // Exercise backend parent creation failure independently of MSC canonical checks.
         let error = inspect_sync_destination(&io, root.path(), Some("Custom/Library"), MediaRole::Music,
             "Custom/Library/song.mp3/child.mp3", true, &empty).await.unwrap_err();
@@ -12733,7 +12872,7 @@ mod tests {
             second.duration_seconds = 210;
             let later = add_item_with_provider_format("later", "flac", "audio/flac", 2);
             let path = construct_desired_file_path(&root.path().join("Music"), &first, None).unwrap().path;
-            let relative = path.strip_prefix(root.path()).unwrap().to_string_lossy().to_string();
+            let relative = path.strip_prefix(root.path()).unwrap().to_string_lossy().replace('\\', "/");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let resident: crate::device::SyncedItem = serde_json::from_value(serde_json::json!({
                 "providerItemId":"first","name":first.name,"artist":"Artist","album":"Album",

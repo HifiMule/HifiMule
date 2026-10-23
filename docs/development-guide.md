@@ -237,7 +237,7 @@ Contents:
 
 ## Transcoding Profiles
 
-`device-profiles.json` is seeded from `hifimule-daemon/assets/device-profiles.json` on first run. To add a new profile:
+`device-profiles.json` is seeded from `hifimule-daemon/assets/device-profiles.json` on first run. Later starts append new preset IDs and fill missing attributes while retaining customer values. To add a new profile:
 
 1. Edit `hifimule-daemon/assets/device-profiles.json`
 2. Or edit the live file in the app data directory
@@ -255,6 +255,12 @@ Format:
 ```
 
 The `"passthrough"` profile (id: `"passthrough"`) means no transcoding; the original file is downloaded as-is.
+
+M4B direct support requires an explicit `m4b` container paired with `aac` in `DirectPlayProfiles`; do not globally alias it to M4A/MP4. Audiobookshelf retains the selected validated file's `.m4b` extension during sync while its player continues using the existing AAC/MP4 representation. `MaxStreamingBitrate` bounds original direct copies; `MusicStreamingTranscodingBitrate` sets the conversion target. The four speech presets use a 320 kbps original ceiling with a 96 kbps MP3 fallback. A per-item bitrate override can lower either ceiling. Scanned reuse retains its existing 5% measured-output bitrate tolerance.
+
+The five M4B presets are `modern-dap-lossless-m4b`, `rockbox-audiobooks-m4b`, `audiobooks-m4b-mp3`, `pocketbook-audiobooks` and `android-voice-audiobooks`. Garmin's explicit AAC/M4B addition migrates only an identified unchanged legacy device profile and description; custom names/folders survive, and custom capability arrays stay untouched. The exact legacy Jellyfin-only Original Download description is updated only for the unchanged passthrough policy. New IDs are merged idempotently. See [Audiobookshelf implementation](./audiobookshelf-implementation.md#device-sync-and-auto-fill) for device qualifications, local encoding requirements and chapter/AAC variant limitations.
+
+M4B discovery uses the normal audio scanner. Unix/libmtp sends M4B with its M4A audio type. Windows WPD and its Shell fallback already preserve the original filename and accept generic files, so M4B uses that existing transfer path. These transport choices do not certify device indexing or playback. The focused regression command is `rtk node scripts/build-daemon.mjs test -p hifimule-daemon m4b`; the libmtp mapping test additionally requires a Unix build.
 
 If an unchanged player reports every track as **transcoding profile changed**, open
 **Device Settings** on a mass-storage device with **No transcoding** selected. If you know its existing audio

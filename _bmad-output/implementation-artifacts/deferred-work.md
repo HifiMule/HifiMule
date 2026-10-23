@@ -369,3 +369,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: Audiobookshelf MP3 direct-copy fix (2026-10-22)
 
 - **Windows music path-policy tests fail on the unchanged baseline.** `sync::tests::music_destination_policy_preserves_other_media_and_inspection_errors` expects canonicalization error wording that differs on Windows. `sync::tests::selected_music_collisions_keep_one_owner_across_retry_force_and_missing_files` compares native relative paths with slash-normalized manifest paths. Both fail at baseline `cadc7fe40a29a05a02bc7d1111447bbeccecc0d3` and after this fix; baseline music test run: 32 passed, 2 failed. Evidence: `target/mp3-direct-copy-baseline.log`. Address platform-independent assertions in a focused follow-up.
+
+  Reconfirmed during M4B implementation on 2026-10-23 against an isolated archive of `4b9b8862ac31c7184c1326a057c46ccbf7de08bd`: both tests fail individually with the same assertions. The initial M4B full-suite run reported 1,664 passed, these two failed, and 12 ignored.
+
+  Resolved on 2026-10-23: the file-as-parent assertion now checks that the underlying filesystem error is preserved, independent of the OS-specific failure stage; the collision fixture uses slash-normalized manifest paths. All 35 affected music sync tests passed after both failures were reproduced. See `spec-fix-windows-sync-test-portability.md` for final verification.

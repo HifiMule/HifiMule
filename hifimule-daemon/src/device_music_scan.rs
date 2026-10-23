@@ -64,7 +64,7 @@ pub fn audio_file(path: &str) -> bool {
             .unwrap_or("")
             .to_ascii_lowercase()
             .as_str(),
-        "mp3" | "flac" | "m4a" | "mp4" | "aac" | "ogg" | "opus" | "wav" | "wma" | "aiff" | "alac"
+        "mp3" | "flac" | "m4a" | "m4b" | "mp4" | "aac" | "ogg" | "opus" | "wav" | "wma" | "aiff" | "alac"
     )
 }
 fn normal(s: &str) -> String {
@@ -627,6 +627,12 @@ async fn reconcile_enabled(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn m4b_audio_discovery_includes_audiobooks_but_not_sidecars() {
+        assert!(audio_file("Audiobooks/Author/Book.m4b"));
+        assert!(audio_file("Podcasts/Show/Episode.M4B"));
+        assert!(!audio_file("Audiobooks/._Book.m4b"));
+    }
     use crate::providers::{
         BrowseCapabilities, Capabilities, ProviderChangeContext, ProviderError, ScrobbleRequest,
         ServerType, TranscodeProfile,

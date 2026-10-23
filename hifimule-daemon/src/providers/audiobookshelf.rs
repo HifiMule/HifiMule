@@ -867,6 +867,16 @@ struct SyncAudioPropertiesDto {
     bit_rate: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_optional_positive_u32")]
     channels: Option<u32>,
+    #[serde(default, rename = "metadata", deserialize_with = "deserialize_m4b_extension")]
+    is_m4b: bool,
+}
+
+fn deserialize_m4b_extension<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let metadata = serde_json::Value::deserialize(deserializer)?;
+    Ok(metadata.get("ext").and_then(serde_json::Value::as_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(".m4b")))
 }
 
 fn deserialize_optional_positive_u32<'de, D: serde::Deserializer<'de>>(
@@ -1112,7 +1122,7 @@ impl AudiobookshelfProvider {
     async fn resolve_podcast_media(
         &self,
         id: &str,
-    ) -> Result<(PlaybackDescription, crate::domain::models::SourceAudioProperties), ProviderError> {
+    ) -> Result<(PlaybackDescription, SyncAudioPropertiesDto), ProviderError> {
         let (library, item_id, media_id, episode_id) = parse_episode_id(id)?;
         let (item, episode) = self.podcast_episode_detail(id).await?;
         let audio_file = episode.audio_file.as_ref().ok_or_else(|| {
@@ -1230,7 +1240,7 @@ impl AudiobookshelfProvider {
                     expected_content_type: Some(track.mime_type),
                 },
             }],
-        }, verified_file.source_audio.properties()))
+        }, verified_file.source_audio.clone()))
     }
 
     async fn protected_get(&self, endpoint: &str) -> Result<reqwest::Response, ProviderError> {
@@ -3564,7 +3574,7 @@ impl MediaProvider for AudiobookshelfProvider {
     ) -> Result<crate::providers::SyncMediaRepresentation, ProviderError> {
         // A direct session supplies authenticated media and cleanup, without
         // reading or writing the player's progress record.
-        let (playback, source_audio) = if self.library_role == Some(ProviderLibraryRole::Podcast) {
+        let (playback, mut source_audio) = if self.library_role == Some(ProviderLibraryRole::Podcast) {
             self.resolve_podcast_media(id).await?
         } else {
             (self.resolve_playback(id).await?, Default::default())
@@ -3572,7 +3582,6 @@ impl MediaProvider for AudiobookshelfProvider {
         let mut media = crate::providers::SyncMediaRepresentation::from_playback_representations(
             playback.representations,
         )?;
-        media.source_audio = source_audio;
         if self.library_role == Some(ProviderLibraryRole::Audiobook) {
             let (library, item, media_id, file) = parse_track_id(id)?;
             let response = self
@@ -3582,8 +3591,13 @@ impl MediaProvider for AudiobookshelfProvider {
             let book: BookDto = bounded_json(response, "book sync metadata").await?;
             media.book_tags = Some(sync_book_tags(&book, &library, &item, &media_id, &file)?);
             // sync_book_tags has checked the complete identity and unique file list.
-            media.source_audio = book.media.audio_files.iter().find(|part| part.ino == file)
-                .expect("sync identity was validated").source_audio.properties();
+            source_audio = book.media.audio_files.iter().find(|part| part.ino == file)
+                .expect("sync identity was validated").source_audio.clone();
+        }
+        media.source_audio = source_audio.properties();
+        // Extension evidence preserves the original filename; it never proves the codec.
+        if source_audio.is_m4b && media.codec == "aac" && media.container == "m4a" {
+            media.container = "m4b".into();
         }
         Ok(media)
     }
