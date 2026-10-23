@@ -2637,6 +2637,8 @@ mod tests {
 
         assert_eq!(song.id, "song-id");
         assert_eq!(song.duration_seconds, 319);
+        assert_eq!(song.disc_number, Some(2));
+        assert_eq!(song.track_number, Some(7));
         assert_eq!(song.bitrate_kbps, Some(256));
         assert_eq!(song.provider_metadata.source_audio.sample_rate_hz, Some(96_000));
         assert_eq!(song.provider_metadata.source_audio.bit_depth, Some(24));

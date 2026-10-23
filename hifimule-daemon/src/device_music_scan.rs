@@ -1049,6 +1049,45 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn disc_filenames_preserve_tag_based_scan_and_read_only_reconciliation() {
+        for first_name in ["01 - Track.mp3", "1-01 Track.mp3"] {
+            let (root, io, file) = fixture().await;
+            let first_path = format!("Music/{first_name}");
+            tokio::fs::rename(root.path().join(&file.path), root.path().join(&first_path)).await.unwrap();
+            let first_bytes = tokio::fs::read(root.path().join(&first_path)).await.unwrap();
+            let mut second_bytes = first_bytes.clone();
+            let disc_frame = second_bytes.windows(4).position(|bytes| bytes == b"TPOS").unwrap();
+            second_bytes[disc_frame + 11] = b'2';
+            let second_path = "Music/2-01 Track.mp3";
+            tokio::fs::write(root.path().join(second_path), &second_bytes).await.unwrap();
+            let first = song();
+            let mut second = first.clone();
+            second.id = "track-2".into();
+            second.disc_number = Some(2);
+            let provider = FixtureProvider { songs: vec![first.clone(), second.clone()], truncated: false };
+            let result = scan(&io, "Music", &provider, Some(&profile()), Arc::new(Progress::default())).await.unwrap();
+            assert_eq!(result.matches.len(), 2);
+            assert_eq!(result.ambiguous, 0);
+            for (id, path) in [("track-1", first_path.as_str()), ("track-2", second_path)] {
+                assert!(result.matches.iter().any(|(song, file)| song.id == id && file.path == path));
+            }
+            let manifest = crate::device::DeviceManifest {
+                reconcile_before_sync: true, managed_paths: vec!["Music".into()], ..Default::default()
+            };
+            let desired = [first, second].iter().map(crate::rpc::provider_song_to_desired_item).collect::<Vec<_>>();
+            let mut delta = crate::sync::calculate_delta(&desired, &manifest);
+            reconcile(&mut delta, &manifest, &io, Some(&profile()), None).await.unwrap();
+            assert!(delta.adds.is_empty());
+            assert_eq!(delta.id_changes.len(), 2);
+            for (id, path, bytes) in [("track-1", first_path.as_str(), first_bytes), ("track-2", second_path, second_bytes)] {
+                assert!(delta.id_changes.iter().any(|change| change.new_jellyfin_id == id && change.old_local_path == path));
+                assert_eq!(tokio::fs::read(root.path().join(path)).await.unwrap(), bytes);
+            }
+            assert!(manifest.synced_items.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn later_file_becomes_read_only_adoption_and_duplicates_stay_unmanaged() {
         let (root, io, file) = fixture().await;
         let manifest:crate::device::DeviceManifest=serde_json::from_value(serde_json::json!({"device_id":"device","version":"1.0","reconcileBeforeSync":true,"managedPaths":["Music"],"syncedItems":[]})).unwrap();

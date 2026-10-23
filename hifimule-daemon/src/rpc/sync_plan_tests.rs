@@ -1107,6 +1107,13 @@ fn disc_metadata_survives_provider_jellyfin_and_delta_mapping() {
     assert_eq!(desired.disc_number,Some(2));
     let delta=crate::sync::calculate_delta(&[desired],&crate::device::DeviceManifest::default());
     assert_eq!(delta.adds[0].disc_number,Some(2));
+    let restored: crate::sync::SyncDelta = serde_json::from_value(serde_json::to_value(delta).unwrap()).unwrap();
+    assert_eq!(restored.adds[0].disc_number, Some(2));
+    let fill: crate::auto_fill::AutoFillItem = serde_json::from_value(json!({
+        "id":"one", "name":"Track", "discNumber":2, "trackNumber":3,
+        "sizeBytes":1000, "priorityReason":"favorite"
+    })).unwrap();
+    assert_eq!(auto_fill_to_desired_item(fill, None, crate::device::MediaRole::Music, None).disc_number, Some(2));
     let item:crate::api::JellyfinItem=serde_json::from_value(json!({"Id":"one","Name":"Track","Type":"Audio","ParentIndexNumber":2})).unwrap();
     assert_eq!(jellyfin_item_to_desired_item(item).disc_number,Some(2));
 }
@@ -1129,7 +1136,7 @@ async fn prepared_sync_replaces_untracked_music_and_continues_in_normal_and_forc
             }}, true, Some("1.16.1".into()),
         ).unwrap();
         state.server_manager.write().await.set_test_provider(Arc::new(provider));
-        let relative = format!("{folder}/Ace of Base/The Sign/01 - The Sign (radio edit).mp3");
+        let relative = format!("{folder}/Ace of Base/The Sign/1-01 The Sign (radio edit).mp3");
         let destination = root.path().join(&relative);
         tokio::fs::create_dir_all(destination.parent().unwrap()).await.unwrap();
         tokio::fs::write(&destination, b"unrecognized old audio").await.unwrap();
@@ -1185,7 +1192,7 @@ async fn prepared_sync_coalesces_selected_music_in_normal_and_force_modes() {
             }}, true, Some("1.16.1".into()),
         ).unwrap();
         state.server_manager.write().await.set_test_provider(Arc::new(provider));
-        let relative = format!("{folder}/Ace of Base/The Sign/01 - The Sign (radio edit).mp3");
+        let relative = format!("{folder}/Ace of Base/The Sign/1-01 The Sign (radio edit).mp3");
         let destination = root.path().join(&relative);
         tokio::fs::create_dir_all(destination.parent().unwrap()).await.unwrap();
         tokio::fs::write(&destination, b"unrecognized old audio").await.unwrap();
@@ -1344,6 +1351,8 @@ async fn basket_estimate_rejects_wrong_destination_and_changed_profile_without_f
 #[test]
 fn force_estimation_retains_desired_duration_source_and_is_idempotent() {
     let mut song = make_fake_song("song", "Track");
+    song.disc_number = Some(2);
+    song.track_number = Some(3);
     song.duration_seconds = 240;
     song.bitrate_kbps = Some(1600);
     song.size_bytes = Some(50_000_000);
@@ -1363,6 +1372,8 @@ fn force_estimation_retains_desired_duration_source_and_is_idempotent() {
     crate::sync::estimate_delta_outputs(&mut delta, Some(&profile), None);
     assert_eq!(delta.adds.len(), 1);
     assert_eq!(delta.adds[0].duration_seconds, 240);
+    assert_eq!(delta.adds[0].disc_number, Some(2));
+    assert_eq!(delta.adds[0].track_number, Some(3));
     assert_eq!(delta.adds[0].source_audio.original_size_bytes, Some(50_000_000));
     assert_eq!(delta.adds[0].size_bytes, 5_883_136);
     apply_force_sync(&mut delta, &manifest);

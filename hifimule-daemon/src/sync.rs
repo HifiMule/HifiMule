@@ -1353,7 +1353,12 @@ fn construct_desired_file_path(
                 .map(|n| format!("{n:02}"))
                 .unwrap_or_else(|| "00".to_string())
         };
-        let filename_base = format!("{} - {}", track_num, track_name_clean);
+        let filename_base = if item.media_role == crate::device::MediaRole::Music {
+            let disc = item.disc_number.filter(|disc| *disc > 0).unwrap_or(1);
+            format!("{disc}-{track_num} {track_name_clean}")
+        } else {
+            format!("{} - {}", track_num, track_name_clean)
+        };
         let filename_candidate = format!("{}.{}", filename_base, extension);
         let (filename, original_name) =
             if filename_candidate.chars().count() > current_max_component {
@@ -5878,8 +5883,8 @@ mod tests {
         let response = serde_json::json!({"subsonic-response":{
             "status":"ok", "version":"1.16.1", "openSubsonic":true,
             "album":{"id":"album", "name":"Album", "song":[
-                {"id":"solo", "title":"Solo", "album":"Album", "artist":"Main", "displayAlbumArtist":"Main"},
-                {"id":"guest", "title":"Duet", "album":"Album", "artist":"Main feat. Guest", "albumArtists":[{"id":"main", "name":"Main"}]}
+                {"id":"solo", "title":"Solo", "album":"Album", "artist":"Main", "displayAlbumArtist":"Main", "discNumber":1,"track":1},
+                {"id":"guest", "title":"Duet", "album":"Album", "artist":"Main feat. Guest", "albumArtists":[{"id":"main", "name":"Main"}], "discNumber":2,"track":1}
             ]}
         }});
         let mock = server
@@ -5907,11 +5912,13 @@ mod tests {
             ("guest", "Duet", "Main feat. Guest"),
         ]
         .into_iter()
-        .map(|(id, title, performer)| {
+        .enumerate()
+        .map(|(index, (id, title, performer))| {
             crate::providers::jellyfin::song_from_item(
                 serde_json::from_value(serde_json::json!({
                     "Id":id, "Name":title, "Type":"Audio", "Album":"Album",
-                    "AlbumArtist":"Main", "Artists":[performer]
+                    "AlbumArtist":"Main", "Artists":[performer],
+                    "ParentIndexNumber":index + 1,"IndexNumber":1
                 }))
                 .unwrap(),
             )
@@ -5955,6 +5962,9 @@ mod tests {
                 let adds = calculate_delta(selection, &empty_manifest()).adds;
                 assert_eq!(adds.len(), 2);
                 for add in adds {
+                    assert_eq!(add.disc_number, Some(if add.jellyfin_id == "solo" { 1 } else { 2 }));
+                    let expected = if add.jellyfin_id == "solo" { "1-01 Solo.mp3" } else { "2-01 Duet.mp3" };
+                    assert_eq!(construct_desired_file_path(Path::new("Music"), &add, None).unwrap().path.file_name().unwrap(), expected);
                     assert_eq!(
                         construct_desired_file_path(Path::new("Music"), &add, None)
                             .unwrap()
@@ -5971,6 +5981,7 @@ mod tests {
             let restored: SyncDelta = serde_json::from_value(saved).unwrap();
             for item in &restored.adds {
                 assert_eq!(item.album_artist.as_deref(), Some("Main"));
+                assert_eq!(item.disc_number, Some(if item.jellyfin_id == "solo" { 1 } else { 2 }));
                 let path = construct_desired_file_path(Path::new("Music"), item, None)
                     .unwrap()
                     .path;
@@ -6014,7 +6025,7 @@ mod tests {
                     .path,
                 Path::new("Music")
                     .join(expected)
-                    .join("Album/01 - Track.flac")
+                    .join("Album/1-01 Track.flac")
             );
         }
         item.album_artist = Some("Main".into());
@@ -9487,7 +9498,7 @@ mod tests {
             .collect();
         if same_path_replacement {
             old[0] = make_synced_item("new-a", "Track new-a", Some("Album"), Some("Artist"));
-            old[0].local_path = "Music/Artist/Album/00 - Track new-a.flac".into();
+            old[0].local_path = "Music/Artist/Album/1-00 Track new-a.flac".into();
         }
         for item in &old {
             tokio::fs::create_dir_all(dir.path().join(&item.local_path).parent().unwrap())
@@ -11056,6 +11067,23 @@ mod tests {
     // ===== Story 4.2 Tests =====
 
     #[test]
+    fn test_construct_desired_file_path_disc_number_matrix() {
+        for (disc, track, expected) in [
+            (Some(1), Some(1), "1-01 Intro.flac"),
+            (Some(2), Some(3), "2-03 Intro.flac"),
+            (None, Some(2), "1-02 Intro.flac"),
+            (Some(0), Some(2), "1-02 Intro.flac"),
+            (Some(2), None, "2-00 Intro.flac"),
+            (Some(10), Some(123), "10-123 Intro.flac"),
+        ] {
+            let mut item = make_test_item("Intro", Some("Artist"), Some("Album"), track, Some("flac"));
+            item.disc_number = disc;
+            let path = construct_desired_file_path(Path::new("Music"), &item, None).unwrap().path;
+            assert_eq!(path.file_name().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn test_construct_desired_file_path_basic() {
         let managed = std::path::PathBuf::from("Music");
         let item = make_test_item(
@@ -11070,7 +11098,7 @@ mod tests {
         let expected = managed
             .join("Pink Floyd")
             .join("The Dark Side of the Moon")
-            .join("01 - Speak to Me.flac");
+            .join("1-01 Speak to Me.flac");
         assert_eq!(path, expected);
     }
 
@@ -11083,7 +11111,7 @@ mod tests {
         let expected = managed
             .join("Unknown Artist")
             .join("Unknown Album")
-            .join("00 - Unknown Track.mp3");
+            .join("1-00 Unknown Track.mp3");
         assert_eq!(path, expected);
     }
 
@@ -11258,6 +11286,7 @@ mod tests {
         let result = construct_desired_file_path(&managed, &item, None).unwrap();
 
         let filename = result.path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("1-01 "));
         assert!(
             filename.ends_with(".flac"),
             "Extension must be .flac, got: {}",
@@ -11289,7 +11318,7 @@ mod tests {
         let result = construct_desired_file_path(&managed, &item, Some("mp3")).unwrap();
         let filename = result.path.file_name().unwrap().to_string_lossy();
 
-        assert_eq!(filename, "01 - K.mp3");
+        assert_eq!(filename, "1-01 K.mp3");
     }
 
     #[test]
@@ -11506,7 +11535,7 @@ mod tests {
             Path::new("Music")
                 .join("Artist")
                 .join("Album")
-                .join("03 - News.mp3")
+                .join("1-03 News.mp3")
         );
     }
 
@@ -12839,6 +12868,62 @@ mod tests {
             let _unanswered = if full_queue { None } else { receiver.recv().await };
             operations.request_cancel(&operation).await;
             assert_eq!(tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap().unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_disc_same_title_writes_distinct_files_and_playlist_paths() {
+        let mut server = mockito::Server::new_async().await;
+        let first_download = server.mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "first".into()))
+            .with_status(200).with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4]).expect(1).create_async().await;
+        let second_download = server.mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "second".into()))
+            .with_status(200).with_header("content-type", "audio/flac")
+            .with_body(vec![5_u8, 6, 7, 8]).expect(1).create_async().await;
+        let root = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(root.path()).await;
+        manager.update_manifest(|m| m.playlist_path = Some("Playlists".into())).await.unwrap();
+        let mut first = add_item_with_provider_format("first", "flac", "audio/flac", 4);
+        first.name = "Intro".into();
+        first.track_number = Some(1);
+        first.disc_number = Some(1);
+        let mut second = first.clone();
+        second.jellyfin_id = "second".into();
+        second.disc_number = Some(2);
+        let delta = SyncDelta {
+            adds: vec![first, second], deletes: vec![], id_changes: vec![], unchanged: 0,
+            playlists: vec![PlaylistSyncItem { jellyfin_id: "playlist".into(), name: "Multi Disc".into(),
+                tracks: ["first", "second"].iter().map(|id| PlaylistTrackInfo {
+                    jellyfin_id: (*id).into(), artist: None, run_time_seconds: 200,
+                }).collect() }],
+            provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![],
+        };
+        let operations = Arc::new(SyncOperationManager::new());
+        let id = unique_operation_id("multi-disc");
+        operations.create_operation(id.clone(), 2).await;
+        let (_, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+            local_encoding_servers: HashSet::new(), provider: subsonic_provider(server.url()),
+            transcoding_profile: None, providers_by_server: Default::default(),
+        }, operations, id, manager, io).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        first_download.assert_async().await;
+        second_download.assert_async().await;
+        let manifest = read_persisted_manifest(root.path());
+        assert_eq!(manifest.synced_items.len(), 2);
+        let playlist = std::fs::read_to_string(root.path().join("Playlists/Multi Disc.m3u")).unwrap();
+        let references: Vec<_> = playlist.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).collect();
+        assert_eq!(references, vec![
+            "../Music/Artist/Album/1-01 Intro.flac",
+            "../Music/Artist/Album/2-01 Intro.flac",
+        ]);
+        for (id, relative, bytes) in [
+            ("first", "Music/Artist/Album/1-01 Intro.flac", vec![1_u8, 2, 3, 4]),
+            ("second", "Music/Artist/Album/2-01 Intro.flac", vec![5_u8, 6, 7, 8]),
+        ] {
+            assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), bytes);
+            assert_eq!(manifest.synced_items.iter().find(|item| item.jellyfin_id == id).unwrap().local_path, relative);
         }
     }
 

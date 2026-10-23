@@ -174,6 +174,17 @@ fn strip_track_number_prefix(title: &str) -> &str {
     let trimmed = title.trim_start();
     let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
 
+    if digit_count > 0
+        && !trimmed.starts_with('0')
+        && let Some((track, rest)) = trimmed[digit_count..]
+            .strip_prefix('-')
+            .and_then(|suffix| suffix.split_once(' '))
+        && track.len() >= 2
+        && track.bytes().all(|ch| ch.is_ascii_digit())
+    {
+        return rest.trim_start();
+    }
+
     if digit_count == 0 || digit_count > 3 {
         return trimmed;
     }
@@ -459,6 +470,29 @@ async fn find_jellyfin_item_id(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+
+    #[test]
+    fn disc_track_prefix_preserves_legacy_and_title_numbers() {
+        for (filename, expected) in [
+            ("1-01 Intro", "Intro"),
+            ("2-03 Finale", "Finale"),
+            ("10-123 Finale", "Finale"),
+            ("1-00 Intro", "Intro"),
+            ("1-01 99 Luftballons", "99 Luftballons"),
+            ("1-01 2-03 Song", "2-03 Song"),
+            ("03 - Finale", "Finale"),
+            ("03. Finale", "Finale"),
+            ("03-Finale", "Finale"),
+            ("03-12 Monkeys", "12 Monkeys"),
+            ("99 Luftballons", "99 Luftballons"),
+            ("1984", "1984"),
+            ("Finale", "Finale"),
+        ] {
+            assert_eq!(strip_track_number_prefix(filename), expected, "{filename}");
+            let log = format!("1779229621:219508:285518:/Music/Artist/Album/{filename}.mp3\n");
+            assert_eq!(parse_scrobbler_log(&log)[0].title, expected, "{filename}");
+        }
+    }
 
     const SAMPLE_LOG: &str = "\
 #AUDIOSCROBBLER/1.1
