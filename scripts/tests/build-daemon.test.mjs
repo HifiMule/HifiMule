@@ -90,6 +90,33 @@ test("daemon wrapper passes custom Cargo arguments through unchanged", () => {
   assert.deepEqual(calls.find((call) => call.command === "cargo").args, ["check", "-p", "hifimule-daemon"]);
 });
 
+test("Cargo tests disable Tauri sidecar copies without discarding inherited configuration", () => {
+  const inherited = {
+    productName: "Custom HifiMule",
+    bundle: { active: true, externalBin: ["sidecars/mediacheck"], resources: { "assets/*": "assets/" } },
+    app: { windows: [] },
+  };
+  for (const config of [undefined, JSON.stringify(inherited)]) {
+    const calls = [];
+    const original = config === undefined ? {} : { TAURI_CONFIG: config };
+    const options = {
+      platform: "linux",
+      env: original,
+      execFileSync: executor("x86_64-unknown-linux-gnu", calls),
+      ensureLinuxAudioRuntime: () => "/controlled/ffmpeg",
+      linuxBuildEnvironment: (_target, env) => env,
+    };
+    const result = runDaemonBuild(["test", "--workspace"], options);
+    const expected = config === undefined ? { bundle: { externalBin: [] } }
+      : { ...inherited, bundle: { ...inherited.bundle, externalBin: [] } };
+    assert.deepEqual(JSON.parse(result.env.TAURI_CONFIG), expected);
+    assert.deepEqual(calls.find((call) => call.command === "cargo").args, ["test", "--workspace"]);
+    assert.deepEqual(original, config === undefined ? {} : { TAURI_CONFIG: config });
+    const build = runDaemonBuild(["build", "-p", "hifimule-daemon"], options);
+    assert.equal(build.env.TAURI_CONFIG, config);
+  }
+});
+
 test("daemon wrapper ensures Windows FFmpeg and exports FFMPEG_DIR before Cargo", () => {
   const calls = [];
   let ensured;

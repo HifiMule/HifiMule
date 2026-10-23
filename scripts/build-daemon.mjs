@@ -80,6 +80,11 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     throw new Error(`Unsupported daemon build platform: ${platform}\n${buildDaemonUsage}`);
   }
 
+  if (args[0] === "test") {
+    // Tauri otherwise copies packaged sidecars over Cargo's same-named test binaries.
+    const config = JSON.parse(env.TAURI_CONFIG ?? "{}");
+    env.TAURI_CONFIG = JSON.stringify({ ...config, bundle: { ...config.bundle, externalBin: [] } });
+  }
   execute("cargo", args, { cwd: root, stdio: "inherit", env });
   return { target, args, env };
 }
