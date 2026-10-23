@@ -1759,7 +1759,17 @@ export class BasketSidebar {
 
         if (etaSeconds < 10) return t('basket.sync.almost_done');
         if (etaSeconds < 60) return t('basket.sync.seconds_left', { count: Math.round(etaSeconds) });
-        return t('basket.sync.minutes_left', { count: Math.round(etaSeconds / 60) });
+        const totalMinutes = Math.round(etaSeconds / 60);
+        if (etaSeconds >= 3600) {
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            if (minutes === 0) return t('basket.sync.hours_left', { hours });
+            return t('basket.sync.hours_minutes_left', {
+                hours,
+                minutes,
+            });
+        }
+        return t('basket.sync.minutes_left', { count: totalMinutes });
     }
 
     private async confirmBlockedPlan(planId: string, total: number): Promise<boolean> {
