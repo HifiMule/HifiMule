@@ -154,6 +154,7 @@ for (const [lineEnding, newline] of [["LF", "\n"], ["CRLF", "\r\n"], ["CR", "\r"
     assert.match(integrity, /grep -q 'Sealed Resources'/);
     assert.match(integrity, /Bundle signature is missing sealed resources[\s\S]*exit 1/);
     assert.match(integrity, /codesign --verify --strict --verbose=2 "\$APP_DIR\/Contents\/MacOS\/hifimule-daemon"/);
+    assert.match(integrity, /codesign --verify --strict --verbose=2 "\$APP_DIR\/Contents\/MacOS\/mediacheck"/);
     assert.match(integrity, /for library in "\$APP_DIR"\/Contents\/Resources\/bundled-libs\/\*\.dylib/);
     assert.match(integrity, /codesign --verify --strict --verbose=2 "\$library"/);
     assert.doesNotMatch(integrity, /macos_signing|spctl|stapler|Authority=Developer ID/);

@@ -4,7 +4,7 @@ use crate::providers::TranscodeProfile;
 use anyhow::{Context, Result, anyhow, ensure};
 use ff::packet::Mut;
 use ffmpeg_next::{self as ff, ChannelLayout, codec, format, frame, media};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::{
     path::Path,
     sync::{
@@ -423,189 +423,13 @@ fn drained(error: ff::Error) -> Result<()> {
     }
 }
 
-const MAX_MP3_METADATA_TAIL: usize = 1_048_576;
-
-/// Some MP3 demuxers emit trailing tags across audio packet boundaries. Check
-/// the file's tags independently of those boundaries, and only tolerate a
-/// rejected EOF packet wholly within that metadata. Never trim accepted audio.
-fn is_mp3_metadata_tail(input: &Path, data: &[u8], position: isize, file_len: u64) -> bool {
-    if data.is_empty()
-        || data.len() > MAX_MP3_METADATA_TAIL
-        || position < 0
-        || (position as u64).checked_add(data.len() as u64) != Some(file_len)
-    {
-        return false;
-    }
-    // A packet starting with a plausible MPEG audio header may contain audio,
-    // even when a metadata footer follows it. Preserve the decoding error.
-    if data.len() >= 4
-        && data[0] == 0xff
-        && data[1] & 0xe0 == 0xe0
-        && data[1] & 0x18 != 0x08
-        && data[1] & 0x06 != 0
-        && data[2] & 0xf0 != 0xf0
-        && data[2] & 0x0c != 0x0c
-    {
-        return false;
-    }
-    // Read only on a decoding error. A bounded, separate file handle leaves the
-    // demuxer's buffered input untouched. On an I/O error retain the decoder's
-    // original failure instead of allowing an unverified packet through.
-    let Ok(mut file) = std::fs::File::open(input) else {
-        return false;
-    };
-    if file.metadata().map(|m| m.len()).ok() != Some(file_len) {
-        return false;
-    }
-    let len = file_len.min(MAX_MP3_METADATA_TAIL as u64) as usize;
-    let mut tail = vec![0; len];
-    if file.seek(SeekFrom::End(-(len as i64))).is_err() || file.read_exact(&mut tail).is_err() {
-        return false;
-    }
-    data.len() <= mp3_trailing_metadata_len(&tail, file_len - len as u64)
-}
-
-/// Return the contiguous, recognizable metadata suffix. Tag sizes are used
-/// solely to verify rejected packets, never to truncate the source or audio.
-fn mp3_trailing_metadata_len(data: &[u8], file_offset: u64) -> usize {
-    let mut end = data.len();
-    if end >= 128 && &data[end - 128..end - 125] == b"TAG" {
-        end -= 128;
-    }
-    if end >= 15 && &data[end - 9..end] == b"LYRICS200" {
-        let digits = &data[end - 15..end - 9];
-        if !digits.iter().all(u8::is_ascii_digit) {
-            return data.len() - end;
-        }
-        let size = digits
-            .iter()
-            .fold(0usize, |n, b| n * 10 + (b - b'0') as usize);
-        if size < 11 || size > end - 15 {
-            return data.len() - end;
-        }
-        let start = end - 15 - size;
-        if &data[start..start + 11] != b"LYRICSBEGIN" {
-            return data.len() - end;
-        }
-        end = start;
-    }
-    if end >= 32 && &data[end - 32..end - 24] == b"APETAGEX" {
-        let footer = &data[end - 32..end];
-        let field = |offset| u32::from_le_bytes(footer[offset..offset + 4].try_into().unwrap());
-        let size = field(12) as usize;
-        if matches!(field(8), 1000 | 2000)
-            && (32..=MAX_MP3_METADATA_TAIL).contains(&size)
-            && size <= end
-            && field(16) <= 65_536
-            && field(20) & !0x80000001 == 0 // Footer, optional header/read-only flags.
-            && footer[24..].iter().all(|b| *b == 0)
-        {
-            end -= size;
-        }
-    }
-    // The observed lookup trailer is separate from an ID3 MLLT frame:
-    // MLLT\0, little-endian offsets, entry count, then this fixed footer.
-    // Its header can sit inside an accepted audio packet, so locate it from
-    // the count at EOF instead of requiring a rejected packet to start there.
-    const MLLT_FOOTER: &[u8] = b"\x10MLLT 01234567890j";
-    if end >= 27 && data[..end].ends_with(MLLT_FOOTER) {
-        let count_at = end - MLLT_FOOTER.len() - 4;
-        let count = u32::from_le_bytes(data[count_at..count_at + 4].try_into().unwrap()) as usize;
-        if (1..=(MAX_MP3_METADATA_TAIL - 27) / 4).contains(&count) {
-            let size = 27 + count * 4;
-            if size <= end {
-                let start = end - size;
-                let mut previous = 0;
-                let valid_offsets = data[start + 5..count_at].chunks_exact(4).all(|entry| {
-                    let offset = u32::from_le_bytes(entry.try_into().unwrap());
-                    // Offsets are relative to the audio's beginning. Even
-                    // without locating it, they cannot exceed the trailer's
-                    // absolute position in the file.
-                    let valid =
-                        offset > previous && u64::from(offset) <= file_offset + start as u64;
-                    previous = offset;
-                    valid
-                });
-                if &data[start..start + 5] == b"MLLT\0" && valid_offsets {
-                    end = start;
-                }
-            }
-        }
-    }
-    data.len() - end
-}
-
-/// Bounded evidence of damaged audio skipped by the decoder. Recovery can leave
-/// audible defects; successful output does not imply that damaged sound was restored.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct RecoveryReport {
-    pub invalid_events: u64,
-    /// Charged bytes: exact for rejected packets, conservatively the largest
-    /// submitted audio packet for errors from buffered decoding or EOF draining.
-    pub rejected_bytes: u64,
-    pub first_position: Option<isize>,
-}
+pub use hifimule_daemon::source_audio::RecoveryReport;
+use hifimule_daemon::source_audio::{SourceDecoder, SourceEvent};
 
 #[derive(Debug)]
 pub struct EncodeReport {
     pub output_bytes: u64,
     pub recovery: RecoveryReport,
-}
-
-#[derive(Default)]
-struct DecodeRecovery {
-    report: RecoveryReport,
-    submitted_packets: u64,
-    largest_packet: usize,
-    consecutive: u64,
-}
-
-impl DecodeRecovery {
-    fn submit(&mut self, bytes: usize) {
-        self.submitted_packets += 1;
-        self.largest_packet = self.largest_packet.max(bytes);
-    }
-
-    // A buffered decoder error cannot be assigned to the current input packet.
-    // Charge an upper bound for any submitted packet rather than zero at EOF.
-    fn reject_buffered(&mut self, error: ff::Error) -> Result<()> {
-        self.reject(error, -1, self.largest_packet)
-    }
-
-    fn reject(&mut self, error: ff::Error, position: isize, bytes: usize) -> Result<()> {
-        if error != ff::Error::InvalidData {
-            return Err(error.into());
-        }
-        self.report.invalid_events += 1;
-        self.report.rejected_bytes = self.report.rejected_bytes.saturating_add(bytes as u64);
-        if self.report.invalid_events == 1 && position >= 0 {
-            self.report.first_position = Some(position);
-        }
-        self.consecutive += 1;
-        ensure!(
-            self.report.invalid_events <= 8,
-            "Too many invalid audio decoding events (maximum 8)"
-        );
-        ensure!(
-            self.consecutive <= 3,
-            "Sustained invalid audio decoding (maximum 3 consecutive events)"
-        );
-        ensure!(
-            self.report.rejected_bytes <= 1_048_576,
-            "Rejected audio exceeds 1 MiB recovery limit"
-        );
-        Ok(())
-    }
-
-    fn validate(&self) -> Result<()> {
-        ensure!(
-            self.report.invalid_events.saturating_mul(100) <= self.submitted_packets,
-            "Invalid audio decoding exceeds one percent of submitted packets ({} events / {} packets)",
-            self.report.invalid_events,
-            self.submitted_packets
-        );
-        Ok(())
-    }
 }
 
 /// The caller reserves original+output bytes before download. Abort rather than
@@ -662,32 +486,11 @@ fn encode_inner(
         Ok(())
     };
     check()?;
-    let input_len = std::fs::metadata(input)
-        .context("Cannot inspect original audio")?
-        .len();
-    let mut ictx = format::input(input).context("Cannot open original audio")?;
-    let stream = ictx
-        .streams()
-        .best(media::Type::Audio)
-        .ok_or_else(|| anyhow!("Original contains no audio stream"))?;
-    let input_index = stream.index();
-    let input_is_mp3 = stream.parameters().id() == codec::Id::MP3;
+    let source = SourceDecoder::open(input)?;
+    let ictx = source.input_context();
+    let stream = ictx.stream(source.audio_stream_index()).unwrap();
     let input_metadata = stream.metadata().to_owned();
-    let mut context = codec::context::Context::from_parameters(stream.parameters())?;
-    context.set_threading(codec::threading::Config {
-        count: 1,
-        ..Default::default()
-    });
-    let mut decoder = context
-        .decoder()
-        .audio()
-        .context("Original audio decoder unavailable")?;
-    ensure!(
-        decoder.rate() > 0 && decoder.channels() > 0,
-        "Original has invalid audio properties"
-    );
-    let source_duration = ictx.duration();
-    let duration_method = unsafe { (*ictx.as_ptr()).duration_estimation_method };
+    let decoder = source.decoder();
     let source_rate = decoder.rate();
     let encoder_codec = ff::encoder::find_by_name(target.encoder).unwrap().audio()?;
     let desired_rate = if target.encoder == "libopus" {
@@ -984,105 +787,33 @@ fn encode_inner(
         ensure!(written == count as i32, "Cannot buffer converted audio");
         process_fifo(encoder, octx, false)
     };
-    let mut recovery = DecodeRecovery::default();
-    let mut decoded_samples = 0u64;
-    let mut receive = |decoder: &mut ff::decoder::Audio,
-                       encoder: &mut ff::encoder::audio::Encoder,
-                       octx: &mut format::context::Output,
-                       recovery: &mut DecodeRecovery|
-     -> Result<()> {
-        let mut decoded = frame::Audio::empty();
-        loop {
-            match decoder.receive_frame(&mut decoded) {
-                Ok(()) => {
-                    recovery.consecutive = 0;
-                    if decoded.channel_layout().is_empty() || decoded.channel_layout().bits() == 0 {
-                        decoded.set_channel_layout(input_layout);
-                    }
-                    check()?;
-                    ensure!(
-                        decoded.samples() <= 1_048_576,
-                        "Original audio frame is too large"
-                    );
-                    // Keep this independent of the converted/output sample
-                    // count so resampling or encoder loss remains detectable.
-                    decoded_samples += decoded.samples() as u64;
-                    let capacity = ((decoded.samples() as u64 * rate as u64)
-                        .div_ceil(decoder.rate() as u64)
-                        + 256) as usize;
-                    let mut converted = frame::Audio::new(sample, capacity, layout);
-                    resampler
-                        .run(&decoded, &mut converted)
-                        .context("resampling decoded audio")?;
-                    queue_frame(&mut converted, encoder, octx)?;
-                }
-                Err(error) => match error {
-                    ff::Error::Eof => break,
-                    ff::Error::Other { errno } if errno == ff::error::EAGAIN => break,
-                    error => recovery
-                        .reject_buffered(error)
-                        .context("Cannot decode original audio frame")?,
-                },
-            }
-        }
-        Ok(())
-    };
-    loop {
-        check()?;
-        // av_read_frame requires an empty packet; its previous buffer must be
-        // released even for skipped streams and tolerated trailing metadata.
-        let mut packet = ff::Packet::empty();
-        match packet.read(&mut ictx) {
-            Ok(()) => {
+    let source_report = source.decode_with_observer(
+        &check,
+        |decoded| {
+            let capacity = ((decoded.samples() as u64 * rate as u64).div_ceil(source_rate as u64)
+                + 256) as usize;
+            let mut converted = frame::Audio::new(sample, capacity, layout);
+            resampler
+                .run(decoded, &mut converted)
+                .context("resampling decoded audio")?;
+            queue_frame(&mut converted, &mut encoder, &mut octx)
+        },
+        |event| match event {
+            SourceEvent::Packet(packet) => {
                 #[cfg(test)]
-                test_support::observe_input_packet(&packet);
-                if packet.stream() == input_index {
-                    let sent = decoder.send_packet(&packet);
-                    if let Err(error) = sent {
-                        if error == ff::Error::InvalidData
-                            && input_is_mp3
-                            && is_mp3_metadata_tail(
-                                input,
-                                packet.data().unwrap_or_default(),
-                                packet.position(),
-                                input_len,
-                            )
-                        {
-                            crate::daemon_log!(
-                                "[Sync] Ignoring rejected trailing MP3 metadata packet at byte {} ({} bytes)",
-                                packet.position(),
-                                packet.size()
-                            );
-                            continue;
-                        }
-                    }
-                    recovery.submit(packet.size());
-                    if let Err(error) = sent {
-                        recovery
-                            .reject(error, packet.position(), packet.size())
-                            .with_context(|| {
-                                format!(
-                                    "Cannot decode original audio packet at byte {} ({} bytes)",
-                                    packet.position(),
-                                    packet.size()
-                                )
-                            })?;
-                    }
-                    receive(&mut decoder, &mut encoder, &mut octx, &mut recovery)?;
-                }
+                test_support::observe_input_packet(packet);
+                #[cfg(not(test))]
+                let _ = packet;
             }
-            Err(ff::Error::Eof) => break,
-            Err(error) => return Err(error).context("Cannot read original audio packet"),
-        }
-    }
-    if let Err(error) = decoder.send_eof() {
-        recovery
-            .reject_buffered(error)
-            .context("Cannot finish decoding original audio")?;
-    }
-    receive(&mut decoder, &mut encoder, &mut octx, &mut recovery)?;
-    recovery.validate()?;
-    drop(receive);
+            SourceEvent::IgnoredMp3Metadata { position, bytes } => {
+                crate::daemon_log!(
+                    "[Sync] Ignoring rejected trailing MP3 metadata packet at byte {} ({} bytes)",
+                    position,
+                    bytes
+                );
+            }
+        },
+    )?;
     loop {
         let mut converted = frame::Audio::new(sample, 4096, layout);
         check()?;
@@ -1159,49 +890,27 @@ fn encode_inner(
             "Encoded audio bitrate exceeds profile ceiling"
         );
     }
-    // Bitrate estimates can include trailing metadata bytes. Use the audio
-    // actually decoded, while retaining reliable source headers to detect EOF
-    // before the declared audio ends. Count at the source rate, before conversion.
-    let decoded_duration =
-        (u128::from(decoded_samples) * 1_000_000 / u128::from(source_rate)) as i64;
-    validate_duration(
-        source_duration,
-        decoded_duration,
-        duration_method,
-        verify.duration(),
-    )?;
+    source_report.validate_output(verify.duration())?;
     Ok(EncodeReport {
         output_bytes: std::fs::metadata(output)?.len(),
-        recovery: recovery.report,
+        recovery: source_report.recovery,
     })
 }
 
+#[cfg(test)]
 fn validate_duration(
     source: i64,
     decoded: i64,
     method: ff::ffi::AVDurationEstimationMethod,
     actual: i64,
 ) -> Result<()> {
-    let use_decoded =
-        source <= 0 || method == ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE;
-    let (expected, expectation) = if use_decoded {
-        (decoded, "decoded samples")
-    } else {
-        (source, "probed source")
-    };
-    if expected > 0 && actual > 0 {
-        ensure!(
-            expected.abs_diff(actual) <= 2_000_000,
-            "Encoded duration does not match original: expected {:.3}s, output {:.3}s; probed source {:.3}s, decoded {:.3}s; duration estimation method {:?}; expectation {}",
-            expected as f64 / 1_000_000.0,
-            actual as f64 / 1_000_000.0,
-            source as f64 / 1_000_000.0,
-            decoded as f64 / 1_000_000.0,
-            method,
-            expectation
-        );
+    hifimule_daemon::source_audio::SourceReport {
+        probed_duration_micros: source,
+        decoded_duration_micros: decoded,
+        duration_estimation_method: method,
+        recovery: RecoveryReport::default(),
     }
-    Ok(())
+    .validate_output(actual)
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
@@ -1314,6 +1023,12 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(decoder.rate(), rate);
         }
+        let audited = SourceDecoder::open(&tagged)
+            .unwrap()
+            .decode(|| Ok(()), |_| Ok(()))
+            .unwrap();
+        audited.validate_source().unwrap();
+        assert_eq!(audited.recovery, RecoveryReport::default());
         let output = temp.path().join("encoded.mp3");
         encode(&tagged, &output, &mp3, &cancelled, 2_000_000).unwrap();
         assert_eq!(std::fs::read(&tagged).unwrap(), tagged_bytes);
@@ -1353,6 +1068,11 @@ pub(crate) mod tests {
             unsafe { (*context.as_ptr()).duration_estimation_method },
             ff::ffi::AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE
         );
+        let audited = SourceDecoder::open(&truncated)
+            .unwrap()
+            .decode(|| Ok(()), |_| Ok(()))
+            .unwrap();
+        assert!(audited.validate_source().is_err());
         let error = encode(&truncated, &output, &profile, &cancelled, 2_000_000).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("Encoded duration does not match original: expected"));
@@ -1468,6 +1188,12 @@ pub(crate) mod tests {
             let report = result.unwrap_or_else(|e| panic!("{e:#}"));
             assert_eq!(report.recovery, RecoveryReport::default());
             packets.assert_released();
+            let audited = SourceDecoder::open(&tagged)
+                .unwrap()
+                .decode(|| Ok(()), |_| Ok(()))
+                .unwrap();
+            audited.validate_source().unwrap();
+            assert_eq!(audited.recovery, report.recovery);
             assert_eq!(pcm_bytes(&output), pcm_bytes(&reference));
         }
     }
@@ -1521,139 +1247,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn mllt_metadata_requires_a_complete_bounded_table_with_valid_offsets() {
-        let tags = mllt_mp3_tags();
-        let count_at = 5 + 128 * 4;
-        assert_eq!(mp3_trailing_metadata_len(&tags, 60_000), tags.len());
-        let mut malformed = Vec::new();
-        for offset in [0, 4, count_at + 4, count_at + 21] {
-            let mut bad = tags.clone();
-            bad[offset] ^= 0xff;
-            malformed.push(bad);
-        }
-        for count in [0, 127, 129, u32::MAX] {
-            let mut bad = tags.clone();
-            bad[count_at..count_at + 4].copy_from_slice(&count.to_le_bytes());
-            malformed.push(bad);
-        }
-        for (offset, value) in [(5, 0), (9, 417), (13, 416), (13, u32::MAX)] {
-            let mut bad = tags.clone();
-            bad[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-            malformed.push(bad);
-        }
-        let mut truncated = tags.clone();
-        truncated.remove(count_at + 5);
-        malformed.push(truncated);
-        let mut oversized = b"MLLT\0".to_vec();
-        let count = MAX_MP3_METADATA_TAIL as u32 / 4;
-        for offset in 1..=count {
-            oversized.extend_from_slice(&offset.to_le_bytes());
-        }
-        oversized.extend_from_slice(&count.to_le_bytes());
-        oversized.extend_from_slice(&tags[count_at + 4..]);
-        assert_eq!(mp3_trailing_metadata_len(&oversized, 1_000_000), 128);
-        for bad in malformed {
-            assert_eq!(mp3_trailing_metadata_len(&bad, 60_000), 128);
-        }
-        assert_eq!(mp3_trailing_metadata_len(&tags, 0), 128);
-    }
-
-    #[test]
-    fn mllt_metadata_split_across_packets_is_verified_from_the_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let input = temp.path().join("split-mllt.mp3");
-        let tags = mllt_mp3_tags();
-        let mut bytes = vec![0; 60_000];
-        bytes.extend_from_slice(&tags);
-        std::fs::write(&input, &bytes).unwrap();
-        for offset in 0..tags.len() {
-            assert!(
-                is_mp3_metadata_tail(
-                    &input,
-                    &tags[offset..],
-                    (60_000 + offset) as isize,
-                    bytes.len() as u64,
-                ),
-                "MLLT split at {offset}"
-            );
-        }
-        assert!(!is_mp3_metadata_tail(
-            &input,
-            &bytes[59_999..],
-            59_999,
-            bytes.len() as u64
-        ));
-        // Keep the verified file suffix valid so only the packet's MPEG
-        // header guard can reject this audio-like packet.
-        let mut audio_like_packet = tags[46..].to_vec();
-        audio_like_packet[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
-        assert!(!is_mp3_metadata_tail(
-            &input,
-            &audio_like_packet,
-            60_046,
-            bytes.len() as u64
-        ));
-    }
-
-    #[test]
-    fn mp3_metadata_exception_requires_a_bounded_recognized_eof_packet() {
-        let temp = tempfile::tempdir().unwrap();
-        let input = temp.path().join("metadata-tail.mp3");
-        let tags = stacked_mp3_tags();
-        let at_eof = |data: &[u8]| {
-            let mut bytes = vec![0; 1000];
-            bytes.extend_from_slice(data);
-            std::fs::write(&input, &bytes).unwrap();
-            is_mp3_metadata_tail(&input, data, 1000, bytes.len() as u64)
-        };
-        assert!(at_eof(&tags));
-        assert!(!is_mp3_metadata_tail(&input, &tags, 1000, 1234));
-        assert!(!is_mp3_metadata_tail(&input, &tags, -1, tags.len() as u64));
-        assert!(!at_eof(&[]));
-        assert!(!at_eof(b"arbitrary damaged audio"));
-        assert!(!at_eof(&vec![0; 1_048_577]));
-        assert!(at_eof(&tags[105..])); // Standalone ID3v1.
-        assert!(at_eof(&tags[60..])); // Lyrics3v2 followed by ID3v1.
-        for offset in [28, 36, 40, 47, 48, 52, 60, 90] {
-            let mut bad = tags.clone();
-            bad[offset] ^= 0xff;
-            assert!(!at_eof(&bad), "invalid tag field at {offset}");
-        }
-        let mut short_ape = tags.clone();
-        short_ape[40..44].copy_from_slice(&32u32.to_le_bytes());
-        assert!(!at_eof(&short_ape)); // Declared APE size cannot cover this packet.
-        let mut with_audio = tags.clone();
-        with_audio[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
-        assert!(!at_eof(&with_audio));
-        let mut untagged_prefix = b"damaged audio".to_vec();
-        untagged_prefix.extend_from_slice(&tags[60..]);
-        assert!(!at_eof(&untagged_prefix));
-    }
-
-    #[test]
-    fn mp3_tags_split_across_packets_are_recognized_from_the_file_tail() {
-        let temp = tempfile::tempdir().unwrap();
-        let input = temp.path().join("split-tags.mp3");
-        let tags = stacked_mp3_tags();
-        let mut bytes = vec![0; 1000];
-        bytes.extend_from_slice(&tags);
-        std::fs::write(&input, &bytes).unwrap();
-        let file_len = bytes.len() as u64;
-        for offset in 0..tags.len() {
-            assert!(
-                is_mp3_metadata_tail(&input, &tags[offset..], (1000 + offset) as isize, file_len),
-                "tag split at {offset}"
-            );
-        }
-        // The reported case: only the last 52 bytes of ID3v1 are in the packet.
-        assert!(is_mp3_metadata_tail(&input, &tags[181..], 1181, file_len));
-        assert!(!is_mp3_metadata_tail(&input, &bytes[800..], 800, file_len));
-        assert!(!is_mp3_metadata_tail(&input, &tags[181..], 1180, file_len));
-        std::fs::remove_file(&input).unwrap();
-        assert!(!is_mp3_metadata_tail(&input, &tags[181..], 1181, file_len));
-    }
-
-    #[test]
     fn unrecognized_mp3_tails_recover_with_warning_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.wav");
@@ -1683,79 +1276,17 @@ pub(crate) mod tests {
             });
             let report = result.unwrap();
             packets.assert_released();
+            let audited = SourceDecoder::open(&damaged)
+                .unwrap()
+                .decode(|| Ok(()), |_| Ok(()))
+                .unwrap();
+            audited.validate_source().unwrap();
+            assert_eq!(audited.recovery, report.recovery);
             assert_eq!(report.recovery.invalid_events, 1);
             assert!(report.recovery.first_position.is_some());
             assert!(report.recovery.rejected_bytes > 0);
             assert!(report.output_bytes > 0);
         }
-    }
-
-    #[test]
-    fn recovery_policy_bounds_events_consecutive_bytes_fraction_and_error_kind() {
-        let mut recovery = DecodeRecovery::default();
-        assert!(recovery.reject(ff::Error::InvalidData, 12, 100).is_ok());
-        assert_eq!(recovery.report.first_position, Some(12));
-        recovery.submitted_packets = 99;
-        assert!(recovery.validate().is_err());
-        recovery.submitted_packets = 100;
-        recovery.validate().unwrap();
-        for _ in 0..2 {
-            recovery.reject(ff::Error::InvalidData, 20, 1).unwrap();
-        }
-        assert!(recovery.reject(ff::Error::InvalidData, 20, 1).is_err());
-        let mut recovery = DecodeRecovery::default();
-        for _ in 0..8 {
-            recovery.consecutive = 0;
-            recovery.reject(ff::Error::InvalidData, 20, 1).unwrap();
-        }
-        recovery.consecutive = 0;
-        assert!(recovery.reject(ff::Error::InvalidData, 20, 1).is_err());
-        let mut recovery = DecodeRecovery::default();
-        recovery
-            .reject(ff::Error::InvalidData, 20, 1_048_576)
-            .unwrap();
-        assert!(recovery.reject(ff::Error::InvalidData, 20, 1).is_err());
-        let mut recovery = DecodeRecovery::default();
-        assert!(
-            recovery
-                .reject(
-                    ff::Error::Other {
-                        errno: ff::error::EIO
-                    },
-                    20,
-                    1
-                )
-                .is_err()
-        );
-        assert_eq!(recovery.report, RecoveryReport::default());
-    }
-
-    #[test]
-    fn buffered_decode_errors_charge_high_water_bytes_and_keep_unknown_first_position() {
-        let mut recovery = DecodeRecovery::default();
-        recovery.submit(700_000);
-        recovery.submit(100);
-        recovery.reject_buffered(ff::Error::InvalidData).unwrap();
-        assert_eq!(recovery.report.rejected_bytes, 700_000);
-        assert_eq!(recovery.report.first_position, None);
-        recovery.reject(ff::Error::InvalidData, 42, 100).unwrap();
-        assert_eq!(
-            recovery.report.first_position, None,
-            "a later location is not the first error"
-        );
-        // EOF has no current packet, but cannot bypass the cumulative byte cap.
-        assert!(recovery.reject_buffered(ff::Error::InvalidData).is_err());
-        assert_eq!(recovery.report.rejected_bytes, 1_400_100);
-        let mut fatal = DecodeRecovery::default();
-        fatal.submit(700_000);
-        assert!(
-            fatal
-                .reject_buffered(ff::Error::Other {
-                    errno: ff::error::EIO
-                })
-                .is_err()
-        );
-        assert_eq!(fatal.report, RecoveryReport::default());
     }
 
     pub fn damaged_mp3(dir: &Path, damaged_packets: &[usize]) -> Vec<u8> {
@@ -1821,6 +1352,14 @@ pub(crate) mod tests {
             packets.assert_released();
             assert_eq!(result.is_ok(), succeeds, "{result:?}");
             assert_eq!(output.exists(), succeeds);
+            let audited = SourceDecoder::open(&input)
+                .unwrap()
+                .decode(|| Ok(()), |_| Ok(()));
+            assert_eq!(audited.is_ok(), succeeds, "{audited:?}");
+            if let Ok(audited) = audited {
+                audited.validate_source().unwrap();
+                assert_eq!(audited.recovery.invalid_events, 1);
+            }
             if let Ok(report) = result {
                 assert_eq!(report.recovery.invalid_events, 1);
                 assert!(report.output_bytes > 700_000);

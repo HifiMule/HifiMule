@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { audioRuntimeVerification, verifyAudioRuntime, withoutAudioRuntimeVerification } from "./verify-audio-runtime.mjs";
 
@@ -147,6 +147,8 @@ export function verifyInstalledMacosBundle(appRoot, target, options = {}) {
   const sidecar = files.find((path) => basename(path) === "hifimule-daemon"
     || basename(path).startsWith("hifimule-daemon-"));
   if (!sidecar) throw new Error("macOS bundle is missing the daemon sidecar");
+  const mediacheck = files.find((path) => basename(path) === "mediacheck");
+  if (!mediacheck || dirname(mediacheck) !== dirname(sidecar)) throw new Error("macOS bundle is missing mediacheck beside the daemon");
   for (const required of ["audio-runtime.json", "THIRD_PARTY_AUDIO_NOTICES.md"]) {
     if (!files.some((path) => basename(path) === required)) throw new Error(`macOS bundle is missing ${required}`);
   }
@@ -161,12 +163,12 @@ export function verifyInstalledMacosBundle(appRoot, target, options = {}) {
       throw new Error(`macOS bundle contains stale lib${library} runtime: ${names.join(", ")}`);
     }
   }
-  for (const path of [sidecar, ...dylibs]) {
+  for (const path of [sidecar, mediacheck, ...dylibs]) {
     execute("lipo", [path, "-verify_arch", info.arch]);
     const dependencies = execute("otool", ["-L", path]);
     if (/\/opt\/homebrew|\/usr\/local|target\/audio-runtime|\.cargo/.test(dependencies)) throw new Error(`Developer load path remains in ${path}`);
   }
-  return { sidecar, dylibCount: dylibs.length };
+  return { sidecar, mediacheck, dylibCount: dylibs.length };
 }
 export function writeMacosBuildEnvironment(prefix, target, output, options = {}) {
   const env = withoutAudioRuntimeVerification(options.env ?? process.env);
@@ -187,6 +189,13 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   const [mode, target, value] = process.argv.slice(2);
   if (mode === "ensure") console.log(ensureMacosAudioRuntime(target));
   else if (mode === "env") writeMacosBuildEnvironment(ensureMacosAudioRuntime(target), target, value);
-  else if (mode === "verify-bundle") console.log(JSON.stringify(verifyInstalledMacosBundle(value, target)));
+  else if (mode === "verify-bundle") {
+    const installed = verifyInstalledMacosBundle(value, target);
+    const env = { ...process.env };
+    delete env.DYLD_LIBRARY_PATH;
+    const help = run(installed.mediacheck, ["--help"], { env });
+    if (!help.includes("Usage: mediacheck")) throw new Error("Installed mediacheck console help was not displayed");
+    console.log(JSON.stringify(installed));
+  }
   else throw new Error("Usage: macos-audio-runtime.mjs <ensure TARGET | env TARGET OUTPUT | verify-bundle TARGET APP>");
 }

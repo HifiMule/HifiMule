@@ -453,3 +453,16 @@ The build wrapper verifies required encoder/muxer capabilities as well as ABI
 versions. Local conversion uses linked libraries directly; users do not need an
 external FFmpeg installation. See [sync performance](./sync-performance.md) for
 configuration, pipeline bounds and benchmark guidance.
+
+### Building and testing mediacheck
+
+The packaged `mediacheck` console tool audits local sources through the same source
+decoder, recovery policy, duration checks and controlled runtime as sync. It does
+not require a target profile. See [the mediacheck guide](./mediacheck.md) for
+installed locations, Windows shares, log semantics and exit codes.
+
+```bash
+rtk npm run build:daemon -- build -p hifimule-daemon --bin mediacheck
+rtk npm run build:daemon -- test -p hifimule-daemon --lib
+rtk npm run build:daemon -- test -p hifimule-daemon --test mediacheck_cli
+```

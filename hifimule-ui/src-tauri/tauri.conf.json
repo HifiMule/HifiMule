@@ -50,7 +50,8 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "sidecars/hifimule-daemon"
+      "sidecars/hifimule-daemon",
+      "sidecars/mediacheck"
     ],
     "resources": {
       "../../hifimule-daemon/audio-runtime.json": "audio-runtime.json",

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Builds the hifimule-daemon and copies it to the Tauri sidecars directory
+// Builds the daemon and mediacheck and copies them to the Tauri sidecars directory
 // with the correct target-triple naming convention required by Tauri v2.
 
 import { execSync } from "node:child_process";
@@ -48,7 +48,7 @@ if (!existsSync(join(uiDir, "node_modules"))) {
   });
 }
 
-console.log("Building hifimule-daemon...");
+console.log("Building hifimule-daemon and mediacheck...");
 const { env: buildEnv } = runDaemonBuild();
 const audioPrefix = buildEnv.FFMPEG_DIR;
 if (process.platform === "win32") {
@@ -57,34 +57,36 @@ if (process.platform === "win32") {
 
 // Determine source and destination paths
 const ext = process.platform === "win32" ? ".exe" : "";
-const sourceBinary = join(projectRoot, "target", "release", `hifimule-daemon${ext}`);
-const destBinary = join(sidecarsDir, `hifimule-daemon-${targetTriple}${ext}`);
-const tempBinary = `${destBinary}.tmp`;
-
-// Ensure sidecars directory exists
+const binaries = ["hifimule-daemon", "mediacheck"];
+const destinations = [];
 mkdirSync(sidecarsDir, { recursive: true });
 
-try {
-  rmSync(tempBinary, { force: true });
-  copyFileSync(sourceBinary, tempBinary);
-  renameSync(tempBinary, destBinary);
-} catch (error) {
-  rmSync(tempBinary, { force: true });
-  throw error;
+for (const name of binaries) {
+  const sourceBinary = join(projectRoot, "target", "release", `${name}${ext}`);
+  const destBinary = join(sidecarsDir, `${name}-${targetTriple}${ext}`);
+  const tempBinary = `${destBinary}.tmp`;
+  try {
+    rmSync(tempBinary, { force: true });
+    copyFileSync(sourceBinary, tempBinary);
+    renameSync(tempBinary, destBinary);
+  } catch (error) {
+    rmSync(tempBinary, { force: true });
+    throw error;
+  }
+  destinations.push(destBinary);
+  console.log(`Sidecar copied: ${destBinary}`);
 }
 
-// Remove stale sidecars for other architectures after the new binary is in place
+// Remove stale architectures only after both new binaries are in place.
 for (const entry of readdirSync(sidecarsDir, { withFileTypes: true })) {
   const fullPath = join(sidecarsDir, entry.name);
-  if (entry.isFile() && entry.name.startsWith("hifimule-daemon-") && fullPath !== destBinary) {
+  if (entry.isFile() && binaries.some((name) => entry.name.startsWith(`${name}-`)) && !destinations.includes(fullPath)) {
     rmSync(fullPath, { force: true });
   }
 }
 
-console.log(`Sidecar copied: ${destBinary}`);
-
 if (process.platform === "linux") {
-  bundleLinuxAudioRuntime(audioPrefix, destBinary, targetTriple);
+  bundleLinuxAudioRuntime(audioPrefix, destinations, targetTriple);
 }
 
 if (process.platform === "darwin") {

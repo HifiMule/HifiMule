@@ -114,6 +114,17 @@ jobs:
           TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           node scripts/macos-audio-runtime.mjs env "$TARGET_TRIPLE" "$GITHUB_ENV"
 
+      - name: Verify mediacheck source audit
+        run: npm run build:daemon -- test -p hifimule-daemon --test mediacheck_cli
+
+      - name: Build Windows mediacheck and audit UNC and mapped shares
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          npm run build:daemon -- build -p hifimule-daemon --bin mediacheck
+          if ($LASTEXITCODE -ne 0) { throw 'mediacheck build failed' }
+          ./scripts/smoke-tests/check-mediacheck-windows-shares.ps1 -MediaCheck target/debug/mediacheck.exe
+
       - name: Verify Playback selector
         run: npm run build:daemon -- test -p hifimule-daemon playback::selection
 

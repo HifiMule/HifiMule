@@ -194,6 +194,10 @@ test("sidecar delegates verified Cargo builds and retains Windows bundle staging
   const stage = prepare.indexOf("stageWindowsAudioRuntime(audioPrefix, targetTriple)");
   const copy = prepare.indexOf("copyFileSync(sourceBinary, tempBinary)");
   assert.ok(build >= 0 && stage > build && copy > stage);
+  assert.match(prepare, /const binaries = \["hifimule-daemon", "mediacheck"\]/);
+  assert.match(prepare, /for \(const name of binaries\)/);
+  assert.match(prepare, /binaries\.some\(\(name\) => entry\.name\.startsWith/);
+  assert.match(prepare, /bundleLinuxAudioRuntime\(audioPrefix, destinations, targetTriple\)/);
   assert.doesNotMatch(prepare, /cargo build|ensureWindowsAudioRuntime|withAudioRuntimeVerification/);
   const workflow = readFileSync(join(root, ".github/workflows/build.yml"), "utf8");
   assert.match(workflow, /windows-audio-runtime\.mjs env \$TargetTriple \$env:GITHUB_ENV/);

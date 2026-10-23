@@ -151,7 +151,7 @@ copyBrewDylib(libmtpDylib);
 for (const dylib of findFfmpegDylibs()) copyBrewDylib(dylib);
 
 const sidecars = existsSync(sidecarsDir)
-  ? walkFiles(sidecarsDir).filter((path) => /^hifimule-daemon-.*apple-darwin$/.test(basename(path)))
+  ? walkFiles(sidecarsDir).filter((path) => /^(?:hifimule-daemon|mediacheck)-.*apple-darwin$/.test(basename(path)))
   : [];
 
 // Linkers commonly record the ABI symlink (for example libavformat.63.dylib)

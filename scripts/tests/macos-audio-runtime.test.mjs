@@ -45,6 +45,7 @@ function fakeApp() {
   mkdirSync(macos, { recursive: true });
   mkdirSync(libs, { recursive: true });
   writeFileSync(join(macos, "hifimule-daemon"), "mach-o");
+  writeFileSync(join(macos, "mediacheck"), "mach-o");
   writeFileSync(join(resources, "audio-runtime.json"), JSON.stringify(manifest));
   writeFileSync(join(resources, "THIRD_PARTY_AUDIO_NOTICES.md"), "notices");
   for (const [library, version] of Object.entries(manifest.abiVersions)) writeFileSync(join(libs, `lib${library}.${version}.dylib`), library);
@@ -70,4 +71,21 @@ test("macOS bundling clears its staging directory before copying the controlled 
   assert.match(source, /rmSync\(libDir, \{ recursive: true, force: true \}\);\s*mkdirSync\(libDir/);
   assert.match(source, /join\(projectRoot, "target", "audio-runtime"\)/);
   assert.match(source, /return \[match, abiAlias\]/);
+  assert.match(source, /\(\?:hifimule-daemon\|mediacheck\)/);
+});
+
+test("macOS installed verifier requires the audit CLI and checks its architecture and load paths", (t) => {
+  const app = fakeApp();
+  t.after(() => rmSync(app, { recursive: true, force: true }));
+  const cli = join(app, "Contents", "MacOS", "mediacheck");
+  const run = (command, args) => {
+    if (command === "lipo" && args[0] === cli) throw new Error("Wrong CLI architecture");
+    return "";
+  };
+  assert.throws(() => verifyInstalledMacosBundle(app, "aarch64-apple-darwin", { run }), /Wrong CLI architecture/);
+  assert.throws(() => verifyInstalledMacosBundle(app, "aarch64-apple-darwin", {
+    run: (command, args) => command === "otool" && args.at(-1) === cli ? "/opt/homebrew/lib/libavcodec.dylib" : "",
+  }), /Developer load path remains in .*mediacheck/);
+  rmSync(cli);
+  assert.throws(() => verifyInstalledMacosBundle(app, "aarch64-apple-darwin", { run: () => "" }), /missing mediacheck beside/);
 });

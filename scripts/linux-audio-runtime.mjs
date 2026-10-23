@@ -209,18 +209,23 @@ export function stageLinuxDependencyClosure(sidecar, roots, out, target, dirs, o
   return copied;
 }
 function resolved(path, env) { const output = run("ldd", [path], { env }); if (/=>\s+not found/.test(output)) throw new Error(`Unresolved dependency for ${path}:\n${output}`); }
-export function verifyLinuxAudioLinkage(needed) {
+export function verifyLinuxAudioLinkage(needed, { requireAll = true } = {}) {
+  let imported = 0;
   for (const [library, version] of Object.entries(manifest.abiVersions)) {
     const stem = `lib${library}.so.`;
     const expected = `${stem}${version.split(".")[0]}`;
     const actual = needed.filter((name) => name.startsWith(stem));
+    if (!requireAll && actual.length === 0) continue;
+    imported += actual.length;
     if (actual.length !== 1 || actual[0] !== expected) {
       throw new Error(`Daemon FFmpeg linkage mismatch: expected ${expected}, found ${actual.join(", ") || "none"}. Rebuild the daemon with the controlled FFmpeg prefix before packaging.`);
     }
   }
+  if (!imported) throw new Error("No controlled FFmpeg linkage found in audio executable");
 }
-export function bundleLinuxAudioRuntime(prefix, sidecar, target) {
-  verifyLinuxAudioLinkage(assertElf(sidecar, target).needed);
+export function bundleLinuxAudioRuntime(prefix, sidecars, target) {
+  sidecars = Array.isArray(sidecars) ? sidecars : [sidecars];
+  for (const sidecar of sidecars) verifyLinuxAudioLinkage(assertElf(sidecar, target).needed, { requireAll: !basename(sidecar).startsWith("mediacheck") });
   prefix = verifyLinuxAudioPrefix(prefix, target);
   const env = pcEnv(prefix), out = join(root, "hifimule-ui/src-tauri/bundled-libs"); mkdirSync(out, { recursive: true });
   for (const name of readdirSync(out)) if (/\.so(?:\.|$)/.test(name)) rmSync(join(out, name), { force: true });
@@ -228,11 +233,11 @@ export function bundleLinuxAudioRuntime(prefix, sidecar, target) {
   for (const library of Object.keys(manifest.abiVersions)) { const dir = run("pkg-config", ["--variable=libdir", `lib${library}`], { env }).trim(); roots.push(realpathSync(join(dir, `lib${library}.so`))); }
   const mtpDir = run("pkg-config", ["--variable=libdir", "libmtp"], { env }).trim(); dirs.push(mtpDir); roots.push(realpathSync(join(mtpDir, "libmtp.so")));
   const pulseDir = run("pkg-config", ["--variable=libdir", "libpulse"], { env }).trim(); dirs.push(pulseDir); roots.push(realpathSync(join(pulseDir, "libpulse.so")));
-  const copied = stageLinuxDependencyClosure(sidecar, roots, out, target, dirs);
+  const copied = stageLinuxDependencyClosure(sidecars[0], roots, out, target, dirs);
   for (const name of copied.keys()) { const path = join(out, name); run("patchelf", ["--set-rpath", "$ORIGIN", path]); if (run("patchelf", ["--print-rpath", path]).trim() !== "$ORIGIN") throw new Error(`Invalid RUNPATH: ${path}`); }
   const sidecarPath = ["$ORIGIN/../bundled-libs", "$ORIGIN/bundled-libs", "$ORIGIN/../lib/HifiMule/bundled-libs", "$ORIGIN/../lib/hifimule/bundled-libs"].join(":");
-  run("patchelf", ["--set-rpath", sidecarPath, sidecar]);
-  const resolveEnv = { ...process.env, LD_LIBRARY_PATH: out }; for (const name of copied.keys()) resolved(join(out, name), resolveEnv); resolved(sidecar, process.env);
+  for (const sidecar of sidecars) run("patchelf", ["--set-rpath", sidecarPath, sidecar]);
+  const resolveEnv = { ...process.env, LD_LIBRARY_PATH: out }; for (const name of copied.keys()) resolved(join(out, name), resolveEnv); for (const sidecar of sidecars) resolved(sidecar, process.env);
 }
 function walk(dir) { return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : entry.isFile() ? [join(dir, entry.name)] : []); }
 function isWithin(root, candidate) {
@@ -294,10 +299,16 @@ export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
   const files = listFiles(bundleRoot);
   const sidecar = files.find((path) => basename(path) === "hifimule-daemon");
   if (!sidecar) throw new Error(`No daemon sidecar under ${bundleRoot}`);
-  const sidecarMeta = inspectElf(sidecar, target);
-  verifyLinuxAudioLinkage(sidecarMeta.needed);
-  const sidecarRunpath = execute("patchelf", ["--print-rpath", sidecar]).trim();
-  const libdir = validateInstalledSidecarRunpath(bundleRoot, sidecar, sidecarRunpath);
+  const mediacheck = files.find((path) => basename(path) === "mediacheck");
+  if (!mediacheck || dirname(mediacheck) !== dirname(sidecar)) throw new Error(`No mediacheck beside daemon under ${bundleRoot}`);
+  const executables = [sidecar, mediacheck].map((path) => {
+    const meta = inspectElf(path, target);
+    verifyLinuxAudioLinkage(meta.needed, { requireAll: path === sidecar });
+    const runpath = execute("patchelf", ["--print-rpath", path]).trim();
+    return { path, meta, libdir: validateInstalledSidecarRunpath(bundleRoot, path, runpath) };
+  });
+  const libdir = executables[0].libdir;
+  if (!isSameFile(libdir, executables[1].libdir)) throw new Error("Installed audio executables do not share the controlled runtime");
   const controlledRoots = [
     ...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`),
     "libmtp.so.9",
@@ -320,7 +331,7 @@ export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
     }
     queue.push({ name, requiredBy });
   };
-  for (const name of sidecarMeta.needed) if (!isHostRuntimeLibrary(name)) enqueue(name, sidecar);
+  for (const { path, meta } of executables) for (const name of meta.needed) if (!isHostRuntimeLibrary(name)) enqueue(name, path);
   for (const name of controlledRoots) enqueue(name, "the controlled Linux runtime");
   const libraries = new Map();
   while (queue.length) {
@@ -346,8 +357,8 @@ export function verifyInstalledLinuxBundle(bundleRoot, target, options = {}) {
   }
   const env = { ...process.env, LD_LIBRARY_PATH: libdir };
   for (const { path } of libraries.values()) verifyResolved(path, env);
-  verifyResolved(sidecar, process.env);
-  return { sidecar, libdir, libraryCount: libraries.size };
+  for (const { path } of executables) verifyResolved(path, process.env);
+  return { sidecar, mediacheck, libdir, libraryCount: libraries.size };
 }
 export function writeLinuxBuildEnvironment(prefix, path, target, options = {}) {
   const baseEnv = withoutAudioRuntimeVerification(options.env ?? process.env);
@@ -373,6 +384,13 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   const [mode, target, arg] = process.argv.slice(2);
   if (mode === "ensure") console.log(ensureLinuxAudioRuntime(target));
   else if (mode === "env") writeLinuxBuildEnvironment(ensureLinuxAudioRuntime(target), arg, target);
-  else if (mode === "verify-bundle") console.log(JSON.stringify(verifyInstalledLinuxBundle(arg, target)));
+  else if (mode === "verify-bundle") {
+    const installed = verifyInstalledLinuxBundle(arg, target);
+    const env = { ...process.env };
+    delete env.LD_LIBRARY_PATH;
+    const help = run(installed.mediacheck, ["--help"], { env });
+    if (!help.includes("Usage: mediacheck")) throw new Error("Installed mediacheck console help was not displayed");
+    console.log(JSON.stringify(installed));
+  }
   else throw new Error("Usage: linux-audio-runtime.mjs <ensure TARGET | env TARGET OUTPUT | verify-bundle TARGET ROOT>");
 }

@@ -15,7 +15,7 @@ test("RPM retains private resources and uses Fedora runtime package names", () =
   assert.deepEqual(effective.bundle.linux.rpm.depends, ["gtk3", "webkit2gtk4.1", "libsoup3", "libappindicator-gtk3", "libmtp", "openssl-libs", "libxdo"]);
   assert.deepEqual(effective.bundle.linux.rpm.recommends, ["gnome-shell-extension-appindicator"]);
   assert.ok(!effective.bundle.linux.rpm.depends.includes("gnome-shell-extension-appindicator"));
-  assert.deepEqual(effective.bundle.externalBin, ["sidecars/hifimule-daemon"]);
+  assert.deepEqual(effective.bundle.externalBin, ["sidecars/hifimule-daemon", "sidecars/mediacheck"]);
   assert.equal(effective.bundle.resources["bundled-libs/*"], "bundled-libs/");
   assert.equal(effective.bundle.resources["../../hifimule-daemon/audio-runtime.json"], "audio-runtime.json");
   assert.equal(effective.bundle.resources["../../hifimule-daemon/THIRD_PARTY_AUDIO_NOTICES.md"], "THIRD_PARTY_AUDIO_NOTICES.md");

@@ -1,5 +1,6 @@
 [package]
 name = "hifimule-daemon"
+default-run = "hifimule-daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,10 @@ rust-version.workspace = true
 [[bin]]
 name = "hifimule-daemon"
 path = "src/main.rs"
+
+[[bin]]
+name = "mediacheck"
+path = "src/bin/mediacheck.rs"
 
 
 

@@ -444,6 +444,7 @@ jobs:
           }
           # Dylibs in Resources are sealed as data; --deep does not verify their signatures.
           codesign --verify --strict --verbose=2 "$APP_DIR/Contents/MacOS/hifimule-daemon"
+          codesign --verify --strict --verbose=2 "$APP_DIR/Contents/MacOS/mediacheck"
           for library in "$APP_DIR"/Contents/Resources/bundled-libs/*.dylib; do
             codesign --verify --strict --verbose=2 "$library"
           done
@@ -478,6 +479,9 @@ jobs:
           $Process = Start-Process msiexec.exe -ArgumentList "/a `"$($Msi.FullName)`" /qn TARGETDIR=`"$Extracted`"" -Wait -PassThru
           if ($Process.ExitCode -ne 0) { throw "MSI administrative extraction failed: $($Process.ExitCode)" }
           node scripts/windows-audio-runtime.mjs verify-bundle x86_64-pc-windows-msvc $Extracted
+          if ($LASTEXITCODE -ne 0) { throw 'Installed audio bundle verification failed' }
+          $MediaCheck = (Get-ChildItem $Extracted -Filter mediacheck.exe -Recurse | Select-Object -First 1).FullName
+          ./scripts/smoke-tests/check-mediacheck-windows-shares.ps1 -MediaCheck $MediaCheck
 
       - name: Verify Windows Authenticode signatures
         if: matrix.platform == 'windows-latest' && steps.windows_signing.outputs.enabled == 'true'

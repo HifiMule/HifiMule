@@ -37,10 +37,10 @@ fn main() {
         // local-network usage independently as well as suppress its Dock icon.
         println!("cargo:rerun-if-changed=Info.plist");
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        println!("cargo:rustc-link-arg=-sectcreate");
-        println!("cargo:rustc-link-arg=__TEXT");
-        println!("cargo:rustc-link-arg=__info_plist");
-        println!("cargo:rustc-link-arg={manifest_dir}/Info.plist");
+        println!("cargo:rustc-link-arg-bin=hifimule-daemon=-sectcreate");
+        println!("cargo:rustc-link-arg-bin=hifimule-daemon=__TEXT");
+        println!("cargo:rustc-link-arg-bin=hifimule-daemon=__info_plist");
+        println!("cargo:rustc-link-arg-bin=hifimule-daemon={manifest_dir}/Info.plist");
     }
     if target_os == "windows" {
         let mut res = winresource::WindowsResource::new();

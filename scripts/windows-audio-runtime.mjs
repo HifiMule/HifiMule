@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve, win32 } from "node:path";
+import { basename, dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { audioRuntimeVerification } from "./verify-audio-runtime.mjs";
 
@@ -374,6 +374,12 @@ export function verifyInstalledWindowsBundle(bundleRoot, target) {
   const files = walkFiles(resolve(bundleRoot));
   const sidecar = files.find((path) => basename(path).toLowerCase() === "hifimule-daemon.exe");
   if (!sidecar) fail(`Installed Windows bundle is missing hifimule-daemon.exe under ${bundleRoot}`);
+  const mediacheck = files.find((path) => basename(path).toLowerCase() === "mediacheck.exe");
+  if (!mediacheck || dirname(mediacheck) !== dirname(sidecar)) fail(`Installed Windows bundle is missing mediacheck.exe beside the daemon under ${bundleRoot}`);
+  if (peMachine(mediacheck) !== targetInfo.machine) fail(`Installed Windows mediacheck architecture does not match ${target}`);
+  const cliBytes = readFileSync(mediacheck);
+  const subsystemOffset = cliBytes.readUInt32LE(0x3c) + 24 + 68;
+  if (cliBytes.length < subsystemOffset + 2 || cliBytes.readUInt16LE(subsystemOffset) !== 3) fail("Installed mediacheck.exe must use the Windows console subsystem");
   if (peMachine(sidecar) !== targetInfo.machine) fail(`Installed Windows daemon architecture does not match ${target}`);
   for (const required of ["audio-runtime.json", "THIRD_PARTY_AUDIO_NOTICES.md"]) {
     if (!files.some((path) => basename(path) === required)) fail(`Installed Windows bundle is missing ${required}`);
@@ -383,10 +389,11 @@ export function verifyInstalledWindowsBundle(bundleRoot, target) {
     const expected = `${library}-${version.split(".")[0]}.dll`.toLowerCase();
     const matches = dlls.filter((path) => basename(path).toLowerCase() === expected);
     if (matches.length !== 1) fail(`Installed Windows bundle must contain exactly one ${expected}`);
+    if (dirname(matches[0]) !== dirname(sidecar)) fail(`Installed Windows DLL is not beside the audio executables: ${matches[0]}`);
     if (peMachine(matches[0]) !== targetInfo.machine) fail(`Installed Windows DLL architecture does not match ${target}: ${matches[0]}`);
     if (resolve(matches[0]).toLowerCase().startsWith(resolve(process.env.SystemRoot ?? "C:\\Windows").toLowerCase())) fail(`System DLL cannot satisfy controlled runtime: ${matches[0]}`);
   }
-  return { sidecar, dllCount: dlls.length };
+  return { sidecar, mediacheck, dllCount: dlls.length };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
@@ -396,7 +403,13 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     console.log(writeWindowsAudioRuntimeReceipt(process.env.FFMPEG_DIR, target));
   } else if (mode === "verify-bundle") {
     if (!output) fail("The `verify-bundle` command requires an extracted bundle root");
-    console.log(JSON.stringify(verifyInstalledWindowsBundle(output, target)));
+    const installed = verifyInstalledWindowsBundle(output, target);
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+    env.PATH = join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+    const help = execFileSync(installed.mediacheck, ["--help"], { encoding: "utf8", env });
+    if (!help.includes("Usage: mediacheck")) fail("Installed mediacheck console help was not displayed");
+    console.log(JSON.stringify(installed));
   } else if (["ensure", "verify", "env"].includes(mode)) {
     const prefix = ensureWindowsAudioRuntime(target);
     if (mode === "env") {

@@ -292,22 +292,61 @@ function installedBundleFixture(t, reachableNames, nestedNames) {
   const bundleRoot = mkdtempSync(join(tmpdir(), "hifimule-installed-bundle-"));
   t.after(() => rmSync(bundleRoot, { recursive: true, force: true }));
   const sidecar = join(bundleRoot, "usr/bin/hifimule-daemon");
+  const mediacheck = join(bundleRoot, "usr/bin/mediacheck");
+  const executables = [sidecar, mediacheck];
   const libdir = join(bundleRoot, "usr/lib");
   const nestedLibdir = join(bundleRoot, "usr/lib/HifiMule/resources/bundled-libs");
-  for (const path of [sidecar, ...reachableNames.map((name) => join(libdir, name)), ...nestedNames.map((name) => join(nestedLibdir, name))]) {
+  for (const path of [...executables, ...reachableNames.map((name) => join(libdir, name)), ...nestedNames.map((name) => join(nestedLibdir, name))]) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, "ELF fixture");
   }
-  const allFiles = [sidecar, ...reachableNames.map((name) => join(libdir, name)), ...nestedNames.map((name) => join(nestedLibdir, name))];
+  const allFiles = [...executables, ...reachableNames.map((name) => join(libdir, name)), ...nestedNames.map((name) => join(nestedLibdir, name))];
   const requiredFfmpeg = Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`);
   const options = {
-    assertElf: (path) => ({ needed: path === sidecar ? requiredFfmpeg : [], soname: basename(path) }),
+    assertElf: (path) => ({ needed: executables.includes(path) ? requiredFfmpeg : [], soname: basename(path) }),
     elf: () => ({ needed: [] }),
     resolved: () => {},
-    run: (_command, args) => args[1] === sidecar ? "$ORIGIN/../lib\n" : "$ORIGIN\n",
+    run: (_command, args) => executables.includes(args[1]) ? "$ORIGIN/../lib\n" : "$ORIGIN\n",
   };
-  return { allFiles, bundleRoot, libdir, options };
+  return { executables, allFiles, bundleRoot, libdir, options };
 }
+
+test("Linux source audit may omit unused FFmpeg imports but rejects imported foreign ABIs", () => {
+  const imports = ["libavcodec.so.63", "libavformat.so.63", "libavutil.so.61"];
+  assert.doesNotThrow(() => verifyLinuxAudioLinkage(imports, { requireAll: false }));
+  assert.throws(() => verifyLinuxAudioLinkage(imports), /libswresample/);
+  assert.throws(() => verifyLinuxAudioLinkage([...imports, "libswresample.so.6"], { requireAll: false }), /libswresample/);
+  assert.throws(() => verifyLinuxAudioLinkage([], { requireAll: false }), /No controlled FFmpeg/);
+});
+
+test("installed Linux verification requires mediacheck and checks its own architecture, imports and RUNPATH", (t) => {
+  const names = [...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`), "libmtp.so.9", "libpulse.so.0"];
+  const fixture = installedBundleFixture(t, names, []);
+  const cli = fixture.executables[1];
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options, walk: () => fixture.allFiles.filter((path) => path !== cli),
+  }), /No mediacheck beside daemon/);
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options, assertElf: (path) => {
+      if (path === cli) throw new Error("Wrong mediacheck ELF architecture");
+      return fixture.options.assertElf(path);
+    },
+  }), /Wrong mediacheck ELF architecture/);
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options, assertElf: (path) => path === cli
+      ? { needed: ["libavformat.so.62"] } : fixture.options.assertElf(path),
+  }), /FFmpeg linkage mismatch/);
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options, run: (command, args) => args[1] === cli ? "/usr/lib" : fixture.options.run(command, args),
+  }), /Invalid installed sidecar RUNPATH/);
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options, assertElf: (path) => path === cli
+      ? { needed: ["libavformat.so.63", "libmissing-cli.so.1"] } : fixture.options.assertElf(path),
+  }), /Installed private closure is missing libmissing-cli/);
+  assert.throws(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
+    ...fixture.options, resolved: (path) => { if (path === cli) throw new Error("mediacheck loader failed"); },
+  }), /mediacheck loader failed/);
+});
 
 test("installed Linux verification ignores desktop metadata preceding the daemon executable", (t) => {
   const controlledNames = [
@@ -419,7 +458,7 @@ test("installed Linux verification walks reachable transitive dependencies by ex
   const result = verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
     ...fixture.options,
     assertElf: (path) => ({
-      needed: path === fixture.allFiles[0]
+      needed: fixture.executables.includes(path)
         ? [...controlledNames.slice(0, 4), direct]
         : basename(path) === direct ? [transitive] : [],
       soname: basename(path),
@@ -475,7 +514,7 @@ test("installed Linux verification rejects missing and path-containing reachable
       () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
         ...fixture.options,
         assertElf: (path) => ({
-          needed: path === fixture.allFiles[0]
+          needed: fixture.executables.includes(path)
             ? [...controlledNames.slice(0, 4), direct]
             : basename(path) === direct ? [invalid] : [],
           soname: basename(path),
@@ -501,7 +540,7 @@ test("installed Linux verification validates loader-like dependency names before
     assert.throws(
       () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
         ...fixture.options,
-        assertElf: (path) => ({ needed: path === fixture.allFiles[0] ? [...ffmpegNames, invalid] : [], soname: basename(path) }),
+        assertElf: (path) => ({ needed: fixture.executables.includes(path) ? [...ffmpegNames, invalid] : [], soname: basename(path) }),
       }),
       /Invalid installed dependency name/,
       `direct dependency ${JSON.stringify(invalid)}`,
@@ -510,7 +549,7 @@ test("installed Linux verification validates loader-like dependency names before
       () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
         ...fixture.options,
         assertElf: (path) => ({
-          needed: path === fixture.allFiles[0] ? [...ffmpegNames, direct] : basename(path) === direct ? [invalid] : [],
+          needed: fixture.executables.includes(path) ? [...ffmpegNames, direct] : basename(path) === direct ? [invalid] : [],
           soname: basename(path),
         }),
       }),
@@ -522,7 +561,7 @@ test("installed Linux verification validates loader-like dependency names before
     assert.throws(
       () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
         ...fixture.options,
-        assertElf: (path) => ({ needed: path === fixture.allFiles[0] ? [...ffmpegNames, prefixed] : [], soname: basename(path) }),
+        assertElf: (path) => ({ needed: fixture.executables.includes(path) ? [...ffmpegNames, prefixed] : [], soname: basename(path) }),
       }),
       new RegExp(`Installed private closure is missing ${prefixed.replaceAll(".", "\\.")}`),
       `direct dependency ${prefixed}`,
@@ -531,7 +570,7 @@ test("installed Linux verification validates loader-like dependency names before
       () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
         ...fixture.options,
         assertElf: (path) => ({
-          needed: path === fixture.allFiles[0] ? [...ffmpegNames, direct] : basename(path) === direct ? [prefixed] : [],
+          needed: fixture.executables.includes(path) ? [...ffmpegNames, direct] : basename(path) === direct ? [prefixed] : [],
           soname: basename(path),
         }),
       }),
@@ -551,7 +590,7 @@ test("installed Linux verification validates bundled baseline libraries that can
   const sidecarDependencies = [...controlledNames.slice(0, 4), "libc.so.6"];
   const absentResult = verifyInstalledLinuxBundle(absent.bundleRoot, target, {
     ...absent.options,
-    assertElf: (path) => ({ needed: path === absent.allFiles[0] ? sidecarDependencies : [], soname: basename(path) }),
+    assertElf: (path) => ({ needed: absent.executables.includes(path) ? sidecarDependencies : [], soname: basename(path) }),
   });
   assert.equal(absentResult.libraryCount, controlledNames.length);
 
@@ -561,7 +600,7 @@ test("installed Linux verification validates bundled baseline libraries that can
       ...shadowed.options,
       assertElf: (path) => {
         if (basename(path) === "libc.so.6") throw new Error(`Malformed bundled baseline library: ${path}`);
-        return { needed: path === shadowed.allFiles[0] ? sidecarDependencies : [], soname: basename(path) };
+        return { needed: shadowed.executables.includes(path) ? sidecarDependencies : [], soname: basename(path) };
       },
     }),
     /Malformed bundled baseline library/,
@@ -625,7 +664,7 @@ test("installed Linux verification rejects invalid RUNPATH and ldd failures in t
   assert.throws(
     () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
       ...fixture.options,
-      run: (_command, args) => args[1] === fixture.allFiles[0] ? "$ORIGIN/../lib\n" : basename(args[1]) === required ? "/usr/lib\n" : "$ORIGIN\n",
+      run: (_command, args) => fixture.executables.includes(args[1]) ? "$ORIGIN/../lib\n" : basename(args[1]) === required ? "/usr/lib\n" : "$ORIGIN\n",
     }),
     new RegExp(`Invalid installed RUNPATH: .*${required.replaceAll(".", "\\.")}`),
   );
@@ -669,7 +708,7 @@ test("installed Linux verification accepts an in-directory SONAME symlink to a v
     ...fixture.options,
     assertElf: (path, elfTarget, expectedSoname) => {
       inspections.push({ path, elfTarget, expectedSoname });
-      if (path === fixture.allFiles[0]) return fixture.options.assertElf(path, elfTarget, expectedSoname);
+      if (fixture.executables.includes(path)) return fixture.options.assertElf(path, elfTarget, expectedSoname);
       const actualSoname = path === realpathSync(backingPath) ? soname : basename(path);
       if (expectedSoname && expectedSoname !== actualSoname) throw new Error(`ELF SONAME mismatch for ${path}: ${actualSoname}`);
       return { needed: [], soname: actualSoname };
@@ -694,7 +733,7 @@ test("installed Linux verification rejects a regular required library with the w
     () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
       ...fixture.options,
       assertElf: (path, elfTarget, expectedSoname) => {
-        if (path === fixture.allFiles[0]) return fixture.options.assertElf(path, elfTarget, expectedSoname);
+        if (fixture.executables.includes(path)) return fixture.options.assertElf(path, elfTarget, expectedSoname);
         const actualSoname = basename(path) === requiredName ? "libwrong.so.1" : basename(path);
         if (expectedSoname && expectedSoname !== actualSoname) throw new Error(`ELF SONAME mismatch for ${path}: ${actualSoname}`);
         return { needed: [], soname: actualSoname };
@@ -716,7 +755,7 @@ test("installed Linux verification permits GUI sidecar dependencies supplied by 
     () => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
       ...fixture.options,
       assertElf: (path) => ({
-        needed: path === fixture.allFiles[0]
+        needed: fixture.executables.includes(path)
           ? [...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`), directDependency]
           : [],
         soname: basename(path),
@@ -735,7 +774,7 @@ test("installed Linux verification permits the host OpenSSL runtime", (t) => {
   assert.doesNotThrow(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
     ...fixture.options,
     assertElf: (path) => ({
-      needed: path === fixture.allFiles[0]
+      needed: fixture.executables.includes(path)
         ? [...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`), "libssl.so.3", "libcrypto.so.3"]
         : [],
       soname: basename(path),
@@ -753,7 +792,7 @@ test("installed Linux verification permits the host XDo runtime", (t) => {
   assert.doesNotThrow(() => verifyInstalledLinuxBundle(fixture.bundleRoot, target, {
     ...fixture.options,
     assertElf: (path) => ({
-      needed: path === fixture.allFiles[0]
+      needed: fixture.executables.includes(path)
         ? [...Object.entries(manifest.abiVersions).map(([library, version]) => `lib${library}.so.${version.split(".")[0]}`), "libxdo.so.3"]
         : [],
       soname: basename(path),
