@@ -5,9 +5,85 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use ffmpeg_next::{self as ff, ChannelLayout, codec, format, frame, media};
 use std::collections::BTreeSet;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
+/// A few libraries prepend an ID3 tag to a RIFF/WAVE file. FFmpeg probes the
+/// WAVE container but otherwise attempts to read its header from the ID3 bytes.
+/// Trust only the declared tag boundary and a complete, bounded RIFF header.
+fn id3_prefixed_wave_offset(input: &Path, input_len: u64) -> Option<u64> {
+    let mut file = std::fs::File::open(input).ok()?;
+    let mut header = [0; 10];
+    file.read_exact(&mut header).ok()?;
+    if &header[..3] != b"ID3" || header[4] == 0xff {
+        return None;
+    }
+    let allowed_flags = match header[3] {
+        2 => 0xc0,
+        3 => 0xe0,
+        4 => 0xf0,
+        _ => return None,
+    };
+    if header[5] & !allowed_flags != 0 || header[6..].iter().any(|byte| byte & 0x80 != 0) {
+        return None;
+    }
+    let tag_size = header[6..]
+        .iter()
+        .fold(0u64, |size, byte| (size << 7) | u64::from(*byte));
+    let mut offset = 10 + tag_size;
+    if header[3] == 4 && header[5] & 0x10 != 0 {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut footer = [0; 10];
+        file.read_exact(&mut footer).ok()?;
+        if &footer[..3] != b"3DI" || footer[3..] != header[3..] {
+            return None;
+        }
+        offset += 10;
+    }
+    let remaining = input_len.checked_sub(offset)?;
+    if remaining < 12 {
+        return None;
+    }
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut riff = [0; 12];
+    file.read_exact(&mut riff).ok()?;
+    let riff_size = u64::from(u32::from_le_bytes(riff[4..8].try_into().ok()?));
+    (&riff[..4] == b"RIFF" && &riff[8..] == b"WAVE" && riff_size >= 4 && riff_size <= remaining - 8)
+        .then_some(offset)
+}
+
+fn open_prefixed_wave(input: &Path, offset: u64) -> Result<format::context::Input, ff::Error> {
+    let path = CString::new(input.to_str().ok_or(ff::Error::InvalidData)?)
+        .map_err(|_| ff::Error::InvalidData)?;
+    let mut options = ff::Dictionary::new();
+    options.set("skip_initial_bytes", &offset.to_string());
+    // Explicitly choose the already-validated container: automatic probing runs
+    // before skip_initial_bytes and can miss WAVE behind a large ID3 tag.
+    unsafe {
+        let wave = ff::ffi::av_find_input_format(c"wav".as_ptr());
+        if wave.is_null() {
+            return Err(ff::Error::DemuxerNotFound);
+        }
+        let mut context = std::ptr::null_mut();
+        let mut options = options.disown();
+        let result = ff::ffi::avformat_open_input(&mut context, path.as_ptr(), wave, &mut options);
+        // FFmpeg returns unused options to the caller, which owns them again.
+        drop(ff::Dictionary::own(options));
+        if result < 0 {
+            // avformat_open_input frees its context on failure.
+            return Err(ff::Error::from(result));
+        }
+        // Own the opened context before the next fallible operation so stream
+        // discovery failures close the input and release all native resources.
+        let mut context = format::context::Input::wrap(context);
+        let result = ff::ffi::avformat_find_stream_info(context.as_mut_ptr(), std::ptr::null_mut());
+        if result < 0 {
+            return Err(ff::Error::from(result));
+        }
+        Ok(context)
+    }
+}
 
 /// Extensions supported by demuxers in HifiMule's linked controlled runtime.
 /// Conventional aliases supplement demuxers with incomplete extension metadata.
@@ -79,6 +155,7 @@ pub struct SourceDecoder {
     source_rate: u32,
     source_duration: i64,
     duration_method: ff::ffi::AVDurationEstimationMethod,
+    skipped_id3_bytes: Option<u64>,
 }
 
 impl SourceDecoder {
@@ -93,7 +170,13 @@ impl SourceDecoder {
         let input_len = std::fs::metadata(input)
             .context("Cannot inspect original audio")?
             .len();
-        let context = format::input(input).context("Cannot open original audio")?;
+        let skipped_id3_bytes = id3_prefixed_wave_offset(input, input_len);
+        let context = if let Some(offset) = skipped_id3_bytes {
+            open_prefixed_wave(input, offset)
+        } else {
+            format::input(input)
+        }
+        .context("Cannot open original audio")?;
         let stream = context
             .streams()
             .best(media::Type::Audio)
@@ -132,7 +215,12 @@ impl SourceDecoder {
             source_rate,
             source_duration,
             duration_method,
+            skipped_id3_bytes,
         })
+    }
+
+    pub fn skipped_id3_bytes(&self) -> Option<u64> {
+        self.skipped_id3_bytes
     }
 
     pub fn input_context(&self) -> &format::context::Input {
@@ -538,6 +626,102 @@ mod tests {
         assert_eq!(report.recovery, RecoveryReport::default());
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn id3_prefixed_wave_decodes_with_mp3_or_extensionless_names_without_source_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let clean = dir.path().join("clean.wav");
+        wav(&clean, 1);
+        let wave = std::fs::read(&clean).unwrap();
+        for (version, footer, tag_size) in [
+            (2, false, 128),
+            (3, false, 128),
+            (4, false, 128),
+            (4, true, 128),
+            (4, false, 8 * 1024 * 1024),
+        ] {
+            let header = [
+                b'I',
+                b'D',
+                b'3',
+                version,
+                0,
+                if footer { 0x10 } else { 0 },
+                ((tag_size >> 21) & 0x7f) as u8,
+                ((tag_size >> 14) & 0x7f) as u8,
+                ((tag_size >> 7) & 0x7f) as u8,
+                (tag_size & 0x7f) as u8,
+            ];
+            let mut bytes = header.to_vec();
+            bytes.resize(10 + tag_size, 0);
+            if footer {
+                bytes.extend_from_slice(b"3DI");
+                bytes.extend_from_slice(&header[3..]);
+            }
+            let offset = bytes.len() as u64;
+            bytes.extend_from_slice(&wave);
+            for name in ["tagged.MP3", "000001-staged"] {
+                let path = dir.path().join(name);
+                std::fs::write(&path, &bytes).unwrap();
+                assert_eq!(
+                    id3_prefixed_wave_offset(&path, bytes.len() as u64),
+                    Some(offset)
+                );
+                let source = SourceDecoder::open(&path).unwrap();
+                assert_eq!(source.input_context().format().name(), "wav");
+                let report = source.decode(|| Ok(()), |_| Ok(())).unwrap();
+                report.validate_source().unwrap();
+                assert_eq!(report.decoded_duration_micros, 1_000_000);
+                assert_eq!(report.recovery, RecoveryReport::default());
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn id3_wave_offset_rejects_invalid_tags_and_container_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let valid = b"ID3\x04\x00\x00\x00\x00\x00\x00RIFF\x04\x00\x00\x00WAVE".to_vec();
+        let mut invalid = vec![valid[..9].to_vec(), valid[..21].to_vec()];
+        for (at, value) in [
+            (3, 5),     // Unsupported ID3 version.
+            (4, 0xff),  // Invalid revision.
+            (5, 1),     // Reserved ID3 flags.
+            (6, 0x80),  // Non-synchsafe length.
+            (9, 127),   // Tag extends beyond EOF.
+            (10, b'X'), // Not RIFF.
+            (14, 3),    // RIFF size excludes its format identifier.
+            (14, 5),    // RIFF size extends beyond EOF.
+            (18, b'X'), // Not WAVE.
+        ] {
+            let mut bytes = valid.clone();
+            bytes[at] = value;
+            invalid.push(bytes);
+        }
+        // The footer flag must have a matching footer before the container.
+        let mut missing_footer = valid.clone();
+        missing_footer[5] = 0x10;
+        invalid.push(missing_footer);
+        for bytes in invalid {
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                id3_prefixed_wave_offset(&path, bytes.len() as u64),
+                None,
+                "{bytes:?}"
+            );
+        }
+        std::fs::write(&path, &valid[10..]).unwrap();
+        assert_eq!(
+            id3_prefixed_wave_offset(&path, (valid.len() - 10) as u64),
+            None
+        );
+        // A normal tagged MPEG stream must retain FFmpeg's usual tag handling.
+        let mut mp3 = valid[..10].to_vec();
+        mp3.extend_from_slice(&[0xff, 0xfb, 0x90, 0].repeat(3));
+        std::fs::write(&path, &mp3).unwrap();
+        assert_eq!(id3_prefixed_wave_offset(&path, mp3.len() as u64), None);
     }
 
     #[test]

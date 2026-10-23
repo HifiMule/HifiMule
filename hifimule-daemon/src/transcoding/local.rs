@@ -4,7 +4,7 @@ use crate::providers::TranscodeProfile;
 use anyhow::{Context, Result, anyhow, ensure};
 use ff::packet::Mut;
 use ffmpeg_next::{self as ff, ChannelLayout, codec, format, frame, media};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::{
     path::Path,
     sync::{
@@ -423,6 +423,86 @@ fn drained(error: ff::Error) -> Result<()> {
     }
 }
 
+fn prefixed_wave_tags(input: &Path, prefix_bytes: u64) -> Result<id3::Tag> {
+    use id3::TagLike;
+    // Match the bounded metadata policy used by audiobook tag rewriting.
+    const MAX_METADATA: u64 = 16 * 1024 * 1024;
+    ensure!(
+        prefix_bytes <= MAX_METADATA + 20,
+        "ID3 metadata exceeds safety limit"
+    );
+    let mut bytes = vec![0; prefix_bytes as usize];
+    std::fs::File::open(input)?.read_exact(&mut bytes)?;
+    ensure!(bytes.len() >= 10, "Truncated ID3 header");
+    let header = &bytes[..10];
+    ensure!(
+        &header[..3] == b"ID3"
+            && (2..=4).contains(&header[3])
+            && header[6..10].iter().all(|b| b & 0x80 == 0),
+        "Invalid ID3 header"
+    );
+    ensure!(
+        header[5] & 0x40 == 0,
+        "Unsupported ID3 extended header or compression"
+    );
+    let size = header[6..10]
+        .iter()
+        .fold(0usize, |n, b| (n << 7) | usize::from(*b));
+    ensure!(
+        size as u64 <= MAX_METADATA && size <= bytes.len() - 10,
+        "Invalid ID3 metadata size"
+    );
+    let mut frames = bytes[10..10 + size].to_vec();
+    if header[3] < 4 && header[5] & 0x80 != 0 {
+        crate::sync_tags::undo_unsynchronisation(&mut frames);
+    }
+    crate::sync_tags::validate_id3_frames(&frames, header[3], 0)?;
+    drop(frames);
+    let mut tags = id3::Tag::read_from2(std::io::Cursor::new(bytes))?;
+    ensure!(
+        tags.chapters()
+            .all(|chapter| chapter.start_offset == u32::MAX && chapter.end_offset == u32::MAX),
+        "ID3 chapters with absolute byte offsets cannot be safely rewritten"
+    );
+    // These indexes refer to the original compressed bytes, which encoding replaces.
+    for id in ["MLLT", "SEEK", "ASPI", "RBUF"] {
+        tags.remove(id);
+    }
+    Ok(tags)
+}
+
+fn restore_prefixed_wave_tags(tags: &id3::Tag, output: &Path, max_output: u64) -> Result<()> {
+    const MAX_METADATA: usize = 16 * 1024 * 1024;
+    let mut encoded = Vec::new();
+    tags.write_to(&mut encoded, tags.version())?;
+    ensure!(
+        encoded.len() <= MAX_METADATA,
+        "Encoded ID3 metadata exceeds safety limit"
+    );
+    ensure!(
+        id3::Tag::read_from2(std::io::Cursor::new(&encoded))? == *tags,
+        "ID3 metadata cannot be rewritten without loss"
+    );
+    let mut existing = std::fs::File::open(output)?;
+    let previous_tag_bytes = if id3::Tag::skip(&mut existing)? {
+        existing.stream_position()?
+    } else {
+        0
+    };
+    ensure!(
+        existing
+            .metadata()?
+            .len()
+            .checked_sub(previous_tag_bytes)
+            .and_then(|size| size.checked_add(encoded.len() as u64))
+            .is_some_and(|size| size <= max_output),
+        "Local encoding metadata exceeds reserved output capacity"
+    );
+    drop(existing);
+    tags.write_to_path(output, tags.version())?;
+    Ok(())
+}
+
 pub use hifimule_daemon::source_audio::RecoveryReport;
 use hifimule_daemon::source_audio::{SourceDecoder, SourceEvent};
 
@@ -487,6 +567,15 @@ fn encode_inner(
     };
     check()?;
     let source = SourceDecoder::open(input)?;
+    let prefixed_tags = if target.muxer == "mp3" {
+        source
+            .skipped_id3_bytes()
+            .map(|offset| prefixed_wave_tags(input, offset))
+            .transpose()
+            .context("Cannot preserve original ID3 metadata")?
+    } else {
+        None
+    };
     let ictx = source.input_context();
     let stream = ictx.stream(source.audio_stream_index()).unwrap();
     let input_metadata = stream.metadata().to_owned();
@@ -836,6 +925,11 @@ fn encode_inner(
     octx.write_trailer()
         .context("Cannot finish encoded audio container")?;
     drop(octx);
+    if let Some(tags) = &prefixed_tags {
+        check()?;
+        restore_prefixed_wave_tags(tags, output, max_output)
+            .context("Cannot restore original ID3 metadata")?;
+    }
     check()?;
     // Reopen the completed file before it may enter the serialized device writer.
     let verify = format::input(output).context("Cannot reopen encoded output")?;
@@ -949,6 +1043,100 @@ pub(crate) mod tests {
         let bytes = std::fs::read(path).unwrap();
         let start = bytes.windows(4).position(|b| b == b"data").unwrap();
         bytes[start + 8..].to_vec()
+    }
+
+    #[test]
+    fn id3_prefixed_wave_staged_without_extension_encodes_to_mp3() {
+        use id3::TagLike;
+        let temp = tempfile::tempdir().unwrap();
+        let clean = temp.path().join("clean.wav");
+        let staged = temp.path().join("000001-source");
+        let output = temp.path().join("encoded.mp3");
+        wav(&clean, 2);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let mut tags = id3::Tag::new();
+        tags.set_title("Tagged WAV title");
+        tags.set_artist("Tagged WAV artist");
+        tags.set_album("Tagged WAV album");
+        tags.add_frame(id3::frame::Picture {
+            mime_type: "image/png".into(),
+            picture_type: id3::frame::PictureType::CoverFront,
+            description: "Cover".into(),
+            data: png.into_inner(),
+        });
+        for (id, data) in [
+            ("RBUF", vec![0, 1, 0, 1, 0, 0, 0, 42]),
+            ("SEEK", vec![0, 0, 0, 42]),
+        ] {
+            tags.add_frame(id3::Frame::with_content(
+                id,
+                id3::Content::Unknown(id3::frame::Unknown {
+                    data,
+                    version: id3::Version::Id3v24,
+                }),
+            ));
+        }
+        let mut bytes = Vec::new();
+        tags.write_to(&mut bytes, id3::Version::Id3v24).unwrap();
+        bytes.extend_from_slice(&std::fs::read(&clean).unwrap());
+        std::fs::write(&staged, &bytes).unwrap();
+        let profile = TranscodeProfile {
+            container: Some("mp3".into()),
+            audio_codec: Some("mp3".into()),
+            max_bitrate_kbps: Some(192),
+            ..Default::default()
+        };
+        let report = encode_with_report(
+            &staged,
+            &output,
+            &profile,
+            &AtomicBool::new(false),
+            2_000_000,
+        )
+        .unwrap();
+        assert!(report.output_bytes > 0);
+        assert_eq!(report.recovery, RecoveryReport::default());
+        let encoded = SourceDecoder::open(&output).unwrap();
+        assert_eq!(encoded.input_context().format().name(), "mp3");
+        assert_eq!(encoded.decoder().rate(), 48_000);
+        let decoded = encoded.decode(|| Ok(()), |_| Ok(())).unwrap();
+        decoded.validate_source().unwrap();
+        assert!(decoded.decoded_duration_micros.abs_diff(2_000_000) < 100_000);
+        let mut expected = tags.clone();
+        expected.remove("RBUF");
+        expected.remove("SEEK");
+        assert_eq!(id3::Tag::read_from_path(&output).unwrap(), expected);
+        assert_eq!(std::fs::read(&staged).unwrap(), bytes);
+        std::fs::remove_file(&output).unwrap();
+        assert_eq!(
+            encode_with_report(
+                &staged,
+                &output,
+                &profile,
+                &AtomicBool::new(false),
+                report.output_bytes
+            )
+            .unwrap()
+            .output_bytes,
+            report.output_bytes
+        );
+        std::fs::remove_file(&output).unwrap();
+        let error = encode_with_report(
+            &staged,
+            &output,
+            &profile,
+            &AtomicBool::new(false),
+            report.output_bytes - 1,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("metadata exceeds reserved output capacity"),
+            "{error:#}"
+        );
+        assert!(!output.exists());
     }
 
     #[test]

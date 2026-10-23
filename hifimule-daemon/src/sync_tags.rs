@@ -146,7 +146,7 @@ fn write_mp3(path: &Path, tags: &SyncBookTags, cancel: &AtomicBool) -> Result<()
 // ID3's decoder trusts v2.3 frame lengths and can inflate compressed frames.
 // Validate the bounded on-disk frame tree first, rejecting compression rather
 // than letting a tiny downloaded tag allocate an unbounded decoded payload.
-fn validate_id3_frames(mut bytes: &[u8], version: u8, depth: usize) -> Result<()> {
+pub(crate) fn validate_id3_frames(mut bytes: &[u8], version: u8, depth: usize) -> Result<()> {
     ensure!(depth <= 16, "ID3 chapter nesting exceeds safety limit");
     while !bytes.is_empty() {
         if bytes[0] == 0 {
@@ -223,7 +223,7 @@ fn validate_id3_frames(mut bytes: &[u8], version: u8, depth: usize) -> Result<()
     }
     Ok(())
 }
-fn undo_unsynchronisation(bytes: &mut Vec<u8>) {
+pub(crate) fn undo_unsynchronisation(bytes: &mut Vec<u8>) {
     let mut write = 0;
     let mut previous_ff = false;
     for read in 0..bytes.len() {
