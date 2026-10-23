@@ -7812,11 +7812,18 @@ async fn handle_sync_calculate_delta_logged(state: &AppState, params: Option<Val
                         continue;
                     }
 
-                    match state
-                        .jellyfin_client
-                        .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
-                        .await
-                    {
+                    let children = if is_playlist {
+                        state
+                            .jellyfin_client
+                            .get_playlist_items(&url, &token, &user_id, &item.id)
+                            .await
+                    } else {
+                        state
+                            .jellyfin_client
+                            .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
+                            .await
+                    };
+                    match children {
                         Ok(children) => {
                             if is_playlist {
                                 let tracks: Vec<crate::sync::PlaylistTrackInfo> = children
@@ -15262,17 +15269,20 @@ mod tests {
             .await;
 
         let _mock_playlist_children = server
-            .mock("GET", "/Items")
+            .mock("GET", "/Playlists/playlist-1/Items")
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), "Me".into()),
-                Matcher::UrlEncoded("ParentId".into(), "playlist-1".into()),
-                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
-                Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
             .with_status(200)
-            .with_body(r#"{"Items":[{"Id":"track-1","Name":"Track 1","Type":"Audio","Album":"Album A","AlbumArtist":"Artist A","RunTimeTicks":2100000000,"MediaSources":[{"Size":12345}],"Etag":"track-etag"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[
+                {"Id":"track-3","Name":"Track 3","Type":"Audio","IndexNumber":3,"Album":"Album A","AlbumArtist":"Artist A","RunTimeTicks":2100000000,"MediaSources":[{"Size":12345}],"Etag":"track-etag"},
+                {"Id":"folder","Name":"Folder","Type":"Folder"},
+                {"Id":"track-1","Name":"Track 1","Type":"Audio","IndexNumber":1},
+                {"Id":"track-3","Name":"Track 3","Type":"Audio","IndexNumber":3},
+                {"Id":"video","Name":"Video","Type":"MusicVideo"}
+            ],"TotalRecordCount":5,"StartIndex":0}"#)
             .create_async()
             .await;
 
@@ -15314,7 +15324,6 @@ mod tests {
             .await
             .unwrap();
 
-
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "sync_calculate_delta".to_string(),
@@ -15331,15 +15340,22 @@ mod tests {
 
         let delta: crate::sync::SyncDelta =
             serde_json::from_value(response.result.unwrap()).unwrap();
-        assert_eq!(delta.adds.len(), 1);
-        assert_eq!(delta.adds[0].jellyfin_id, "track-1");
-        assert_eq!(delta.adds[0].name, "Track 1");
+        assert_eq!(delta.adds.len(), 3);
+        assert_eq!(delta.adds[0].jellyfin_id, "track-3");
+        assert_eq!(delta.adds[0].name, "Track 3");
         assert_eq!(delta.adds[0].size_bytes, 12345);
         assert_eq!(delta.playlists.len(), 1);
         assert_eq!(delta.playlists[0].jellyfin_id, "playlist-1");
         assert_eq!(delta.playlists[0].name, "Road Trip");
-        assert_eq!(delta.playlists[0].tracks.len(), 1);
-        assert_eq!(delta.playlists[0].tracks[0].jellyfin_id, "track-1");
+        assert_eq!(
+            delta.playlists[0]
+                .tracks
+                .iter()
+                .map(|track| track.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["track-3", "track-1", "track-3", "video"]
+        );
+        _mock_playlist_children.assert_async().await;
         assert_eq!(
             delta.playlists[0].tracks[0].artist.as_deref(),
             Some("Artist A")

@@ -12202,6 +12202,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_generate_m3u_preserves_duplicates_and_rewrites_order_only_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let device_path = tmp.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
+        let synced = vec![
+            make_playlist_synced_item("t1", "Music/01 - First.flac"),
+            make_playlist_synced_item("t3", "Music/03 - Third.flac"),
+        ];
+        for item in &synced {
+            tokio::fs::write(device_path.join(&item.local_path), b"existing audio")
+                .await
+                .unwrap();
+        }
+        let mut manifest = empty_manifest();
+        manifest.synced_items = synced.clone();
+        let mut playlist = PlaylistSyncItem {
+            jellyfin_id: "pl1".into(),
+            name: "Ordered Playlist".into(),
+            tracks: ["t3", "t1", "t3"]
+                .into_iter()
+                .map(|id| PlaylistTrackInfo {
+                    jellyfin_id: id.into(),
+                    artist: None,
+                    run_time_seconds: 120,
+                })
+                .collect(),
+        };
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+        let path = managed_path.join("Ordered Playlist.m3u");
+        for expected in [vec!["t3", "t1", "t3"], vec!["t1", "t3", "t3"]] {
+            let desired = expected
+                .iter()
+                .map(|id| {
+                    let item = synced.iter().find(|item| item.jellyfin_id == *id).unwrap();
+                    make_desired(id, &item.name, None, None)
+                })
+                .collect::<Vec<_>>();
+            let delta = calculate_delta(&desired, &manifest);
+            assert!(delta.adds.is_empty(), "Order-only changes must reuse audio");
+            assert!(delta.deletes.is_empty());
+            let warnings = generate_m3u_files(
+                &[playlist.clone()],
+                device_path,
+                &managed_path,
+                &synced,
+                &mut manifest,
+                std::sync::Arc::clone(&device_io),
+            )
+            .await;
+            assert!(warnings.is_empty(), "{warnings:?}");
+            let content = tokio::fs::read_to_string(&path).await.unwrap();
+            let paths = content
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .collect::<Vec<_>>();
+            let expected_paths = expected
+                .iter()
+                .map(|id| {
+                    if *id == "t1" {
+                        "01 - First.flac"
+                    } else {
+                        "03 - Third.flac"
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(paths, expected_paths);
+            assert_eq!(manifest.playlists[0].track_ids, expected);
+            assert_eq!(manifest.playlists[0].track_count, 3);
+            playlist.tracks.swap(0, 1);
+        }
+        for item in &synced {
+            assert_eq!(
+                tokio::fs::read(device_path.join(&item.local_path))
+                    .await
+                    .unwrap(),
+                b"existing audio"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_generate_m3u_no_rewrite_if_unchanged() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let device_path = tmp_dir.path();

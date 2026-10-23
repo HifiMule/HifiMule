@@ -1506,48 +1506,12 @@ impl JellyfinClient {
         user_id: &str,
         playlist_id: &str,
     ) -> Result<Vec<JellyfinItem>> {
-        CredentialManager::validate_url(url)?;
-        CredentialManager::validate_token(token)?;
-
-        let headers = jellyfin_token_headers(token)?;
-
-        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
-        endpoint.query_pairs_mut().append_pair("userId", user_id);
-
-        let response = self.client.get(endpoint).headers(headers).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(anyhow!("Server returned status: {}", status));
-        }
-
-        let items_response = response.json::<JellyfinItemsResponse>().await?;
-        Ok(items_response.items)
-    }
-
-    pub async fn get_playlist_items_via_user_library(
-        &self,
-        url: &str,
-        token: &str,
-        user_id: &str,
-        playlist_id: &str,
-    ) -> Result<Vec<JellyfinItem>> {
-        self.get_playlist_items_via_user_library_page(url, token, user_id, playlist_id, None)
+        self.get_playlist_items_window(url, token, user_id, playlist_id, 0, None)
             .await
     }
 
-    pub async fn get_playlist_items_via_user_library_page(
-        &self,
-        url: &str,
-        token: &str,
-        user_id: &str,
-        playlist_id: &str,
-        limit: Option<u32>,
-    ) -> Result<Vec<JellyfinItem>> {
-        self.get_playlist_items_via_user_library_window(url, token, user_id, playlist_id, 0, limit)
-            .await
-    }
-
-    pub async fn get_playlist_items_via_user_library_window(
+    /// Read the playlist entry sequence, including non-audio entries used by mutations.
+    pub async fn get_playlist_items_window(
         &self,
         url: &str,
         token: &str,
@@ -1560,14 +1524,11 @@ impl JellyfinClient {
         CredentialManager::validate_token(token)?;
 
         let headers = jellyfin_token_headers(token)?;
-
-        let mut endpoint = jellyfin_endpoint(url, &["Users", user_id, "Items"])?;
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
         endpoint
             .query_pairs_mut()
-            .append_pair("ParentId", playlist_id)
-            .append_pair("IncludeItemTypes", "Audio,MusicVideo")
-            .append_pair("Fields", "MediaSources,ProviderIds")
-            .append_pair("Recursive", "true");
+            .append_pair("userId", user_id)
+            .append_pair("Fields", "MediaSources,ProviderIds");
         if let Some(limit) = limit {
             endpoint
                 .query_pairs_mut()
@@ -1581,10 +1542,9 @@ impl JellyfinClient {
 
         let response = self.client.get(endpoint).headers(headers).send().await?;
         let status = response.status();
-
         if !status.is_success() {
-            let text = response.text().await?;
-            return Err(anyhow!("Server returned status: {} — {}", status, text));
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, body));
         }
 
         let items_response = response.json::<JellyfinItemsResponse>().await?;
@@ -2276,6 +2236,52 @@ impl CredentialManager {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn playlist_window_preserves_raw_entries_and_base_path() {
+        use mockito::Matcher;
+        let mut server = mockito::Server::new_async().await;
+        let request = server.mock("GET", "/jellyfin/Playlists/playlist1/Items")
+            .match_header("Authorization", "MediaBrowser Token=\"playlist-test-token\"")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), "user1".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "3".into()),
+                Matcher::UrlEncoded("Limit".into(), "2".into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"Items":[
+                {"Id":"folder","Name":"Folder","Type":"Folder","PlaylistItemId":"entry-a"},
+                {"Id":"song","Name":"Song","Type":"Audio","PlaylistItemId":"entry-b","MediaSources":[{"Size":123}],"ProviderIds":{"MusicBrainzTrack":"track-id"}}
+            ],"TotalRecordCount":5,"StartIndex":3}"#)
+            .create_async().await;
+        let items = super::JellyfinClient::new()
+            .get_playlist_items_window(
+                &format!("{}/jellyfin", server.url()),
+                "playlist-test-token",
+                "user1",
+                "playlist1",
+                3,
+                Some(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["folder", "song"]
+        );
+        assert_eq!(items[0].playlist_item_id.as_deref(), Some("entry-a"));
+        assert_eq!(items[1].playlist_item_id.as_deref(), Some("entry-b"));
+        assert_eq!(items[1].media_sources.as_ref().unwrap()[0].size, Some(123));
+        assert_eq!(
+            items[1].provider_ids.as_ref().unwrap()["MusicBrainzTrack"],
+            "track-id"
+        );
+        request.assert_async().await;
+    }
+
     #[test]
     fn token_authorization_roundtrips_jellyfin_parameter_decoding() {
         let token = "token+percent%20value";

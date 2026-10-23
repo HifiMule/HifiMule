@@ -144,6 +144,56 @@ impl JellyfinProvider {
         }
     }
 
+    async fn playlist_tracks_window(
+        &self,
+        playlist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // ponytail: windows rescan O(offset) entries until the provider API carries a raw cursor.
+        let page_size = if offset == 0 { limit.min(200) } else { 200 };
+        let mut raw_offset = 0u32;
+        let mut skip = offset;
+        let mut tracks = Vec::new();
+        loop {
+            let items = self
+                .client
+                .get_playlist_items_window(
+                    self.url(),
+                    self.token(),
+                    self.user_id(),
+                    playlist_id,
+                    raw_offset,
+                    Some(page_size),
+                )
+                .await
+                .map_err(Self::map_error)?;
+            let raw_count = items.len().min(page_size as usize) as u32;
+            for item in items.into_iter().take(page_size as usize) {
+                if !matches!(item.item_type.as_str(), "Audio" | "MusicVideo") {
+                    continue;
+                }
+                if skip != 0 {
+                    skip -= 1;
+                    continue;
+                }
+                tracks.push(song_from_item(item));
+                if tracks.len() == limit as usize {
+                    return Ok(tracks);
+                }
+            }
+            if raw_count < page_size {
+                return Ok(tracks);
+            }
+            raw_offset = raw_offset.checked_add(raw_count).ok_or_else(|| {
+                ProviderError::Other(anyhow::anyhow!("Playlist pagination offset overflow"))
+            })?;
+        }
+    }
+
     fn token(&self) -> &str {
         &self.token
     }
@@ -459,15 +509,11 @@ impl MediaProvider for JellyfinProvider {
         }
         let tracks = self
             .client
-            .get_playlist_items_via_user_library(
-                self.url(),
-                self.token(),
-                self.user_id(),
-                playlist_id,
-            )
+            .get_playlist_items(self.url(), self.token(), self.user_id(), playlist_id)
             .await
             .map_err(Self::map_error)?
             .into_iter()
+            .filter(|item| matches!(item.item_type.as_str(), "Audio" | "MusicVideo"))
             .map(song_from_item)
             .collect();
 
@@ -482,23 +528,7 @@ impl MediaProvider for JellyfinProvider {
         playlist_id: &str,
         limit: u32,
     ) -> Result<Vec<Song>, ProviderError> {
-        self.client
-            .get_playlist_items_via_user_library_page(
-                self.url(),
-                self.token(),
-                self.user_id(),
-                playlist_id,
-                Some(limit),
-            )
-            .await
-            .map_err(Self::map_error)
-            .map(|items| {
-                items
-                    .into_iter()
-                    .take(limit as usize)
-                    .map(song_from_item)
-                    .collect()
-            })
+        self.playlist_tracks_window(playlist_id, 0, limit).await
     }
 
     async fn get_playlist_tracks_window(
@@ -507,24 +537,8 @@ impl MediaProvider for JellyfinProvider {
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Song>, ProviderError> {
-        self.client
-            .get_playlist_items_via_user_library_window(
-                self.url(),
-                self.token(),
-                self.user_id(),
-                playlist_id,
-                offset,
-                Some(limit),
-            )
+        self.playlist_tracks_window(playlist_id, offset, limit)
             .await
-            .map_err(Self::map_error)
-            .map(|items| {
-                items
-                    .into_iter()
-                    .take(limit as usize)
-                    .map(song_from_item)
-                    .collect()
-            })
     }
 
     async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
@@ -1836,17 +1850,21 @@ mod tests {
             .create_async()
             .await;
         let _tracks = server
-            .mock("GET", "/Users/user1/Items")
+            .mock("GET", "/Playlists/playlist1/Items")
             .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("ParentId".into(), "playlist1".into()),
-                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
-                Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
             .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","RunTimeTicks":100000000}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[
+                {"Id":"song3","Name":"Third","Type":"Audio","IndexNumber":3,"RunTimeTicks":100000000,"MediaSources":[{"Size":12345,"Container":"flac"}],"ProviderIds":{"MusicBrainzRecording":"189002e7-3285-4e2e-92a3-7f6c30d407a2"}},
+                {"Id":"folder","Name":"Folder","Type":"Folder"},
+                {"Id":"song1","Name":"First","Type":"Audio","IndexNumber":1},
+                {"Id":"song3","Name":"Third","Type":"Audio","IndexNumber":3},
+                {"Id":"video","Name":"Music Video","Type":"MusicVideo"}
+            ],"TotalRecordCount":5,"StartIndex":0}"#)
             .create_async()
             .await;
 
@@ -1857,21 +1875,35 @@ mod tests {
 
         assert_eq!(playlists[0].name, "Road Trip");
         assert_eq!(playlist.playlist.duration_seconds, Some(10));
-        assert_eq!(playlist.tracks[0].id, "song1");
+        assert_eq!(
+            playlist
+                .tracks
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["song3", "song1", "song3", "video"]
+        );
+        assert_eq!(playlist.tracks[0].track_number, Some(3));
+        assert_eq!(playlist.tracks[1].track_number, Some(1));
+        assert_eq!(playlist.tracks[0].size_bytes, Some(12345));
+        assert_eq!(playlist.tracks[0].suffix.as_deref(), Some("flac"));
+        assert!(playlist.tracks[0].provider_metadata.recording.is_some());
+        _tracks.assert_async().await;
     }
 
     #[tokio::test]
     async fn playback_playlist_retrieval_requests_a_server_side_limit() {
         let mut server = Server::new_async().await;
         let _tracks = server
-            .mock("GET", "/Users/user1/Items")
+            .mock("GET", "/Playlists/playlist2/Items")
             .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("ParentId".into(), "playlist2".into()),
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,ProviderIds".into()),
                 Matcher::UrlEncoded("Limit".into(), "1".into()),
             ]))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"song1","Name":"First","Type":"Audio"},{"Id":"song2","Name":"Second","Type":"Audio"}],"TotalRecordCount":2,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[{"Id":"song3","Name":"Third","Type":"Audio","IndexNumber":3},{"Id":"song1","Name":"First","Type":"Audio","IndexNumber":1}],"TotalRecordCount":2,"StartIndex":0}"#)
             .create_async()
             .await;
         let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
@@ -1880,29 +1912,199 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].id, "song1");
+        assert_eq!(tracks[0].id, "song3");
+        _tracks.assert_async().await;
     }
 
     #[tokio::test]
-    async fn radio_playlist_window_advances_on_server() {
+    async fn playlist_windows_count_playable_entries_across_raw_pages() {
         let mut server = Server::new_async().await;
-        let _tracks = server.mock("GET", "/Users/user1/Items")
+        let mut first = vec![serde_json::json!({"Id":"folder","Name":"Folder","Type":"Folder"})];
+        first.extend((1..200).map(|id| {
+            serde_json::json!({
+                "Id":format!("song{id}"), "Name":"Track", "Type":"Audio"
+            })
+        }));
+        let first_page = server
+            .mock("GET", "/Playlists/playlist2/Items")
+            .match_query(Matcher::Regex(
+                "^userId=user1&Fields=MediaSources%2CProviderIds&Limit=200$".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"Items":first,"TotalRecordCount":205,"StartIndex":0})
+                    .to_string(),
+            )
+            .expect(2)
+            .create_async()
+            .await;
+        let next_page = server
+            .mock("GET", "/Playlists/playlist2/Items")
             .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("ParentId".into(), "playlist2".into()),
-                Matcher::UrlEncoded("Limit".into(), "2".into()),
-                Matcher::UrlEncoded("StartIndex".into(), "400".into()),
+                Matcher::UrlEncoded("Limit".into(), "200".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "200".into()),
             ]))
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"song401","Name":"Later","Type":"Audio"}],"TotalRecordCount":401,"StartIndex":400}"#)
-            .create_async().await;
+            .with_body(
+                r#"{"Items":[
+                {"Id":"folder2","Name":"Folder","Type":"Folder"},
+                {"Id":"song200","Name":"Track","Type":"Audio"},
+                {"Id":"song201","Name":"Track","Type":"Audio"},
+                {"Id":"song202","Name":"Track","Type":"Audio"},
+                {"Id":"song203","Name":"Track","Type":"Audio"}
+            ],"TotalRecordCount":205,"StartIndex":200}"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
         let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
-        let tracks = provider
-            .get_playlist_tracks_window("playlist2", 400, 2)
+        let first = provider
+            .get_playlist_tracks_window("playlist2", 198, 3)
             .await
             .unwrap();
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].id, "song401");
+        let next = provider
+            .get_playlist_tracks_window("playlist2", 201, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|song| song.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["song199", "song200", "song201"]
+        );
+        assert_eq!(
+            next.iter().map(|song| song.id.as_str()).collect::<Vec<_>>(),
+            vec!["song202", "song203"]
+        );
+        first_page.assert_async().await;
+        next_page.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn bounded_playlist_skips_non_audio_prefix_and_zero_limit_makes_no_requests() {
+        let mut server = Server::new_async().await;
+        let prefix = server.mock("GET", "/Playlists/playlist2/Items")
+            .match_query(Matcher::Regex("^userId=user1&Fields=MediaSources%2CProviderIds&Limit=1$".into()))
+            .with_status(200)
+            .with_body(r#"{"Items":[{"Id":"folder","Name":"Folder","Type":"Folder"}],"TotalRecordCount":2,"StartIndex":0}"#)
+            .expect(1).create_async().await;
+        let audio = server.mock("GET", "/Playlists/playlist2/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("Limit".into(), "1".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"Items":[{"Id":"song","Name":"Song","Type":"Audio"}],"TotalRecordCount":2,"StartIndex":1}"#)
+            .expect(1).create_async().await;
+        let no_request = server
+            .mock("GET", "/Playlists/zero/Items")
+            .match_query(Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+        assert!(
+            provider
+                .get_playlist_tracks_bounded("zero", 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            provider
+                .get_playlist_tracks_window("zero", 400, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            provider
+                .get_playlist_tracks_bounded("playlist2", 1)
+                .await
+                .unwrap()[0]
+                .id,
+            "song"
+        );
+        prefix.assert_async().await;
+        audio.assert_async().await;
+        no_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn playlist_reads_handle_empty_results_and_propagate_failures() {
+        let mut server = Server::new_async().await;
+        let playlist = server
+            .mock("GET", "/Items/playlist1")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"Id":"playlist1","Name":"Empty","Type":"Playlist"}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let items = server
+            .mock("GET", "/Playlists/playlist1/Items")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#)
+            .expect(3)
+            .create_async()
+            .await;
+        let provider = JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+        assert!(
+            provider
+                .get_playlist("playlist1")
+                .await
+                .unwrap()
+                .tracks
+                .is_empty()
+        );
+        assert!(
+            provider
+                .get_playlist_tracks_bounded("playlist1", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            provider
+                .get_playlist_tracks_window("playlist1", 400, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        items.assert_async().await;
+        items.remove_async().await;
+        let failure = server
+            .mock("GET", "/Playlists/playlist1/Items")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .with_body("Playlist unavailable")
+            .expect(3)
+            .create_async()
+            .await;
+        assert!(
+            provider
+                .get_playlist("playlist1")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Playlist unavailable")
+        );
+        assert!(
+            provider
+                .get_playlist_tracks_bounded("playlist1", 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .get_playlist_tracks_window("playlist1", 400, 10)
+                .await
+                .is_err()
+        );
+        failure.assert_async().await;
+        playlist.assert_async().await;
     }
 
     #[tokio::test]
