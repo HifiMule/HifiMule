@@ -825,6 +825,7 @@ impl MediaProvider for JellyfinProvider {
 
     async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
         let song = self.get_song(song_id).await?;
+        let container = jellyfin_playback_container(song.suffix.as_deref()).map(str::to_owned);
         let url = reqwest::Url::parse(&format!(
             "{}/Items/{}/Download",
             self.url().trim_end_matches('/'),
@@ -846,7 +847,7 @@ impl MediaProvider for JellyfinProvider {
             representations: vec![PlaybackRepresentation {
                 id: crate::providers::RepresentationId(format!(
                     "jellyfin-original-{}",
-                    song.suffix.as_deref().unwrap_or("unknown")
+                    container.as_deref().unwrap_or("unknown")
                 )),
                 quality: crate::providers::PlaybackQuality {
                     tier: 100,
@@ -854,13 +855,13 @@ impl MediaProvider for JellyfinProvider {
                         .bitrate_kbps
                         .map(|value| u64::from(value) * 125),
                 },
-                codec: song.suffix.clone(),
-                container: song.suffix.clone(),
+                codec: container.clone(),
+                container: container.clone(),
                 bitrate_kbps: song.bitrate_kbps,
                 sample_rate: None,
                 bit_depth: None,
                 provenance: PlaybackProvenance::Original,
-                seek_mechanism: jellyfin_seek_mechanism(song.suffix.as_deref()),
+                seek_mechanism: jellyfin_seek_mechanism(container.as_deref()),
                 request: PlaybackRequest {
                     url,
                     headers,
@@ -1198,6 +1199,23 @@ impl MediaProvider for JellyfinProvider {
     }
 }
 
+fn jellyfin_playback_container(container: Option<&str>) -> Option<&str> {
+    container.map(|container| {
+        // FFmpeg reports MP4-family containers as aliases such as "mov,mp4,m4a,3gp,3g2,mj2".
+        // Keep this playback hint separate from the source suffix used by sync.
+        if container.split(',').all(|alias| {
+            matches!(
+                alias.trim().to_ascii_lowercase().as_str(),
+                "mov" | "mp4" | "m4a" | "3gp" | "3g2" | "mj2"
+            )
+        }) {
+            "m4a"
+        } else {
+            container
+        }
+    })
+}
+
 fn jellyfin_seek_mechanism(suffix: Option<&str>) -> Option<PlaybackSeekMechanism> {
     match suffix?
         .trim_start_matches('.')
@@ -1484,6 +1502,165 @@ mod tests {
 
     const TOKEN: &str = "test-token-1234567890";
     const USER_ID: &str = "user1";
+
+    #[test]
+    fn playback_container_normalizes_only_mp4_family_aliases() {
+        for container in [
+            "mov",
+            "mp4",
+            "m4a",
+            "3gp",
+            "3g2",
+            "mj2",
+            " MOV ",
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            " MoV, MP4 , M4A, 3GP,3G2, MJ2 ",
+        ] {
+            assert_eq!(jellyfin_playback_container(Some(container)), Some("m4a"));
+        }
+        for container in [
+            "mp3",
+            "flac",
+            "wav",
+            "opus",
+            "MP3",
+            "unknown",
+            "",
+            "mp3,flac",
+            "mov,unknown",
+            "mov,",
+            "not-mov",
+        ] {
+            assert_eq!(
+                jellyfin_playback_container(Some(container)),
+                Some(container)
+            );
+        }
+        assert_eq!(jellyfin_playback_container(None), None);
+    }
+
+    #[tokio::test]
+    async fn playback_admits_aac_and_alac_mp4_samples_without_changing_source_metadata() {
+        for codec in ["aac", "alac"] {
+            for source_container in [Some("mov"), None] {
+                let mut server = Server::new_async().await;
+                let url = server.url();
+                let item_container = "mov,mp4,m4a,3gp,3g2,mj2";
+                let id = format!("sample-{codec}");
+                let mock = server
+                    .mock("GET", format!("/Items/{id}").as_str())
+                    .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+                    .match_header(
+                        "Authorization",
+                        format!("MediaBrowser Token=\"{TOKEN}\"").as_str(),
+                    )
+                    .with_status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(
+                        serde_json::json!({
+                            "Id": id, "Name": id, "Type": "Audio",
+                            "Path": format!("/music/{id}.{codec}"),
+                            "Container": item_container,
+                            "MediaSources": [{
+                                "Container": source_container,
+                                "MediaStreams": [{
+                                    "Type": "Audio", "Codec": codec, "Channels": 2,
+                                    "SampleRate": 44100, "BitRate": 128000
+                                }]
+                            }]
+                        })
+                        .to_string(),
+                    )
+                    .expect(1)
+                    .create_async()
+                    .await;
+                let provider = JellyfinProvider::new(JellyfinClient::new(), &url, TOKEN, USER_ID);
+
+                let description = provider.resolve_playback(&id).await.unwrap();
+
+                assert_eq!(
+                    description.song.suffix.as_deref(),
+                    Some(source_container.unwrap_or(item_container))
+                );
+                assert_eq!(description.representations.len(), 1);
+                let selected =
+                    crate::providers::select_playback_representation(description.representations)
+                        .expect("MP4-family AAC and ALAC originals should be admitted");
+                assert_eq!(selected.id.0, "jellyfin-original-m4a");
+                assert_eq!(selected.codec.as_deref(), Some("m4a"));
+                assert_eq!(selected.container.as_deref(), Some("m4a"));
+                assert_eq!(selected.provenance, PlaybackProvenance::Original);
+                assert_eq!(
+                    selected.seek_mechanism,
+                    Some(PlaybackSeekMechanism::JellyfinOriginalM4a)
+                );
+                assert_eq!(
+                    selected.request.url.as_str(),
+                    format!("{url}/Items/{id}/Download")
+                );
+                assert_eq!(
+                    selected.request.headers[reqwest::header::AUTHORIZATION],
+                    format!("MediaBrowser Token=\"{TOKEN}\"")
+                );
+                assert!(selected.request.range_supported);
+                assert!(selected.request.cleanup.is_none());
+                assert!(selected.request.refresh.is_none());
+                mock.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_preserves_other_formats_and_missing_metadata_admission() {
+        for suffix in [
+            Some("mp3"),
+            Some("flac"),
+            Some("wav"),
+            Some("opus"),
+            Some("unknown"),
+            None,
+        ] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("GET", "/Items/track")
+                .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    serde_json::json!({
+                        "Id": "track", "Name": "Track", "Type": "Audio", "Container": suffix
+                    })
+                    .to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
+            let provider =
+                JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+
+            let description = provider.resolve_playback("track").await.unwrap();
+
+            assert_eq!(description.song.suffix.as_deref(), suffix);
+            let representation = &description.representations[0];
+            assert_eq!(
+                representation.id.0,
+                format!("jellyfin-original-{}", suffix.unwrap_or("unknown"))
+            );
+            assert_eq!(representation.codec.as_deref(), suffix);
+            assert_eq!(representation.container.as_deref(), suffix);
+            assert_eq!(
+                representation.seek_mechanism,
+                jellyfin_seek_mechanism(suffix)
+            );
+            // Missing codec metadata remains eligible for decoder sniffing.
+            assert_eq!(
+                crate::providers::select_playback_representation(description.representations)
+                    .is_ok(),
+                suffix != Some("unknown")
+            );
+            mock.assert_async().await;
+        }
+    }
 
     #[test]
     fn jellyfin_view_maps_music_library() {
