@@ -9,6 +9,7 @@
     },
     {
       "id": "rockbox-mp3-320",
+      "defaultFolderArtwork": true,
       "ownership": "system",
       "name": "Rockbox / iPod — MP3 320 kbps",
       "description": "For iPods and DAPs running Rockbox firmware. Transcodes non-MP3 to MP3 320 kbps; passes through MP3 and FLAC directly.",
@@ -39,6 +40,7 @@
     },
     {
       "id": "rockbox-mp3-192",
+      "defaultFolderArtwork": true,
       "ownership": "system",
       "name": "Rockbox / iPod — MP3 192 kbps",
       "description": "For devices with limited storage. Copies MP3 within the 192 kbps ceiling; transcodes other audio to MP3 192 kbps.",
@@ -282,6 +284,7 @@
     },
     {
       "id": "rockbox-audiobooks-m4b",
+      "defaultFolderArtwork": true,
       "ownership": "system",
       "name": "Rockbox — M4B Audiobooks",
       "description": "For Rockbox targets known to support AAC/M4B. Copies MP3 and AAC in M4A/M4B up to 320 kbps, stereo and 48 kHz; converts other audio to MP3 96 kbps. AAC variant support varies by target. Audiobookshelf conversion requires local encoding.",

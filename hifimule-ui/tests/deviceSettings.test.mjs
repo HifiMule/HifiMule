@@ -116,3 +116,14 @@ test('profiles without media defaults retain configured device folders',async()=
  assert.equal(dialog.querySelector('#device-settings-audiobook').value,'Existing/Books');
  assert.equal(dialog.querySelector('#device-settings-podcast').value,'Existing/Shows');
 });
+
+
+test('profile artwork defaults never overwrite an existing device preference',async()=>{
+ for(const enabled of [true,false]){
+  const {dialog,profileSaved,calls}=await setup({folderArtwork:{enabled}});
+  profileSaved([],{id:'custom:saved',defaultFolderArtwork:!enabled});
+  assert.equal(dialog.querySelector('#device-settings-artwork').checked,enabled);
+  await dialog.querySelector('#device-settings-save').click();
+  assert.deepEqual(calls.find(call=>call.method==='device.update_manifest').params.folderArtwork,{enabled});
+ }
+});

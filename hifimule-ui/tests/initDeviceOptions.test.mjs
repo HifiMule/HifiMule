@@ -108,3 +108,29 @@ test('initial profile media defaults reach initialization and missing defaults i
  const select=legacy.body.querySelector('#init-transcoding-profile');select.value='passthrough';select.listeners.get('sl-change')({target:select});
  assert.equal(legacy.body.querySelector('#init-audiobook-folder-input').value,'');assert.equal(legacy.body.querySelector('#init-podcast-folder-input').value,'');
 });
+
+
+test('creation seeds artwork from initial, selected and newly saved profiles, then persists it',async()=>{
+ const initial=setup([{id:'passthrough',name:'Originals',defaultFolderArtwork:true}]);
+ assert.equal(initial.body.querySelector('#init-device-artwork').checked,true);
+ await initial.modal.handleConfirm('listener','usb-drive',{value:'Player'});
+ assert.equal(initial.calls[0].params.folderArtwork.enabled,true);
+ const rockbox={id:'system:rockbox-mp3-320',name:'Rockbox',defaultFolderArtwork:true};
+ const legacy={id:'passthrough',name:'Originals'};
+ const {body,profileSaved,modal,calls}=setup([legacy,rockbox]),select=body.querySelector('#init-transcoding-profile'),artwork=body.querySelector('#init-device-artwork');
+ for(const [id,expected] of [[rockbox.id,true],[legacy.id,false],[rockbox.id,true]]){
+  select.value=id;select.listeners.get('sl-change')({target:select});assert.equal(artwork.checked,expected);
+ }
+ profileSaved([],{id:'custom:saved',defaultFolderArtwork:false});assert.equal(artwork.checked,false);
+ profileSaved([],{id:'custom:saved',defaultFolderArtwork:true});assert.equal(artwork.checked,true);
+ await modal.handleConfirm('listener','usb-drive',{value:'Player'});assert.equal(calls[0].params.folderArtwork.enabled,true);
+});
+test('manual artwork choices survive profile switches and saved-profile callbacks during creation',()=>{
+ for(const enabled of [true,false]){
+  const profile={id:'system:rockbox',name:'Rockbox',defaultFolderArtwork:!enabled};
+  const {body,profileSaved}=setup([profile]),artwork=body.querySelector('#init-device-artwork');
+  artwork.checked=enabled;artwork.emit('sl-change');
+  const select=body.querySelector('#init-transcoding-profile');select.value=profile.id;select.listeners.get('sl-change')({target:select});assert.equal(artwork.checked,enabled);
+  profileSaved([],{...profile,id:'custom:new'});assert.equal(artwork.checked,enabled);
+ }
+});

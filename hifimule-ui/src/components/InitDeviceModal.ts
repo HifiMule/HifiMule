@@ -212,7 +212,7 @@ export class InitDeviceModal {
                     <sl-checkbox id="init-device-reconcile" help-text="${escapeAttr(t('basket.device.reconcile_hint'))}">${t('basket.device.reconcile_before_sync')}</sl-checkbox>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
-                    <sl-checkbox id="init-device-artwork" help-text="${escapeAttr(t('basket.device.artwork_hint'))}">${t('basket.device.artwork')}</sl-checkbox>
+                    <sl-checkbox id="init-device-artwork" ${defaultPassthrough?.defaultFolderArtwork === true ? 'checked' : ''} help-text="${escapeAttr(t('basket.device.artwork_hint'))}">${t('basket.device.artwork')}</sl-checkbox>
                 </div>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">${t('device.init.linked_profile')}</div>
@@ -239,9 +239,13 @@ export class InitDeviceModal {
         let podcastFolderEdited = false;
         audiobookFolderInput?.addEventListener('sl-input', () => { audiobookFolderEdited = true; });
         podcastFolderInput?.addEventListener('sl-input', () => { podcastFolderEdited = true; });
+        const artworkInput = body.querySelector('#init-device-artwork') as any;
+        let artworkEdited = false;
+        artworkInput?.addEventListener('sl-change', () => { artworkEdited = true; });
         const applyProfile = (profile?: DeviceProfileSummary) => {
             if (!profile) return;
             descEl.textContent = profile.description ?? '';
+            if (!artworkEdited) artworkInput.checked = profile.defaultFolderArtwork === true;
             if (!musicFolderEdited) musicFolderInput.value = profile.defaultMusicFolder ?? '';
             if (!playlistFolderEdited) playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
             if (!audiobookFolderEdited) audiobookFolderInput.value = profile.defaultAudiobookFolder ?? '';

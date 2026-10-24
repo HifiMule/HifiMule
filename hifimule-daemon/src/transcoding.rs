@@ -24,6 +24,8 @@ pub struct DeviceProfileEntry {
     pub default_audiobook_folder: Option<String>,
     #[serde(rename = "defaultPodcastFolder", default)]
     pub default_podcast_folder: Option<String>,
+    #[serde(rename = "defaultFolderArtwork", default)]
+    pub default_folder_artwork: bool,
     #[serde(rename = "deviceProfile")]
     pub device_profile: Option<Value>,
     #[serde(flatten)]
@@ -156,6 +158,11 @@ pub fn ensure_profiles_file_exists(path: &Path, default_bytes: &[u8]) -> Result<
                 d.as_object_mut().unwrap().remove("ownership");
                 let mut old = p.clone();
                 old.as_object_mut().unwrap().remove("ownership");
+                // Older bundled rows predate this creation-only default. Explicit
+                // values still participate in comparison to preserve custom choices.
+                if old.get("defaultFolderArtwork").is_none() {
+                    d.as_object_mut().unwrap().remove("defaultFolderArtwork");
+                }
                 old == d
             });
             if exact {
@@ -455,6 +462,89 @@ mod tests {
             audio_fingerprint(Some(&json!({"Name":"B","MaxAudioChannels":2})))
         );
         assert_ne!(audio_fingerprint(None), audio_fingerprint(Some(&json!({}))));
+    }
+    #[test]
+    fn artwork_defaults_migrate_old_stock_and_preserve_explicit_custom_choices() {
+        let defaults: Value = serde_json::from_slice(DEFAULTS).unwrap();
+        for explicit in [None, Some(false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("profiles.json");
+            let mut old = defaults["profiles"][1].clone();
+            old.as_object_mut().unwrap().remove("defaultFolderArtwork");
+            if let Some(value) = explicit {
+                old["defaultFolderArtwork"] = json!(value);
+            }
+            std::fs::write(&path, json!({"profiles":[old]}).to_string()).unwrap();
+            ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+            let resolved = resolve_profile(&path, "rockbox-mp3-320").unwrap();
+            assert_eq!(
+                resolved.ownership,
+                if explicit.is_none() { "system" } else { "custom" }
+            );
+            assert_eq!(resolved.default_folder_artwork, explicit.is_none());
+            let system = resolve_profile(&path, "system:rockbox-mp3-320").unwrap();
+            assert!(system.default_folder_artwork);
+        }
+    }
+    #[test]
+    fn artwork_defaults_persist_clone_and_refresh_without_audio_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        let profiles = load_profiles(&path).unwrap();
+        for entry in &profiles {
+            assert_eq!(
+                entry.default_folder_artwork,
+                entry.id.starts_with("system:rockbox-"),
+                "{}",
+                entry.id
+            );
+        }
+        let system = resolve_profile(&path, "system:rockbox-mp3-320").unwrap();
+        let cloned = save_profile(&path, system.clone(), None, Some(&system.id)).unwrap();
+        assert!(
+            resolve_profile(&path, &cloned.id)
+                .unwrap()
+                .default_folder_artwork
+        );
+        let mut edited = cloned.clone();
+        edited.default_folder_artwork = false;
+        let saved = save_profile(&path, edited, Some(cloned.revision), None).unwrap();
+        assert!(
+            !resolve_profile(&path, &saved.id)
+                .unwrap()
+                .default_folder_artwork
+        );
+        assert_eq!(
+            audio_fingerprint(saved.device_profile.as_ref()),
+            audio_fingerprint(system.device_profile.as_ref())
+        );
+        let mut draft = saved.clone();
+        draft.default_folder_artwork = true;
+        let created = save_profile(&path, draft, None, None).unwrap();
+        assert!(
+            resolve_profile(&path, &created.id)
+                .unwrap()
+                .default_folder_artwork
+        );
+        let before = read_document(&path).unwrap();
+        let mut defaults: Value = serde_json::from_slice(DEFAULTS).unwrap();
+        defaults["profiles"][1]["defaultFolderArtwork"] = json!(false);
+        ensure_profiles_file_exists(&path, defaults.to_string().as_bytes()).unwrap();
+        assert!(
+            !resolve_profile(&path, &system.id)
+                .unwrap()
+                .default_folder_artwork
+        );
+        assert!(
+            resolve_profile(&path, &created.id)
+                .unwrap()
+                .default_folder_artwork
+        );
+        assert_eq!(
+            before["legacyAudioBaselines"],
+            read_document(&path).unwrap()["legacyAudioBaselines"]
+        );
     }
     #[test]
     fn media_folder_defaults_persist_clone_clear_and_validate_without_audio_changes() {

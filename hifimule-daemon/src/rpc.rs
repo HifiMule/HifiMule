@@ -10333,6 +10333,7 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
                 "defaultPlaylistFolder": p.default_playlist_folder,
                 "defaultAudiobookFolder": p.default_audiobook_folder,
                 "defaultPodcastFolder": p.default_podcast_folder,
+                "defaultFolderArtwork": p.default_folder_artwork,
             })
         })
         .collect();

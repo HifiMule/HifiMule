@@ -13,6 +13,14 @@ User approved option A: Custom/System profile list left and capability editor ri
 
 Default folders cover music, playlists, audiobooks, and podcasts. Audiobook and podcast defaults are optional; blank values inherit the music folder. These profile defaults seed device initialization and apply to untouched fields when choosing a profile in device settings, preserving each field the user has edited. Keep the four fields within the existing collapsed Default folders section and reuse its labels, help text, controls, and responsive layout.
 
+## Folder artwork default extension
+
+The Default folders disclosure also contains the Shoelace checkbox “Create folder.jpg thumbnails by default,” after the four folder fields. Its help text states that it applies only when creating a device and preserves existing device thumbnail settings. Reuse the existing disclosure spacing, neutral help text, checkbox states, and compact wrapping; this adds no global token or primitive.
+
+The optional profile boolean `defaultFolderArtwork` is enabled for all three bundled Rockbox profiles and is false when absent. System profiles display its checked or unchecked value as locked; cloning retains the value and makes it editable. Custom profiles save an explicit boolean, including false, and reopening retains it. During new-device creation, the selected profile seeds the existing folder.jpg option until the user edits that checkbox; a manual choice survives later profile switches and profile-editor saves. Selecting or saving a profile in existing-device settings never reapplies this artwork default.
+
+The desktop locked Rockbox state and compact saved custom state are recorded in [the artwork default review](../review/device-profile-manager/artwork-default-review.md). These are scrolled views of the production renderer with a synthetic RPC fixture, not shipping imagery.
+
 ## Numeric configuration extension
 
 The five editable numeric controls retain raw text drafts and show localized units, examples, and actionable inline errors. Sample rate uses Hz with `48000 Hz = 48 kHz` as the unit example; an AAC ceiling of `48` remains visible and explains the codec's minimum. Blank optional limits still mean no limit. Bitrates use kbps with up to three decimal places. Bounds come from the approved numeric configuration contract and additive daemon constraint metadata; older daemons retain ordinary save validation.

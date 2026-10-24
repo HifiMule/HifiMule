@@ -199,3 +199,26 @@ test('changing output clears a cached server error for the previous codec',()=>{
  manager.setProfile(profiles.newProfile(),false);manager.capture=()=>{};manager.serverErrors={MaxAudioSampleRate:'Old codec error'};
  elements.get('.profile-editor-fields').handlers['sl-change']({target:{id:'profile-output'}});assert.deepEqual(manager.serverErrors,{});
 });
+
+
+test('folder artwork defaults roundtrip independently of audio and survive cloning',async()=>{
+ const base=profiles.newProfile();assert.equal(profiles.toDraft(base).artwork,false);
+ const draft=profiles.toDraft(base);draft.artwork=true;
+ const saved=profiles.fromDraft(base,draft);assert.equal(saved.defaultFolderArtwork,true);assert.deepEqual(saved.deviceProfile,base.deviceProfile);
+ draft.artwork=false;assert.equal(profiles.fromDraft(saved,draft).defaultFolderArtwork,false);
+ const {DeviceProfileManager}=loadManager(async()=>{}),manager=new DeviceProfileManager();
+ manager.renderList=()=>{};manager.renderEditor=()=>{};manager.focus=()=>{};
+ manager.setProfile({...saved,id:'system:rockbox',ownership:'system'},false);await manager.clone();
+ assert.equal(manager.draft.artwork,true);assert.equal(manager.profile.ownership,'custom');
+ base.deviceProfile.FutureRule=true;draft.artwork=true;
+ const unsupported=profiles.fromDraft(base,draft);assert.equal(unsupported.defaultFolderArtwork,true);assert.deepEqual(unsupported.deviceProfile,base.deviceProfile);
+});
+test('artwork editor renders checked defaults, system locks and captures explicit off',()=>{
+ const {DeviceProfileManager}=loadManager(async()=>{}),manager=new DeviceProfileManager(),elements=new Map();
+ manager.dialog={querySelector:selector=>{if(!elements.has(selector))elements.set(selector,{addEventListener(){}});return elements.get(selector);},querySelectorAll:()=>[]};manager.renderList=()=>{};
+ const profile={...profiles.newProfile(),defaultFolderArtwork:true};manager.setProfile(profile,false);
+ assert.match(elements.get('.profile-manager-editor').innerHTML,/id="profile-artwork"[^>]*checked[^>]*help-text="profiles.artwork_help"/);
+ elements.set('#profile-artwork',{checked:false});manager.capture();assert.equal(manager.draft.artwork,false);
+ manager.setProfile({...profile,ownership:'system'},false);assert.match(elements.get('.profile-manager-editor').innerHTML,/id="profile-artwork"[^>]*checked[^>]*disabled/);
+ for(const lang of ['en','fr','es','de']){const catalog=JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json',import.meta.url),'utf8'));assert.match(catalog[lang]['profiles.artwork'],/folder\.jpg/);assert.ok(catalog[lang]['profiles.artwork_help']);}
+});
