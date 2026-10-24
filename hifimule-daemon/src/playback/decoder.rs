@@ -332,18 +332,7 @@ pub fn decode_stream_with_seek_and_gain(
                 }
                 Err(error) => return Err(error.into()),
             }
-            let input_layout = if frame.channel_layout().is_empty() {
-                match frame.channels() {
-                    1 => ChannelLayout::MONO,
-                    2 => ChannelLayout::STEREO,
-                    _ => anyhow::bail!("unsupported input layout"),
-                }
-            } else {
-                frame.channel_layout()
-            };
-            if input_layout.channels() > 2 {
-                anyhow::bail!("unsupported input layout");
-            }
+            let input_layout = playback_input_layout(frame.channel_layout(), frame.channels())?;
             if frame.channel_layout().is_empty() {
                 frame.set_channel_layout(input_layout);
             }
@@ -525,6 +514,26 @@ pub fn decode_stream_with_seek_and_gain(
     })
 }
 
+// Only mono/stereo may infer their conventional mapping. Multichannel downmix
+// requires an explicit speaker mask; never guess dialogue/surround placement.
+fn playback_input_layout(layout: ChannelLayout, channels: u16) -> anyhow::Result<ChannelLayout> {
+    if layout.is_empty() {
+        return match channels {
+            1 => Ok(ChannelLayout::MONO),
+            2 => Ok(ChannelLayout::STEREO),
+            _ => anyhow::bail!("unsupported input layout: multichannel speaker mapping is unknown"),
+        };
+    }
+    anyhow::ensure!(
+        layout.channels() == i32::from(channels)
+            && unsafe { ffmpeg::ffi::av_channel_layout_check(&layout.0) } == 1
+            && (channels <= 2
+                || layout.0.order == ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE),
+        "unsupported input layout: invalid or unknown speaker mapping"
+    );
+    Ok(layout)
+}
+
 fn decoded_representation_matches(suffix: &str, container: &str, codec: &str) -> bool {
     let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
     let container = container.to_ascii_lowercase();
@@ -602,6 +611,100 @@ fn validated_seek_duration_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ac3_playback_preserves_full_audio_downmixes_center_and_resumes_by_discard() {
+        for name in [
+            "generated-ac3-mono.ac3",
+            "generated-ac3-stereo.ac3",
+            "generated-ac3-5point1.ac3",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
+            let (summary, samples) = decode_test_file_at(&path, 0).unwrap();
+            // Raw AC3 encodes complete 1536-sample blocks, padding 2 s to 2.016 s.
+            assert_eq!(summary.frames, 96_768, "{name}");
+            assert_eq!(summary.emitted_frames, 96_768, "{name}");
+            assert_eq!(samples, summary.frames * 2, "{name}");
+            let (resumed, samples) = decode_test_file_at(&path, 24_000).unwrap();
+            assert_eq!(resumed.frames, summary.frames);
+            assert_eq!(resumed.emitted_frames, summary.frames - 24_000);
+            assert_eq!(samples, resumed.emitted_frames * 2);
+            for channels in [1, 2] {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let reader = BoundedHttpReader::from_source(
+                    std::fs::File::open(&path).unwrap(),
+                    cancel.clone(),
+                    Arc::new(AtomicU64::new(0)),
+                );
+                let pcm = Arc::new(ArrayQueue::new(220_000));
+                let decoded =
+                    decode_stream(reader, Some(name), 48_000, channels, 0, pcm.clone(), cancel)
+                        .unwrap();
+                assert_eq!(pcm.len() as u64, decoded.frames * u64::from(channels));
+                let mut peaks = vec![0.0f32; channels as usize];
+                let mut index = 0;
+                while let Some(sample) = pcm.pop() {
+                    assert!(sample.is_finite());
+                    peaks[index % channels as usize] =
+                        peaks[index % channels as usize].max(sample.abs());
+                    index += 1;
+                }
+                // The 5.1 fixture has silence everywhere except center dialogue.
+                assert!(peaks.iter().all(|peak| *peak > 0.02), "{name}: {peaks:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_multichannel_layout_is_rejected_without_guessing() {
+        let mut unspecified = ChannelLayout::_5POINT1;
+        unspecified.0.order = ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_UNSPEC;
+        assert!(
+            playback_input_layout(unspecified, 6)
+                .unwrap_err()
+                .to_string()
+                .contains("speaker mapping is unknown")
+        );
+        assert_eq!(
+            playback_input_layout(ChannelLayout::_5POINT1, 6).unwrap(),
+            ChannelLayout::_5POINT1
+        );
+        assert!(playback_input_layout(ChannelLayout::_5POINT1, 2).is_err());
+    }
+
+    #[test]
+    fn ac3_streams_beyond_compressed_window_without_losing_frames() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("long.ac3");
+        let fixture = include_bytes!("../../tests/fixtures/generated-ac3-5point1.ac3");
+        let repeats = COMPRESSED_CAPACITY_BYTES / fixture.len() + 2;
+        let mut file = std::fs::File::create(&path).unwrap();
+        for _ in 0..repeats {
+            file.write_all(fixture).unwrap();
+        }
+        drop(file);
+        let (summary, samples, high_water) =
+            decode_test_file_at_with_compressed_high_water(&path, 0).unwrap();
+        assert_eq!(summary.frames, 96_768 * repeats as u64);
+        assert_eq!(samples, summary.frames * 2);
+        assert!(high_water <= COMPRESSED_CAPACITY_BYTES as u64);
+    }
+
+    #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_AC3; never committed as a fixture"]
+    fn diagnostic_external_ac3() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_AC3").unwrap();
+        let (summary, samples) = decode_test_file_at(std::path::Path::new(&path), 0).unwrap();
+        assert!(summary.frames > 0);
+        assert_eq!(samples, summary.frames * 2);
+        eprintln!(
+            "AC3 playback: {} frames, 48000 Hz, stereo, {:.3} seconds",
+            summary.frames,
+            summary.frames as f64 / 48_000.0
+        );
+    }
 
     #[test]
     fn album_gain_has_a_bit_exact_unity_path_and_scales_once() {

@@ -1557,6 +1557,186 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ac3_corruption_recovers_only_within_policy_and_removes_failed_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("000001-source");
+        let output = temp.path().join("encoded.mp3");
+        let fixture = include_bytes!("../../tests/fixtures/generated-ac3-5point1.ac3");
+        let profile = TranscodeProfile {
+            container: Some("mp3".into()),
+            audio_codec: Some("mp3".into()),
+            max_bitrate_kbps: Some(192),
+            max_channels: Some(2),
+            ..Default::default()
+        };
+        for (damaged, succeeds) in [
+            (vec![60], true),
+            (vec![60, 61, 62, 63], false),
+            (vec![20, 60, 100], false),
+        ] {
+            let mut bytes = fixture.repeat(3);
+            for frame in damaged {
+                bytes[frame * 2048 + 100..frame * 2048 + 1900].fill(0xff);
+            }
+            std::fs::write(&input, &bytes).unwrap();
+            let (result, packets) = test_support::capture_input_packets(|| {
+                encode_with_report(
+                    &input,
+                    &output,
+                    &profile,
+                    &AtomicBool::new(false),
+                    2_000_000,
+                )
+            });
+            packets.assert_released();
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            assert_eq!(output.exists(), succeeds);
+            assert_eq!(std::fs::read(&input).unwrap(), bytes);
+            if let Ok(report) = result {
+                assert_eq!(report.recovery.invalid_events, 1);
+                let decoded = SourceDecoder::open(&output)
+                    .unwrap()
+                    .decode(|| Ok(()), |_| Ok(()))
+                    .unwrap();
+                decoded.validate_source().unwrap();
+                assert!(decoded.decoded_duration_micros.abs_diff(6_016_000) < 100_000);
+                std::fs::remove_file(&output).unwrap();
+            }
+        }
+        let mut crc_damage = fixture.to_vec();
+        for frame in crc_damage.chunks_exact_mut(2048) {
+            frame[2] ^= 1;
+        }
+        let mut truncated = fixture.to_vec();
+        truncated.truncate(truncated.len() - 500);
+        for bytes in [crc_damage, truncated] {
+            std::fs::write(&input, &bytes).unwrap();
+            assert!(
+                encode_with_report(
+                    &input,
+                    &output,
+                    &profile,
+                    &AtomicBool::new(false),
+                    2_000_000
+                )
+                .is_err()
+            );
+            assert!(!output.exists());
+            assert_eq!(std::fs::read(&input).unwrap(), bytes);
+        }
+    }
+
+    fn verify_ac3_conversion(input: &Path, output: &Path, container: &str, codec: &str) {
+        let original = std::fs::read(input).unwrap();
+        let source = SourceDecoder::open(input).unwrap();
+        assert_eq!(source.decoder().id(), codec::Id::AC3);
+        let channels = source.decoder().channels();
+        let rate = source.decoder().rate();
+        let duration = source
+            .decode(|| Ok(()), |_| Ok(()))
+            .unwrap()
+            .decoded_duration_micros;
+        let profile = TranscodeProfile {
+            container: Some(container.into()),
+            audio_codec: Some(codec.into()),
+            max_bitrate_kbps: Some(192),
+            max_channels: Some(2),
+            max_sample_rate_hz: Some(48_000),
+            max_bit_depth: Some(if codec.contains("32") { 32 } else { 24 }),
+        };
+        let report = encode_with_report(
+            input,
+            output,
+            &profile,
+            &AtomicBool::new(false),
+            32 * 1024 * 1024,
+        )
+        .unwrap();
+        assert!(report.output_bytes > 0);
+        assert_eq!(report.recovery, RecoveryReport::default());
+        let encoded = SourceDecoder::open(output).unwrap();
+        assert_eq!(encoded.decoder().channels(), 2);
+        assert_eq!(encoded.decoder().rate(), 48_000);
+        let mut converter = None;
+        let mut peak = 0.0f32;
+        let decoded = encoded
+            .decode(
+                || Ok(()),
+                |frame| {
+                    let converter =
+                        converter.get_or_insert(ff::software::resampling::Context::get(
+                            frame.format(),
+                            frame.channel_layout(),
+                            frame.rate(),
+                            ff::format::Sample::F32(ff::format::sample::Type::Packed),
+                            ff::ChannelLayout::STEREO,
+                            frame.rate(),
+                        )?);
+                    let mut pcm = frame::Audio::empty();
+                    converter.run(frame, &mut pcm)?;
+                    for sample in pcm.plane::<f32>(0) {
+                        assert!(sample.is_finite());
+                        peak = peak.max(sample.abs());
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        decoded.validate_source().unwrap();
+        assert!(
+            peak > 0.02,
+            "center signal missing from {container}/{codec}: {peak}"
+        );
+        assert!(decoded.decoded_duration_micros.abs_diff(duration) < 100_000);
+        assert_eq!(std::fs::read(input).unwrap(), original);
+        eprintln!(
+            "AC3 encode {container}/{codec}: {channels} source channels, {rate} Hz, {} seconds -> stereo, {} bytes",
+            duration as f64 / 1_000_000.0,
+            report.output_bytes
+        );
+    }
+
+    #[test]
+    fn extensionless_ac3_downmixes_to_stereo_for_existing_encoding_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("000001-source");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated-ac3-5point1.ac3"),
+            &input,
+        )
+        .unwrap();
+        for (container, codec) in [
+            ("mp3", "mp3"),
+            ("m4a", "aac"),
+            ("aac", "aac"),
+            ("flac", "flac"),
+            ("m4a", "alac"),
+            ("wav", "pcm_s16le"),
+            ("wav", "pcm_s24le"),
+            ("wav", "pcm_s32le"),
+            ("wav", "pcm_f32le"),
+            ("ogg", "vorbis"),
+            ("opus", "opus"),
+        ] {
+            let output = temp.path().join(format!("output-{codec}.{container}"));
+            verify_ac3_conversion(&input, &output, container, codec);
+        }
+    }
+
+    #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_AC3; never committed as a fixture"]
+    fn diagnostic_external_ac3_encodes_to_verified_mp3() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_AC3").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        verify_ac3_conversion(
+            Path::new(&path),
+            &temp.path().join("encoded.mp3"),
+            "mp3",
+            "mp3",
+        );
+    }
+
+    #[test]
     fn real_encoding_all_required_targets_reopens_and_decodes() {
         let temp = tempfile::tempdir().unwrap();
         let input = temp.path().join("source.wav");

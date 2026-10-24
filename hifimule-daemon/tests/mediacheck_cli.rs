@@ -70,6 +70,139 @@ fn damage_mp3(clean: &Path, damaged_packets: &[usize]) -> Vec<u8> {
 }
 
 #[test]
+fn ac3_extensions_are_checked_case_insensitively_and_corruption_is_bad() {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().join("library");
+    std::fs::create_dir(&folder).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated-ac3-5point1.ac3");
+    let original = std::fs::read(fixture).unwrap();
+    for name in ["lower.ac3", "upper.AC3"] {
+        std::fs::write(folder.join(name), &original).unwrap();
+    }
+    let healthy_log = temp.path().join("healthy.log");
+    let result = mediacheck(
+        temp.path(),
+        &[
+            folder.as_os_str(),
+            "--log".as_ref(),
+            healthy_log.as_os_str(),
+        ],
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let report = std::fs::read_to_string(healthy_log).unwrap();
+    assert!(report.contains("Checked files: 2"), "{report}");
+    assert!(report.contains("Ignored files: 0"), "{report}");
+    assert!(report.contains("Bad files: 0"), "{report}");
+    assert_eq!(
+        report
+            .lines()
+            .filter(|line| line.starts_with("OK\t"))
+            .count(),
+        2
+    );
+    let invalid = b"invalid AC3 audio";
+    std::fs::write(folder.join("broken.ac3"), invalid).unwrap();
+    let bad_log = temp.path().join("bad.log");
+    let result = mediacheck(
+        temp.path(),
+        &[folder.as_os_str(), "--log".as_ref(), bad_log.as_os_str()],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let report = std::fs::read_to_string(bad_log).unwrap();
+    assert!(report.contains("Checked files: 3"), "{report}");
+    assert!(report.contains("Ignored files: 0"), "{report}");
+    assert!(report.contains("Bad files: 1"), "{report}");
+    assert_eq!(
+        report
+            .lines()
+            .filter(|line| line.starts_with("BAD\t"))
+            .count(),
+        1
+    );
+    for name in ["lower.ac3", "upper.AC3"] {
+        assert_eq!(std::fs::read(folder.join(name)).unwrap(), original);
+    }
+    assert_eq!(std::fs::read(folder.join("broken.ac3")).unwrap(), invalid);
+}
+
+#[test]
+fn ac3_concealment_is_recoverable_or_bad_according_to_shared_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().join("library");
+    std::fs::create_dir(&folder).unwrap();
+    let fixture = include_bytes!("fixtures/generated-ac3-5point1.ac3");
+    let mut originals = Vec::new();
+    for (name, repeats, damaged) in [
+        ("recoverable.ac3", 3, vec![60]),
+        ("sustained.AC3", 3, vec![60, 61, 62, 63]),
+        ("ratio.ac3", 3, vec![20, 60, 100]),
+        ("concealed-middle.ac3", 1, (15..45).collect()),
+    ] {
+        let mut bytes = fixture.repeat(repeats);
+        for frame in damaged {
+            bytes[frame * 2048 + 100..frame * 2048 + 1900].fill(0xff);
+        }
+        originals.push((name, bytes));
+    }
+    let mut crc_damage = fixture.to_vec();
+    for frame in crc_damage.chunks_exact_mut(2048) {
+        frame[2] ^= 1;
+    }
+    originals.push(("crc.AC3", crc_damage));
+    let mut truncated = fixture.to_vec();
+    truncated.truncate(truncated.len() - 500);
+    originals.push(("truncated.ac3", truncated));
+    for (name, bytes) in &originals {
+        std::fs::write(folder.join(name), bytes).unwrap();
+    }
+    let log = temp.path().join("audit.log");
+    let result = mediacheck(
+        temp.path(),
+        &[folder.as_os_str(), "--log".as_ref(), log.as_os_str()],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let report = std::fs::read_to_string(log).unwrap();
+    for expected in [
+        "Checked files: 6",
+        "Ignored files: 0",
+        "Recoverable files: 1",
+        "Bad files: 5",
+        "Operational errors: 0",
+    ] {
+        assert!(report.contains(expected), "{report}");
+    }
+    assert_eq!(
+        report
+            .lines()
+            .filter(|line| line.starts_with("BAD\t"))
+            .count(),
+        5
+    );
+    assert_eq!(
+        report
+            .lines()
+            .filter(|line| line.starts_with("RECOVERABLE\t"))
+            .count(),
+        1
+    );
+    assert!(!report.lines().any(|line| line.starts_with("OK\t")));
+    assert!(
+        report.contains("Sustained invalid audio decoding"),
+        "{report}"
+    );
+    assert!(report.contains("exceeds one percent"), "{report}");
+    for (name, bytes) in originals {
+        assert_eq!(std::fs::read(folder.join(name)).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn mixed_library_reports_all_classifications_without_modifying_sources() {
     let temp = tempfile::tempdir().unwrap();
     let folder = temp.path().join("Müsic with spaces");

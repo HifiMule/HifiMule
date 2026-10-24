@@ -8138,6 +8138,7 @@ mod tests {
             Some(" AuDiO/X-MS-WMA ; codec=wmav2"),
             Some("audio/wma"),
             Some("audio/ac3"),
+            Some("audio/x-ac3"),
             Some("audio/x-unknown"),
             Some("application/ogg; codecs=vorbis"),
             Some("APPLICATION/OCTET-STREAM; charset=binary"),
@@ -8180,6 +8181,10 @@ mod tests {
     async fn local_encoding_original_mime_variants_commit_verified_mp3_in_both_modes() {
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         for (fixture, content_type) in [
+            ("generated-ac3-5point1.ac3", Some("audio/ac3")),
+            ("generated-ac3-5point1.ac3", Some("AuDiO/X-AC3; codec=ac3")),
+            ("generated-ac3-stereo.ac3", Some("application/octet-stream")),
+            ("generated-ac3-mono.ac3", None),
             ("generated-pcm16.aif", Some("audio/aiff")),
             ("generated-pcm16.aif", Some("audio/x-aiff")),
             ("generated-pcm16.aif", Some(" AuDiO/X-AIF ; codec=pcm")),
@@ -8220,8 +8225,16 @@ mod tests {
                 let (devices, io) = setup_provider_sync_device(root.path()).await;
                 let mut item = add_item_with_provider_format(
                     "mime-original",
-                    "aif",
-                    "audio/aiff",
+                    if fixture.ends_with(".ac3") {
+                        "Ac3"
+                    } else {
+                        "aif"
+                    },
+                    if fixture.ends_with(".ac3") {
+                        "audio/ac3"
+                    } else {
+                        "audio/aiff"
+                    },
                     audio.len() as u64,
                 );
                 item.duration_seconds = 2;

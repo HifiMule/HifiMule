@@ -107,6 +107,7 @@ pub fn supported_extensions() -> Result<BTreeSet<String>> {
                 "aiff" => &["aif", "aiff", "aifc", "afc"],
                 "asf" => &["asf", "wma", "wmv"],
                 "ogg" => &["ogg", "oga", "opus"],
+                "ac3" => &["ac3"],
                 _ => &[],
             };
             extensions.extend(aliases.iter().map(|extension| (*extension).to_owned()));
@@ -188,8 +189,13 @@ impl SourceDecoder {
             count: 1,
             ..Default::default()
         });
-        let decoder = decoder_context
-            .decoder()
+        let mut decoder = decoder_context.decoder();
+        if decoder.id() == codec::Id::AC3 {
+            // AC3 can report successful decoding after concealing a corrupt
+            // frame. Request its CRC check and inspect frame error flags below.
+            decoder.check(ff::decoder::Check::CRC);
+        }
+        let decoder = decoder
             .audio()
             .context("Original audio decoder unavailable")?;
         ensure!(
@@ -254,6 +260,7 @@ impl SourceDecoder {
         let mut recovery = DecodeRecovery::default();
         let mut decoded_samples = 0u64;
         let input_layout = self.input_layout;
+        let input_is_ac3 = self.decoder.id() == codec::Id::AC3;
         let mut receive = |decoder: &mut ff::decoder::Audio,
                            recovery: &mut DecodeRecovery,
                            check: &mut dyn FnMut() -> Result<()>|
@@ -262,6 +269,12 @@ impl SourceDecoder {
             loop {
                 match decoder.receive_frame(&mut decoded) {
                     Ok(()) => {
+                        if input_is_ac3 && unsafe { (*decoded.as_ptr()).decode_error_flags != 0 } {
+                            recovery
+                                .reject_buffered(ff::Error::InvalidData)
+                                .context("Cannot decode damaged AC3 audio frame")?;
+                            continue;
+                        }
                         recovery.consecutive = 0;
                         if decoded.channel_layout().is_empty()
                             || decoded.channel_layout().bits() == 0
@@ -604,6 +617,130 @@ mod tests {
     }
 
     #[test]
+    fn ac3_concealed_frames_follow_bounded_recovery_instead_of_counting_as_clean() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("damaged.ac3");
+        let fixture = include_bytes!("../tests/fixtures/generated-ac3-5point1.ac3");
+        assert_eq!(fixture.len(), 63 * 2048);
+        for (damaged_frames, expected_error) in [
+            (vec![60], None),
+            (
+                vec![60, 61, 62, 63],
+                Some("Sustained invalid audio decoding"),
+            ),
+            (vec![20, 60, 100], Some("exceeds one percent")),
+        ] {
+            // 189 frames give one damaged frame less than a 1% recovery share.
+            let mut bytes = fixture.repeat(3);
+            for frame in &damaged_frames {
+                bytes[frame * 2048 + 100..frame * 2048 + 1900].fill(0xff);
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let mut frames = 0;
+            let result = SourceDecoder::open(&path).unwrap().decode(
+                || Ok(()),
+                |frame| {
+                    frames += frame.samples();
+                    Ok(())
+                },
+            );
+            match expected_error {
+                Some(message) => assert!(format!("{:#}", result.unwrap_err()).contains(message)),
+                None => {
+                    let report = result.unwrap();
+                    report.validate_source().unwrap();
+                    assert_eq!(report.recovery.invalid_events, 1);
+                    assert_eq!(report.recovery.rejected_bytes, 2048);
+                    // Concealed samples are rejected before accounting/callback.
+                    assert_eq!(frames, 188 * 1536);
+                    assert_eq!(report.decoded_duration_micros, 6_016_000);
+                }
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        let mut crc_damage = fixture.to_vec();
+        for frame in crc_damage.chunks_exact_mut(2048) {
+            frame[2] ^= 1;
+        }
+        let mut truncated = fixture.to_vec();
+        truncated.truncate(truncated.len() - 500);
+        for bytes in [crc_damage, truncated] {
+            std::fs::write(&path, bytes).unwrap();
+            let error = SourceDecoder::open(&path)
+                .unwrap()
+                .decode(|| Ok(()), |_| Ok(()))
+                .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("Sustained invalid audio decoding")
+                    || error.contains("exceeds one percent"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ac3_audio_block_damage_is_reported_even_with_a_matching_crc() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("invalid-block.ac3");
+        let mut bytes = include_bytes!("../tests/fixtures/generated-ac3-5point1.ac3").repeat(3);
+        let frame = &mut bytes[60 * 2048..61 * 2048];
+        frame[100..1900].fill(0xff);
+        // Restore the decoder's full-frame CRC while retaining invalid audio
+        // blocks. This exercises native concealment beyond the CRC-error path.
+        let table = unsafe { ff::ffi::av_crc_get_table(ff::ffi::AVCRCId::AV_CRC_16_ANSI) };
+        let prefix_crc = unsafe { ff::ffi::av_crc(table, 0, frame[2..2046].as_ptr(), 2044) };
+        let correction = (0..=u16::MAX)
+            .map(u16::to_be_bytes)
+            .find(|value| (unsafe { ff::ffi::av_crc(table, prefix_crc, value.as_ptr(), 2) }) == 0)
+            .unwrap();
+        frame[2046..].copy_from_slice(&correction);
+        assert_eq!(
+            unsafe { ff::ffi::av_crc(table, 0, frame[2..].as_ptr(), 2046) },
+            0
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        let report = SourceDecoder::open(&path)
+            .unwrap()
+            .decode(|| Ok(()), |_| Ok(()))
+            .unwrap();
+        report.validate_source().unwrap();
+        assert_eq!(report.recovery.invalid_events, 1);
+        assert_eq!(report.recovery.rejected_bytes, 2048);
+        assert_eq!(report.decoded_duration_micros, 6_016_000);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn ac3_sources_decode_from_extensionless_staging_with_original_channels() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, channels) in [("mono", 1), ("stereo", 2), ("5point1", 6)] {
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/generated-ac3-{name}.ac3"));
+            let bytes = std::fs::read(fixture).unwrap();
+            let staged = temp.path().join("000001-source");
+            std::fs::write(&staged, &bytes).unwrap();
+            let source = SourceDecoder::open(&staged).unwrap();
+            assert_eq!(source.decoder().id(), codec::Id::AC3);
+            assert_eq!(source.decoder().channels(), channels);
+            assert_eq!(source.decoder().rate(), 48_000);
+            let report = source
+                .decode(
+                    || Ok(()),
+                    |frame| {
+                        assert_eq!(frame.channels(), channels);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            report.validate_source().unwrap();
+            assert_eq!(report.decoded_duration_micros, 2_016_000);
+            assert_eq!(report.recovery, RecoveryReport::default());
+            assert_eq!(std::fs::read(staged).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn source_decode_streams_complete_audio_without_creating_an_output() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.wav");
@@ -790,14 +927,13 @@ mod tests {
     fn supported_extensions_come_from_the_enabled_runtime() {
         let extensions = supported_extensions().unwrap();
         for extension in [
-            "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "aif", "aiff",
+            "mp3", "flac", "m4a", "aac", "ac3", "ogg", "opus", "wav", "wma", "aif", "aiff",
         ] {
             assert!(
                 extensions.contains(extension),
                 "missing {extension}: {extensions:?}"
             );
         }
-        assert!(!extensions.contains("ac3"));
         assert!(!extensions.contains("txt"));
         for image in ["avif", "heic", "heif"] {
             assert!(!extensions.contains(image));

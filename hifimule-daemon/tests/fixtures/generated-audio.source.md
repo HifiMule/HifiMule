@@ -78,3 +78,33 @@ The decoder tests correlate compressed seek output against the full decoded
 chirp within the 50 ms landing budget. This accounts for codec delay without
 accepting a count-only landing. Compressed seeks decode a bounded 50 ms lead-in
 before trimming to the target, including the MP3 bit-reservoir history.
+
+## Synthetic AC3 source fixtures
+
+Generated with FFmpeg 9.0.2 on 2026-10-24. These CC0-1.0 fixtures contain only
+synthetic 440 Hz signals, no recording or private metadata. Production and test
+execution decode them through HifiMule's controlled runtime; system FFmpeg is
+used only to generate assets because AC3 is not an output profile.
+
+```sh
+rtk ffmpeg -hide_banner -loglevel error -y -f lavfi \
+  -i 'sine=frequency=440:sample_rate=48000:duration=2' -ac <channels> \
+  -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
+  -c:a ac3 -b:a 192k hifimule-daemon/tests/fixtures/generated-ac3-<layout>.ac3
+```
+
+Use channels `1` / layout `mono` and channels `2` / layout `stereo`. For
+`generated-ac3-5point1.ac3`, use the following center-only source and 512 kbps:
+
+```sh
+rtk ffmpeg -hide_banner -loglevel error -y -f lavfi \
+  -i 'aevalsrc=0|0|0.2*sin(2*PI*440*t)|0|0|0:s=48000:d=2:c=5.1' \
+  -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
+  -c:a ac3 -b:a 512k hifimule-daemon/tests/fixtures/generated-ac3-5point1.ac3
+```
+
+The center-only signal detects dropped dialogue during downmix. Raw AC3 has
+complete 1,536-sample codec blocks, so all three fixtures decode to 96,768 frames
+(2.016 seconds) at 48 kHz. Tests concatenate raw frames into a temporary stream
+larger than the compressed window to check bounded playback without committing a
+large fixture. This does not qualify AC3 seeking or gapless playback.

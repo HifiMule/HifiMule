@@ -832,6 +832,14 @@ ready after an authorized decoded head reaches the normal 100 ms target, or clea
 EOF leaves at least one complete frame. Preparation retains the existing 60 s
 deadline. A zero-frame decode is a failure.
 
+Original AC3 sources are admitted case-insensitively for playback and local
+encoding into the existing target formats. Known multichannel speaker layouts,
+including AC3 5.1, pass through the existing resampler to mono/stereo output;
+unknown multichannel mappings fail explicitly instead of guessing speaker placement.
+Local sync accepts AC3 originals with audio/ac3, audio/x-ac3, generic binary or
+missing MIME metadata and validates the staged bytes through the controlled runtime.
+AC3 is not an output profile, and AC3 seeking and gapless continuity are not qualified.
+
 The output format is fixed for the output epoch. Each occurrence is decoded and
 resampled independently into that rate and mono/stereo layout, including decoder
 and resampler drain. The boundary is the exact output-frame offset after the
@@ -842,7 +850,7 @@ validated padding metadata; HifiMule does not add a second trim. Missing or
 ambiguous padding metadata never authorizes inferred trimming. Legacy Apple AAC
 without declared start padding remains untrimmed and is not continuity-certified:
 `iTunNORM` and a filler packet do not establish an exact encoder delay. Raw AAC,
-AIFF, Vorbis, and WMA remain ordinary-playback formats until separately qualified.
+AIFF, Vorbis, WMA, and AC3 remain ordinary-playback formats until separately qualified.
 Unknown-length MP3 streams remain ordinary playback: the controlled FFmpeg 9
 nonseekable demuxer does not reliably apply terminal Xing padding without byte
 size. HifiMule neither guesses that size nor trims to provider duration.

@@ -351,6 +351,7 @@ fn representation_is_supported(representation: &PlaybackRepresentation) -> bool 
             | "alac"
             | "mp3"
             | "aac"
+            | "ac3"
             | "m4a"
             | "m4r"
             | "mp4"
@@ -2322,6 +2323,7 @@ mod tests {
     #[test]
     fn new_audio_labels_preserve_original_preference() {
         for label in [
+            "ac3",
             "aif",
             "aiff",
             "ogg",
@@ -2338,7 +2340,11 @@ mod tests {
             "pcm_s24be",
             "pcm_s32be",
         ] {
-            for codec in [label.to_owned(), label.to_ascii_uppercase()] {
+            for codec in [
+                label.to_owned(),
+                label.to_ascii_uppercase(),
+                format!("{}{}", &label[..1].to_ascii_uppercase(), &label[1..]),
+            ] {
                 let selected = select_playback_representation(vec![
                     representation(
                         "flac",
