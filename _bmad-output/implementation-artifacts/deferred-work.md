@@ -378,3 +378,6 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: numerical configuration validation (2026-10-24)
 
 - **Auto-sync profile-history tests assume pre-migration profile IDs.** `tests::manifest_migration_regression_auto_completion_records_operation_profile_snapshot` expects `rockbox-mp3-320` but receives `system:rockbox-mp3-320`; `tests::manifest_migration_regression_auto_finalization_preserves_profile_history` fails its clean-profile-history assertion. Both failures were reproduced against isolated baseline `2e6afe52c40fd11f56d4ecfeda271864e6a8283f` using the controlled FFmpeg wrapper (filtered run: 2 passed, 2 failed). Isolate profile-store fixtures and reconcile migration-aware history assertions in a focused follow-up; this validation change does not alter sync history.
+
+
+Resolved on 2026-10-24: the auto-sync completion helper now records the execution audio fingerprint together with canonical profile history. Both regression tests use isolated migrated profile stores, assert the captured canonical identity/fingerprint, and cover aliases in both directions. The full Rust suite passes. See `spec-fix-profile-history-and-selection-test-regressions.md`.

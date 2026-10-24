@@ -1825,12 +1825,13 @@ async fn get_selected_provider(
 fn finish_auto_sync_manifest(
     manifest: &mut device::DeviceManifest,
     completed_profile: Option<&str>,
+    audio_fingerprint: &str,
 ) {
     manifest.dirty = false;
     manifest.pending_item_ids.clear();
     manifest.last_sync_at = Some(rpc::now_unix_secs());
     // Record what this operation applied; a later selection remains dirty until its own sync.
-    manifest.record_completed_transcoding_profile(completed_profile);
+    manifest.record_completed_audio_profile(completed_profile, audio_fingerprint);
 }
 
 fn load_auto_sync_transcoding_profile(
@@ -2143,8 +2144,8 @@ async fn run_auto_sync_logged(
                                 finish_auto_sync_manifest(
                                     m,
                                     manifest.transcoding_profile_id.as_deref(),
+                                    &execution_audio_fingerprint,
                                 );
-                                m.record_completed_audio_profile(manifest.transcoding_profile_id.as_deref(), &execution_audio_fingerprint);
                             },
                         )
                         .await

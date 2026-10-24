@@ -20,6 +20,14 @@ class Element {
   }
   add(option) { this.append(option); if (!this.value) this.value = option.value; }
   setAttribute(key, value) { this.attributes[key] = value; }
+  getAttribute(key) { return this.attributes[key] ?? null; }
+  setCustomValidity(value) { this.validationMessage = value; }
+  classList = { toggle() {} };
+  insertAdjacentElement(position, element) {
+    assert.equal(position, 'afterend');
+    element.parentElement = this.parentElement;
+    this.parentElement.children.splice(this.parentElement.children.indexOf(this) + 1, 0, element);
+  }
   focus() { this.ownerDocument.activeElement = this; this.listeners.get('focus')?.(); }
   blur() { this.ownerDocument.activeElement = null; this.listeners.get('blur')?.(); }
   addEventListener(key, handler) { this.listeners.set(key, handler); }
@@ -40,12 +48,17 @@ function load(mocks) {
   }).outputText;
   const exports = {};
   const document = { activeElement: null, createElement: tag => { const element = new Element(tag); element.ownerDocument = document; return element; } };
+  const numeric = {};
+  vm.runInNewContext(ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/numericValidation.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { exports: numeric, document, require: () => ({ t: key => key }) });
   const Option = class extends Element {
     constructor(label, value) { super('option'); this.textContent = label; this.value = value; }
   };
   vm.runInNewContext(source, { exports, document, Option, setTimeout, clearTimeout, require: name => ({
     '../rpc': mocks,
     '../i18n': { t: key => key },
+    '../numericValidation': numeric,
     '../serverIdentity': { formatServerIdentity: server => ({ label: server.name ?? server.serverId }) },
   })[name], console });
   const settings = new exports.PlaybackSelectionSettings();
@@ -137,7 +150,8 @@ test('saving a seed edit preserves advanced ordering and track cap', async () =>
     playbackSaveSelectionConfig: async value => { saved = value; },
   });
   await tick();
-  const seed = root.find(node => node.tagName === 'input' && node.type === 'number');
+  const seed = root.find(node => node.tagName === 'label' && node.textContent === 'playback.selection.seed')
+    .children.find(node => node.tagName === 'input');
   seed.value = '8'; seed.listeners.get('input')();
   button(root, 'playback.selection.save').click();
   await tick();
@@ -168,6 +182,32 @@ test('source options can be paged beyond the first page', async () => {
   assert.deepEqual(offsets, [0, 400]);
   assert.ok(root.all(node => node.attributes.role === 'option').some(option => option.textContent.includes('Later')));
   assert.equal(root.find(node => node.attributes.role === 'listbox').hidden, false);
+  settings.destroy();
+});
+
+test('real numeric validation blocks invalid seed saves and accepts a corrected zero', async () => {
+  const saved = [];
+  const { settings, root } = load({
+    playbackGetSelectionConfig: async () => config,
+    serverList: async () => [server],
+    playbackSelectionOptions: async () => ({ supported: true, options: [{ id: 'list', name: 'List' }] }),
+    playbackSaveSelectionConfig: async value => saved.push(value),
+  });
+  await tick();
+  const seed = root.find(node => node.tagName === 'label' && node.textContent === 'playback.selection.seed')
+    .children.find(node => node.tagName === 'input');
+  for (const value of ['', '1.5', '4294967296']) {
+    seed.value = value; seed.listeners.get('input')();
+    button(root, 'playback.selection.save').click(); await tick();
+    assert.equal(saved.length, 0);
+    assert.ok(seed.validationMessage);
+    assert.equal(seed.attributes['aria-invalid'], 'true');
+  }
+  seed.value = '0'; seed.listeners.get('input')();
+  button(root, 'playback.selection.save').click(); await tick();
+  assert.equal(saved.length, 1); assert.equal(saved[0].seed, 0);
+  assert.equal(seed.validationMessage, '');
+  assert.equal(seed.attributes['aria-invalid'], 'false');
   settings.destroy();
 });
 

@@ -3,205 +3,231 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn manifest_migration_regression_auto_completion_records_operation_profile_snapshot() {
-    for (completed, current, expected_dirty) in [
-        (Some("rockbox-mp3-320"), None, true),
-        (Some("rockbox-mp3-320"), Some("other-profile"), true),
-        (None, Some("rockbox-mp3-320"), true),
-        (Some("passthrough"), None, false),
-        (Some("rockbox-mp3-320"), Some("rockbox-mp3-320"), false),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut manifest = device::DeviceManifest {
-            device_id: "auto-operation-profile".into(),
-            version: "1.0".into(),
-            managed_paths: vec!["Music".into()],
-            transcoding_profile_id: completed.map(str::to_string),
-            last_synced_transcoding_profile_id: Some("passthrough".into()),
-            transcoding_profile_dirty: true,
-            dirty: true,
-            pending_item_ids: vec!["unfinished".into()],
-            ..Default::default()
-        };
-        manifest.synced_items = serde_json::from_str(r#"[{"providerItemId":"track","name":"Track","localPath":"Music/Track.mp3","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap();
-        let manager = device::DeviceManager::new(Arc::new(db::Database::memory().unwrap()));
-        let io = Arc::new(device_io::MscBackend::new(dir.path().into()));
-        device::write_manifest(io.clone(), &manifest).await.unwrap();
-        manager
-            .handle_device_detected(dir.path().into(), manifest.clone(), io)
-            .await
-            .unwrap();
-        let target: sync::SyncTarget = manager
-            .get_sync_target_for_device(&manifest.device_id)
-            .await
-            .unwrap()
-            .into();
-        let operations = sync::SyncOperationManager::new();
-        manager
-            .admit_sync_operation(&operations, "operation".into(), 1, &manifest.device_id)
-            .await
-            .unwrap();
-        manager
-            .update_manifest(|m| m.set_transcoding_profile(current.map(str::to_string)))
-            .await
-            .unwrap();
-        let (status, _) = operations
-            .finalize_operation("operation", vec![], || async {
-                manager
-                    .update_manifest_for_connection(
-                        &manifest.device_id,
-                        target.observation,
-                        &target.io,
-                        |m| {
-                            finish_auto_sync_manifest(
-                                m,
-                                target.manifest.transcoding_profile_id.as_deref(),
-                            )
-                        },
-                    )
-                    .await
-            })
-            .await;
-        assert_eq!(status, sync::SyncStatus::Complete);
-        let durable = device::DeviceProber::probe(dir.path())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            durable.last_synced_transcoding_profile_id.as_deref(),
-            completed,
-            "record actual operation profile"
-        );
-        assert_eq!(durable.transcoding_profile_id.as_deref(), current);
-        assert_eq!(
-            durable.transcoding_profile_dirty, expected_dirty,
-            "retain a selection changed during execution"
-        );
-        assert!(!durable.dirty && durable.pending_item_ids.is_empty());
-    }
+    let profiles = tempfile::tempdir().unwrap();
+    let profiles_path = profiles.path().join("profiles.json");
+    // Start with the legacy bundled store so migration installs its canonical-ID aliases.
+    std::fs::write(&profiles_path, include_bytes!("../assets/device-profiles.json")).unwrap();
+    transcoding::ensure_profiles_file_exists(&profiles_path, include_bytes!("../assets/device-profiles.json")).unwrap();
+    paths::TEST_DEVICE_PROFILES_PATH.scope(profiles_path, async {
+        for (completed, current, expected_dirty) in [
+            (Some("rockbox-mp3-320"), None, true),
+            (Some("rockbox-mp3-320"), Some("other-profile"), true),
+            (None, Some("rockbox-mp3-320"), true),
+            (Some("passthrough"), None, false),
+            (Some("rockbox-mp3-320"), Some("rockbox-mp3-320"), false),
+            (Some("rockbox-mp3-320"), Some("system:rockbox-mp3-320"), false),
+            (Some("system:rockbox-mp3-320"), Some("rockbox-mp3-320"), false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut manifest = device::DeviceManifest {
+                device_id: "auto-operation-profile".into(),
+                version: "1.0".into(),
+                managed_paths: vec!["Music".into()],
+                transcoding_profile_id: completed.map(str::to_string),
+                last_synced_transcoding_profile_id: Some("passthrough".into()),
+                transcoding_profile_dirty: true,
+                dirty: true,
+                pending_item_ids: vec!["unfinished".into()],
+                ..Default::default()
+            };
+            manifest.synced_items = serde_json::from_str(r#"[{"providerItemId":"track","name":"Track","localPath":"Music/Track.mp3","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap();
+            let manager = device::DeviceManager::new(Arc::new(db::Database::memory().unwrap()));
+            let io = Arc::new(device_io::MscBackend::new(dir.path().into()));
+            device::write_manifest(io.clone(), &manifest).await.unwrap();
+            manager
+                .handle_device_detected(dir.path().into(), manifest.clone(), io)
+                .await
+                .unwrap();
+            let target: sync::SyncTarget = manager
+                .get_sync_target_for_device(&manifest.device_id)
+                .await
+                .unwrap()
+                .into();
+            let completed_profile = target.manifest.transcoding_profile_id.clone();
+            let executed_audio = load_auto_sync_transcoding_profile(completed_profile.as_deref()).unwrap();
+            let fingerprint = transcoding::audio_fingerprint(executed_audio.as_ref());
+            let operations = sync::SyncOperationManager::new();
+            manager
+                .admit_sync_operation(&operations, "operation".into(), 1, &manifest.device_id)
+                .await
+                .unwrap();
+            manager
+                .update_manifest(|m| m.set_transcoding_profile(current.map(str::to_string)))
+                .await
+                .unwrap();
+            let (status, _) = operations
+                .finalize_operation("operation", vec![], || async {
+                    manager
+                        .update_manifest_for_connection(
+                            &manifest.device_id,
+                            target.observation,
+                            &target.io,
+                            |m| {
+                                finish_auto_sync_manifest(
+                                    m,
+                                    completed_profile.as_deref(),
+                                    &fingerprint,
+                                )
+                            },
+                        )
+                        .await
+                })
+                .await;
+            assert_eq!(status, sync::SyncStatus::Complete);
+            let durable = device::DeviceProber::probe(dir.path())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                durable.last_synced_transcoding_profile_id.as_deref(),
+                completed_profile.as_deref(),
+                "record canonical profile captured by the operation"
+            );
+            assert_eq!(durable.last_synced_audio_fingerprint.as_deref(), Some(fingerprint.as_str()));
+            assert_eq!(durable.transcoding_profile_id.as_deref(), current);
+            assert_eq!(
+                durable.transcoding_profile_dirty, expected_dirty,
+                "retain a selection changed during execution"
+            );
+            assert!(!durable.dirty && durable.pending_item_ids.is_empty());
+        }
+    }).await;
 }
 
 #[tokio::test]
 async fn manifest_migration_regression_auto_finalization_preserves_profile_history() {
-    for scenario in ["failed", "cancelled", "complete"] {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = device::DeviceManifest {
-            device_id: "auto-profile-history".into(),
-            version: "1.0".into(),
-            managed_paths: vec!["Music".into()],
-            transcoding_profile_id: Some("rockbox-mp3-320".into()),
-            last_synced_transcoding_profile_id: Some("passthrough".into()),
-            transcoding_profile_dirty: true,
-            dirty: true,
-            pending_item_ids: vec!["unfinished".into()],
-            synced_items: serde_json::from_str(r#"[{"providerItemId":"track","name":"Track",
-                "localPath":"Music/Track.mp3","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap(),
-            ..Default::default()
-        };
-        let manager = device::DeviceManager::new(Arc::new(db::Database::memory().unwrap()));
-        let io = Arc::new(device_io::MscBackend::new(dir.path().into()));
-        device::write_manifest(io.clone(), &manifest).await.unwrap();
-        manager
-            .handle_device_detected(dir.path().into(), manifest.clone(), io)
-            .await
-            .unwrap();
-        let target: sync::SyncTarget = manager
-            .get_sync_target_for_device(&manifest.device_id)
-            .await
-            .unwrap()
-            .into();
-        let operations = sync::SyncOperationManager::new();
-        manager
-            .admit_sync_operation(&operations, scenario.into(), 1, &manifest.device_id)
-            .await
-            .unwrap();
-        let errors = if scenario == "failed" {
-            vec![sync::SyncFileError {
-                jellyfin_id: "unfinished".into(),
-                filename: "unfinished.flac".into(),
-                error_message: "transfer failed".into(),
-            }]
-        } else {
-            vec![]
-        };
-        if scenario == "cancelled" {
-            operations.request_cancel(scenario).await;
-        }
-        let (status, _) = operations
-            .finalize_operation(scenario, errors, || async {
-                manager
-                    .update_manifest_for_connection(
-                        &manifest.device_id,
-                        target.observation,
-                        &target.io,
-                        |m| {
-                            finish_auto_sync_manifest(
-                                m,
-                                target.manifest.transcoding_profile_id.as_deref(),
-                            )
-                        },
-                    )
-                    .await
-            })
-            .await;
-        let mut durable = device::DeviceProber::probe(dir.path())
-            .await
-            .unwrap()
-            .unwrap();
-        if scenario == "complete" {
-            assert_eq!(status, sync::SyncStatus::Complete);
-            assert!(!durable.dirty && durable.pending_item_ids.is_empty());
-            assert!(!durable.transcoding_profile_dirty);
-            assert!(durable.last_sync_at.is_some());
-            durable.set_transcoding_profile(None);
-            let item = &durable.synced_items[0];
-            let desired = sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
-                album_artist: None,
-                duration_seconds: 0,
-                media_role: item.media_role.clone(),
-                jellyfin_id: item.jellyfin_id.clone(),
-                name: item.name.clone(),
-                album: item.album.clone(),
-                artist: item.artist.clone(),
-                size_bytes: item.size_bytes,
-                etag: item.etag.clone(),
-                provider_album_id: item.provider_album_id.clone(),
-                provider_content_type: item.provider_content_type.clone(),
-                provider_suffix: item.provider_suffix.clone(),
-                original_bitrate: item.original_bitrate,
-                track_number: item.track_number,
-                server_id: item.server_id.clone(),
+    let profiles = tempfile::tempdir().unwrap();
+    let profiles_path = profiles.path().join("profiles.json");
+    // Start with the legacy bundled store so migration installs its canonical-ID aliases.
+    std::fs::write(&profiles_path, include_bytes!("../assets/device-profiles.json")).unwrap();
+    transcoding::ensure_profiles_file_exists(&profiles_path, include_bytes!("../assets/device-profiles.json")).unwrap();
+    paths::TEST_DEVICE_PROFILES_PATH.scope(profiles_path, async {
+        for scenario in ["failed", "cancelled", "complete"] {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = device::DeviceManifest {
+                device_id: "auto-profile-history".into(),
+                version: "1.0".into(),
+                managed_paths: vec!["Music".into()],
+                transcoding_profile_id: Some("rockbox-mp3-320".into()),
+                last_synced_transcoding_profile_id: Some("passthrough".into()),
+                transcoding_profile_dirty: true,
+                dirty: true,
+                pending_item_ids: vec!["unfinished".into()],
+                synced_items: serde_json::from_str(r#"[{"providerItemId":"track","name":"Track",
+                    "localPath":"Music/Track.mp3","sizeBytes":1234,"syncedAt":"2026-10-11T00:00:00Z"}]"#).unwrap(),
+                ..Default::default()
             };
-            let delta = sync::calculate_delta(&[desired], &durable);
-            assert_eq!(
-                delta.adds.len(),
-                1,
-                "completed real profile must be replaced when returning to passthrough"
-            );
-            assert_eq!(delta.deletes.len(), 1);
-            assert_eq!(
-                delta.adds[0].reason_code.as_deref(),
-                Some("transcoding-profile-change")
-            );
-            assert_eq!(
-                durable.last_synced_transcoding_profile_id.as_deref(),
-                Some("rockbox-mp3-320")
-            );
-        } else {
-            assert_eq!(
-                status,
-                if scenario == "failed" {
-                    sync::SyncStatus::Failed
-                } else {
-                    sync::SyncStatus::Cancelled
-                }
-            );
-            assert_eq!(
-                serde_json::to_value(durable).unwrap(),
-                serde_json::to_value(manifest).unwrap(),
-                "{scenario} retains all recovery metadata"
-            );
+            let manager = device::DeviceManager::new(Arc::new(db::Database::memory().unwrap()));
+            let io = Arc::new(device_io::MscBackend::new(dir.path().into()));
+            device::write_manifest(io.clone(), &manifest).await.unwrap();
+            manager
+                .handle_device_detected(dir.path().into(), manifest.clone(), io)
+                .await
+                .unwrap();
+            let target: sync::SyncTarget = manager
+                .get_sync_target_for_device(&manifest.device_id)
+                .await
+                .unwrap()
+                .into();
+            let completed_profile = target.manifest.transcoding_profile_id.clone();
+            let executed_audio = load_auto_sync_transcoding_profile(completed_profile.as_deref()).unwrap();
+            let fingerprint = transcoding::audio_fingerprint(executed_audio.as_ref());
+            let operations = sync::SyncOperationManager::new();
+            manager
+                .admit_sync_operation(&operations, scenario.into(), 1, &manifest.device_id)
+                .await
+                .unwrap();
+            let errors = if scenario == "failed" {
+                vec![sync::SyncFileError {
+                    jellyfin_id: "unfinished".into(),
+                    filename: "unfinished.flac".into(),
+                    error_message: "transfer failed".into(),
+                }]
+            } else {
+                vec![]
+            };
+            if scenario == "cancelled" {
+                operations.request_cancel(scenario).await;
+            }
+            let (status, _) = operations
+                .finalize_operation(scenario, errors, || async {
+                    manager
+                        .update_manifest_for_connection(
+                            &manifest.device_id,
+                            target.observation,
+                            &target.io,
+                            |m| {
+                                finish_auto_sync_manifest(
+                                    m,
+                                    completed_profile.as_deref(),
+                                    &fingerprint,
+                                )
+                            },
+                        )
+                        .await
+                })
+                .await;
+            let mut durable = device::DeviceProber::probe(dir.path())
+                .await
+                .unwrap()
+                .unwrap();
+            if scenario == "complete" {
+                assert_eq!(status, sync::SyncStatus::Complete);
+                assert!(!durable.dirty && durable.pending_item_ids.is_empty());
+                assert!(!durable.transcoding_profile_dirty);
+                assert!(durable.last_sync_at.is_some());
+                durable.set_transcoding_profile(None);
+                let item = &durable.synced_items[0];
+                let desired = sync::DesiredItem { artwork: None,source_audio: Default::default(), disc_number: None,
+                    album_artist: None,
+                    duration_seconds: 0,
+                    media_role: item.media_role.clone(),
+                    jellyfin_id: item.jellyfin_id.clone(),
+                    name: item.name.clone(),
+                    album: item.album.clone(),
+                    artist: item.artist.clone(),
+                    size_bytes: item.size_bytes,
+                    etag: item.etag.clone(),
+                    provider_album_id: item.provider_album_id.clone(),
+                    provider_content_type: item.provider_content_type.clone(),
+                    provider_suffix: item.provider_suffix.clone(),
+                    original_bitrate: item.original_bitrate,
+                    track_number: item.track_number,
+                    server_id: item.server_id.clone(),
+                };
+                let delta = sync::calculate_delta(&[desired], &durable);
+                assert_eq!(
+                    delta.adds.len(),
+                    1,
+                    "completed real profile must be replaced when returning to passthrough"
+                );
+                assert_eq!(delta.deletes.len(), 1);
+                assert_eq!(
+                    delta.adds[0].reason_code.as_deref(),
+                    Some("transcoding-profile-change")
+                );
+                assert_eq!(
+                    durable.last_synced_transcoding_profile_id.as_deref(),
+                    completed_profile.as_deref()
+                );
+                assert_eq!(durable.last_synced_audio_fingerprint.as_deref(), Some(fingerprint.as_str()));
+            } else {
+                assert_eq!(
+                    status,
+                    if scenario == "failed" {
+                        sync::SyncStatus::Failed
+                    } else {
+                        sync::SyncStatus::Cancelled
+                    }
+                );
+                assert_eq!(
+                    serde_json::to_value(durable).unwrap(),
+                    serde_json::to_value(manifest).unwrap(),
+                    "{scenario} retains all recovery metadata"
+                );
+            }
         }
-    }
+    }).await;
 }
 
 #[test]
