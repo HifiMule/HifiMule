@@ -606,11 +606,87 @@ pub struct UiActivationRequest {
     pub open_device_profiles: bool,
 }
 
-/// A mailbox rather than a UI server: concurrent requests may coalesce, since
-/// each asks for the same idempotent window activation. It works before daemon
-/// readiness and does not depend on a platform-specific notification endpoint.
+/// A mailbox rather than a UI server: concurrent requests may coalesce to the
+/// latest destination. It works before daemon readiness and does not depend on
+/// a platform-specific notification endpoint.
 pub fn request_ui_activation(app_data: &Path) -> Result<String, LifecycleError> {
     request_ui_activation_with_target(app_data, false, false, false)
+}
+
+pub const UI_ACTIVATION_REQUEST_ARG: &str = "--ui-activation-request";
+
+/// Invalid correlation must never fall back to a manual foreground request.
+pub fn parse_ui_activation_request_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Option<String>, LifecycleError> {
+    let mut args = args.into_iter();
+    let mut request_id = None;
+    while let Some(arg) = args.next() {
+        if arg != UI_ACTIVATION_REQUEST_ARG {
+            continue;
+        }
+        let value = args.next().and_then(|value| value.into_string().ok());
+        if request_id.is_some()
+            || value
+                .as_deref()
+                .is_none_or(|value| Uuid::parse_str(value).is_err())
+        {
+            return Err(invalid_ui_launch_correlation());
+        }
+        request_id = value;
+    }
+    Ok(request_id)
+}
+
+/// Follow the posted request even if acknowledged or superseded. Only manual
+/// duplicates post a fresh foreground request.
+pub fn request_ui_activation_for_launch(
+    app_data: &Path,
+    request_id: Option<&str>,
+) -> Result<String, LifecycleError> {
+    match request_id {
+        Some(request_id) if Uuid::parse_str(request_id).is_ok() => Ok(request_id.to_owned()),
+        Some(_) => Err(invalid_ui_launch_correlation()),
+        None => request_ui_activation(app_data),
+    }
+}
+
+fn invalid_ui_launch_correlation() -> LifecycleError {
+    LifecycleError::new(
+        LifecycleErrorCode::LocalAccessDenied,
+        "UI launch activation request is invalid",
+    )
+}
+
+/// Call only after the new UI has hydrated. A matching launch request belongs
+/// to this owner too, even if a prior owner acknowledged it before exiting.
+/// Consume correlation once, and never replay it after a newer menu choice.
+pub fn take_ui_activation_destination(
+    app_data: &Path,
+    launch_request: &mut Option<String>,
+) -> Result<Option<&'static str>, LifecycleError> {
+    let Some(request) = read_ui_activation_detail(app_data)? else {
+        *launch_request = None;
+        return Ok(None);
+    };
+    let destination = if request.open_device_profiles {
+        Some("profiles")
+    } else if request.open_audio_output {
+        Some("output")
+    } else if request.open_playback_settings {
+        Some("settings")
+    } else {
+        None
+    };
+    let correlated = launch_request.as_deref() == Some(request.request_id.as_str());
+    let acknowledged = read_ui_activation_ack(app_data)?.as_deref() == Some(&request.request_id);
+    if destination.is_some() && (correlated || !acknowledged) {
+        acknowledge_ui_activation(app_data, &request.request_id)?;
+        *launch_request = None;
+        return Ok(destination);
+    }
+    *launch_request = None;
+    Ok(None)
 }
 
 pub fn request_ui_playback_settings_activation(app_data: &Path) -> Result<String, LifecycleError> {

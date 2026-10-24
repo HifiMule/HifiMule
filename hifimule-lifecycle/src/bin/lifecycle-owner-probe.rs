@@ -9,18 +9,32 @@ fn main() {
         .unwrap_or(0);
     let mode = args.next();
     if mode.as_deref() == Some("--ui-handoff") {
-        match hifimule_lifecycle::UiInstanceGuard::acquire(&profile) {
-            Ok(Some(_guard)) => println!("acquired"),
+        let mut launch_request = hifimule_lifecycle::parse_ui_activation_request_args(
+            args.map(std::ffi::OsString::from),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("{:?}", error.code());
+            std::process::exit(3);
+        });
+        let _guard = match hifimule_lifecycle::UiInstanceGuard::acquire(&profile) {
+            Ok(Some(guard)) => guard,
             Ok(None) => {
-                let request_id = hifimule_lifecycle::request_ui_activation(&profile).unwrap();
+                let request_id = hifimule_lifecycle::request_ui_activation_for_launch(
+                    &profile,
+                    launch_request.as_deref(),
+                )
+                .unwrap();
                 println!("requested");
                 match hifimule_lifecycle::wait_for_ui_handoff(
                     &profile,
                     &request_id,
                     Duration::from_secs(2),
                 ) {
-                    Ok(Some(_guard)) => println!("acquired"),
-                    Ok(None) => println!("handled"),
+                    Ok(Some(guard)) => guard,
+                    Ok(None) => {
+                        println!("handled");
+                        return;
+                    }
                     Err(error) => {
                         eprintln!("{:?}", error.code());
                         std::process::exit(3);
@@ -31,6 +45,14 @@ fn main() {
                 eprintln!("{:?}", error.code());
                 std::process::exit(3);
             }
+        };
+        println!("acquired");
+        // Exercise the same readiness decision as production after takeover.
+        for _ in 0..2 {
+            let destination =
+                hifimule_lifecycle::take_ui_activation_destination(&profile, &mut launch_request)
+                    .unwrap();
+            println!("ready:{}", destination.unwrap_or("none"));
         }
         return;
     }

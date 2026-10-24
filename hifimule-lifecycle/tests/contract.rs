@@ -177,6 +177,276 @@ fn malformed_or_oversized_ui_requests_are_rejected() {
     assert!(read_ui_activation_request(profile.path()).is_err());
 }
 
+type ActivationTarget = fn(&std::path::Path) -> Result<String, hifimule_lifecycle::LifecycleError>;
+
+fn activation_targets() -> [(ActivationTarget, [bool; 3], &'static str); 3] {
+    [
+        (
+            hifimule_lifecycle::request_ui_playback_settings_activation,
+            [true, false, false],
+            "settings",
+        ),
+        (
+            hifimule_lifecycle::request_ui_audio_output_activation,
+            [false, true, false],
+            "output",
+        ),
+        (
+            hifimule_lifecycle::request_ui_device_profiles_activation,
+            [false, false, true],
+            "profiles",
+        ),
+    ]
+}
+
+fn assert_activation_target(profile: &std::path::Path, request_id: &str, flags: [bool; 3]) {
+    let request = hifimule_lifecycle::read_ui_activation_detail(profile)
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.request_id, request_id);
+    assert_eq!(
+        [
+            request.open_playback_settings,
+            request.open_audio_output,
+            request.open_device_profiles
+        ],
+        flags
+    );
+}
+
+// New process regressions must fail within a bound and reap children on panic.
+struct UiProbe {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl UiProbe {
+    fn spawn(profile: &std::path::Path, args: &[&str]) -> Self {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lifecycle-owner-probe"))
+            .arg(profile)
+            .args(["0", "--ui-handoff"])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                if sender.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { child, lines }
+    }
+
+    fn line(&self) -> String {
+        self.lines
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("UI probe did not report progress within five seconds")
+    }
+
+    fn finish(mut self) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "UI probe did not exit within five seconds"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for UiProbe {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn correlated_duplicates_preserve_every_target_and_new_owners_dispatch_once_despite_prior_ack() {
+    use hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG as ARG;
+    for (post, flags, destination) in activation_targets() {
+        let profile = tempfile::tempdir().unwrap();
+        let _daemon = OwnerGuard::acquire(profile.path()).unwrap();
+        let guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+        let request_id = post(profile.path()).unwrap();
+        let duplicate = UiProbe::spawn(profile.path(), &[ARG, &request_id]);
+        assert_eq!(duplicate.line(), "requested");
+        assert_activation_target(profile.path(), &request_id, flags);
+        assert!(UiInstanceGuard::acquire(profile.path()).unwrap().is_none());
+        assert_eq!(
+            OwnerGuard::acquire(profile.path()).unwrap_err().code(),
+            LifecycleErrorCode::OwnerChanged
+        );
+        acknowledge_ui_activation(profile.path(), &request_id).unwrap();
+        assert_eq!(duplicate.line(), "handled");
+        assert!(duplicate.finish().success());
+
+        // An acknowledgment before a delayed duplicate starts must not create
+        // another generic request, and the live owner still handles it.
+        let delayed = UiProbe::spawn(profile.path(), &[ARG, &request_id]);
+        assert_eq!(delayed.line(), "requested");
+        assert_eq!(delayed.line(), "handled");
+        assert!(delayed.finish().success());
+        assert_activation_target(profile.path(), &request_id, flags);
+
+        // The old owner has exited after acknowledgment. The new owner must
+        // actually dispatch the matching surface, not merely keep its mailbox.
+        drop(guard);
+        let reopened = UiProbe::spawn(profile.path(), &[ARG, &request_id]);
+        assert_eq!(reopened.line(), "acquired");
+        assert_eq!(reopened.line(), format!("ready:{destination}"));
+        assert_eq!(reopened.line(), "ready:none");
+        assert!(reopened.finish().success());
+        assert_activation_target(profile.path(), &request_id, flags);
+    }
+}
+
+#[test]
+fn correlated_duplicate_takes_over_and_dispatches_every_target_when_owner_exits_during_handoff() {
+    for (post, flags, destination) in activation_targets() {
+        let profile = tempfile::tempdir().unwrap();
+        let guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+        let request_id = post(profile.path()).unwrap();
+        let duplicate = UiProbe::spawn(
+            profile.path(),
+            &[hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG, &request_id],
+        );
+        assert_eq!(duplicate.line(), "requested");
+        drop(guard);
+        assert_eq!(duplicate.line(), "acquired");
+        assert_eq!(duplicate.line(), format!("ready:{destination}"));
+        assert_eq!(duplicate.line(), "ready:none");
+        assert!(duplicate.finish().success());
+        assert_activation_target(profile.path(), &request_id, flags);
+    }
+}
+
+#[test]
+fn delayed_launcher_neither_replaces_nor_replays_a_superseded_menu_choice() {
+    let profile = tempfile::tempdir().unwrap();
+    let guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let older =
+        hifimule_lifecycle::request_ui_playback_settings_activation(profile.path()).unwrap();
+    let newer = hifimule_lifecycle::request_ui_device_profiles_activation(profile.path()).unwrap();
+    acknowledge_ui_activation(profile.path(), &newer).unwrap();
+    let duplicate = UiProbe::spawn(
+        profile.path(),
+        &[hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG, &older],
+    );
+    assert_eq!(duplicate.line(), "requested");
+    assert_eq!(duplicate.line(), "handled");
+    assert!(duplicate.finish().success());
+    assert_activation_target(profile.path(), &newer, [false, false, true]);
+    drop(guard);
+    let reopened = UiProbe::spawn(
+        profile.path(),
+        &[hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG, &older],
+    );
+    assert_eq!(reopened.line(), "acquired");
+    assert_eq!(reopened.line(), "ready:none");
+    assert_eq!(reopened.line(), "ready:none");
+    assert!(reopened.finish().success());
+    assert_activation_target(profile.path(), &newer, [false, false, true]);
+
+    // A superseded launcher that wins ownership still dispatches a newer,
+    // unacknowledged destination through normal readiness delivery.
+    let latest = hifimule_lifecycle::request_ui_audio_output_activation(profile.path()).unwrap();
+    let reopened = UiProbe::spawn(
+        profile.path(),
+        &[hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG, &older],
+    );
+    assert_eq!(reopened.line(), "acquired");
+    assert_eq!(reopened.line(), "ready:output");
+    assert_eq!(reopened.line(), "ready:none");
+    assert!(reopened.finish().success());
+    assert_activation_target(profile.path(), &latest, [false, true, false]);
+}
+
+#[test]
+fn manual_duplicate_posts_fresh_foreground_activation_instead_of_adopting_stale_target() {
+    let profile = tempfile::tempdir().unwrap();
+    let _guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let stale = hifimule_lifecycle::request_ui_device_profiles_activation(profile.path()).unwrap();
+    let duplicate = UiProbe::spawn(profile.path(), &[]);
+    assert_eq!(duplicate.line(), "requested");
+    let fresh = read_ui_activation_request(profile.path()).unwrap().unwrap();
+    assert_ne!(fresh, stale);
+    assert_activation_target(profile.path(), &fresh, [false, false, false]);
+    acknowledge_ui_activation(profile.path(), &fresh).unwrap();
+    assert_eq!(duplicate.line(), "handled");
+    assert!(duplicate.finish().success());
+}
+
+#[test]
+fn invalid_launch_correlation_never_replaces_the_mailbox() {
+    use hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG as ARG;
+    let profile = tempfile::tempdir().unwrap();
+    let _guard = UiInstanceGuard::acquire(profile.path()).unwrap().unwrap();
+    let request_id =
+        hifimule_lifecycle::request_ui_audio_output_activation(profile.path()).unwrap();
+    for args in [
+        vec![ARG],
+        vec![ARG, "not-a-uuid"],
+        vec![ARG, &request_id, ARG, &request_id],
+    ] {
+        assert_eq!(
+            UiProbe::spawn(profile.path(), &args).finish().code(),
+            Some(3)
+        );
+        assert_activation_target(profile.path(), &request_id, [false, true, false]);
+    }
+    assert!(
+        hifimule_lifecycle::request_ui_activation_for_launch(profile.path(), Some("invalid"))
+            .is_err()
+    );
+    assert_activation_target(profile.path(), &request_id, [false, true, false]);
+}
+
+#[test]
+fn ui_launch_parser_distinguishes_manual_launches_from_valid_correlation() {
+    use hifimule_lifecycle::parse_ui_activation_request_args as parse;
+    let profile = tempfile::tempdir().unwrap();
+    let request_id = request_ui_activation(profile.path()).unwrap();
+    assert_eq!(
+        parse(["--smoke-id", "unrelated"].map(Into::into)).unwrap(),
+        None
+    );
+    assert_eq!(
+        parse(
+            [
+                "--smoke-id",
+                "unrelated",
+                hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG,
+                &request_id
+            ]
+            .map(Into::into)
+        )
+        .unwrap(),
+        Some(request_id)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(
+            parse([
+                hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG.into(),
+                std::ffi::OsString::from_vec(vec![0xff])
+            ])
+            .is_err()
+        );
+    }
+}
+
 #[test]
 fn simultaneous_activation_requests_coalesce_to_a_valid_request() {
     assert_simultaneous_activation_requests(true);

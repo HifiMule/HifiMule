@@ -17,6 +17,7 @@ struct StartupState {
     observed: Option<hifimule_lifecycle::OwnerDescriptor>,
     hydrated: Option<(u64, hifimule_lifecycle::OwnerDescriptor)>,
     route_ready: bool,
+    launch_activation: Option<String>,
 }
 
 #[derive(Clone)]
@@ -160,28 +161,9 @@ fn report_ui_ready(
     // JS calls this only after mounting the route and floating bar.
     state.route_ready = true;
     let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
-    let Some(request) =
-        hifimule_lifecycle::read_ui_activation_detail(&path).map_err(|e| e.to_string())?
-    else {
-        return Ok(None);
-    };
-    if !(request.open_playback_settings || request.open_audio_output || request.open_device_profiles)
-        || hifimule_lifecycle::read_ui_activation_ack(&path)
-            .map_err(|e| e.to_string())?
-            .as_deref()
-            == Some(request.request_id.as_str())
-    {
-        return Ok(None);
-    }
-    hifimule_lifecycle::acknowledge_ui_activation(&path, &request.request_id)
-        .map_err(|e| e.to_string())?;
-    Ok(Some(if request.open_device_profiles {
-        "profiles".to_string()
-    } else if request.open_audio_output {
-        "output".to_string()
-    } else {
-        "settings".to_string()
-    }))
+    hifimule_lifecycle::take_ui_activation_destination(&path, &mut state.launch_activation)
+        .map(|destination| destination.map(str::to_owned))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1070,6 +1052,16 @@ pub fn run() {
         !cfg!(debug_assertions)
     ));
 
+    let launch_request = match hifimule_lifecycle::parse_ui_activation_request_args(
+        std::env::args_os().skip(1),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            ui_log(&format!("Cannot read UI launch activation request: {error}"));
+            return;
+        }
+    };
+
     // Arbitrate before constructing windows or coordinating the daemon. A
     // startup access failure still builds the splash, where the existing
     // lifecycle failure UI can explain it and offer Retry/Close.
@@ -1097,7 +1089,10 @@ pub fn run() {
                     watcher_config = Some((app_data, baseline));
                 }
                 Ok(None) => {
-                    let request_id = match hifimule_lifecycle::request_ui_activation(&app_data) {
+                    let request_id = match hifimule_lifecycle::request_ui_activation_for_launch(
+                        &app_data,
+                        launch_request.as_deref(),
+                    ) {
                         Ok(request_id) => request_id,
                         Err(error) => {
                             ui_log(&format!("Could not request UI activation: {error}"));
@@ -1153,6 +1148,7 @@ pub fn run() {
                 observed: None,
                 hydrated: None,
                 route_ready: false,
+                launch_activation: launch_request,
                 status: status(
                     if startup_error.is_some() {
                         LifecycleState::Failed
@@ -1299,6 +1295,7 @@ mod lifecycle_tests {
             observed: None,
             hydrated: None,
             route_ready: false,
+            launch_activation: None,
             status: status(LifecycleState::Starting, None),
         })))
     }

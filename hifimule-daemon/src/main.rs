@@ -1481,9 +1481,13 @@ fn run_candidate(
                 } else {
                     hifimule_lifecycle::request_ui_activation(&shutdown_app_data)
                 };
-                if let Err(error) = activation {
-                    eprintln!("Failed to request UI activation: {error}");
-                }
+                let activation_request = match activation {
+                    Ok(request_id) => Some(request_id),
+                    Err(error) => {
+                        eprintln!("Failed to request UI activation: {error}");
+                        None
+                    }
+                };
 
                 if cfg!(debug_assertions) {
                     // A UI started directly from target/debug may own the
@@ -1530,7 +1534,14 @@ fn run_candidate(
                             "hifimule-ui"
                         });
                         if ui_path.exists() {
-                            match std::process::Command::new(ui_path).spawn() {
+                            let mut command = std::process::Command::new(ui_path);
+                            if let Some(request_id) = &activation_request {
+                                command.args([
+                                    hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG,
+                                    request_id,
+                                ]);
+                            }
+                            match command.spawn() {
                                 Ok(child) => ui_launches.push(child),
                                 Err(error) => eprintln!("Failed to reopen debug UI: {error}"),
                             }
@@ -1546,23 +1557,33 @@ fn run_candidate(
                             .unwrap_or_else(|| std::path::PathBuf::from("../hifimule-ui"));
 
                         #[cfg(windows)]
-                        let status = std::process::Command::new("cmd")
-                            .args(["/C", "npm", "run", "tauri", "dev"])
-                            .current_dir(ui_dir)
-                            .spawn();
+                        let mut command = {
+                            let mut command = std::process::Command::new("cmd");
+                            command.args(["/C", "npm"]);
+                            command
+                        };
                         #[cfg(not(windows))]
-                        let status = std::process::Command::new("npm")
-                            .args(["run", "tauri", "dev"])
-                            .current_dir(ui_dir)
-                            .spawn();
+                        let mut command = std::process::Command::new("npm");
+                        command.args(["run", "tauri", "--", "dev"]);
+                        if let Some(request_id) = &activation_request {
+                            // npm consumes its first --; Tauri consumes one for
+                            // runner arguments and the next for application args.
+                            command.args([
+                                "--",
+                                "--",
+                                hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG,
+                                request_id,
+                            ]);
+                        }
+                        let status = command.current_dir(ui_dir).spawn();
                         match status {
                             Ok(child) => dev_ui_runner = Some(child),
                             Err(error) => eprintln!("Failed to launch UI dev runner: {error}"),
                         }
                     }
                 } else {
-                    // A short-lived loser posts another mailbox request. If the
-                    // old UI exits during this click, this process opens a new UI.
+                    // Preserve the posted destination when a duplicate hands
+                    // off to the old UI, or becomes owner after it exits.
                     let mut ui_path = std::env::current_exe().unwrap_or_default();
                     ui_path.set_file_name(if cfg!(windows) {
                         "hifimule-ui.exe"
@@ -1570,7 +1591,14 @@ fn run_candidate(
                         "hifimule-ui"
                     });
                     if ui_path.exists() {
-                        match std::process::Command::new(ui_path).spawn() {
+                        let mut command = std::process::Command::new(ui_path);
+                        if let Some(request_id) = &activation_request {
+                            command.args([
+                                hifimule_lifecycle::UI_ACTIVATION_REQUEST_ARG,
+                                request_id,
+                            ]);
+                        }
+                        match command.spawn() {
                             Ok(child) => ui_launches.push(child),
                             Err(error) => eprintln!("Failed to launch UI: {error}"),
                         }
