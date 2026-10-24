@@ -210,6 +210,10 @@ Contributions are welcome! Please open an issue to discuss changes before submit
 As I'm mostly using Windows and Mac OS for the development of HifiMule, I'm looking for feedback from Linux users.
 I'm also looking for feedback from owners of various devices, as my collection is quite limited.
 
+Before reporting a bug, see [how to collect logs and remove personal information](docs/reporting-issues.md) to help us diagnose the problem.
+
+Have a device profile that works well with your player? [Share your profile](docs/sharing-device-profiles.md) in **🙌 Show and Tell** to help other users and contribute a candidate for a future built-in system profile.
+
 ## Acknowledgements
 
 - [Jellyfin](https://jellyfin.org/) — Free software media server
