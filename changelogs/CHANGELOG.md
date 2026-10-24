@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.20.0 - 2026-10-24
+
+You can now **encode sync audio on the computer** instead of asking the server to convert it. Choose the encoding location separately for each server, then let your device profile decide which originals to keep and which files to convert. Local encoding also lets you convert Audiobookshelf books and podcast episodes for players that need another format. Downloads, conversion, and device writes overlap, with encoding concurrency and staging sized automatically for your computer.
+
+The new **Device profile manager** lets you create, clone, and edit profiles without hand-editing configuration files or connecting a device. You can choose supported formats, conversion quality, audio limits, default media folders, and folder artwork. New **M4B presets** cover compatible modern DAPs, Rockbox players, PocketBook readers, and Android / Voice, while Garmin gains explicit M4B support and separate audiobook and podcast folder defaults. Enable **folder artwork** to give music, book, and podcast folders covers or portraits, with optional desktop folder icons on supported systems. Rockbox presets turn artwork on by default for new devices.
+
+You can audit a local audio library with the bundled **mediacheck** tool, which checks complete files and reports healthy, recoverable, and bad sources without modifying the originals. AC3 audio is now supported for playback, local conversion, and auditing. Device setup now lets you choose whether to reconcile externally managed files before each sync, and the basket separates expected file size from its safety reserve. Music uses disc-and-track filenames, with stable suffixes keeping distinct tracks separate when names collide, while inline validation helps you enter valid numeric settings. Jellyfin playlist entry order are now preserved.
+
 ## v0.19.0 - 2026-10-17
 
 You can now **recognize music already on your device** when configuring a populated music folder. An optional scan matches compatible files against your active server and adds them to your basket without copying the audio again, grouping complete artists and albums where possible. Imported matches become managed music and follow the usual removal rules. Normal sync also recognizes compatible selected music added later, while **Force Sync** replaces managed selected copies.
