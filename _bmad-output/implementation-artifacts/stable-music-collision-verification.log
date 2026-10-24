@@ -1,0 +1,221 @@
+Command: rtk node scripts/build-daemon.mjs test -p hifimule-daemon --bin hifimule-daemon sync:: -- --test-threads=1
+Captured tool output after compilation began (trailing whitespace trimmed):
+warning: `hifimule-daemon` (bin "hifimule-daemon" test) generated 11 warnings (run `cargo fix --bin "hifimule-daemon" -p hifimule-daemon --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 52.84s
+     Running unittests src\main.rs (target\debug\deps\hifimule_daemon-b0ee4d54a42cab5c.exe)
+
+running 192 tests
+test sync::artwork::tests::artwork_physical_role_boundaries_exclude_every_managed_root_and_alias ... ok
+test sync::artwork::tests::artwork_targets_include_books_and_podcasts_without_role_roots ... ok
+test sync::artwork::tests::audiobookshelf_artwork_uses_shared_publication_reuse_and_cleanup_for_each_folder_type ... ok
+test sync::artwork::tests::cancellation_after_publication_checkpoints_ownership_and_disk_full_is_nonfatal ... ok
+test sync::artwork::tests::cleanup_keeps_pending_foreign_host_native_evidence_and_its_jpeg ... ok
+test sync::artwork::tests::cleanup_retries_transient_stat_and_read_errors_without_losing_ownership ... ok
+test sync::artwork::tests::current_album_identity_replaces_indexed_metadata_at_same_path ... ok
+test sync::artwork::tests::insensitive_object_aliases_reuse_stable_record_when_original_alias_track_disappears ... ok
+test sync::artwork::tests::jpeg_bounds_no_upscale_alpha_and_invalid_input ... ok
+test sync::artwork::tests::retained_tracks_outside_new_root_protect_artwork_until_final_descendant_is_removed ... ok
+test sync::artwork::tests::source_election_ignores_missing_cover_and_failed_losing_candidate ... ok
+test sync::artwork::tests::touched_folders_require_artist_strictly_below_physical_music_root ... ok
+test sync::artwork::tests::unchanged_sync_skips_backfill_then_updates_reuse_images_and_cleanup_owned_outputs ... ok
+test sync::artwork::tests::unmanaged_jpeg_and_missing_tagged_provider_are_preserved ... ok
+test sync::protection::tests::cancellation_preempts_an_active_protection_wait ... ok
+test sync::protection::tests::delivery_risk_without_a_shared_source_does_not_throttle_unrelated_sync ... ok
+test sync::protection::tests::depleted_playback_without_a_shared_source_uses_the_global_minimum_delay ... ok
+test sync::protection::tests::dropping_the_last_publisher_closes_the_observer_immediately ... ok
+test sync::protection::tests::exact_risk_threshold_targets_only_shared_source ... ok
+test sync::protection::tests::ineffective_never_escalates_delay ... ok
+test sync::protection::tests::publisher_replacement_and_close_cannot_revive_old_generation ... ok
+test sync::protection::tests::recovery_pending_keeps_the_same_bounded_delay ... ok
+test sync::protection::tests::stale_unknown_and_healthy_are_exactly_normal ... ok
+test sync::protection::tests::unattributable_risk_is_weakest_global_delay ... ok
+test sync::source_audio_planning_tests::breakdown_saturates_payload_and_reservation_without_inventing_extra_bytes ... ok
+test sync::source_audio_planning_tests::converted_breakdown_keeps_payload_separate_from_one_percent_and_fixed_reserve ... ok
+test sync::source_audio_planning_tests::distinct_music_metadata_matches_reserve_each_new_output ... ok
+test sync::source_audio_planning_tests::known_resolution_bounds_prevent_direct_copy_and_scanned_reuse ... ok
+test sync::source_audio_planning_tests::lossless_does_not_assume_legacy_server_enforces_resolution_limits ... ok
+test sync::source_audio_planning_tests::lossless_uses_known_pcm_resolution_and_direct_copies_keep_original_bytes ... ok
+test sync::source_audio_planning_tests::metadata_rekeys_respect_server_quality_and_profile_rewrites ... ok
+test sync::source_audio_planning_tests::mp3_defaults_and_low_rate_normalization_match_the_requested_plan ... ok
+test sync::source_audio_planning_tests::new_music_ids_remain_audio_additions_when_matching_old_files_are_missing ... ok
+test sync::source_audio_planning_tests::one_bit_source_precision_is_not_a_pcm_output_depth ... ok
+test sync::source_audio_planning_tests::resident_measurements_are_used_only_when_delta_keeps_the_file ... ok
+test sync::source_audio_planning_tests::selection_identity_includes_server_and_deduplicates_only_same_owner ... ok
+test sync::source_audio_planning_tests::smaller_goal_reservations_replace_oversized_retained_outputs ... ok
+test sync::source_audio_planning_tests::unknown_duration_uses_original_evidence_and_is_idempotent_after_publication ... ok
+test sync::tests::album_artist_groups_provider_music_and_survives_plan_serialization ... ok
+test sync::tests::album_artist_paths_handle_compilations_blanks_sanitization_and_media_roles ... ok
+test sync::tests::ambiguous_transcode_allocates_using_validated_extension_without_reusing_another_identity ... ok
+test sync::tests::artwork_runs_before_next_audio_write_and_final_progress_including_full_sync ... ok
+test sync::tests::audiobook_role_survives_delta_planning ... ok
+test sync::tests::benchmark_large_sync_retention ... ignored, external process memory benchmark
+test sync::tests::blocked_media_preview_defaults_for_legacy_delta ... ok
+test sync::tests::collective_unknown_staging_sizes_fail_promptly_and_release_capacity ... ok
+test sync::tests::committed_shutdown_cancels_active_and_late_operations ... ok
+test sync::tests::committed_shutdown_drains_mutation_and_pipeline_workers ... ok
+test sync::tests::concurrent_underestimated_producers_do_not_deadlock ... ok
+test sync::tests::configured_pipeline_caps_include_active_writer_and_use_buffer ... ok
+test sync::tests::distinct_music_collision_preserves_every_identity_and_repeated_playlist_entry ... ok
+test sync::tests::encoded_music_collisions_transfer_each_identity_and_repeat_without_requests ... ok
+test sync::tests::failed_copy_preserves_all_scheduled_deletions ... ok
+test sync::tests::failed_untracked_replacement_preserves_old_file_and_manifest ... ok
+test sync::tests::id_change_preserves_written_size_instead_of_source_estimate ... ok
+test sync::tests::inline_artwork_excludes_deleted_competing_candidates ... ok
+test sync::tests::legacy_music_assignment_survives_adding_server_provenance ... ok
+test sync::tests::local_encoding_automatic_sync_uses_original_download_and_commits_verified_mp3 ... ok
+test sync::tests::local_encoding_mime_admission_is_independent_of_device_format_mapping ... ok
+test sync::tests::local_encoding_mime_and_native_failures_preserve_identity_policy_and_cleanup ...
+ok
+test sync::tests::local_encoding_mixed_servers_preserves_each_captured_route ... ok
+test sync::tests::local_encoding_original_failures_preserve_manual_and_autofill_policy ... ok
+test sync::tests::local_encoding_original_mime_variants_commit_verified_mp3_in_both_modes ... [ac3 @ 0000025DC59367C0] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC5260E40] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC525ECC0] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC5C67540] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC50E4180] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC59357C0] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC5C4EA00] Estimating duration from bitrate, this may be inaccurate
+[ac3 @ 0000025DC35C8240] Estimating duration from bitrate, this may be inaccurate
+[vorbis @ 0000025DC5C87500] Could not update timestamps for discarded samples.
+[vorbis @ 0000025DC5C88780] Could not update timestamps for discarded samples.
+ok
+test sync::tests::local_encoding_pipeline_cancels_active_workers_without_committing ... ok
+test sync::tests::local_encoding_pipeline_overlaps_download_workers_and_writer ... ok
+test sync::tests::local_encoding_recovered_tracks_write_once_with_warnings_in_both_modes ... [mp3 @ 0000025DC35C7880] Could not update timestamps for skipped samples.
+[mp3 @ 0000025DC35C7880] big_values too big
+[mp3 @ 0000025DC35C7880] Error while decoding MPEG audio frame.
+[mp3 @ 0000025DC35C7880] Could not update timestamps for discarded samples.
+[mp3 @ 0000025DC5C654C0] Could not update timestamps for skipped samples.
+[mp3 @ 0000025DC5C654C0] big_values too big
+[mp3 @ 0000025DC5C654C0] Error while decoding MPEG audio frame.
+[mp3 @ 0000025DC5C654C0] Could not update timestamps for discarded samples.
+ok
+test sync::tests::local_encoding_throughput_benchmark ... ignored, explicit CPU throughput benchmark; run local_encoding_throughput_benchmark -- --ignored --nocapture
+test sync::tests::local_encoding_unknown_lossless_properties_share_budget_without_fabricated_maxima ... ok
+test sync::tests::long_sync_warning_evidence_is_paged_while_polling_sample_stays_bounded ... ok
+test sync::tests::m4b_direct_copy_retains_custom_audio_limits_without_format_lists ... ok
+test sync::tests::m4b_requires_explicit_extension_and_verified_codec_even_with_mp4_mime ... ok
+test sync::tests::m4b_scanned_conversion_only_profile_keeps_encoder_ceiling ... ok
+test sync::tests::m4b_shipped_presets_keep_direct_and_conversion_bitrate_policies_separate ... ok
+test sync::tests::manifest_migration_regression_delta_preserves_profile_evidence ... ok
+test sync::tests::manifest_migration_regression_partial_sync_keeps_profile_replacement ... ok
+test sync::tests::manifest_migration_regression_playlist_preserves_equivalent_passthrough ... ok
+test sync::tests::media_folder_change_only_relocates_its_role ... ok
+test sync::tests::multi_disc_same_title_writes_distinct_files_and_playlist_paths ... ok
+test sync::tests::music_collision_allocation_handles_case_truncation_hash_conflicts_and_server_identity ... ok
+test sync::tests::music_collision_assignments_survive_repeat_membership_force_and_repair ... ok
+test sync::tests::music_collision_checkpoint_failure_preserves_committed_owner_on_retry ... ok
+test sync::tests::music_destination_policy_preserves_other_media_and_inspection_errors ... ok
+test sync::tests::music_metadata_match_requires_new_audio_instead_of_id_reassignment ... ok
+test sync::tests::music_path_keeps_artist_album_and_track_number ... ok
+test sync::tests::new_album_artist_keeps_existing_performer_directory ... ok
+test sync::tests::pipeline_write_gate_tolerates_slow_start_and_early_release ... ok
+test sync::tests::podcast_path_uses_show_and_publication_date ... ok
+test sync::tests::podcast_path_without_date_is_deterministic ... ok
+test sync::tests::provider_sync_staging_path_component_bounds_long_values ... ok
+test sync::tests::reconciled_music_reserves_its_adopted_path_before_collision_downloads ... ok
+test sync::tests::refused_force_id_cleanup_keeps_both_managed_files_tracked ... ok
+test sync::tests::regression_finalization_preserves_dirty_evidence_and_terminal_outcomes ... ok
+test sync::tests::regression_pending_fence_stays_non_cancelling_and_retry_is_consumed_once ... ok
+test sync::tests::regression_sync_target_survives_selection_change_during_begin_job ...
+ok
+test sync::tests::reopening_after_failed_fence_restores_admission ... ok
+test sync::tests::resolved_provenance_handles_retained_transitions_adds_and_id_changes ... ok
+test sync::tests::retained_origin_updates_are_read_only_until_execution_and_preserve_sizes ... ok
+test sync::tests::reviewed_playlist_early_warning_cannot_hide_journal_storage_failure ... ok
+test sync::tests::reviewed_warning_append_handle_closes_at_execution_end_and_shutdown_removes_evidence ... ok
+test sync::tests::reviewed_zero_warning_journal_does_not_create_a_spool_file ... ok
+test sync::tests::same_path_replacement_reclaims_obsolete_file_before_next_copy ... ok
+test sync::tests::scheduled_deletes_follow_each_successful_copy_and_drain_leftovers ... ok
+test sync::tests::shutdown_cancellation_is_serialized_with_final_commit_boundary ... ok
+test sync::tests::shutdown_deadline_publishes_waiting_without_abandoning_work ... ok
+test sync::tests::shutdown_fence_closes_pipeline_admission_and_is_idempotent ... ok
+test sync::tests::staged_byte_permit_expands_to_actual_staged_size ... ok
+test sync::tests::staging_growth_waits_for_blocked_writer_capacity_and_can_cancel ... ok
+test sync::tests::sync_checkpoint_large_provenance_flip_preserves_tracks_and_batches_updates ... ok
+test sync::tests::sync_direct_media_compatibility_uses_verified_codec ... ok
+test sync::tests::sync_tags_and_artwork_pipeline_uses_current_metadata_and_final_bytes_and_rejects_bad_audio ... ok
+test sync::tests::sync_tags_concurrent_growth_and_cancellation_release_all_reservations ... ok
+test sync::tests::sync_tags_reservation_cancellation_and_growth_release_capacity ... ok
+test sync::tests::synced_origin_survives_manifest_roundtrip_and_legacy_defaults_to_selected ... ok
+test sync::tests::targeted_admission_never_publishes_without_identity_or_cancellation ... ok
+test sync::tests::test_audio_compatibility_accepts_mp4_container_when_profile_supports_common_mp4_audio ... ok
+test sync::tests::test_calculate_delta_cleans_up_tracks_outside_current_music_folder ... ok
+test sync::tests::test_calculate_delta_does_not_convert_relocation_to_id_change ... ok
+test sync::tests::test_calculate_delta_does_not_infer_id_change_when_provider_album_differs ... ok
+test sync::tests::test_calculate_delta_does_not_infer_id_change_when_track_number_differs ... ok
+test sync::tests::test_calculate_delta_id_change_no_original_name_stays_none ... ok
+test sync::tests::test_calculate_delta_id_change_preserves_original_name ... ok
+test sync::tests::test_calculate_delta_propagates_server_id ... ok
+test sync::tests::test_change_reason_summary_counts_replacement_pair_once ... ok
+test sync::tests::test_construct_desired_file_path_basic ... ok
+test sync::tests::test_construct_desired_file_path_disc_number_matrix ... ok
+test sync::tests::test_construct_desired_file_path_extension_override ... ok
+test sync::tests::test_construct_desired_file_path_long_album_artist_truncated ... ok
+test sync::tests::test_construct_desired_file_path_long_filename_extension_preserved ... ok
+test sync::tests::test_construct_desired_file_path_missing_fields_uses_defaults ... ok
+test sync::tests::test_construct_desired_file_path_short_name_no_original_name ... ok
+test sync::tests::test_delete_validation_rejects_unmanaged_relative_path ... ok
+test sync::tests::test_delta_complete_replacement ... ok
+test sync::tests::test_delta_empty_manifest ... ok
+test sync::tests::test_delta_full_overlap ... ok
+test sync::tests::test_delta_id_change_case_insensitive ... ok
+test sync::tests::test_delta_missing_local_bitrate_does_not_force_rewrite ... ok
+test sync::tests::test_delta_partial_overlap ... ok
+test sync::tests::test_delta_profile_dirty_rewrites_matching_tracks ... ok
+test sync::tests::test_destructive_cleanup_count_includes_playlist_relocation ... ok
+test sync::tests::test_execute_provider_sync_autofill_backpressure_does_not_deadlock ... ok
+test sync::tests::test_execute_provider_sync_cancellation_preserves_collision_assignments_on_resume ... ok
+test sync::tests::test_execute_provider_sync_cleans_staging_directory_after_cancellation ... ok
+test sync::tests::test_execute_provider_sync_cleans_staging_files_after_success ... ok
+test sync::tests::test_execute_provider_sync_counts_already_absent_delete_as_completed ... ok
+test sync::tests::test_execute_provider_sync_downloads_jellyfin_track ... ok
+test sync::tests::test_execute_provider_sync_preserves_compatible_direct_suffix ... ok
+test sync::tests::test_execute_provider_sync_rejects_unverified_missing_write ... ok
+test sync::tests::test_execute_provider_sync_removes_manifest_entry_when_managed_file_missing ... ok
+test sync::tests::test_execute_provider_sync_retries_staged_path_write ... ok
+test sync::tests::test_execute_provider_sync_retries_transient_http_status_once ... ok
+test sync::tests::test_execute_provider_sync_skips_incompatible_direct_response ... ok
+test sync::tests::test_execute_provider_sync_skips_unconfirmed_transcode_output ... ok
+test sync::tests::test_execute_provider_sync_stages_next_item_while_first_write_blocked ... ok
+test sync::tests::test_execute_provider_sync_transcodes_subsonic_flac_to_mp3_with_kbps ... ok
+test sync::tests::test_explicit_device_profile_takes_precedence_over_mtp_preferred_container ... ok
+test sync::tests::test_format_id_change_diagnostics_includes_sample_and_omitted_count ... ok
+test sync::tests::test_generate_m3u_basic ... ok
+test sync::tests::test_generate_m3u_cleanup ... ok
+test sync::tests::test_generate_m3u_does_not_delete_unowned_same_name_legacy_playlist ... ok
+test sync::tests::test_generate_m3u_missing_track_omitted ... ok
+test sync::tests::test_generate_m3u_no_rewrite_if_unchanged ... ok
+test sync::tests::test_generate_m3u_preserves_duplicates_and_rewrites_order_only_changes ... ok
+test sync::tests::test_generate_m3u_rejects_invalid_stored_playlist_path_before_creating_dirs ... ok
+test sync::tests::test_generate_m3u_removes_manifest_owned_legacy_playlist_from_music_folder ... ok
+test sync::tests::test_generate_m3u_rewrites_when_manifest_unchanged_but_file_missing ... ok
+test sync::tests::test_generate_m3u_rewrites_when_profile_dirty_changes_extension ... ok
+test sync::tests::test_generate_m3u_uses_custom_playlist_folder_and_relative_track_paths ... ok
+test sync::tests::test_missing_delete_error_classification_is_narrow ... ok
+test sync::tests::test_modern_dap_direct_formats_are_detected_from_expanded_metadata ... ok
+test sync::tests::test_msc_delete_validation_allows_manifest_owned_relocation_path ... ok
+test sync::tests::test_msc_delete_validation_allows_missing_managed_directory ... ok
+test sync::tests::test_mtp_preferred_container_still_applies_without_device_profile ... ok
+test sync::tests::test_pipeline_cancel_resets_for_next_pipeline ... ok
+test sync::tests::test_relative_device_path_from_sibling_playlist_folder ... ok
+test sync::tests::test_relative_device_path_preserves_case_distinct_folders ... ok
+test sync::tests::test_sanitize_path_component_replaces_invalid_chars ... ok
+test sync::tests::test_sanitize_path_component_strips_trailing_dots ... ok
+test sync::tests::test_sanitize_path_component_trims_whitespace ... ok
+test sync::tests::test_sync_operation_manager_lifecycle ... ok
+test sync::tests::test_synced_item_original_name_serializes_as_camel_case ... ok
+test sync::tests::test_truncate_component_300_char_name ... ok
+test sync::tests::test_truncate_component_all_dots_returns_fallback ... ok
+test sync::tests::test_truncate_component_all_spaces_returns_fallback ... ok
+test sync::tests::test_truncate_component_short_name_unchanged ... ok
+test sync::tests::test_truncate_component_strips_trailing_dots_without_truncation ... ok
+test sync::tests::test_truncate_component_trailing_dots_stripped ... ok
+test sync::tests::test_truncate_component_trailing_spaces_stripped ... ok
+test sync::tests::test_truncate_filename_pathological_does_not_drop_extension_entirely ... ok
+test sync::tests::test_truncate_filename_pathological_extension_preserves_dot ... ok
+test sync::tests::transfer_timing_handles_zero_duration ... ok
+test sync::tests::transfer_timing_keeps_sub_millisecond_speed ... ok
+test sync::tests::transfer_timing_provider_stage_totals_are_weighted_zero_safe_and_separate ... ok
+
+test result: ok. 190 passed; 0 failed; 2 ignored; 0 measured; 1507 filtered out; finished in 26.18s

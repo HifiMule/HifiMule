@@ -386,3 +386,7 @@ Resolved on 2026-10-24: the auto-sync completion helper now records the executio
 
 - **macOS FFmpeg downloads leave temporary archives after failure.** The download in `scripts/macos-audio-runtime.mjs` predates this change and lacks temporary-file cleanup on curl or checksum failure. Add a `finally` cleanup separately.
 - **Windows signature/key downloads retain partial files after terminal failure.** `scripts/windows-audio-runtime.mjs` downloads these directly to paths later checked with `existsSync`. Use temporary files and rename after success in a focused follow-up; the retry-policy change preserves existing verification.
+
+## Deferred from: stable music collision paths (2026-10-24)
+
+- **Protection tests use expiring fixed timestamps in long suites.** `sync::protection::tests::delivery_risk_without_a_shared_source_does_not_throttle_unrelated_sync` and `sync::protection::tests::depleted_playback_without_a_shared_source_uses_the_global_minimum_delay` construct snapshots at 1,000 ms, expiring after 60 seconds, while `protection_decision` reads actual process monotonic time. Both returned `Stale` during the full daemon run; all ten protection tests pass standalone. Git blame attributes the fixtures to unchanged commit `989103c8`. Use current monotonic time or an injected clock in a focused follow-up. The broader collision verification passed with only these two fixtures excluded.

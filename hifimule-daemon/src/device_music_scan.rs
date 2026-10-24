@@ -1050,7 +1050,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn disc_filenames_preserve_tag_based_scan_and_read_only_reconciliation() {
-        for first_name in ["01 - Track.mp3", "1-01 Track.mp3"] {
+        for first_name in ["01 - Track.mp3", "1-01 Track.mp3", "1-01 Track [a81f209c].mp3"] {
             let (root, io, file) = fixture().await;
             let first_path = format!("Music/{first_name}");
             tokio::fs::rename(root.path().join(&file.path), root.path().join(&first_path)).await.unwrap();
@@ -1085,6 +1085,34 @@ pub(crate) mod tests {
             }
             assert!(manifest.synced_items.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn hash_filenames_do_not_disambiguate_equal_tags_or_reassign_owned_audio() {
+        let (root, io, file) = fixture().await;
+        let path = "Music/1-00 Track [a81f209c].mp3";
+        tokio::fs::rename(root.path().join(&file.path), root.path().join(path)).await.unwrap();
+        let before = tokio::fs::read(root.path().join(path)).await.unwrap();
+        let mut manifest = crate::device::DeviceManifest {
+            reconcile_before_sync: true, managed_paths: vec!["Music".into()], ..Default::default()
+        };
+        let mut ambiguous = pending_delta();
+        let mut second = ambiguous.adds[0].clone(); second.jellyfin_id = "track-2".into();
+        ambiguous.adds.push(second);
+        let mut summary = ReconciliationSummary::default();
+        reconcile_enabled(&mut ambiguous, &manifest, &io, Some(&profile()), None, &mut summary).await.unwrap();
+        assert_eq!(ambiguous.adds.len(), 2);
+        assert!(ambiguous.id_changes.is_empty());
+        assert_eq!(summary.ambiguous, 1);
+        let owned_file = FileEntry { path: path.into(), name: "1-00 Track [a81f209c].mp3".into(), size: before.len() as u64 };
+        manifest.synced_items.push(synced(&song(), &owned_file, "server-a"));
+        let mut other_source = pending_delta();
+        other_source.adds[0].server_id = Some("server-b".into());
+        other_source.adds[0].jellyfin_id = "other-track".into();
+        reconcile(&mut other_source, &manifest, &io, Some(&profile()), None).await.unwrap();
+        assert_eq!(other_source.adds.len(), 1);
+        assert!(!other_source.id_changes.iter().any(|change| change.new_jellyfin_id == "other-track"));
+        assert_eq!(tokio::fs::read(root.path().join(path)).await.unwrap(), before);
     }
 
     #[tokio::test]

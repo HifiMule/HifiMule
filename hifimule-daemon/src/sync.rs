@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub(crate) mod protection;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock, Semaphore, mpsc};
 
 use crate::device::{DeviceManifest, SyncedItem};
 use crate::providers::{MediaProvider, TranscodeProfile};
@@ -444,7 +444,9 @@ fn compatible_optional_eq<T: PartialEq>(left: &Option<T>, right: &Option<T>) -> 
 }
 
 fn id_change_candidate_matches(add: &SyncAddItem, old: &SyncedItem) -> bool {
-    add.media_role == old.media_role
+    // Music tags cannot distinguish movements or other distinct recordings.
+    add.media_role != crate::device::MediaRole::Music
+        && add.media_role == old.media_role
         && compatible_optional_eq(&add.server_id, &old.server_id)
         && bitrate_stale_reason(add.original_bitrate, old.original_bitrate).is_none()
         && compatible_optional_eq(&add.provider_album_id, &old.provider_album_id)
@@ -1301,7 +1303,7 @@ pub const WINDOWS_MAX_PATH: usize = 250;
 ///
 /// Contains the resolved filesystem path and an optional mapping of the
 /// original Jellyfin track name if truncation was applied.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PathConstructionResult {
     /// The final path where the file will be written (truncated as necessary).
     pub path: std::path::PathBuf,
@@ -2877,8 +2879,86 @@ impl Drop for StagedBytePermit {
     }
 }
 
-fn can_coalesce_selected_roles(first: crate::device::MediaRole, next: crate::device::MediaRole) -> bool {
-    first == crate::device::MediaRole::Music && next == crate::device::MediaRole::Music
+type MusicIdentity = (Option<String>, String);
+
+/// One allocation authority for all providers, including response-only formats.
+/// Assignments live in the existing manifest local_path; no hash is persisted separately.
+#[derive(Default)]
+struct MusicDestinations {
+    owners: HashMap<String, MusicIdentity>,
+    assignments: HashMap<MusicIdentity, String>,
+}
+
+impl MusicDestinations {
+    fn key(path: &str) -> String {
+        normalized_device_folder(path).to_lowercase()
+    }
+
+    fn reserve(&mut self, owner: MusicIdentity, path: String) {
+        let key = Self::key(&path);
+        if self.owners.get(&key).is_none_or(|existing| existing == &owner) {
+            self.owners.insert(key, owner.clone());
+            self.assignments.insert(owner, path);
+        }
+    }
+
+    fn allocate(&mut self, owner: MusicIdentity, original_name: &str, mut candidate: PathConstructionResult,
+        root: &Path, device: &Path) -> Result<PathConstructionResult> {
+        let extension = candidate.path.extension().and_then(|ext| ext.to_str())
+            .and_then(clean_audio_extension).context("Music output has no validated extension")?;
+        let assigned = self.assignments.get(&owner).map(|path| (owner.clone(), path.clone()))
+            .or_else(|| {
+                // The existing source-admission guard permits a unique legacy
+                // unknown owner to gain provenance for the same provider item ID.
+                if owner.0.is_none() { return None; }
+                let legacy = (None, owner.1.clone());
+                self.assignments.get(&legacy).map(|path| (legacy, path.clone()))
+            });
+        if let Some((previous_owner, assigned)) = assigned {
+            let path = device.join(&assigned);
+            if validate_device_relative_path(&assigned).is_ok()
+                && path.starts_with(root)
+                && path.extension().and_then(|ext| ext.to_str()).and_then(clean_audio_extension).as_deref() == Some(extension.as_str()) {
+                self.owners.insert(Self::key(&assigned), owner.clone());
+                self.assignments.remove(&previous_owner);
+                self.assignments.insert(owner, assigned);
+                candidate.path = path;
+                return Ok(candidate);
+            }
+        }
+        let base = candidate.path.file_stem().and_then(|name| name.to_str())
+            .context("Invalid music filename")?.to_string();
+        let parent = candidate.path.parent().context("Music filename has no parent")?.to_path_buf();
+        let identity = serde_json::to_vec(&owner)?;
+        let hash = blake3::hash(&identity).to_hex().to_string();
+        for attempt in 0..1024 {
+            if attempt > 0 {
+                let suffix = if attempt <= 15 {
+                    format!(" [{}]", &hash[..(8 + (attempt - 1) * 4).min(64)])
+                } else {
+                    // Even a full hash or a naturally hash-looking title may be occupied.
+                    let extra = blake3::hash(&serde_json::to_vec(&(&owner, attempt))?).to_hex().to_string();
+                    format!(" [{}]", &extra[..16])
+                };
+                let parent_len = parent.to_string_lossy().chars().count();
+                let max_len = MAX_PATH_COMPONENT_LEN.min(WINDOWS_MAX_PATH.saturating_sub(parent_len + 1));
+                let reserved = suffix.chars().count() + extension.chars().count() + 1;
+                anyhow::ensure!(max_len > reserved, "Cannot allocate a bounded collision filename");
+                let truncated: String = base.chars().take(max_len - reserved).collect();
+                if truncated != base { candidate.original_name = Some(original_name.to_string()); }
+                candidate.path = parent.join(format!("{truncated}{suffix}.{extension}"));
+            }
+            let relative = candidate.path.strip_prefix(device).context("Music output escapes device")?
+                .to_string_lossy().replace('\\', "/");
+            let key = Self::key(&relative);
+            if self.owners.get(&key).is_none_or(|existing| existing == &owner) {
+                self.owners.insert(key, owner.clone());
+                self.assignments.insert(owner, relative);
+                return Ok(candidate);
+            }
+        }
+        anyhow::bail!("Cannot allocate a unique music destination")
+    }
 }
 
 async fn delete_scheduled_managed_item(
@@ -2955,18 +3035,6 @@ struct StagedTrack {
     _byte_permit: StagedBytePermit,
 }
 
-/// Both preparation decisions and completed audio are serialized through the
-/// writer, which alone owns the changing destination/identity indexes.
-enum PreparedTrack {
-    ReuseCandidate {
-        add_item: SyncAddItem,
-        rel_path: String,
-        add_index: usize,
-        reply: oneshot::Sender<bool>,
-    },
-    Staged(StagedTrack),
-}
-
 enum EncodingOutcome {
     Complete,
     Warning(String),
@@ -2978,7 +3046,7 @@ async fn encode_and_enqueue(
     profile: TranscodeProfile,
     max_output: u64,
     session: Arc<crate::transcoding::local::Session>,
-    tx: mpsc::Sender<PreparedTrack>,
+    tx: mpsc::Sender<StagedTrack>,
     manager: Arc<SyncOperationManager>,
     operation: String,
 ) -> EncodingOutcome {
@@ -3058,7 +3126,7 @@ async fn encode_and_enqueue(
             format!("'{}': local encoding recovered from {} damaged audio section(s). Audible defects may remain.",
                 track.add_item.name, recovery.invalid_events)
         });
-        slot.send(PreparedTrack::Staged(track));
+        slot.send(track);
         if let Some(warning) = warning {
             return EncodingOutcome::Warning(warning);
         }
@@ -3068,53 +3136,13 @@ async fn encode_and_enqueue(
     EncodingOutcome::Complete
 }
 
-impl PreparedTrack {
+impl StagedTrack {
     fn details(&self) -> (&SyncAddItem, &String, usize) {
-        match self {
-            Self::ReuseCandidate { add_item, rel_path, add_index, .. } => (add_item, rel_path, *add_index),
-            Self::Staged(staged) => (&staged.add_item, &staged.rel_path, staged.add_index),
-        }
+        (&self.add_item, &self.rel_path, self.add_index)
     }
 
     async fn discard(&self) {
-        if let Self::Staged(staged) = self {
-            let _ = tokio::fs::remove_file(&staged.staged_path).await;
-        }
-    }
-
-    fn answer(self, handled: bool) {
-        if let Self::ReuseCandidate { reply, .. } = self { let _ = reply.send(handled); }
-    }
-}
-
-async fn request_music_reuse(
-    queue: &mpsc::Sender<PreparedTrack>,
-    destination_hints: &std::sync::RwLock<HashMap<String, String>>,
-    item: &SyncAddItem,
-    path: &Path,
-    device_path: &Path,
-    add_index: usize,
-    operations: &Arc<SyncOperationManager>,
-    operation_id: &str,
-) -> Option<bool> {
-    let rel_path = path.strip_prefix(device_path).unwrap_or(path).to_string_lossy().replace('\\', "/");
-    // Hints only avoid pointless roundtrips for unrelated tracks, preserving
-    // concurrent source preparation and device writing. The writer remains the
-    // authority even when a stale hint survives a move or failed transfer.
-    let possible_alias = destination_hints.read().unwrap_or_else(|p| p.into_inner())
-        .get(&normalized_device_folder(&rel_path)).is_some_and(|owner| owner != &item.jellyfin_id);
-    if !possible_alias { return Some(false); }
-    let (reply, response) = oneshot::channel();
-    let candidate = PreparedTrack::ReuseCandidate { add_item: item.clone(), rel_path, add_index, reply };
-    tokio::select! {
-        biased;
-        _ = wait_for_operation_cancellation(operations, operation_id) => return None,
-        result = queue.send(candidate) => if result.is_err() { return None; },
-    }
-    tokio::select! {
-        biased;
-        _ = wait_for_operation_cancellation(operations, operation_id) => None,
-        result = response => result.ok(),
+        let _ = tokio::fs::remove_file(&self.staged_path).await;
     }
 }
 
@@ -3426,29 +3454,28 @@ async fn execute_plan_sync_buffered(
         Ok(_) => None, Err(error) => Some(Err(error)),
     }).collect::<Result<_>>()?;
     let replaced_ids: HashSet<String> = readd_ids.iter().cloned().chain(force_id_changes.values().cloned()).collect();
-    // Seed valid selected residents so retries keep the same owner. Re-added
-    // owners may refresh once (Force Sync); colliding aliases retain their output.
+    // Reserve all manifest ownership before any additions. Selected residents
+    // keep their assignments even during Force, missing-file repair and retries.
     let deleted_ids: HashSet<String> = delta.deletes.iter()?.map(|item| item.map(|i| i.jellyfin_id)).collect::<Result<_>>()?;
     let rekeyed_ids: HashSet<String> = delta.id_changes.iter()?.map(|item| item.map(|i| i.old_jellyfin_id)).collect::<Result<_>>()?;
     let mut retained_music: HashMap<String, String> = HashMap::new();
-    let mut music_aliases: HashMap<String, String> = HashMap::new();
-    let mut selected_resident_music: HashMap<String, Vec<String>> = HashMap::new();
+    let mut music_destinations = MusicDestinations::default();
     for resident in delta.residents.iter()? {
         let resident = resident?;
+        music_destinations.reserve((resident.server_id.clone(), resident.jellyfin_id.clone()), resident.local_path.clone());
         if resident.media_role != crate::device::MediaRole::Music
             || (!readd_ids.contains(&resident.jellyfin_id)
                 && (deleted_ids.contains(&resident.jellyfin_id) || rekeyed_ids.contains(&resident.jellyfin_id))) {
             continue;
         }
-        selected_resident_music.entry(normalized_device_folder(&resident.local_path))
-            .or_default().push(resident.jellyfin_id.clone());
-        // Validate only when an addition actually collides. This keeps a
-        // small addition from inspecting every file in a large resident library.
         retained_music.entry(normalized_device_folder(&resident.local_path)).or_insert(resident.jellyfin_id);
     }
     for change in delta.id_changes.iter()? {
         let change = change?;
         if change.media_role == crate::device::MediaRole::Music {
+            // Reconciliation can adopt an untracked file as an ID update. Its
+            // selected owner must be reserved before any new audio is allocated.
+            music_destinations.reserve((change.source_server_id.clone(), change.new_jellyfin_id.clone()), change.old_local_path.clone());
             retained_music.entry(normalized_device_folder(&change.old_local_path)).or_insert(change.new_jellyfin_id);
         }
     }
@@ -3456,7 +3483,41 @@ async fn execute_plan_sync_buffered(
     for (path, owner) in &retained_music {
         retained_owner_paths.entry(owner.clone()).or_default().insert(path.clone());
     }
-    let destination_hints = Arc::new(std::sync::RwLock::new(retained_music.clone()));
+    // Allocate known formats in identity order, independently of selection order
+    // and provider completion. Keep only path candidates, not full plan records.
+    let mut candidates = Vec::new();
+    for item in delta.adds.iter()? {
+        let item = item?;
+        if item.media_role != crate::device::MediaRole::Music { continue; }
+        let source = provider_audio_format(item.provider_suffix.as_deref(), item.provider_content_type.as_deref());
+        let profile = if compatibility.is_constrained()
+            && !direct_for_bitrate(&compatibility, &source, item.original_bitrate, item.max_bitrate_override_kbps, item.source_audio) {
+            compatibility.transcode_profile.clone().map(|mut profile| {
+                profile.max_bitrate_kbps = lower_bitrate_ceiling(profile.max_bitrate_kbps, item.max_bitrate_override_kbps);
+                if local_encoding_servers.contains(item.server_id.as_deref().unwrap_or("")) {
+                    crate::transcoding::local::normalized_for_source(&profile, item.source_audio)
+                } else { profile.normalized_for_source(item.source_audio) }
+            })
+        } else { None };
+        let extension = if local_encoding_servers.contains(item.server_id.as_deref().unwrap_or("")) {
+            profile.as_ref().and_then(|profile| crate::transcoding::local::resolve(profile).ok()).map(|target| target.extension.to_string())
+                .or_else(|| predictable_music_extension(&compatibility, &source, profile.as_ref()))
+        } else { predictable_music_extension(&compatibility, &source, profile.as_ref()) };
+        if let Some(extension) = extension {
+            let root = target.manifest.media_path(item.media_role).map(|folder| device_path.join(folder))
+                .unwrap_or_else(|| managed_path.clone());
+            if let Ok(path) = construct_desired_file_path(&root, &item, Some(&extension)) {
+                candidates.push(((item.server_id.clone(), item.jellyfin_id.clone()), item.name, root, path));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    for (identity, name, root, candidate) in candidates {
+        // Leave path errors to the normal per-item handling in the producer,
+        // including its Auto-Fill warning/continue policy.
+        let _ = music_destinations.allocate(identity, &name, candidate, &root, device_path);
+    }
+    let music_destinations = Arc::new(std::sync::Mutex::new(music_destinations));
     let mut pending_deletes = delta.deletes.iter()?.filter_map(|item|match item {
         Ok(item) if !replaced_ids.contains(&item.jellyfin_id) => Some(Ok(item)),
         Ok(_) => None, Err(error) => Some(Err(error)),
@@ -3489,7 +3550,7 @@ async fn execute_plan_sync_buffered(
         let producer_manifest = manifest_snapshot.clone();
         let producer_device_path = device_path.to_path_buf();
         let producer_compatibility = compatibility.clone();
-        let producer_destination_hints = Arc::clone(&destination_hints);
+        let producer_music_destinations = Arc::clone(&music_destinations);
         let producer_byte_limiter = Arc::clone(&byte_limiter);
         let producer_count_limiter = Arc::clone(&count_limiter);
         let producer_priority_barrier = Arc::clone(&priority_barrier);
@@ -3663,17 +3724,6 @@ async fn execute_plan_sync_buffered(
                 .and_then(|manifest| manifest.media_path(add_item.media_role))
                 .map(|folder| producer_device_path.join(folder))
                 .unwrap_or_else(|| producer_managed_path.clone());
-            if add_item.media_role == crate::device::MediaRole::Music
-                && let Some(extension) = predictable_music_extension(&producer_compatibility, &source_format, profile.as_ref())
-                && let Ok(construction) = construct_desired_file_path(&media_root, &add_item, Some(&extension))
-            {
-                match request_music_reuse(&staged_tx, &producer_destination_hints, &add_item, &construction.path,
-                    &producer_device_path, index, &producer_operation_manager, &producer_operation_id).await {
-                    Some(true) => continue,
-                    Some(false) => {},
-                    None => break,
-                }
-            }
             crate::daemon_log!(
                 "[Sync] Preparing '{}': resolving provider download URL (transcode={}, source_suffix={:?}, source_content_type={:?}, direct_compatible={}, preferred_audio_container={:?}, device_preferred_audio_container={:?})",
                 add_item.name,
@@ -3984,10 +4034,14 @@ async fn execute_plan_sync_buffered(
                 add_item.name
             );
             let construction = match construct_desired_file_path(
-                &media_root,
-                &add_item,
-                extension_override.as_deref(),
-            ) {
+                &media_root, &add_item, extension_override.as_deref(),
+            ).and_then(|path| {
+                if add_item.media_role == crate::device::MediaRole::Music {
+                    producer_music_destinations.lock().unwrap_or_else(|p| p.into_inner())
+                        .allocate((add_item.server_id.clone(), add_item.jellyfin_id.clone()), &add_item.name,
+                            path, &media_root, &producer_device_path)
+                } else { Ok(path) }
+            }) {
                 Ok(result) => result,
                 Err(e) => {
                     let error_message = format!("Failed to construct file path: {}", e);
@@ -4005,18 +4059,6 @@ async fn execute_plan_sync_buffered(
                     break;
                 }
             };
-
-            // Response validation supplies the authoritative destination when a
-            // compatible provider output was not predictable before its request.
-            // Recheck even after an earlier miss: another output may have completed.
-            if add_item.media_role == crate::device::MediaRole::Music {
-                match request_music_reuse(&staged_tx, &producer_destination_hints, &add_item, &construction.path,
-                    &producer_device_path, index, &producer_operation_manager, &producer_operation_id).await {
-                    Some(true) => continue,
-                    Some(false) => {},
-                    None => break,
-                }
-            }
 
             let count_started = std::time::Instant::now();
             let count_permit = tokio::select! {
@@ -4330,10 +4372,6 @@ async fn execute_plan_sync_buffered(
                 .to_string_lossy()
                 .replace('\\', "/");
 
-            if add_item.media_role == crate::device::MediaRole::Music {
-                producer_destination_hints.write().unwrap_or_else(|p| p.into_inner())
-                    .insert(normalized_device_folder(&rel_path), add_item.jellyfin_id.clone());
-            }
             let staged_track = StagedTrack {
                 add_item,
                 staged_path,
@@ -4355,7 +4393,7 @@ async fn execute_plan_sync_buffered(
                 });
                 continue;
             }
-            let mut staged = PreparedTrack::Staged(staged_track);
+            let mut staged = staged_track;
             let send_started = std::time::Instant::now();
             loop {
                 if producer_operation_manager
@@ -4489,8 +4527,8 @@ async fn execute_plan_sync_buffered(
             prepared.discard().await;
             continue;
         }
-        if let PreparedTrack::Staged(staged) = &prepared
-            && staged.staged_size > MAX_FILE_BUFFER_BYTES {
+        if prepared.staged_size > MAX_FILE_BUFFER_BYTES {
+            let staged = &prepared;
             errors.push(SyncFileError {
                 jellyfin_id: staged.add_item.jellyfin_id.clone(), filename: staged.add_item.name.clone(),
                 error_message: format!("Staged file too large ({} bytes > {} byte limit)", staged.staged_size, MAX_FILE_BUFFER_BYTES),
@@ -4502,15 +4540,6 @@ async fn execute_plan_sync_buffered(
         }
         let (add_item, rel_path, _) = prepared.details();
         let destination_key = normalized_device_folder(rel_path);
-        // Most additions have no resident output. A failed lookup needs no
-        // device inspection until completed audio reaches the write boundary.
-        if matches!(&prepared, PreparedTrack::ReuseCandidate { .. })
-            && !retained_music.contains_key(&destination_key)
-            && !selected_destinations.contains_key(&destination_key)
-        {
-            prepared.answer(false);
-            continue;
-        }
         match inspect_sync_destination(
             device_io.as_ref(),
             device_path,
@@ -4520,10 +4549,9 @@ async fn execute_plan_sync_buffered(
             is_mtp,
             &owned_manifest_paths,
         ).await {
-            Ok(true) if matches!(&prepared, PreparedTrack::Staged(_)) => crate::daemon_log!(
+            Ok(true) => crate::daemon_log!(
                 "[Sync] Replacing untracked music destination '{}'", rel_path
             ),
-            Ok(true) => {},
             Ok(false) => {},
             Err(error) => {
                 errors.push(SyncFileError {
@@ -4538,7 +4566,7 @@ async fn execute_plan_sync_buffered(
             }
         }
         if let Some((first_id, first_role)) = selected_destinations.get(&destination_key)
-            && !can_coalesce_selected_roles(*first_role, add_item.media_role) {
+            && (first_id != &add_item.jellyfin_id || *first_role != add_item.media_role) {
             errors.push(SyncFileError {
                 jellyfin_id: add_item.jellyfin_id.clone(), filename: rel_path.clone(),
                 error_message: format!("Selected tracks '{}' and '{}' resolve to the same destination; earlier output preserved",
@@ -4549,81 +4577,7 @@ async fn execute_plan_sync_buffered(
             writer_failed = true;
             continue;
         }
-        if add_item.media_role == crate::device::MediaRole::Music {
-            if retained_music.contains_key(&destination_key) {
-                match device_io.file_length(rel_path).await {
-                    Ok(Some(size)) if size > 0 => {},
-                    Ok(_) => { retained_music.remove(&destination_key); },
-                    Err(error) => {
-                        errors.push(SyncFileError { jellyfin_id: add_item.jellyfin_id.clone(),
-                            filename: rel_path.clone(), error_message: format!("Failed to inspect retained music: {error:#}") });
-                        let _ = operation_manager.request_cancel(&operation_id).await;
-                        prepared.discard().await;
-                        writer_failed = true;
-                        continue;
-                    }
-                }
-            }
-            if let Some(owner) = retained_music.get(&destination_key).cloned()
-                && (owner != add_item.jellyfin_id || selected_destinations.contains_key(&destination_key)) {
-                let message = format!("[Sync] Coalesced selected music '{}' with '{}' at '{}'; keeping one file",
-                    add_item.jellyfin_id, owner, rel_path);
-                crate::daemon_log!("{}", message);
-                music_aliases.insert(add_item.jellyfin_id.clone(), owner.clone());
-                if let Some(residents) = selected_resident_music.get(&destination_key) {
-                    for resident_id in residents {
-                        if resident_id != &owner { music_aliases.insert(resident_id.clone(), owner.clone()); }
-                    }
-                }
-                let replacement_id = force_id_changes.get(&add_item.jellyfin_id)
-                    .unwrap_or(&add_item.jellyfin_id);
-                let replacement_delete: Option<SyncDeleteItem> = delta.get("delete", replacement_id)?;
-                let mut cleanup_failed = false;
-                if let Some(delete_item) = replacement_delete.as_ref()
-                    && retained_music.get(&normalized_device_folder(&delete_item.local_path))
-                        .is_none_or(|retained| retained == replacement_id) {
-                    if let Some(error) = cleanup_replaced_file_after_write(delete_item, rel_path,
-                        device_path, &managed_path, managed_subfolder_for_delete.as_deref(), is_mtp,
-                        &owned_manifest_paths, &device_io, &operation_manager, &operation_id).await {
-                        cleanup_failed = true;
-                        deletion_errors += 1;
-                        errors.push(error);
-                    }
-                }
-                // A previous partial sync can have redundant identity records. Keep
-                // the chosen owner, but never publish an alias as a second owner.
-                if let Err(error) = checkpoint.stage(1, |m| {
-                    let owner_present = m.synced_items.iter().any(|item| item.jellyfin_id == owner);
-                    m.synced_items.retain(|item| item.media_role != crate::device::MediaRole::Music
-                        || item.jellyfin_id == owner
-                        || ((!owner_present || normalized_device_folder(&item.local_path) != destination_key)
-                            && (cleanup_failed || replacement_delete.is_none() || item.jellyfin_id != *replacement_id)));
-                }).await {
-                    errors.push(SyncFileError { jellyfin_id: add_item.jellyfin_id.clone(),
-                        filename: rel_path.clone(), error_message: format!("Coalesced identity checkpoint failed: {error}") });
-                    let _ = operation_manager.request_cancel(&operation_id).await;
-                    writer_failed = true;
-                }
-                if !cleanup_failed && replacement_id != &owner {
-                    if let Some(paths) = retained_owner_paths.remove(replacement_id) {
-                        for path in paths {
-                            if retained_music.get(&path) == Some(replacement_id) { retained_music.remove(&path); }
-                        }
-                    }
-                }
-                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes).await;
-                prepared.discard().await;
-                prepared.answer(true);
-                continue;
-            }
-        }
-        let staged = match prepared {
-            PreparedTrack::ReuseCandidate { reply, .. } => {
-                let _ = reply.send(false);
-                continue;
-            }
-            PreparedTrack::Staged(staged) => staged,
-        };
+        let staged = prepared;
         mark_operation_preparing_file(&operation_manager, &operation_id,
             &staged.add_item.name, staged.add_item.size_bytes).await;
         let t_write = std::time::Instant::now();
@@ -4756,10 +4710,7 @@ async fn execute_plan_sync_buffered(
                 if let Err(e) = checkpoint
                     .stage(1, |m| {
                         m.synced_items.retain(|item| {
-                            (staged.add_item.media_role != crate::device::MediaRole::Music
-                                || item.media_role != crate::device::MediaRole::Music
-                                || normalized_device_folder(&item.local_path) != destination_key)
-                                && item.jellyfin_id != id_to_replace
+                            item.jellyfin_id != id_to_replace
                                 && force_id_changes
                                     .get(id_to_replace.as_str())
                                     .is_none_or(|old| {
@@ -4802,8 +4753,6 @@ async fn execute_plan_sync_buffered(
                         .await;
                     selected_destinations.insert(destination_key.clone(), (staged.add_item.jellyfin_id.clone(), staged.add_item.media_role));
                     if staged.add_item.media_role == crate::device::MediaRole::Music {
-                        destination_hints.write().unwrap_or_else(|p| p.into_inner())
-                            .insert(destination_key.clone(), staged.add_item.jellyfin_id.clone());
                         if let Some(paths) = retained_owner_paths.remove(&staged.add_item.jellyfin_id) {
                             for path in paths {
                                 if retained_music.get(&path) == Some(&staged.add_item.jellyfin_id) { retained_music.remove(&path); }
@@ -4811,14 +4760,6 @@ async fn execute_plan_sync_buffered(
                         }
                         retained_owner_paths.entry(staged.add_item.jellyfin_id.clone()).or_default().insert(destination_key.clone());
                         retained_music.insert(destination_key.clone(), staged.add_item.jellyfin_id.clone());
-                        music_aliases.remove(&staged.add_item.jellyfin_id);
-                        if let Some(residents) = selected_resident_music.get(&destination_key) {
-                            for resident_id in residents {
-                                if resident_id != &staged.add_item.jellyfin_id {
-                                    music_aliases.insert(resident_id.clone(), staged.add_item.jellyfin_id.clone());
-                                }
-                            }
-                        }
                     }
                     synced_count += 1;
                     if !replacement_deletes_file && !replacement_cleanup_failed && !operation_manager.is_cancelled(&operation_id).await {
@@ -4998,35 +4939,6 @@ async fn execute_plan_sync_buffered(
                 _ => { errors.push(SyncFileError {jellyfin_id:id_change.new_jellyfin_id.clone(),filename:id_change.old_local_path.clone(),error_message:"Existing device file changed after preparation; prepare sync again".into()});continue; }
             }
         }
-        if id_change.media_role == crate::device::MediaRole::Music {
-            let key = normalized_device_folder(&id_change.old_local_path);
-            if let Some(owner) = retained_music.get(&key) && owner != &id_change.new_jellyfin_id {
-                match device_io.file_length(&id_change.old_local_path).await {
-                    Ok(Some(size)) if size > 0 => {},
-                    other => {
-                        errors.push(SyncFileError { jellyfin_id: id_change.new_jellyfin_id.clone(), filename: id_change.old_local_path.clone(),
-                            error_message: format!("Cannot inspect retained identity-change destination: {other:?}") });
-                        continue;
-                    }
-                }
-                if let Err(error) = checkpoint.stage(1, |m| {
-                    if m.synced_items.iter().any(|item| item.jellyfin_id == *owner) {
-                        m.synced_items.retain(|item| item.jellyfin_id == *owner
-                            || (item.jellyfin_id != id_change.old_jellyfin_id && item.jellyfin_id != id_change.new_jellyfin_id));
-                    }
-                }).await {
-                    errors.push(SyncFileError { jellyfin_id: id_change.new_jellyfin_id.clone(), filename: id_change.old_local_path.clone(),
-                        error_message: format!("Coalesced identity checkpoint failed: {error}") });
-                    let _ = operation_manager.request_cancel(&operation_id).await;
-                    continue;
-                }
-                music_aliases.insert(id_change.new_jellyfin_id.clone(), owner.clone());
-                let message = format!("[Sync] Coalesced selected music '{}' with '{}' at '{}'; keeping one file",
-                    id_change.new_jellyfin_id, owner, id_change.old_local_path);
-                crate::daemon_log!("{}", message);
-                continue;
-            }
-        }
         let old_origin = match delta.get::<crate::sync_plan::ResidentIdentity>("resident", &id_change.old_jellyfin_id) {
             Ok(item) => item.is_some_and(|item|item.is_auto_fill),
             Err(error) => {errors.push(plan_read_error(error)); let _ = operation_manager.request_cancel(&operation_id).await; break},
@@ -5169,10 +5081,7 @@ async fn execute_plan_sync_buffered(
             .await
         && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
     {
-        let mut paths: HashMap<String,String> = std::mem::take(&mut manifest_snapshot.synced_items).into_iter().map(|item|(item.jellyfin_id,item.local_path)).collect();
-        for (alias, owner) in &music_aliases {
-            if let Some(path) = paths.get(owner).cloned() { paths.insert(alias.clone(), path); }
-        }
+        let paths: HashMap<String,String> = std::mem::take(&mut manifest_snapshot.synced_items).into_iter().map(|item|(item.jellyfin_id,item.local_path)).collect();
         let warnings = match generate_plan_m3u_files(delta, device_path, &managed_path, &paths, &mut manifest_snapshot, Arc::clone(&device_io), Arc::clone(&warning_journal)).await {
             Ok(warnings) => warnings,
             Err(error) => {
@@ -6580,7 +6489,11 @@ mod tests {
         let mut old = make_synced_item("old", "One", None, None);
         old.size_bytes = 123;
         manifest.synced_items.push(old);
-        let delta = calculate_delta(&[make_desired("new", "One", None, None)], &manifest);
+        manifest.audiobook_path = Some("Music".into());
+        manifest.synced_items[0].media_role = crate::device::MediaRole::Audiobook;
+        let mut desired = make_desired("new", "One", None, None);
+        desired.media_role = crate::device::MediaRole::Audiobook;
+        let delta = calculate_delta(&[desired], &manifest);
         assert_eq!(delta.id_changes.len(), 1);
         assert_eq!(delta.id_changes[0].size_bytes, 123);
     }
@@ -6594,12 +6507,15 @@ mod tests {
         let mut old_id = make_synced_item("old", "Reidentified", None, None);
         old_id.is_auto_fill = true;
         manifest.synced_items = vec![manual, autofill, old_id];
-        let desired = vec![
+        let mut desired = vec![
             make_desired("manual", "Manual", None, None),
             make_desired("fill", "Fill", None, None),
             make_desired("new", "Reidentified", None, None),
             make_desired("new-fill", "New Fill", None, None),
         ];
+        manifest.audiobook_path = Some("Music".into());
+        manifest.synced_items[2].media_role = crate::device::MediaRole::Audiobook;
+        desired[2].media_role = crate::device::MediaRole::Audiobook;
         let mut delta = calculate_delta(&desired, &manifest);
         classify_provenance(
             &mut delta,
@@ -10730,7 +10646,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_provider_sync_cancellation_cleans_queued_staged_files() {
+    async fn test_execute_provider_sync_cancellation_preserves_collision_assignments_on_resume() {
         let mut server = mockito::Server::new_async().await;
         let _download_a = server
             .mock("GET", "/rest/download.view")
@@ -10753,13 +10669,13 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/octet-stream")
             .with_body(vec![5_u8, 6, 7, 8])
-            .expect(1)
+            .expect(2)
             .create_async()
             .await;
 
         let dir = tempfile::tempdir().unwrap();
         let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
-        let blocking_io = BlockingFirstWriteDeviceIo::new(device_io);
+        let blocking_io = BlockingFirstWriteDeviceIo::new(device_io.clone());
         let sync_io: Arc<dyn crate::device_io::DeviceIO> = blocking_io.clone();
         let operation_manager = Arc::new(SyncOperationManager::new());
         let operation_id = unique_operation_id("op-pipeline-cancel");
@@ -10776,13 +10692,14 @@ mod tests {
         operation_manager
             .create_operation(operation_id.clone(), 2)
             .await;
+        let mut first = add_item_with_provider_format("song-a", "flac", "audio/flac", 4);
+        first.name = "Concerto".into(); first.track_number = Some(0);
+        let mut second = first.clone(); second.jellyfin_id = "song-b".into();
+        let resume_item = second.clone();
         let delta = SyncDelta {
             provenance_updates: HashMap::from([("retained".into(), true)]),
             blocked: vec![],
-            adds: vec![
-                add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
-                add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
-            ],
+            adds: vec![first, second],
             deletes: vec![SyncDeleteItem {
                 jellyfin_id: "retained".into(),
                 local_path: "Music/Unknown/Retained.flac".into(),
@@ -10861,6 +10778,26 @@ mod tests {
             "queued unwritten item must stay out of manifest: {:?}",
             manifest.synced_items
         );
+        let committed = read_persisted_manifest(dir.path()).synced_items.into_iter()
+            .find(|item| item.jellyfin_id == "song-a").unwrap();
+        let resume = SyncDelta { adds: vec![resume_item], deletes: vec![], id_changes: vec![], unchanged: 1,
+            playlists: vec![], provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
+        let operations = Arc::new(SyncOperationManager::new());
+        let id = unique_operation_id("collision-resume"); operations.create_operation(id.clone(), 1).await;
+        let (_, errors) = execute_test_provider_sync(&resume, dir.path(), ProviderSyncSource {
+            local_encoding_servers: HashSet::new(), provider: subsonic_provider(server.url()),
+            transcoding_profile: Some(rockbox_direct_profile()), providers_by_server: Default::default(),
+        }, operations, id, manager.clone(), device_io).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let resumed = read_persisted_manifest(dir.path());
+        let first = resumed.synced_items.iter().find(|item| item.jellyfin_id == "song-a").unwrap();
+        let second = resumed.synced_items.iter().find(|item| item.jellyfin_id == "song-b").unwrap();
+        assert_eq!(first.local_path, committed.local_path);
+        assert_ne!(first.local_path, second.local_path);
+        assert_eq!(std::fs::read(dir.path().join(&first.local_path)).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(std::fs::read(dir.path().join(&second.local_path)).unwrap(), vec![5, 6, 7, 8]);
+        _download_a.assert_async().await;
+        _download_b.assert_async().await;
     }
 
     #[test]
@@ -11046,7 +10983,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_server_id_change_detection() {
+    fn music_metadata_match_requires_new_audio_instead_of_id_reassignment() {
         let mut manifest = empty_manifest();
         manifest.synced_items = vec![make_synced_item(
             "old-id-1",
@@ -11055,7 +10992,7 @@ mod tests {
             Some("My Artist"),
         )];
 
-        // Same metadata but different Jellyfin ID (server re-scanned)
+        // Matching tags cannot distinguish a replacement movement from a server rescan.
         let desired = vec![make_desired(
             "new-id-1",
             "My Song",
@@ -11064,16 +11001,11 @@ mod tests {
         )];
 
         let delta = calculate_delta(&desired, &manifest);
-        // The delete and add should be suppressed, moved to id_changes
-        assert_eq!(delta.deletes.len(), 0);
-        assert_eq!(delta.adds.len(), 0);
-        assert_eq!(delta.id_changes.len(), 1);
-        assert_eq!(delta.id_changes[0].new_jellyfin_id, "new-id-1");
-        assert_eq!(delta.id_changes[0].old_jellyfin_id, "old-id-1");
-        assert_eq!(
-            delta.id_changes[0].reason_code.as_deref(),
-            Some("server-id-change")
-        );
+        assert_eq!(delta.deletes.len(), 1);
+        assert_eq!(delta.adds.len(), 1);
+        assert!(delta.id_changes.is_empty());
+        assert_eq!(delta.adds[0].jellyfin_id, "new-id-1");
+        assert_eq!(delta.deletes[0].jellyfin_id, "old-id-1");
         assert_eq!(delta.unchanged, 0);
     }
 
@@ -11218,13 +11150,16 @@ mod tests {
             Some("my artist"),
         )];
 
-        let desired = vec![make_desired(
+        let mut desired = vec![make_desired(
             "new-id",
             "My Song",
             Some("My Album"),
             Some("My Artist"),
         )];
 
+        manifest.audiobook_path = Some("Music".into());
+        manifest.synced_items[0].media_role = crate::device::MediaRole::Audiobook;
+        desired[0].media_role = crate::device::MediaRole::Audiobook;
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.deletes.len(), 0);
         assert_eq!(delta.adds.len(), 0);
@@ -11423,12 +11358,15 @@ mod tests {
             item
         }];
 
-        let desired = vec![make_desired(
+        let mut desired = vec![make_desired(
             "new-id",
             "My Song",
             Some("My Album"),
             Some("My Artist"),
         )];
+        manifest.audiobook_path = Some("Music".into());
+        manifest.synced_items[0].media_role = crate::device::MediaRole::Audiobook;
+        desired[0].media_role = crate::device::MediaRole::Audiobook;
         let delta = calculate_delta(&desired, &manifest);
 
         assert_eq!(delta.id_changes.len(), 1);
@@ -11449,12 +11387,15 @@ mod tests {
             Some("Artist"),
         )];
 
-        let desired = vec![make_desired(
+        let mut desired = vec![make_desired(
             "new-id",
             "Short Song",
             Some("Album"),
             Some("Artist"),
         )];
+        manifest.audiobook_path = Some("Music".into());
+        manifest.synced_items[0].media_role = crate::device::MediaRole::Audiobook;
+        desired[0].media_role = crate::device::MediaRole::Audiobook;
         let delta = calculate_delta(&desired, &manifest);
 
         assert_eq!(delta.id_changes.len(), 1);
@@ -12816,17 +12757,66 @@ mod tests {
     }
 
     #[test]
-    fn selected_music_collision_never_coalesces_other_media_roles() {
-        use crate::device::MediaRole::{Music, Podcast, Audiobook};
-        assert!(can_coalesce_selected_roles(Music, Music));
-        for pair in [(Podcast, Music), (Audiobook, Music), (Music, Podcast), (Music, Audiobook),
-            (Podcast, Podcast), (Audiobook, Audiobook), (Podcast, Audiobook), (Audiobook, Podcast)] {
-            assert!(!can_coalesce_selected_roles(pair.0, pair.1), "{pair:?}");
+    fn legacy_music_assignment_survives_adding_server_provenance() {
+        let device = Path::new("C:/Device");
+        let root = device.join("Music");
+        let mut destinations = MusicDestinations::default();
+        let assigned = "Music/Artist/Album/1-00 Concerto [legacy].flac";
+        destinations.reserve((None, "track".into()), assigned.into());
+        let mut item = add_item_with_provider_format("track", "flac", "audio/flac", 4);
+        item.server_id = Some("known-server".into());
+        item.name = "Concerto".into(); item.track_number = Some(0);
+        let result = destinations.allocate((item.server_id.clone(), item.jellyfin_id.clone()), &item.name,
+            construct_desired_file_path(&root, &item, Some("flac")).unwrap(), &root, device).unwrap();
+        assert_eq!(result.path, device.join(assigned));
+    }
+
+    #[test]
+    fn music_collision_allocation_handles_case_truncation_hash_conflicts_and_server_identity() {
+        let device = Path::new("C:/Device");
+        let root = device.join("Music");
+        let mut destinations = MusicDestinations::default();
+        let mut first = add_item_with_provider_format("same-id", "flac", "audio/flac", 4);
+        first.server_id = Some("first-server".into());
+        let mut second = first.clone(); second.server_id = Some("second-server".into());
+        let allocate = |registry: &mut MusicDestinations, item: &SyncAddItem, root: &Path, ext| {
+            registry.allocate((item.server_id.clone(), item.jellyfin_id.clone()), &item.name,
+                construct_desired_file_path(root, item, Some(ext)).unwrap(), root, device).unwrap().path
+        };
+        let first_path = allocate(&mut destinations, &first, &root, "flac");
+        let second_path = allocate(&mut destinations, &second, &root, "flac");
+        assert_ne!(MusicDestinations::key(&first_path.to_string_lossy()), MusicDestinations::key(&second_path.to_string_lossy()));
+        assert!(second_path.to_string_lossy().contains('['));
+        // A retained assignment survives a metadata rename and a removed neighbour.
+        let mut renamed = second.clone(); renamed.name = "Changed tags".into();
+        assert_eq!(allocate(&mut destinations, &renamed, &root, "flac"), second_path);
+        assert_ne!(allocate(&mut destinations, &renamed, &root, "mp3"), second_path);
+        assert!(allocate(&mut destinations, &renamed, &device.join("New Music"), "mp3").starts_with(device.join("New Music")));
+
+        for name in ["a".repeat(300), "B".repeat(300), "Case".into(), "case".into(), "a:b".into(), "a?b".into()] {
+            for index in 0..2 {
+                let mut item = first.clone(); item.jellyfin_id = format!("{name}-{index}"); item.name = name.clone();
+                let path = allocate(&mut destinations, &item, &root, "flac");
+                assert!(path.file_name().unwrap().to_string_lossy().chars().count() <= MAX_PATH_COMPONENT_LEN);
+                assert!(path.to_string_lossy().chars().count() <= WINDOWS_MAX_PATH);
+            }
         }
+        // A natural filename can occupy the short hash suffix. Expand it deterministically.
+        let mut item = first.clone(); item.jellyfin_id = "hash-conflict".into();
+        let identity = (item.server_id.clone(), item.jellyfin_id.clone());
+        let hash = blake3::hash(&serde_json::to_vec(&identity).unwrap()).to_hex().to_string();
+        let natural = first_path.with_file_name(format!("{} [{}].flac", first_path.file_stem().unwrap().to_string_lossy(), &hash[..8]));
+        destinations.reserve((None, "natural-title".into()), natural.strip_prefix(device).unwrap().to_string_lossy().replace('\\', "/"));
+        let expanded = allocate(&mut destinations, &item, &root, "flac");
+        assert!(expanded.to_string_lossy().contains(&hash[..12]));
+        assert_ne!(expanded, natural);
+        // Length-delimited serialization keeps server/item tuple boundaries distinct.
+        assert_ne!(blake3::hash(&serde_json::to_vec(&(Some("ab"), "c")).unwrap()),
+            blake3::hash(&serde_json::to_vec(&(Some("a"), "bc")).unwrap()));
     }
 
     #[tokio::test]
-    async fn encoded_mp3_repeat_reuses_before_url_resolution_and_audio_request() {
+    async fn encoded_music_collisions_transfer_each_identity_and_repeat_without_requests() {
         let mut server = mockito::Server::new_async().await;
         let negotiation = server.mock("POST", "/Items/first/PlaybackInfo")
             .match_query(mockito::Matcher::Any).with_status(200)
@@ -12834,7 +12824,13 @@ mod tests {
             .with_body(r#"{"MediaSources":[{"SupportsDirectPlay":false,"TranscodingUrl":"/encoded"}]}"#)
             .expect(1).create_async().await;
         let alias_negotiation = server.mock("POST", "/Items/alias/PlaybackInfo")
-            .match_query(mockito::Matcher::Any).expect(0).create_async().await;
+            .match_query(mockito::Matcher::Any).with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"MediaSources":[{"SupportsDirectPlay":false,"TranscodingUrl":"/alias-encoded"}]}"#)
+            .expect(1).create_async().await;
+        let alias_audio = server.mock("GET", "/alias-encoded").match_query(mockito::Matcher::Any)
+            .with_status(200).with_header("content-type", "audio/mpeg")
+            .with_body(vec![5_u8, 6, 7, 8]).expect(1).create_async().await;
         let audio = server.mock("GET", "/encoded").match_query(mockito::Matcher::Any)
             .with_status(200).with_header("content-type", "audio/mpeg")
             .with_body(vec![1_u8, 2, 3, 4]).expect(1).create_async().await;
@@ -12847,10 +12843,9 @@ mod tests {
         let mut alias = first.clone();
         alias.jellyfin_id = "alias".into();
         alias.is_auto_fill = true;
-        let path = construct_desired_file_path(&root.path().join("Music"), &first, Some("mp3")).unwrap().path;
         for repeat in [false, true] {
             let delta = SyncDelta {
-                adds: if repeat { vec![alias.clone()] } else { vec![first.clone(), alias.clone()] },
+                adds: if repeat { vec![] } else { vec![first.clone(), alias.clone()] },
                 deletes: vec![], id_changes: vec![], unchanged: usize::from(repeat),
                 playlists: vec![PlaylistSyncItem { jellyfin_id: "p".into(), name: "Duplicates".into(),
                     tracks: ["first", "alias", "alias"].into_iter().map(|id| PlaylistTrackInfo {
@@ -12867,10 +12862,13 @@ mod tests {
                 providers_by_server: Default::default(),
             }, operations.clone(), operation.clone(), manager.clone(), io.clone()).await.unwrap();
             assert!(errors.is_empty(), "{errors:?}");
-            assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3, 4]);
             let durable = read_persisted_manifest(root.path());
-            assert_eq!(durable.synced_items.len(), 1);
-            assert_eq!(durable.synced_items[0].jellyfin_id, "first");
+            assert_eq!(durable.synced_items.len(), 2);
+            for (id, bytes) in [("first", vec![1, 2, 3, 4]), ("alias", vec![5, 6, 7, 8])] {
+                let entry = durable.synced_items.iter().find(|item| item.jellyfin_id == id).unwrap();
+                assert!(entry.local_path.ends_with(".mp3"));
+                assert_eq!(std::fs::read(root.path().join(&entry.local_path)).unwrap(), bytes);
+            }
             let playlist = std::fs::read_to_string(root.path().join("Playlists/Duplicates.m3u")).unwrap();
             assert_eq!(playlist.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).count(), 3);
             if repeat {
@@ -12882,11 +12880,12 @@ mod tests {
         }
         negotiation.assert_async().await;
         alias_negotiation.assert_async().await;
+        alias_audio.assert_async().await;
         audio.assert_async().await;
     }
 
     #[tokio::test]
-    async fn ambiguous_transcode_reuses_validated_response_path_before_staging() {
+    async fn ambiguous_transcode_allocates_using_validated_extension_without_reusing_another_identity() {
         let mut server = mockito::Server::new_async().await;
         let audio = server.mock("GET", "/rest/stream.view").match_query(mockito::Matcher::Any)
             .with_status(200).with_header("content-type", "audio/flac")
@@ -12931,40 +12930,144 @@ mod tests {
             local_encoding_servers: HashSet::new(),            provider: subsonic_provider(server.url()), transcoding_profile: Some(profile), providers_by_server: Default::default(),
         }, operations.clone(), operation.clone(), manager, io).await.unwrap();
         assert!(errors.is_empty(), "{errors:?}");
-        assert!(synced.is_empty());
+        assert_eq!(synced.len(), 1);
         assert_eq!(std::fs::read(&path).unwrap(), b"retained");
-        assert_eq!(operations.get_operation(&operation).await.unwrap().average_reading_speed_mb_s, None);
+        let durable = read_persisted_manifest(root.path());
+        let added = durable.synced_items.iter().find(|item| item.jellyfin_id == "alias").unwrap();
+        assert!(added.local_path.ends_with(".flac"));
+        assert_ne!(root.path().join(&added.local_path), path);
+        assert_eq!(std::fs::read(root.path().join(&added.local_path)).unwrap(), vec![1, 2, 3, 4]);
         assert_eq!(std::fs::read(&requested_path).unwrap(), b"other output");
-        assert_eq!(read_persisted_manifest(root.path()).synced_items.len(), 2);
+        assert_eq!(read_persisted_manifest(root.path()).synced_items.len(), 3);
         audio.assert_async().await;
     }
 
     #[tokio::test]
-    async fn music_reuse_waits_end_on_cancellation() {
-        for full_queue in [false, true] {
-            let operations = Arc::new(SyncOperationManager::new());
-            let operation = unique_operation_id("reuse-cancel");
-            operations.create_operation(operation.clone(), 1).await;
-            let (sender, mut receiver) = mpsc::channel(1);
-            let destination_hints = std::sync::RwLock::new(
-                [(normalized_device_folder("Music/song.mp3"), "owner".to_string())].into_iter().collect());
-            let item = add_item_with_provider_format("alias", "mp3", "audio/mpeg", 4);
-            if full_queue {
-                let (reply, _response) = oneshot::channel();
-                sender.send(PreparedTrack::ReuseCandidate { add_item: item.clone(),
-                    rel_path: "Music/song.mp3".into(), add_index: 0, reply }).await.unwrap_or_else(|_| panic!("queue closed"));
-            }
-            let waiting = {
-                let operations = operations.clone(); let operation = operation.clone();
-                tokio::spawn(async move { request_music_reuse(&sender, &destination_hints, &item,
-                    Path::new("/device/Music/song.mp3"), Path::new("/device"), 0, &operations, &operation).await })
-            };
-            // In the reply case, receive the candidate and deliberately keep its
-            // reply open. In the admission case, leave the bounded queue full.
-            let _unanswered = if full_queue { None } else { receiver.recv().await };
-            operations.request_cancel(&operation).await;
-            assert_eq!(tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap().unwrap(), None);
+    async fn distinct_music_collision_preserves_every_identity_and_repeated_playlist_entry() {
+        let mut server = mockito::Server::new_async().await;
+        let mut downloads = Vec::new();
+        let mut adds = Vec::new();
+        for (id, bytes) in [("third", vec![9, 10]), ("second", vec![5, 6]), ("first", vec![1, 2])] {
+            downloads.push(server.mock("GET", "/rest/download.view")
+                .match_query(mockito::Matcher::UrlEncoded("id".into(), id.into()))
+                .with_status(200).with_header("content-type", "audio/flac")
+                .with_body(bytes).expect(1).create_async().await);
+            let mut item = add_item_with_provider_format(id, "flac", "audio/flac", 2);
+            item.name = "Concerto".into(); item.track_number = Some(0);
+            adds.push(item);
         }
+        let root = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(root.path()).await;
+        manager.update_manifest(|m| m.playlist_path = Some("Playlists".into())).await.unwrap();
+        let delta = SyncDelta { adds, deletes: vec![], id_changes: vec![], unchanged: 0,
+            playlists: vec![PlaylistSyncItem { jellyfin_id: "playlist".into(), name: "Movements".into(),
+                tracks: ["third", "first", "second", "first"].into_iter().map(|id| PlaylistTrackInfo {
+                    jellyfin_id: id.into(), artist: None, run_time_seconds: 200,
+                }).collect() }], provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
+        let operations = Arc::new(SyncOperationManager::new());
+        let operation = unique_operation_id("distinct-collision");
+        operations.create_operation(operation.clone(), 3).await;
+        let (_, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+            local_encoding_servers: HashSet::new(), provider: subsonic_provider(server.url()),
+            transcoding_profile: None, providers_by_server: Default::default(),
+        }, operations, operation, manager, io).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let manifest = read_persisted_manifest(root.path());
+        assert_eq!(manifest.synced_items.len(), 3, "each distinct identity owns its audio");
+        for (id, bytes) in [("first", vec![1, 2]), ("second", vec![5, 6]), ("third", vec![9, 10])] {
+            let entry = manifest.synced_items.iter().find(|item| item.jellyfin_id == id).unwrap();
+            assert_eq!(std::fs::read(root.path().join(&entry.local_path)).unwrap(), bytes);
+            if id == "first" { assert!(entry.local_path.ends_with("1-00 Concerto.flac"), "stable identity ordering"); }
+        }
+        let playlist = std::fs::read_to_string(root.path().join("Playlists/Movements.m3u")).unwrap();
+        let paths: Vec<_> = playlist.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).collect();
+        assert_eq!(paths.len(), 4);
+        for (path, id) in paths.iter().zip(["third", "first", "second", "first"]) {
+            assert_eq!(*path, format!("../{}", manifest.synced_items.iter().find(|item| item.jellyfin_id == id).unwrap().local_path));
+        }
+        for download in downloads { download.assert_async().await; }
+    }
+
+    #[tokio::test]
+    async fn reconciled_music_reserves_its_adopted_path_before_collision_downloads() {
+        let mut server = mockito::Server::new_async().await;
+        let download = server.mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "second".into()))
+            .with_status(200).with_header("content-type", "audio/flac")
+            .with_body(vec![5, 6]).expect(1).create_async().await;
+        let root = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(root.path()).await;
+        let mut item = add_item_with_provider_format("second", "flac", "audio/flac", 2);
+        item.name = "Concerto".into(); item.track_number = Some(0);
+        let path = construct_desired_file_path(&root.path().join("Music"), &item, Some("flac")).unwrap().path;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [1, 2]).unwrap();
+        let relative = path.strip_prefix(root.path()).unwrap().to_string_lossy().replace('\\', "/");
+        let adopted: SyncIdChangeItem = serde_json::from_value(serde_json::json!({
+            "oldJellyfinId":"local-file", "newJellyfinId":"first", "oldLocalPath":relative,
+            "name":"Concerto", "album":"Album", "artist":"Artist", "sizeBytes":2,
+            "reasonCode":"device-file-reused", "providerSuffix":"flac"
+        })).unwrap();
+        let delta = SyncDelta { adds: vec![item], deletes: vec![], id_changes: vec![adopted], unchanged: 0,
+            playlists: vec![], provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
+        let operations = Arc::new(SyncOperationManager::new());
+        let id = unique_operation_id("reconciled-collision"); operations.create_operation(id.clone(), 2).await;
+        let (_, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+            local_encoding_servers: HashSet::new(), provider: subsonic_provider(server.url()),
+            transcoding_profile: None, providers_by_server: Default::default(),
+        }, operations, id, manager, io).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let manifest = read_persisted_manifest(root.path());
+        assert_eq!(manifest.synced_items.len(), 2);
+        let first = manifest.synced_items.iter().find(|item| item.jellyfin_id == "first").unwrap();
+        let second = manifest.synced_items.iter().find(|item| item.jellyfin_id == "second").unwrap();
+        assert_eq!(first.local_path, relative);
+        assert_ne!(first.local_path, second.local_path);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2]);
+        assert_eq!(std::fs::read(root.path().join(&second.local_path)).unwrap(), vec![5, 6]);
+        download.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn music_collision_checkpoint_failure_preserves_committed_owner_on_retry() {
+        let mut server = mockito::Server::new_async().await;
+        let download = server.mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "second".into()))
+            .with_status(200).with_header("content-type", "audio/flac")
+            .with_body(vec![5, 6]).expect(2).create_async().await;
+        let root = tempfile::tempdir().unwrap();
+        let (manager, _) = setup_provider_sync_device(root.path()).await;
+        let io = boundary_io(root.path(), false);
+        let mut item = add_item_with_provider_format("second", "flac", "audio/flac", 2);
+        item.name = "Concerto".into(); item.track_number = Some(0);
+        let path = construct_desired_file_path(&root.path().join("Music"), &item, Some("flac")).unwrap().path;
+        let relative = path.strip_prefix(root.path()).unwrap().to_string_lossy().replace('\\', "/");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap(); std::fs::write(&path, [1, 2]).unwrap();
+        let mut resident = make_synced_item("first", "Concerto", Some("Album"), Some("Artist"));
+        resident.local_path = relative.clone(); resident.size_bytes = 2;
+        manager.update_manifest(|m| m.synced_items.push(resident)).await.unwrap();
+        let delta = SyncDelta { adds: vec![item], deletes: vec![], id_changes: vec![], unchanged: 1,
+            playlists: vec![], provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
+        for failing in [true, false] {
+            io.reject_manifest.store(failing, Ordering::Release);
+            let operations = Arc::new(SyncOperationManager::new());
+            let id = unique_operation_id("collision-checkpoint"); operations.create_operation(id.clone(), 1).await;
+            let (_, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                local_encoding_servers: HashSet::new(), provider: subsonic_provider(server.url()),
+                transcoding_profile: None, providers_by_server: Default::default(),
+            }, operations, id, manager.clone(), io.clone()).await.unwrap();
+            assert_eq!(!errors.is_empty(), failing, "{errors:?}");
+            let manifest = read_persisted_manifest(root.path());
+            assert_eq!(manifest.synced_items.len(), if failing { 1 } else { 2 });
+            assert_eq!(manifest.synced_items.iter().find(|item| item.jellyfin_id == "first").unwrap().local_path, relative);
+            assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2]);
+            if !failing {
+                let second = manifest.synced_items.iter().find(|item| item.jellyfin_id == "second").unwrap();
+                assert_ne!(second.local_path, relative);
+                assert_eq!(std::fs::read(root.path().join(&second.local_path)).unwrap(), vec![5, 6]);
+            }
+        }
+        download.assert_async().await;
     }
 
     #[tokio::test]
@@ -13024,145 +13127,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_music_collisions_keep_one_owner_across_retry_force_and_missing_files() {
-        for scenario in ["fresh", "retry", "force", "force-missing", "missing", "zero", "alias-delete", "only-alias", "rekey", "move-alias", "move-failed", "stale-alias", "resident-alias"] {
-            let mut server = mockito::Server::new_async().await;
-            let first_audio = vec![1_u8, 2, 3, 4];
-            let second_audio = vec![5_u8, 6, 7, 8];
-            let first_download = server.mock("GET", "/rest/download.view")
-                .match_query(mockito::Matcher::UrlEncoded("id".into(), "first".into()))
-                .with_status(200).with_header("content-type", "audio/flac")
-                .with_body(first_audio.clone())
-                .expect(usize::from(["fresh", "force", "stale-alias"].contains(&scenario))).create_async().await;
-            let second_download = server.mock("GET", "/rest/download.view")
-                .match_query(mockito::Matcher::UrlEncoded("id".into(), "second".into()))
-                .with_status(200).with_header("content-type", "audio/flac")
-                .with_body(second_audio.clone())
-                .expect(usize::from(["missing", "zero", "only-alias", "stale-alias", "force-missing"].contains(&scenario))).create_async().await;
-            let later_download = server.mock("GET", "/rest/download.view")
-                .match_query(mockito::Matcher::UrlEncoded("id".into(), "later".into()))
-                .with_status(200).with_header("content-type", "audio/flac")
-                .with_body(vec![9_u8, 10]).expect(1).create_async().await;
-            let root = tempfile::tempdir().unwrap();
-            let (manager, io) = setup_provider_sync_device(root.path()).await;
-            manager.update_manifest(|manifest| manifest.playlist_path = Some("Playlists".into())).await.unwrap();
-            let first = add_item_with_provider_format("first", "flac", "audio/flac", 4);
-            let mut second = first.clone();
-            second.jellyfin_id = "second".into();
-            // Different source duration is deliberately irrelevant to filename coalescing.
-            second.duration_seconds = 210;
-            let later = add_item_with_provider_format("later", "flac", "audio/flac", 2);
-            let path = construct_desired_file_path(&root.path().join("Music"), &first, None).unwrap().path;
-            let relative = path.strip_prefix(root.path()).unwrap().to_string_lossy().replace('\\', "/");
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let resident: crate::device::SyncedItem = serde_json::from_value(serde_json::json!({
-                "providerItemId":"first","name":first.name,"artist":"Artist","album":"Album",
-                "localPath":relative,"sizeBytes":3,"syncedAt":"before","providerSuffix":"flac"
-            })).unwrap();
-            if scenario != "fresh" {
-                manager.update_manifest(|manifest| manifest.synced_items.push(resident.clone())).await.unwrap();
-            }
-            if !["missing", "stale-alias", "force-missing"].contains(&scenario) { std::fs::write(&path, [42_u8, 43, 44]).unwrap(); }
-            if scenario == "zero" { std::fs::write(&path, []).unwrap(); }
-            let old_path = root.path().join("Music/old.flac");
-            if ["move-alias", "move-failed"].contains(&scenario) {
-                if scenario == "move-failed" {
-                    std::fs::create_dir(&old_path).unwrap();
-                    std::fs::write(old_path.join("preserved"), b"old content").unwrap();
+    async fn music_collision_assignments_survive_repeat_membership_force_and_repair() {
+        let mut server = mockito::Server::new_async().await;
+        let mut downloads = Vec::new();
+        for (id, bytes, count) in [("first", vec![1, 2], 1), ("second", vec![5, 6], 4), ("third", vec![9, 10], 2)] {
+            downloads.push(server.mock("GET", "/rest/download.view")
+                .match_query(mockito::Matcher::UrlEncoded("id".into(), id.into()))
+                .with_status(200).with_header("content-type", "audio/flac").with_body(bytes)
+                .expect(count).create_async().await);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (manager, io) = setup_provider_sync_device(root.path()).await;
+        let mut items = Vec::new();
+        for id in ["first", "second", "third"] {
+            let mut item = add_item_with_provider_format(id, "flac", "audio/flac", 2);
+            item.name = "Concerto".into(); item.track_number = Some(0); items.push(item);
+        }
+        let mut assignments = HashMap::new();
+        for phase in 0..7 {
+            let before = read_persisted_manifest(root.path());
+            let mut deletes = Vec::new();
+            if phase == 3 || phase == 4 {
+                for item in &before.synced_items {
+                    if phase == 4 || item.jellyfin_id == "first" {
+                        deletes.push(SyncDeleteItem { jellyfin_id: item.jellyfin_id.clone(), local_path: item.local_path.clone(),
+                            name: item.name.clone(), reason_code: None, reason: None });
+                    }
                 }
-                else { std::fs::write(&old_path, b"old duplicate").unwrap(); }
-                let mut old = resident.clone(); old.jellyfin_id = "second".into(); old.local_path = "Music/old.flac".into();
-                manager.update_manifest(|manifest| manifest.synced_items.push(old)).await.unwrap();
             }
-            if ["rekey", "resident-alias"].contains(&scenario) {
-                let mut old = resident.clone(); old.jellyfin_id = "old-id".into();
-                manager.update_manifest(|manifest| manifest.synced_items.push(old)).await.unwrap();
-            }
-            let deletion = |id: &str| -> SyncDeleteItem { serde_json::from_value(serde_json::json!({
-                "jellyfinId":id,"name":"Collision","localPath":relative,"sizeBytes":3
-            })).unwrap() };
-            let (adds, deletes) = match scenario {
-                "rekey" => (vec![later], vec![]),
-                "move-alias" | "move-failed" => {
-                    let mut old = deletion("second"); old.local_path = "Music/old.flac".into();
-                    (vec![second.clone(), later], vec![old])
-                },
-                "stale-alias" => {
-                    let mut moved = first.clone(); moved.name = "Moved First".into();
-                    (vec![second.clone(), moved, later], vec![])
-                },
-                "fresh" => (vec![first.clone(), second.clone(), later], vec![]),
-                // Alias arrives first, but Force must refresh the resident owner once.
-                "force" | "force-missing" => (vec![second.clone(), first.clone(), later], vec![deletion("first")]),
-                "only-alias" => (vec![second.clone(), later], vec![deletion("first")]),
-                "alias-delete" => (vec![second.clone(), later], vec![deletion("obsolete")]),
-                _ => (vec![second.clone(), later], vec![]),
-            };
-            if scenario == "alias-delete" {
-                let mut obsolete = resident.clone(); obsolete.jellyfin_id = "obsolete".into();
-                manager.update_manifest(|manifest| manifest.synced_items.push(obsolete)).await.unwrap();
-            }
-            let playlist_ids = if scenario == "only-alias" { vec!["second", "later"] }
-                else if scenario == "resident-alias" { vec!["first", "second", "old-id", "later"] }
-                else { vec!["first", "second", "later"] };
-            let id_changes = if scenario == "rekey" { vec![serde_json::from_value(serde_json::json!({
-                "oldJellyfinId":"old-id","newJellyfinId":"second","oldLocalPath":relative,
-                "name":"Collision","album":"Album","artist":"Artist","sizeBytes":3
-            })).unwrap()] } else { vec![] };
-            let delta = SyncDelta { adds, deletes, id_changes, unchanged: 0,
-                playlists: vec![PlaylistSyncItem { jellyfin_id: "playlist".into(), name: "Collisions".into(),
-                    tracks: playlist_ids.iter().map(|id| PlaylistTrackInfo { jellyfin_id: (*id).into(), artist: None, run_time_seconds: 210 }).collect() }],
+            if phase == 5 { std::fs::remove_file(root.path().join(&assignments["second"])).unwrap(); }
+            if phase == 6 { std::fs::write(root.path().join(&assignments["second"]), []).unwrap(); }
+            if phase == 4 { for item in &mut items { item.server_id = Some("known-server".into()); } }
+            let adds = match phase { 0 => vec![items[1].clone(), items[0].clone()], 2 => vec![items[2].clone()],
+                4 => vec![items[2].clone(), items[1].clone()], 5 | 6 => vec![items[1].clone()], _ => vec![] };
+            let delta = SyncDelta { adds, deletes, id_changes: vec![], unchanged: 0, playlists: vec![],
                 provenance_updates: Default::default(), blocked: vec![], pity_fired_servers: vec![] };
             let operations = Arc::new(SyncOperationManager::new());
-            let id = unique_operation_id("selected-collision");
-            operations.create_operation(id.clone(), delta.adds.len()).await;
-            let (_synced, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
-                local_encoding_servers: HashSet::new(),
-                provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
+            let id = unique_operation_id("collision-lifecycle");
+            operations.create_operation(id.clone(), delta.adds.len() + delta.deletes.len()).await;
+            let (_, errors) = execute_test_provider_sync(&delta, root.path(), ProviderSyncSource {
+                local_encoding_servers: HashSet::new(), provider: subsonic_provider(server.url()),
+                transcoding_profile: None, providers_by_server: Default::default(),
             }, operations.clone(), id.clone(), manager.clone(), io.clone()).await.unwrap();
-            first_download.assert_async().await;
-            second_download.assert_async().await;
-            later_download.assert_async().await;
-            let operation = operations.get_operation(&id).await.unwrap();
-            assert!(!operation.warnings.iter().any(|warning| warning.contains("Coalesced selected music")), "{scenario}: {:?}", operation.warnings);
-            if scenario == "move-failed" {
-                assert!(errors.iter().any(|e| e.error_message.contains("Failed to remove replaced file")), "{errors:?}");
-                assert!(old_path.exists());
-                let durable = read_persisted_manifest(root.path());
-                assert!(durable.synced_items.iter().any(|item| item.jellyfin_id == "second" && item.local_path == "Music/old.flac"));
-                assert_eq!(std::fs::read(&path).unwrap(), vec![42, 43, 44]);
-                continue;
+            assert!(errors.is_empty(), "phase {phase}: {errors:?}");
+            let manifest = read_persisted_manifest(root.path());
+            assert_eq!(manifest.synced_items.len(), if phase == 2 { 3 } else { 2 });
+            for entry in &manifest.synced_items {
+                if let Some(previous) = assignments.get(&entry.jellyfin_id) { assert_eq!(&entry.local_path, previous, "phase {phase}"); }
+                assignments.insert(entry.jellyfin_id.clone(), entry.local_path.clone());
+                let expected = match entry.jellyfin_id.as_str() { "first" => vec![1, 2], "second" => vec![5, 6], _ => vec![9, 10] };
+                assert_eq!(std::fs::read(root.path().join(&entry.local_path)).unwrap(), expected, "phase {phase}");
             }
-            assert!(errors.is_empty(), "{scenario}: {errors:?}");
-            if scenario == "move-alias" { assert!(!old_path.exists()); }
-            assert!(!operations.is_cancelled(&id).await, "{scenario}");
-            let expected = match scenario { "retry" | "alias-delete" | "rekey" | "move-alias" | "resident-alias" => vec![42, 43, 44], "missing" | "zero" | "only-alias" | "stale-alias" | "force-missing" => second_audio, _ => first_audio };
-            assert_eq!(std::fs::read(&path).unwrap(), expected, "{scenario}");
-            let durable = read_persisted_manifest(root.path());
-            assert_eq!(durable.synced_items.len(), if scenario == "stale-alias" { 3 } else { 2 }, "{scenario}");
-            let owners: Vec<_> = durable.synced_items.iter().filter(|item| item.local_path == relative).collect();
-            assert_eq!(owners.len(), 1, "{scenario}");
-            assert_eq!(owners[0].jellyfin_id, if ["missing", "zero", "only-alias", "stale-alias", "force-missing"].contains(&scenario) { "second" } else { "first" }, "{scenario}");
-            assert_eq!(owners[0].size_bytes, expected.len() as u64, "{scenario}");
-            let playlist = std::fs::read_to_string(root.path().join("Playlists/Collisions.m3u")).unwrap();
-            assert!(playlist.contains("Track later.flac"), "{scenario}: {playlist}");
-            if scenario == "stale-alias" { assert!(playlist.contains("Moved First.flac"), "{playlist}"); }
-            assert_eq!(playlist.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).count(), playlist_ids.len(), "{scenario}: {playlist}");
-            if scenario == "only-alias" {
-                // Once neither identity remains selected, the single retained output
-                // must still be deletable through ordinary manifest cleanup.
-                let cleanup = calculate_delta(&[], &durable);
-                let cleanup_id = unique_operation_id("collision-cleanup");
-                let cleanup_ops = Arc::new(SyncOperationManager::new());
-                cleanup_ops.create_operation(cleanup_id.clone(), cleanup.deletes.len()).await;
-                let (_, errors) = execute_test_provider_sync(&cleanup, root.path(), ProviderSyncSource {
-            local_encoding_servers: HashSet::new(),                    provider: subsonic_provider(server.url()), transcoding_profile: None, providers_by_server: Default::default(),
-                }, cleanup_ops, cleanup_id, manager.clone(), io).await.unwrap();
-                assert!(errors.is_empty(), "{errors:?}");
-                assert!(!path.exists());
-                assert!(read_persisted_manifest(root.path()).synced_items.is_empty());
-            }
+            if phase == 1 || phase == 3 { assert_eq!(operations.get_operation(&id).await.unwrap().bytes_transferred, 0); }
+            if phase >= 3 { assert!(!root.path().join(&assignments["first"]).exists()); }
         }
+        for download in downloads { download.assert_async().await; }
     }
 
     #[tokio::test]
@@ -13748,19 +13767,19 @@ mod source_audio_planning_tests {
         manifest
     }
     #[test]
-    fn metadata_rekeys_share_estimates_without_reusing_an_old_file_twice() {
+    fn distinct_music_metadata_matches_reserve_each_new_output() {
         let desired = vec![review_desired("new"), review_desired("other")];
         let manifest = review_manifest();
         let mut delta = calculate_delta(&desired, &manifest);
-        assert_eq!(delta.id_changes.len(), 1);
-        assert_eq!(delta.adds.len(), 1);
+        assert!(delta.id_changes.is_empty());
+        assert_eq!(delta.adds.len(), 2);
         estimate_delta_outputs(&mut delta, Some(&mp3()), None);
         assert_eq!(planned_selection_bytes(&desired, &manifest, Some(&mp3()), None),
-            delta.id_changes[0].size_bytes + delta.adds[0].size_bytes);
+            delta.adds.iter().map(|item| item.size_bytes).sum::<u64>());
         let size = planned_selection_size(&[desired.clone(), vec![desired[0].clone()]].concat(), &manifest, Some(&mp3()), None);
-        assert_eq!(size.expected_bytes, 5_000_000 + 9_600_000);
-        assert_eq!(size.reserve_bytes(), 96_000 + 65_536);
-        assert_eq!(size.reserved_bytes, delta.id_changes[0].size_bytes + delta.adds[0].size_bytes);
+        assert_eq!(size.expected_bytes, 2 * 9_600_000);
+        assert_eq!(size.reserve_bytes(), 2 * (96_000 + 65_536));
+        assert_eq!(size.reserved_bytes, delta.adds.iter().map(|item| item.size_bytes).sum::<u64>());
     }
     #[test]
     fn metadata_rekeys_respect_server_quality_and_profile_rewrites() {
@@ -13780,7 +13799,7 @@ mod source_audio_planning_tests {
         }
         let mut legacy = review_manifest();
         legacy.synced_items[0].server_id = None;
-        assert_eq!(calculate_delta(&[review_desired("new")], &legacy).id_changes.len(), 1);
+        assert!(calculate_delta(&[review_desired("new")], &legacy).id_changes.is_empty());
     }
     #[test]
     fn smaller_goal_reservations_replace_oversized_retained_outputs() {
@@ -13791,6 +13810,12 @@ mod source_audio_planning_tests {
             desired.size_bytes = 2_004_736; // 240 seconds at 64 kbps with allowances.
             let overrides = HashMap::from([((desired.jellyfin_id.clone(), desired.server_id.clone()), 64)]);
             let mut delta = calculate_delta(&[desired.clone()], &manifest);
+            // Newly distinct music IDs are ordinary additions; the caller applies
+            // their resolved Auto-Fill override before checking retained outputs.
+            for add in &mut delta.adds {
+                add.is_auto_fill = true;
+                add.max_bitrate_override_kbps = Some(64);
+            }
             replace_oversized_goal_residents(&mut delta, &[desired.clone()], &manifest, &overrides);
             replace_oversized_goal_residents(&mut delta, &[desired], &manifest, &overrides);
             assert_eq!(delta.adds.len(), 1);
@@ -13813,20 +13838,20 @@ mod source_audio_planning_tests {
     }
 
     #[tokio::test]
-    async fn missing_rekey_sources_become_linked_audio_replacements() {
+    async fn new_music_ids_remain_audio_additions_when_matching_old_files_are_missing() {
         let root = tempfile::tempdir().unwrap();
         let io = crate::device_io::MscBackend::new(root.path().to_path_buf());
         let manifest = review_manifest();
         let desired = review_desired("new");
         let mut delta = calculate_delta(&[desired.clone()], &manifest);
-        assert_eq!(delta.id_changes.len(), 1);
+        assert!(delta.id_changes.is_empty());
         augment_delta_with_existence_check(&mut delta, &[desired], &manifest, &io).await.unwrap();
         assert_eq!(delta.adds.len(), 1);
-        assert_eq!(delta.id_changes.len(), 1, "retain cleanup linkage");
-        assert_eq!(delta.adds[0].reason_code.as_deref(), Some("device-file-missing"));
+        assert_eq!(delta.deletes.len(), 1, "remove the old identity independently");
+        assert_eq!(delta.adds[0].reason_code.as_deref(), Some("new-selection"));
         estimate_delta_outputs(&mut delta, Some(&mp3()), None);
         let plan = crate::sync_plan::SyncPlan::from_delta(delta, &manifest).unwrap();
-        assert_eq!(plan.total_bytes, 9_761_536, "missing rekey source is a single new audio output");
+        assert_eq!(plan.total_bytes, 9_761_536, "a new identity always reserves its own output");
     }
 
 }
