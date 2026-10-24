@@ -16,7 +16,7 @@
     "--enable-encoder=libmp3lame,aac,flac,alac,libopus,libvorbis,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le",
     "--enable-muxer=mp3,mov,mp4,ipod,adts,flac,ogg,opus,wav,pcm_f32le"
   ],
-  "windowsConfigureFlags": ["--disable-x86asm", "--extra-cflags=-MD", "--extra-cxxflags=-MD"],
+  "windowsConfigureFlags": ["--disable-x86asm", "--extra-cflags=-MD", "--extra-cxxflags=-MD", "--enable-decoder=eac3"],
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],
   "abiVersions": { "avcodec": "63.1.102", "avformat": "63.1.102", "avutil": "61.1.102", "swresample": "7.1.102" },
   "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.18.2", "libpulse-binding": "2.30.1" },

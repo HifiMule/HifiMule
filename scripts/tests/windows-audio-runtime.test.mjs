@@ -127,6 +127,9 @@ for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
     // probes and both language compilers must use that same runtime.
     assert.ok(command.includes("'--extra-cflags=-MD'"));
     assert.ok(command.includes("'--extra-cxxflags=-MD'"));
+    // FFmpeg's AC-3 decoder declares static E-AC-3 helpers unconditionally;
+    // MSVC needs their definitions even when their call sites are optimized out.
+    assert.ok(command.includes("'--enable-decoder=eac3'"));
     assert.equal(invocation.options.env.VSLANG, "1033");
   });
 }
