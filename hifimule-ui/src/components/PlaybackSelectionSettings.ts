@@ -6,6 +6,7 @@ import {
     type ServerSummary,
 } from '../rpc';
 import { t } from '../i18n';
+import { numericError, fieldFeedback, revealInvalid } from '../numericValidation';
 import { formatServerIdentity } from '../serverIdentity';
 
 const kinds: PlaybackSelectionKind[] = ['playlist', 'artist', 'genre'];
@@ -51,8 +52,9 @@ export class PlaybackSelectionSettings {
         this.start.textContent = t('playback.selection.start');
         this.start.className = 'playback-selection-settings__start';
         this.cancel.textContent = t('playback.selection.cancel');
-        this.seed.type = 'number'; this.seed.min = '0'; this.seed.max = '4294967295'; this.seed.step = '1';
-        this.seed.addEventListener('input', () => this.markDirty());
+        this.seed.type = 'text'; this.seed.inputMode = 'numeric'; this.seed.required = true; this.seed.min = '0'; this.seed.max = '4294967295'; this.seed.step = '1';
+        this.seed.addEventListener('input', () => { this.markDirty(); this.validateSeed(); });
+        this.seed.addEventListener('blur', () => this.validateSeed());
         for (const key of orderings) this.ordering.add(new Option(t(`playback.selection.order.${key}`), key));
         this.ordering.addEventListener('change', () => this.markDirty());
         this.add.addEventListener('click', () => this.addSource());
@@ -64,6 +66,7 @@ export class PlaybackSelectionSettings {
         this.element.append(heading, description, this.rows,
             this.label('playback.selection.order', this.ordering),
             this.label('playback.selection.seed', this.seed), controls, this.status);
+        fieldFeedback(this.seed, undefined, t('numeric.seed_hint'));
         this.updateActions();
         void this.load();
     }
@@ -291,7 +294,13 @@ export class PlaybackSelectionSettings {
         this.updateActions();
     }
 
+    private validateSeed(): boolean {
+        const error = numericError(this.seed.value, { required: true, integer: true, min: 0, max: 4294967295 });
+        fieldFeedback(this.seed, error, t('numeric.seed_hint')); return !error;
+    }
+
     private async saveConfig(): Promise<void> {
+        if (!this.validateSeed()) { revealInvalid(this.seed); return; }
         const seed = Number(this.seed.value);
         if (!Number.isSafeInteger(seed) || seed < 0 || seed > 4294967295 || this.config.sources.some(source => source.kind !== 'library' && !source.ref)) {
             this.status.textContent = t('playback.selection.invalid'); return;

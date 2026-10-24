@@ -286,6 +286,7 @@ pub fn validate_entry(
             return Ok(());
         }
         ensure!(profile.is_object(), "Device capabilities must be an object");
+        local::validate_numeric_configuration(profile)?;
         local::validate_profile(profile)?;
         let direct = profile["DirectPlayProfiles"]
             .as_array()
@@ -332,20 +333,6 @@ pub fn validate_entry(
             profile["CodecProfiles"].as_array().is_some(),
             "CodecProfiles must be an array"
         );
-        for (key, max) in [
-            ("MaxAudioChannels", 32),
-            ("MaxAudioSampleRate", 768000),
-            ("MaxAudioBitDepth", 64),
-            ("MaxStreamingBitrate", 100000000),
-            ("MusicStreamingTranscodingBitrate", 100000000),
-        ] {
-            if let Some(value) = profile.get(key) {
-                ensure!(
-                    value.as_u64().is_some_and(|n| n > 0 && n <= max),
-                    "Invalid {key}"
-                );
-            }
-        }
     }
     Ok(())
 }

@@ -7,7 +7,7 @@ const bundle = await build({
     entryPoints: [fileURLToPath(new URL('../src/components/PlaybackSelectionSettings.ts', import.meta.url))],
     bundle: true, platform: 'node', format: 'esm', write: false,
     plugins: [{ name: 'radio-settings-dependencies', setup(build) {
-        build.onResolve({ filter: /^\.\.\/(rpc|i18n|serverIdentity)$/ }, args => ({ path: args.path, namespace: 'test' }));
+        build.onResolve({ filter: /^\.{1,2}\/(rpc|i18n|serverIdentity)$/ }, args => ({ path: args.path, namespace: 'test' }));
         build.onLoad({ filter: /.*/, namespace: 'test' }, ({ path }) => ({ loader: 'js', contents:
             path.endsWith('i18n') ? 'export const t = key => key;'
             : path.endsWith('serverIdentity') ? 'export const formatServerIdentity = () => ({label: "Music"});'
@@ -64,4 +64,11 @@ test('clearing sources must be saved before automatic start, and invalid explici
     assert.equal(view.save.disabled, true);
     await view.saveConfig();
     assert.equal(view.status.textContent, 'playback.selection.invalid');
+});
+
+test('seed blank, fractions, negative, nonfinite and overflow never save; valid correction and zero save',async()=>{
+ const view=settings();let writes=0;globalThis.saveRadio=async()=>{writes++;};
+ for(const value of ['', ' ', '1.2','-1','Infinity','4294967296']){view.seed.value=value;await view.saveConfig();assert.equal(writes,0,value);}
+ for(const value of ['0','4294967295']){view.seed.value=value;await view.saveConfig();assert.equal(view.config.seed,Number(value));}
+ assert.equal(writes,2);
 });

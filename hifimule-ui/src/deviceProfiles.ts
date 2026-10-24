@@ -1,6 +1,7 @@
 import english from 'virtual:hifimule-locale/en';
 import { t } from './i18n';
 import { escapeAttr } from './html';
+import { numericError, type NumericRules } from './numericValidation';
 export interface DeviceProfileSummary {
     id: string; name: string; aliases?: string[]; description?: string; ownership?: string; revision?: number;
     defaultMusicFolder?: string | null; defaultPlaylistFolder?: string | null;
@@ -56,6 +57,7 @@ function rowFormats(row: any): string[] {
     return [...new Set<string>(containers.flatMap((container: string) => codecs.flatMap((codec: string) => matches(container,codec).map(format => format[0]))))];
 }
 export function kbpsToBps(value: string): number | undefined {
+    value = value.trim();
     if (!/^\d+(?:\.\d{1,3})?$/.test(value)) return undefined;
     const [whole, fraction = ''] = value.split('.');
     const bits = Number(whole) * 1000 + Number(fraction.padEnd(3,'0'));
@@ -104,17 +106,47 @@ export function fromDraft(base: DeviceProfile, draft: ProfileDraft): DeviceProfi
     if (!['flac','alac','wav'].includes(draft.output)) audio.MusicStreamingTranscodingBitrate = kbpsToBps(draft.bitrate);
     else delete audio.MusicStreamingTranscodingBitrate;
     for (const key of limits) {
-        if (draft.limits[key] === '') delete audio[key];
+        if (draft.limits[key].trim() === '') delete audio[key];
         else audio[key] = key === 'MaxStreamingBitrate' ? kbpsToBps(draft.limits[key]) : Number(draft.limits[key]);
     }
     result.deviceProfile = audio; return result;
 }
-export function validateDraft(draft: ProfileDraft): string | undefined {
+export interface ProfileConstraints {
+    fields?: Record<string, { min: number; max: number }>;
+    codecs?: Record<string, { sampleRateMin?: number; bitDepthMin?: number }>;
+}
+export function profileNumericRules(key: string, draft: ProfileDraft, constraints?: ProfileConstraints): NumericRules {
+    const bitrate = key === 'bitrate' || key === 'MaxStreamingBitrate';
+    const field = key === 'bitrate' ? 'MusicStreamingTranscodingBitrate' : key;
+    const defaults: Record<string, number> = { MaxAudioChannels: 32, MaxAudioBitDepth: 64, MaxAudioSampleRate: 768000 };
+    const codec = outputs.find(output => output[0] === draft.output)?.[3];
+    const floor = constraints?.codecs?.[codec ?? ''];
+    return { required: key === 'bitrate', integer: !bitrate, min: bitrate ? (constraints?.fields?.[field]?.min ?? 1) / 1000 : Math.max(constraints?.fields?.[field]?.min ?? 1,
+        key === 'MaxAudioSampleRate' ? floor?.sampleRateMin ?? 1 : key === 'MaxAudioBitDepth' ? floor?.bitDepthMin ?? 1 : 1),
+        max: bitrate ? (constraints?.fields?.[field]?.max ?? 100000000) / 1000 : constraints?.fields?.[field]?.max ?? defaults[key],
+        decimals: bitrate ? 3 : undefined };
+}
+export function profileNumericErrors(draft: ProfileDraft, base?: DeviceProfile, constraints?: ProfileConstraints): Record<string, string> {
+    if (base?.ownership === 'system' || (base && unsupportedRules(base).length) || draft.mode === 'originals') return {};
+    if (base) {
+        const original = toDraft(base);
+        const audio = (value: ProfileDraft) => JSON.stringify([value.mode, value.formats, value.output, value.bitrate, value.limits]);
+        if (audio(original) === audio(draft)) return {}; // The daemon also permits unchanged legacy capabilities.
+    }
+    const errors: Record<string, string> = {};
+    for (const key of [...limits, 'bitrate']) {
+        if (key === 'bitrate' && ['flac','alac','wav'].includes(draft.output)) continue;
+        const rules = profileNumericRules(key, draft, constraints);
+        const error = numericError(key === 'bitrate' ? draft.bitrate : draft.limits[key], rules);
+        if (error) errors[key] = key === 'MaxAudioSampleRate' && Number(draft.limits[key]) > 0 && Number(draft.limits[key]) < (rules.min ?? 1)
+            ? t('numeric.sample_rate', { min: rules.min ?? 1, codec: draft.output.toUpperCase() }) : error;
+    }
+    return errors;
+}
+export function validateDraft(draft: ProfileDraft, base?: DeviceProfile, constraints?: ProfileConstraints): string | undefined {
     if (!draft.name.trim() || draft.name.trim().length > 120) return t('profiles.invalid_name');
     for (const folder of [draft.music,draft.playlists,draft.audiobooks,draft.podcasts]) if (/^[\/]|[\\:\0]/.test(folder) || folder.split('/').some(s => s === '.' || s === '..')) return t('profiles.invalid_folder');
-    for (const [key,value] of Object.entries(draft.limits)) if (value !== '' && (key === 'MaxStreamingBitrate' ? kbpsToBps(value) === undefined : !Number.isInteger(Number(value)) || Number(value) <= 0)) return t('profiles.invalid_limit');
-    if (draft.mode !== 'originals' && !['flac','alac','wav'].includes(draft.output) && kbpsToBps(draft.bitrate) === undefined) return t('profiles.invalid_limit');
-    return undefined;
+    return Object.values(profileNumericErrors(draft, base, constraints))[0];
 }
 export function newProfile(): DeviceProfile {
     return {id:'',name:t('profiles.untitled'),description:'',ownership:'custom',revision:0,deviceProfile:{Name:'HifiMule-Custom',DirectPlayProfiles:[{Container:'mp3',AudioCodec:'mp3',Type:'Audio'}],TranscodingProfiles:[{Container:'mp3',AudioCodec:'mp3',Type:'Audio',Protocol:'http',EstimateContentLength:true,EnableMpegtsM2TsMode:false}],CodecProfiles:[],MusicStreamingTranscodingBitrate:256000}};

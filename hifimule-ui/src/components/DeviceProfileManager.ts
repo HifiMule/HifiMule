@@ -1,7 +1,9 @@
 import { rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { escapeAttr } from '../html';
-import { type DeviceProfile, type DeviceProfileSummary, type ProfileDraft, formats, outputs, limits, toDraft, fromDraft, newProfile, validateDraft, unsupportedRules, profileOptions, displayProfile } from '../deviceProfiles';
+import { type DeviceProfile, type DeviceProfileSummary, type ProfileDraft, formats, outputs, limits, toDraft, fromDraft, newProfile, validateDraft, unsupportedRules, profileOptions, displayProfile, profileNumericErrors, profileNumericRules, type ProfileConstraints } from '../deviceProfiles';
+
+import { fieldFeedback, revealInvalid } from '../numericValidation';
 
 type OpenOptions = { selectedId?: string; create?: boolean; onSaved?: (profile: DeviceProfile) => void | Promise<void>; returnFocus?: HTMLElement };
 let instance: DeviceProfileManager | undefined;
@@ -14,6 +16,9 @@ export class DeviceProfileManager {
     private profiles: DeviceProfileSummary[] = [];
     private profile?: DeviceProfile;
     private draft?: ProfileDraft;
+    private constraints?: ProfileConstraints;
+    private numericTouched = new Set<string>();
+    private serverErrors: Record<string, string> = {};
     private clean = '';
     private creating = false;
     private busy = false;
@@ -37,6 +42,7 @@ export class DeviceProfileManager {
         this.dialog.addEventListener('sl-after-hide', (event: Event) => { if (event.target !== this.dialog) return; this.dialog.remove(); if (instance === this) instance = undefined; this.options.returnFocus?.focus(); });
         await customElements.whenDefined('sl-dialog'); await this.dialog.updateComplete; this.dialog.show();
         try {
+            try { this.constraints = await rpcCall('device_profiles.constraints'); } catch { /* Older daemons still validate on save. */ }
             await this.reload();
             if (this.options.create) this.setProfile(newProfile(), true);
             else await this.select(this.options.selectedId ?? this.profiles[0]?.id);
@@ -86,6 +92,7 @@ export class DeviceProfileManager {
     }
     private restorePicker(): void { const picker = this.dialog.querySelector('#profile-picker'); if (picker) picker.value = this.profile?.id || '__draft__'; }
     private setProfile(profile: DeviceProfile, creating: boolean): void {
+        this.numericTouched.clear(); this.serverErrors = {};
         this.profile = profile; this.draft = toDraft(profile); this.clean = JSON.stringify(this.draft); this.creating = creating;
         this.renderList(); this.renderEditor();
         const error = this.dialog?.querySelector('#profile-error'); if (error) error.open = false;
@@ -116,19 +123,23 @@ export class DeviceProfileManager {
             <fieldset class="profile-formats" ${audioDisabled}><legend>${t('profiles.formats')}</legend>${formats.map(([id,label]) => `<sl-checkbox data-format="${id}" ${draft.formats.includes(id) ? 'checked' : ''} ${audioDisabled}>${label}</sl-checkbox>`).join('')}</fieldset>
             <sl-select id="profile-mode" label="${t('profiles.conversion')}" value="${draft.mode}" ${audioDisabled}><sl-option value="originals">${t('profiles.originals')}</sl-option><sl-option value="compatible">${t('profiles.compatible')}</sl-option><sl-option value="always">${t('profiles.always')}</sl-option></sl-select>
             <div class="profile-output-fields" ${draft.mode === 'originals' ? 'hidden' : ''}><sl-select id="profile-output" label="${t('profiles.output')}" value="${draft.output}" ${audioDisabled}>${outputs.map(([id,label]) => `<sl-option value="${id}">${label}</sl-option>`).join('')}</sl-select>
-            ${input('profile-bitrate',t('profiles.bitrate'),draft.bitrate,`type="number" min="0.001" step="0.001" ${audioDisabled} ${['flac','alac','wav'].includes(draft.output) ? 'hidden' : ''}`)}</div>
-            <sl-details summary="${t('profiles.limits')}"><p class="profile-help">${t('profiles.unlimited_help')}</p><div class="profile-limit-fields">${limits.map(key => input(`profile-${key}`,t(`profiles.${key}`),draft.limits[key],`type="number" min="${key === 'MaxStreamingBitrate' ? '0.001' : '1'}" step="${key === 'MaxStreamingBitrate' ? '0.001' : '1'}" placeholder="${t('profiles.unlimited')}" ${audioDisabled}`)).join('')}</div></sl-details>
+            ${input('profile-bitrate',t('profiles.bitrate'),draft.bitrate,`type="text" inputmode="decimal" ${audioDisabled} ${['flac','alac','wav'].includes(draft.output) ? 'hidden' : ''}`)}</div>
+            <sl-details summary="${t('profiles.limits')}"><p class="profile-help">${t('profiles.unlimited_help')}</p><div class="profile-limit-fields">${limits.map(key => input(`profile-${key}`,t(`profiles.${key}`),draft.limits[key],`type="text" inputmode="${key === 'MaxStreamingBitrate' ? 'decimal' : 'numeric'}" placeholder="${t('profiles.unlimited')}" ${audioDisabled}`)).join('')}</div></sl-details>
             <sl-details summary="${t('profiles.folders')}"><p class="profile-help">${t('profiles.folders_help')}</p>${input('profile-music',t('basket.device.music_folder'),draft.music)}${input('profile-playlists',t('basket.device.playlist_folder'),draft.playlists)}${input('profile-audiobooks',t('basket.device.audiobook_folder'),draft.audiobooks,`placeholder="${escapeAttr(t('basket.device.media_folder_inherit'))}"`)}${input('profile-podcasts',t('basket.device.podcast_folder'),draft.podcasts,`placeholder="${escapeAttr(t('basket.device.media_folder_inherit'))}"`)}</sl-details>
             <p class="profile-summary" aria-live="polite"></p>
             ${!system && profile.usage ? `<p class="profile-help">${escapeAttr(t('profiles.usage', {count: profile.usage.length, names: profile.usage.map(d => d.name || d.id).join(', ') || t('profiles.none')}))} ${t('profiles.offline_usage')}</p>` : ''}</div>`;
         this.dialog.querySelector('#profile-picker').addEventListener('sl-change', (event: any) => void this.select(event.target.value));
         const fields = this.dialog.querySelector('.profile-editor-fields');
-        fields.addEventListener('sl-input', () => this.capture()); fields.addEventListener('sl-change', () => { this.capture(); this.updateSummary(); });
+        fields.addEventListener('sl-input', (event: Event) => { this.capture(); const id = (event.target as HTMLElement).id.replace('profile-', ''); this.numericTouched.add(id); delete this.serverErrors[id]; this.updateNumericFeedback(); });
+        fields.addEventListener('sl-change', (event: Event) => {
+            if (['profile-output','profile-mode'].includes((event.target as HTMLElement).id)) this.serverErrors = {};
+            this.capture(); this.updateSummary(); this.updateNumericFeedback();
+        });
         this.dialog.querySelector('#profile-save').hidden = system;
         this.dialog.querySelector('#profile-save').disabled = system || this.busy;
         this.dialog.querySelector('#profile-clone').disabled = this.creating || this.busy;
         this.dialog.querySelector('#profile-clone').textContent = t(system ? 'profiles.clone_customize' : 'profiles.clone');
-        this.updateSummary();
+        this.updateSummary(); this.updateNumericFeedback();
     }
     private capture(): void {
         if (!this.draft || this.busy) return;
@@ -145,9 +156,24 @@ export class DeviceProfileManager {
         this.dialog.querySelector('#profile-bitrate').hidden = lossless;
         this.dialog.querySelectorAll('[data-format]').forEach((el: any) => { el.disabled = this.busy || this.profile?.ownership === 'system' || !!unsupportedRules(this.profile!).length || draft.mode !== 'compatible'; });
     }
+    private updateNumericFeedback(submit = false): boolean {
+        if (!this.draft || !this.profile) return true;
+        const errors = { ...profileNumericErrors(this.draft, this.profile, this.constraints), ...this.serverErrors };
+        let first: any;
+        for (const key of [...limits, 'bitrate']) {
+            const control = this.dialog.querySelector(`#profile-${key}`);
+            if (!control || control.disabled || this.draft.mode === 'originals' || (key === 'bitrate' && ['flac','alac','wav'].includes(this.draft.output))) { fieldFeedback(control); continue; }
+            const rules = profileNumericRules(key, this.draft, this.constraints);
+            const hint = key === 'MaxAudioSampleRate' ? t('numeric.hz_hint') : key === 'bitrate' || key === 'MaxStreamingBitrate' ? t('numeric.kbps_hint') : t('numeric.whole_hint', { min: rules.min ?? 0, max: rules.max ?? '' });
+            fieldFeedback(control, submit || this.numericTouched.has(key) ? errors[key] : undefined, hint);
+            if (errors[key]) first ??= control;
+        }
+        if (submit && first) revealInvalid(first);
+        return !first;
+    }
     private async save(): Promise<void> {
         if (this.busy || !this.profile || !this.draft || this.profile.ownership === 'system') return;
-        this.capture(); const validation = validateDraft(this.draft); if (validation) { this.error(validation); return; }
+        this.capture(); if (!this.updateNumericFeedback(true)) return; const validation = validateDraft(this.draft, this.profile, this.constraints); if (validation) { this.error(validation); return; }
         const button = this.dialog.querySelector('#profile-save'); this.busy = true; button.loading = true;
         this.dialog.querySelectorAll('.profile-editor-fields sl-input, .profile-editor-fields sl-textarea, .profile-editor-fields sl-select, .profile-editor-fields sl-checkbox').forEach((control: any) => { control.disabled = true; });
         try {
@@ -163,7 +189,15 @@ export class DeviceProfileManager {
             try { await this.options.onSaved?.(saved); } catch (error) { refreshError ??= error; }
             if (refreshError) this.error(refreshError,true);
             else this.dialog.querySelector('#profile-error').open = false;
-        } catch (error) { this.error(error); } finally { this.busy = false; button.loading = false; this.renderEditor(); }
+        } catch (error) {
+            const data = (error as any)?.data;
+            if (data?.errorCode === 'PROFILE_NUMERIC_CONSTRAINT') {
+                const key = data.field === 'MusicStreamingTranscodingBitrate' ? 'bitrate' : data.field;
+                const bitrate = key === 'bitrate' || key === 'MaxStreamingBitrate';
+                this.serverErrors[key] = key === 'MaxAudioSampleRate' ? t('numeric.sample_rate', { min: data.min, codec: this.draft.output.toUpperCase() }) : t('numeric.whole_hint', { min: data.min / (bitrate ? 1000 : 1), max: data.max / (bitrate ? 1000 : 1) });
+                this.numericTouched.add(key);
+            } else this.error(error);
+        } finally { this.busy = false; button.loading = false; this.renderEditor(); this.updateNumericFeedback(true); }
     }
     private async close(): Promise<void> { if (this.closing || !await this.permitDiscard()) return; this.closing = true; this.dialog.hide(); }
 }

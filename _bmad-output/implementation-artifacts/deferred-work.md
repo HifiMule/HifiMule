@@ -373,3 +373,8 @@ If future review findings need follow-up, add them as new story scope or reopen 
   Reconfirmed during M4B implementation on 2026-10-23 against an isolated archive of `4b9b8862ac31c7184c1326a057c46ccbf7de08bd`: both tests fail individually with the same assertions. The initial M4B full-suite run reported 1,664 passed, these two failed, and 12 ignored.
 
   Resolved on 2026-10-23: the file-as-parent assertion now checks that the underlying filesystem error is preserved, independent of the OS-specific failure stage; the collision fixture uses slash-normalized manifest paths. All 35 affected music sync tests passed after both failures were reproduced. See `spec-fix-windows-sync-test-portability.md` for final verification.
+
+
+## Deferred from: numerical configuration validation (2026-10-24)
+
+- **Auto-sync profile-history tests assume pre-migration profile IDs.** `tests::manifest_migration_regression_auto_completion_records_operation_profile_snapshot` expects `rockbox-mp3-320` but receives `system:rockbox-mp3-320`; `tests::manifest_migration_regression_auto_finalization_preserves_profile_history` fails its clean-profile-history assertion. Both failures were reproduced against isolated baseline `2e6afe52c40fd11f56d4ecfeda271864e6a8283f` using the controlled FFmpeg wrapper (filtered run: 2 passed, 2 failed). Isolate profile-store fixtures and reconcile migration-aware history assertions in a focused follow-up; this validation change does not alter sync history.

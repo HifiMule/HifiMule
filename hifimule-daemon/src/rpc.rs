@@ -723,6 +723,7 @@ async fn handler(
         "basket.autoFill" => handle_basket_auto_fill(&state, payload.params).await,
         "autoFill.setPipeline" => handle_auto_fill_set_pipeline(&state, payload.params).await,
         "sync.setAutoFill" => handle_sync_set_auto_fill(&state, payload.params).await,
+        "device_profiles.constraints" => Ok(crate::transcoding::local::numeric_constraints()),
         "device_profiles.list" => handle_device_profiles_list().await,
         "device_profiles.get" | "device_profiles.create" | "device_profiles.update" | "device_profiles.clone" => handle_device_profile(&state, &payload.method, payload.params).await,
         "device.set_transcoding_profile" => {
@@ -10442,7 +10443,14 @@ async fn handle_device_profile(
         None
     };
     let saved = crate::transcoding::save_profile(&path, entry, expected, source)
-        .map_err(|e| error(e.to_string()))?;
+        .map_err(|e| {
+            let mut rpc = error(e.to_string());
+            if let Some(field) = e.downcast_ref::<crate::transcoding::local::NumericConstraintError>() {
+                rpc.data = Some(serde_json::json!({"errorCode":"PROFILE_NUMERIC_CONSTRAINT", "field":field.field,
+                    "min":field.min, "max":field.max}));
+            }
+            rpc
+        })?;
     if audio_changed {
         *state
             .sync_operation_manager
@@ -18937,6 +18945,18 @@ mod tests {
                 .await
                 .unwrap();
                 let id = cloned["id"].as_str().unwrap();
+                let durable = std::fs::read(&path).unwrap();
+                for (field, value, minimum) in [("MaxAudioChannels", 33, 1), ("MaxAudioSampleRate", 48, 8000)] {
+                    let mut invalid = cloned.clone();
+                    invalid["deviceProfile"][field] = serde_json::json!(value);
+                    let rejected = handle_device_profile(&state, "device_profiles.update",
+                        Some(serde_json::json!({"profile":invalid,"revision":1}))).await.unwrap_err();
+                    let data = rejected.data.unwrap();
+                    assert_eq!(data["errorCode"],"PROFILE_NUMERIC_CONSTRAINT");
+                    assert_eq!(data["field"],field);
+                    assert!(data["min"].as_u64().unwrap() >= minimum);
+                    assert_eq!(std::fs::read(&path).unwrap(), durable);
+                }
                 let mut metadata = cloned.clone();
                 metadata["name"] = serde_json::json!("My player");
                 let guard = state.sync_operation_manager.try_start_pipeline().unwrap();

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Numeric configuration renderer checks</title>
+<body><div style="padding:1rem;display:flex;gap:1rem;flex-wrap:wrap"><button id="profile">Device profile</button><button id="autofill">Auto-fill</button><button id="podcast">Podcasts</button><button id="radio">Playback selection</button><output id="saved" aria-live="polite"></output></div><main id="radio-host" style="padding:1rem;max-width:50rem"></main>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace.ts';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const records=[{id:'custom:numeric',name:'Portable AAC player',description:'Numeric configuration fixture',ownership:'custom',revision:1,deviceProfile:{Name:'Fixture',DirectPlayProfiles:[],TranscodingProfiles:[{Container:'mp4',AudioCodec:'aac',Type:'Audio',Protocol:'http',EstimateContentLength:true,EnableMpegtsM2TsMode:false}],CodecProfiles:[],MusicStreamingTranscodingBitrate:256000,MaxAudioSampleRate:48000}}];
+const calls=[];window.numericFixture={calls,records};
+const params=new URLSearchParams(location.search);
+window.__TAURI_INTERNALS__={invoke:async(_command,{method,params:args={}})=>{
+ calls.push({method,params:structuredClone(args)});
+ if(method==='device_profiles.constraints') {if(params.has('noMetadata'))throw new Error('Method unavailable');return {fields:{MaxAudioSampleRate:{min:1,max:768000},MaxAudioChannels:{min:1,max:32},MaxAudioBitDepth:{min:1,max:64},MaxStreamingBitrate:{min:1,max:100000000},MusicStreamingTranscodingBitrate:{min:1,max:100000000}},codecs:{aac:{sampleRateMin:7350,bitDepthMin:1},mp3:{sampleRateMin:8000,bitDepthMin:1},flac:{bitDepthMin:16},alac:{bitDepthMin:16},opus:{sampleRateMin:48000},pcm_s16le:{bitDepthMin:16}}};}
+ if(method==='device_profiles.list')return structuredClone(records);
+ if(method==='device_profiles.get')return structuredClone(records.find(p=>p.id===args.id));
+ if(['device_profiles.create','device_profiles.clone','device_profiles.update'].includes(method)){
+  if(params.has('serverError'))throw {code:-32602,message:'Numeric constraint',data:{errorCode:'PROFILE_NUMERIC_CONSTRAINT',field:'MaxAudioSampleRate',min:7350,max:768000}};
+  const saved={...structuredClone(args.profile),revision:2};records[0]=saved;document.getElementById('saved').textContent='Profile saved';return saved;
+ }
+ if(method==='playback.getSelectionConfig')return {data:{schemaVersion:1,sources:[],ordering:['random'],seed:0,maxTracks:16}};
+ if(method==='playback.saveSelectionConfig'){document.getElementById('saved').textContent='Playback selection saved';return {};}
+ if(method==='server.list')return [{serverId:'fixture',name:'Fixture music library',type:'jellyfin'}];
+ if(method==='basket.autoFill')return [];
+ return {};
+}};
+const {initializeI18n,setLanguage}=await import('../src/i18n.ts');
+if(params.has('lang'))await setLanguage(params.get('lang'));else await initializeI18n();
+const {openDeviceProfiles}=await import('../src/components/DeviceProfileManager.ts');
+const {AutoFillPanel}=await import('../src/components/AutoFillPanel.ts');
+const {PlaybackSelectionSettings}=await import('../src/components/PlaybackSelectionSettings.ts');
+const openProfile=()=>openDeviceProfiles({selectedId:records[0].id});
+const openAutofill=(podcast=false)=>{const panel=new AutoFillPanel({serverId:'fixture',serverLabel:'Fixture music library',pipeline:{enabled:true,budget:{maxBytes:1073741825,targetDurationSecs:123457,headroomBytes:123456789},rarity:{enabled:true,legendaryWeight:3,rareWeight:2,commonWeight:1,rareMaxPlays:5},context:{enabled:true,rules:[{window:{timeOfDay:{startHour:6,endHour:11}},sourceRefs:[],includeTags:[],excludeTags:[],includeGenres:[],excludeGenres:[]},{window:{months:{months:[12,1]}},sourceRefs:[],includeTags:[],excludeTags:[],includeGenres:[],excludeGenres:[]}]}},modes:podcast?['podcasts']:['genres','playlists'],playlists:[{id:'commute',name:'Commute'}],podcastShows:[],formatSize:bytes=>String(bytes),onSave:pipeline=>{calls.push({method:'fixture.autofill.save',params:pipeline});document.getElementById('saved').textContent='Auto-fill saved';}});return panel.open();};
+let radio;const openRadio=()=>{radio?.destroy();radio=new PlaybackSelectionSettings();document.getElementById('radio-host').replaceChildren(radio.element);};
+document.getElementById('profile').onclick=openProfile;document.getElementById('autofill').onclick=()=>openAutofill();document.getElementById('podcast').onclick=()=>openAutofill(true);document.getElementById('radio').onclick=openRadio;
+const surface=params.get('open')??'profile';if(surface==='podcast')await openAutofill(true);else if(surface==='autofill')await openAutofill();else if(surface==='radio')openRadio();else await openProfile();
+</script></body></html>

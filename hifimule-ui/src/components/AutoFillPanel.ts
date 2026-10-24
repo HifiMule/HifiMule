@@ -1,4 +1,5 @@
 import { escapeAttr } from '../html';
+import { numericError, monthListError, fieldFeedback, revealInvalid, type NumericRules } from '../numericValidation';
 // Story 12.6: Auto-Fill pipeline-builder configuration panel.
 //
 // A modal dialog, scoped to a single server, that edits an in-memory `AutoFillPipeline` and on
@@ -34,17 +35,8 @@ function parseCommaList(s: string): string[] {
     return s.split(',').map((part) => part.trim()).filter((part) => part.length > 0);
 }
 
-/** Parse a comma-separated month list into `1..=12` integers, dropping anything out of range. */
-function parseMonthList(s: string): number[] {
-    return parseCommaList(s)
-        .map((part) => Number(part))
-        .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
-}
-
-function clampInt(v: number, lo: number, hi: number): number {
-    if (Number.isNaN(v)) return lo;
-    return Math.max(lo, Math.min(hi, Math.round(v)));
-}
+/** Called only after validating every token. Empty retains the existing empty-window semantics. */
+function parseMonthList(s: string): number[] { return parseCommaList(s).map(Number); }
 
 /** The discriminator of a context window (Story 13.5). */
 function contextWindowKind(w: ContextWindow): ContextWindowKind {
@@ -122,6 +114,10 @@ export class AutoFillPanel {
     private durationHoursInput: string;
     private headroomGbInput: string;
 
+    private numericDrafts = new Map<string, string>();
+    private contextDrafts = new WeakMap<ContextRule, Map<string, string>>();
+    private numericEdited = new Set<string>();
+
     // --- Live preview state (Story 12.7) ---
     private previewResult: { count: number; bytes: number } | null = null;
     private previewError: string | null = null;
@@ -151,6 +147,30 @@ export class AutoFillPanel {
             : '';
         this.durationHoursInput = this.initialDurationHoursInput;
         this.headroomGbInput = this.initialHeadroomGbInput;
+        const numeric = (key: string, value: number | undefined) => { if (value !== undefined) this.numericDrafts.set(key, String(value)); };
+        numeric('af-cooldown', this.pipeline.memory.cooldownWeeks);
+        numeric('af-promote-min-favorites', this.pipeline.promotion.promoteAlbumMinFavorites);
+        numeric('af-rarity-legendary', this.pipeline.rarity.legendaryWeight);
+        numeric('af-rarity-rare', this.pipeline.rarity.rareWeight);
+        numeric('af-rarity-common', this.pipeline.rarity.commonWeight);
+        numeric('af-rarity-rare-max', this.pipeline.rarity.rareMaxPlays);
+        numeric('af-pity-threshold', this.pipeline.pity.thresholdSyncs);
+        numeric('af-pity-discovery-max', this.pipeline.pity.discoveryMaxPlays);
+        this.numericDrafts.set('af-duration-hours', this.durationHoursInput);
+        this.numericDrafts.set('af-headroom-gb', this.headroomGbInput);
+        if (this.opts.modes.includes('podcasts')) numeric('af-podcast-recent', this.pipeline.podcastRetention.recentCount);
+        for (const rule of this.contextRules()) {
+            const drafts = new Map<string, string>();
+            if ('timeOfDay' in rule.window) {
+                drafts.set('af-ctx-start-hour', String(rule.window.timeOfDay.startHour)); drafts.set('af-ctx-end-hour', String(rule.window.timeOfDay.endHour));
+            } else if ('months' in rule.window) drafts.set('af-ctx-months', rule.window.months.months.join(', '));
+            else {
+                drafts.set('af-ctx-start-month', String(rule.window.dateRange.start[0])); drafts.set('af-ctx-start-day', String(rule.window.dateRange.start[1]));
+                drafts.set('af-ctx-end-month', String(rule.window.dateRange.end[0])); drafts.set('af-ctx-end-day', String(rule.window.dateRange.end[1]));
+            }
+            if (rule.weight !== undefined) drafts.set('af-ctx-weight', String(rule.weight));
+            this.contextDrafts.set(rule, drafts);
+        }
     }
 
     public async open(): Promise<void> {
@@ -179,7 +199,7 @@ export class AutoFillPanel {
         return ALL_SOURCE_KINDS.filter((k) => k !== 'playlist' || this.playlistsSupported);
     }
 
-    private renderBody(movedIndex?: number): void {
+    private renderBody(movedIndex?: number, restoreFocus = true): void {
         if (!this.dialog) return;
         const focused = document.activeElement as HTMLElement | null;
         const ownsFocus = focused && this.dialog.contains(focused);
@@ -223,7 +243,7 @@ export class AutoFillPanel {
                             </div>
                         </div>
                     ` : ''}
-                    <sl-input id="af-podcast-recent" type="number" min="0" max="100" label="${t(p.podcastRetention.mode === 'latest' ? 'basket.autofill.podcast_latest_count' : 'basket.autofill.podcast_recent')}" value="${p.podcastRetention.recentCount}"></sl-input>
+                    <sl-input id="af-podcast-recent" type="text" inputmode="decimal" data-numeric min="0" max="100" label="${t(p.podcastRetention.mode === 'latest' ? 'basket.autofill.podcast_latest_count' : 'basket.autofill.podcast_recent')}" value="${p.podcastRetention.recentCount}"></sl-input>
                     <sl-switch id="af-podcast-unplayed" ${p.podcastRetention.unplayedOnly ? 'checked' : ''}>${t('basket.autofill.podcast_unplayed')}</sl-switch>
                     <div class="device-settings-description">${t('basket.autofill.podcast_progress_fallback')}</div>
                 ` : ''}
@@ -250,12 +270,13 @@ export class AutoFillPanel {
                 ${t('basket.actions.save')}
             </sl-button>
         `;
+        this.restoreNumericDrafts();
         this.bindEvents();
         (this.dialog as HTMLElement).querySelectorAll('details').forEach(el => {
             const wasOpen = openStages.get(el.querySelector('summary')?.textContent);
             if (wasOpen !== undefined) el.open = wasOpen;
         });
-        if (ownsFocus) {
+        if (ownsFocus && restoreFocus) {
             let replacement = focusId ? this.dialog.querySelector(`#${CSS.escape(focusId)}`) as HTMLElement | null : null;
             if (!replacement && focusClass) {
                 const candidates = Array.from((this.dialog as HTMLElement).querySelectorAll<HTMLElement>(`.${CSS.escape(focusClass)}`))
@@ -337,15 +358,15 @@ export class AutoFillPanel {
 
     private renderBudgetStage(): string {
         return this.renderStage(t('basket.autofill.budget_advanced'), `
-            <sl-input id="af-budget-gb" type="number" min="0" step="any" clearable
+            <sl-input id="af-budget-gb" type="text" inputmode="decimal" data-numeric min="0" step="any" clearable
                 label="${t('basket.autofill.size_budget')}"
                 help-text="${t('basket.autofill.size_budget_hint')}"
                 value="${escapeAttr(this.budgetGbInput)}"></sl-input>
             ${this.advancedOpen ? `
-                <sl-input id="af-duration-hours" type="number" min="0" step="0.5" clearable
+                <sl-input id="af-duration-hours" type="text" inputmode="decimal" data-numeric min="0" step="any" clearable
                     label="${t('basket.autofill.target_duration_hours')}"
                     value="${escapeAttr(this.durationHoursInput)}"></sl-input>
-                <sl-input id="af-headroom-gb" type="number" min="0" step="any" clearable
+                <sl-input id="af-headroom-gb" type="text" inputmode="decimal" data-numeric min="0" step="any" clearable
                     label="${t('basket.autofill.headroom_gb')}"
                     value="${escapeAttr(this.headroomGbInput)}"></sl-input>
                 <sl-switch id="af-encoding-from-goals" size="small" ${this.pipeline.budget.encodingFromGoals ? 'checked' : ''}>
@@ -408,7 +429,7 @@ export class AutoFillPanel {
                 </div>
             </div>
             <div class="auto-fill-caption">${t('basket.autofill.album_track_ratio_hint')}</div>
-            <sl-input id="af-promote-min-favorites" type="number" min="0" step="1"
+            <sl-input id="af-promote-min-favorites" type="text" inputmode="decimal" data-numeric min="0" step="1"
                 label="${t('basket.autofill.promote_min_favorites')}"
                 help-text="${t('basket.autofill.promote_min_favorites_hint')}"
                 value="${pr.promoteAlbumMinFavorites ?? ''}"></sl-input>
@@ -460,7 +481,7 @@ export class AutoFillPanel {
                 <sl-input class="af-ctx-source-refs" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_source_refs')}"
                     value="${escapeAttr((r.sourceRefs ?? []).join(', '))}"></sl-input>
-                <sl-input class="af-ctx-weight" type="number" min="0" step="0.5" size="small" data-index="${i}"
+                <sl-input class="af-ctx-weight" type="text" inputmode="decimal" data-numeric min="0" step="any" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_weight')}"
                     value="${typeof r.weight === 'number' ? r.weight : ''}"></sl-input>
                 <sl-input class="af-ctx-inc-genres" size="small" data-index="${i}"
@@ -483,28 +504,28 @@ export class AutoFillPanel {
         if ('timeOfDay' in w) {
             return `
                 <div class="auto-fill-context-window-fields">
-                    <sl-input class="af-ctx-start-hour" type="number" min="0" max="23" step="1" size="small" data-index="${i}"
+                    <sl-input class="af-ctx-start-hour" type="text" inputmode="decimal" data-numeric min="0" max="23" step="1" size="small" data-index="${i}"
                         label="${t('basket.autofill.context_start_hour')}" value="${w.timeOfDay.startHour}"></sl-input>
-                    <sl-input class="af-ctx-end-hour" type="number" min="0" max="23" step="1" size="small" data-index="${i}"
+                    <sl-input class="af-ctx-end-hour" type="text" inputmode="decimal" data-numeric min="0" max="23" step="1" size="small" data-index="${i}"
                         label="${t('basket.autofill.context_end_hour')}" value="${w.timeOfDay.endHour}"></sl-input>
                 </div>`;
         }
         if ('months' in w) {
             return `
-                <sl-input class="af-ctx-months" size="small" data-index="${i}"
+                <sl-input class="af-ctx-months" data-numeric size="small" data-index="${i}"
                     label="${t('basket.autofill.context_months')}"
                     help-text="${t('basket.autofill.context_months_hint')}"
                     value="${escapeAttr(w.months.months.join(', '))}"></sl-input>`;
         }
         return `
             <div class="auto-fill-context-window-fields">
-                <sl-input class="af-ctx-start-month" type="number" min="1" max="12" step="1" size="small" data-index="${i}"
+                <sl-input class="af-ctx-start-month" type="text" inputmode="decimal" data-numeric min="1" max="12" step="1" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_start_month')}" value="${w.dateRange.start[0]}"></sl-input>
-                <sl-input class="af-ctx-start-day" type="number" min="1" max="31" step="1" size="small" data-index="${i}"
+                <sl-input class="af-ctx-start-day" type="text" inputmode="decimal" data-numeric min="1" max="31" step="1" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_start_day')}" value="${w.dateRange.start[1]}"></sl-input>
-                <sl-input class="af-ctx-end-month" type="number" min="1" max="12" step="1" size="small" data-index="${i}"
+                <sl-input class="af-ctx-end-month" type="text" inputmode="decimal" data-numeric min="1" max="12" step="1" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_end_month')}" value="${w.dateRange.end[0]}"></sl-input>
-                <sl-input class="af-ctx-end-day" type="number" min="1" max="31" step="1" size="small" data-index="${i}"
+                <sl-input class="af-ctx-end-day" type="text" inputmode="decimal" data-numeric min="1" max="31" step="1" size="small" data-index="${i}"
                     label="${t('basket.autofill.context_end_day')}" value="${w.dateRange.end[1]}"></sl-input>
             </div>`;
     }
@@ -525,16 +546,16 @@ export class AutoFillPanel {
             </sl-switch>
             <div class="auto-fill-caption">${t('basket.autofill.rarity_hint')}</div>
             ${r.enabled ? `
-                <sl-input id="af-rarity-legendary" type="number" min="0" step="0.5"
+                <sl-input id="af-rarity-legendary" type="text" inputmode="decimal" data-numeric min="0" step="any"
                     label="${t('basket.autofill.rarity_legendary_weight')}"
                     value="${r.legendaryWeight ?? ''}"></sl-input>
-                <sl-input id="af-rarity-rare" type="number" min="0" step="0.5"
+                <sl-input id="af-rarity-rare" type="text" inputmode="decimal" data-numeric min="0" step="any"
                     label="${t('basket.autofill.rarity_rare_weight')}"
                     value="${r.rareWeight ?? ''}"></sl-input>
-                <sl-input id="af-rarity-common" type="number" min="0" step="0.5"
+                <sl-input id="af-rarity-common" type="text" inputmode="decimal" data-numeric min="0" step="any"
                     label="${t('basket.autofill.rarity_common_weight')}"
                     value="${r.commonWeight ?? ''}"></sl-input>
-                <sl-input id="af-rarity-rare-max" type="number" min="0" step="1"
+                <sl-input id="af-rarity-rare-max" type="text" inputmode="decimal" data-numeric min="0" step="1"
                     label="${t('basket.autofill.rarity_rare_max_plays')}"
                     value="${r.rareMaxPlays ?? ''}"></sl-input>
             ` : ''}
@@ -552,7 +573,7 @@ export class AutoFillPanel {
             </sl-switch>
             <div class="auto-fill-caption">${t('basket.autofill.pity_hint')}</div>
             ${p.enabled ? `
-                <sl-input id="af-pity-threshold" type="number" min="0" step="1"
+                <sl-input id="af-pity-threshold" type="text" inputmode="decimal" data-numeric min="0" step="1"
                     label="${t('basket.autofill.pity_threshold')}"
                     value="${p.thresholdSyncs ?? ''}"></sl-input>
                 <div class="auto-fill-memory-dial">
@@ -562,7 +583,7 @@ export class AutoFillPanel {
                         <span class="af-share-value">${ratioPct}%</span>
                     </div>
                 </div>
-                <sl-input id="af-pity-discovery-max" type="number" min="0" step="1"
+                <sl-input id="af-pity-discovery-max" type="text" inputmode="decimal" data-numeric min="0" step="1"
                     label="${t('basket.autofill.pity_discovery_max_plays')}"
                     value="${p.discoveryMaxPlays ?? ''}"></sl-input>
             ` : ''}
@@ -622,7 +643,7 @@ export class AutoFillPanel {
         const corePct = typeof mem.stableCorePct === 'number' ? Math.round(mem.stableCorePct * 100) : 0;
         const tolPct = typeof mem.repeatTolerance === 'number' ? Math.round(mem.repeatTolerance * 100) : 0;
         return this.renderStage(t('basket.autofill.memory'), `
-            <sl-input id="af-cooldown" type="number" min="0" step="1" clearable
+            <sl-input id="af-cooldown" type="text" inputmode="decimal" data-numeric min="0" step="1" clearable
                 label="${t('basket.autofill.cooldown_weeks')}"
                 value="${escapeAttr(this.cooldownInput)}"></sl-input>
             <sl-switch id="af-played-exclusion" size="small" ${mem.playedExclusion ? 'checked' : ''}>
@@ -772,7 +793,14 @@ export class AutoFillPanel {
             this.invalidatePreview();
         });
         d.querySelector('#af-podcast-mode')?.addEventListener('sl-change', () => {
-            this.buildPipeline();
+            this.captureInputs();
+            this.pipeline.podcastRetention.unplayedOnly = !!d.querySelector('#af-podcast-unplayed')?.checked;
+            if (this.pipeline.podcastRetention.mode === 'selectedShows') {
+                this.pipeline.podcastRetention.showIds = Array.from(d.querySelectorAll('.af-podcast-show'))
+                    .filter((el: any) => el.checked).map((el: any) => String(el.value));
+            }
+            const mode = d.querySelector('#af-podcast-mode')?.value;
+            this.pipeline.podcastRetention.mode = mode === 'selectedShows' ? 'selectedShows' : 'latest';
             this.renderBody();
         });
         d.querySelector('#af-podcast-recent')?.addEventListener('sl-change', () => this.invalidatePreview());
@@ -956,7 +984,7 @@ export class AutoFillPanel {
             const handler = (e: Event): void => {
                 const raw = String((e.target as any).value ?? '').trim();
                 const v = raw === '' ? NaN : Number(raw);
-                set(isNaN(v) || v < 0 ? undefined : v);
+                if (!this.numericControlError(e.target as any)) set(raw === '' ? undefined : v);
                 this.invalidatePreview();
             };
             el?.addEventListener('sl-input', handler);
@@ -979,7 +1007,7 @@ export class AutoFillPanel {
         bindNum('#af-rarity-rare', (v) => { this.pipeline.rarity.rareWeight = v; });
         bindNum('#af-rarity-common', (v) => { this.pipeline.rarity.commonWeight = v; });
         bindNum('#af-rarity-rare-max', (v) => {
-            this.pipeline.rarity.rareMaxPlays = v == null ? undefined : Math.floor(v);
+            this.pipeline.rarity.rareMaxPlays = v == null ? undefined : v;
         });
         d.querySelector('#af-pity-enabled')?.addEventListener('sl-change', (e: Event) => {
             this.captureInputs();
@@ -994,10 +1022,10 @@ export class AutoFillPanel {
             this.renderBody(); // reveals/hides the pity fields
         });
         bindNum('#af-pity-threshold', (v) => {
-            this.pipeline.pity.thresholdSyncs = v == null ? undefined : Math.floor(v);
+            this.pipeline.pity.thresholdSyncs = v == null ? undefined : v;
         });
         bindNum('#af-pity-discovery-max', (v) => {
-            this.pipeline.pity.discoveryMaxPlays = v == null ? undefined : Math.floor(v);
+            this.pipeline.pity.discoveryMaxPlays = v == null ? undefined : v;
         });
         d.querySelector('#af-pity-ratio')?.addEventListener('sl-change', (e: Event) => {
             this.captureInputs();
@@ -1030,7 +1058,7 @@ export class AutoFillPanel {
             this.updateShareReadout(e);
         });
         bindNum('#af-promote-min-favorites', (v) => {
-            this.pipeline.promotion.promoteAlbumMinFavorites = v == null ? undefined : Math.floor(v);
+            this.pipeline.promotion.promoteAlbumMinFavorites = v == null ? undefined : v;
         });
         d.querySelector('#af-coherence')?.addEventListener('sl-change', (e: Event) => {
             this.captureInputs();
@@ -1085,20 +1113,25 @@ export class AutoFillPanel {
                 const handler = (e: Event): void => {
                     const rule = ctxRuleAt(e);
                     if (!rule) return;
-                    apply(rule, String((e.target as any).value ?? ''));
+                    if (!(e.target as HTMLElement).hasAttribute('data-numeric') || !this.numericControlError(e.target as any)) apply(rule, String((e.target as any).value ?? ''));
                     this.invalidatePreview();
                 };
                 el.addEventListener('sl-input', handler);
                 el.addEventListener('sl-change', handler);
+                // A restored draft must also replace a new window kind's default model values.
+                if (el.hasAttribute('data-numeric')) {
+                    const { drafts, key } = this.numericStore(el);
+                    if (drafts.has(key)) handler({ target: el } as unknown as Event);
+                }
             });
         };
-        bindCtxField('.af-ctx-start-hour', (r, v) => { if ('timeOfDay' in r.window) r.window.timeOfDay.startHour = clampInt(Number(v), 0, 23); });
-        bindCtxField('.af-ctx-end-hour', (r, v) => { if ('timeOfDay' in r.window) r.window.timeOfDay.endHour = clampInt(Number(v), 0, 23); });
+        bindCtxField('.af-ctx-start-hour', (r, v) => { if ('timeOfDay' in r.window) r.window.timeOfDay.startHour = Number(v); });
+        bindCtxField('.af-ctx-end-hour', (r, v) => { if ('timeOfDay' in r.window) r.window.timeOfDay.endHour = Number(v); });
         bindCtxField('.af-ctx-months', (r, v) => { if ('months' in r.window) r.window.months.months = parseMonthList(v); });
-        bindCtxField('.af-ctx-start-month', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.start[0] = clampInt(Number(v), 1, 12); });
-        bindCtxField('.af-ctx-start-day', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.start[1] = clampInt(Number(v), 1, 31); });
-        bindCtxField('.af-ctx-end-month', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.end[0] = clampInt(Number(v), 1, 12); });
-        bindCtxField('.af-ctx-end-day', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.end[1] = clampInt(Number(v), 1, 31); });
+        bindCtxField('.af-ctx-start-month', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.start[0] = Number(v); });
+        bindCtxField('.af-ctx-start-day', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.start[1] = Number(v); });
+        bindCtxField('.af-ctx-end-month', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.end[0] = Number(v); });
+        bindCtxField('.af-ctx-end-day', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.end[1] = Number(v); });
         bindCtxField('.af-ctx-source-refs', (r, v) => { r.sourceRefs = parseCommaList(v); });
         bindCtxField('.af-ctx-inc-genres', (r, v) => { r.includeGenres = parseCommaList(v); });
         bindCtxField('.af-ctx-exc-genres', (r, v) => { r.excludeGenres = parseCommaList(v); });
@@ -1150,7 +1183,84 @@ export class AutoFillPanel {
         }
     }
 
+    private numericStore(control: any): { drafts: Map<string, string>; key: string } {
+        if (control.id) return { drafts: this.numericDrafts, key: control.id };
+        const rule = this.contextRules()[Number(control.dataset.index ?? 0)];
+        let drafts = this.contextDrafts.get(rule);
+        if (!drafts) { drafts = new Map(); this.contextDrafts.set(rule, drafts); }
+        return { drafts, key: Array.from(control.classList as DOMTokenList).find(name => name.startsWith('af-ctx-')) ?? '' };
+    }
+    private numericRules(control: any): NumericRules {
+        const key = control.id || Array.from(control.classList as DOMTokenList).find(name => name.startsWith('af-ctx-')) || '';
+        if (key === 'af-budget-gb' || key === 'af-headroom-gb') return { min: 0, scale: GB };
+        if (key === 'af-duration-hours') return { min: 0, scale: 3600 };
+        if (key === 'af-podcast-recent') return { required: true, integer: true, min: 0, max: 100 };
+        if (key.includes('hour')) return { required: true, integer: true, min: 0, max: 23 };
+        if (key.endsWith('-month')) return { required: true, integer: true, min: 1, max: 12 };
+        if (key.endsWith('-day')) return { required: true, integer: true, min: 1, max: 31 };
+        if (key === 'af-ctx-weight' || ['af-rarity-legendary','af-rarity-rare','af-rarity-common'].includes(key)) return { min: 0, float32: true };
+        return { integer: true, min: 0, max: 4294967295 };
+    }
+    private numericControlError(control: any): string | undefined {
+        return control.classList?.contains('af-ctx-months') ? monthListError(String(control.value ?? '')) : numericError(String(control.value ?? ''), this.numericRules(control));
+    }
+    private numericHint(control: any): string {
+        if (control.classList?.contains('af-ctx-months')) return t('basket.autofill.context_months_hint');
+        const rules = this.numericRules(control);
+        if (rules.scale) return t(control.id === 'af-duration-hours' ? 'numeric.hours_hint' : 'numeric.gb_hint');
+        return rules.integer ? t('numeric.whole_hint', { min: rules.min ?? 0, max: rules.max ?? '' }) : t('numeric.weight_hint');
+    }
+    private rememberNumericDrafts(): void {
+        this.dialog?.querySelectorAll('[data-numeric]').forEach((control: any) => {
+            const { drafts, key } = this.numericStore(control); drafts.set(key, String(control.value ?? ''));
+        });
+    }
+    private restoreNumericDrafts(): void {
+        this.dialog.querySelectorAll('[data-numeric]').forEach((control: any) => {
+            const { drafts, key } = this.numericStore(control);
+            if (drafts.has(key)) control.value = drafts.get(key);
+            const edited = this.numericEdited.has(key);
+            fieldFeedback(control, edited ? this.numericControlError(control) : undefined, this.numericHint(control));
+            const update = () => {
+                drafts.set(key, String(control.value ?? '')); this.numericEdited.add(key);
+                fieldFeedback(control, this.numericControlError(control), this.numericHint(control));
+                this.invalidatePreview();
+            };
+            control.addEventListener('sl-input', update); control.addEventListener('sl-change', update); control.addEventListener('sl-blur', update);
+        });
+    }
+    private validateNumericInputs(): boolean {
+        this.captureInputs();
+        // A disclosure does not deactivate its settings. Reveal it only when a hidden draft fails.
+        const synthetic = (key: string, value: string) => ({ id: key.startsWith('af-ctx-') ? '' : key, value,
+            classList: { contains: (name: string) => name === key, *[Symbol.iterator]() { yield key; } } });
+        let hiddenError = false;
+        for (const [key, value] of this.numericDrafts) {
+            if (this.opts.modes.includes('podcasts') && key !== 'af-podcast-recent') continue;
+            if (key.startsWith('af-rarity-') && !this.pipeline.rarity.enabled) continue;
+            if (key.startsWith('af-pity-') && !this.pipeline.pity.enabled) continue;
+            if (this.numericControlError(synthetic(key, value)) && !this.dialog?.querySelector(`#${key}`)) hiddenError = true;
+        }
+        if (!this.opts.modes.includes('podcasts') && this.pipeline.context.enabled) for (const rule of this.contextRules()) {
+            const kind = contextWindowKind(rule.window);
+            for (const [key, value] of this.contextDrafts.get(rule) ?? []) {
+                if (key !== 'af-ctx-weight' && (kind === 'months' ? key !== 'af-ctx-months' : kind === 'timeOfDay' ? !key.endsWith('-hour') : !key.endsWith('-month') && !key.endsWith('-day'))) continue;
+                if (this.numericControlError(synthetic(key, value))) hiddenError = true;
+            }
+        }
+        if (!this.advancedOpen && hiddenError) { this.advancedOpen = true; this.renderBody(undefined, false); }
+        let first: any;
+        this.dialog?.querySelectorAll('[data-numeric]').forEach((control: any) => {
+            if (control.disabled) return;
+            const error = this.numericControlError(control);
+            fieldFeedback(control, error, this.numericHint(control)); if (error) first ??= control;
+        });
+        if (first) revealInvalid(first);
+        return !first;
+    }
+
     private captureInputs(): void {
+        this.rememberNumericDrafts();
         this.budgetGbInput = this.readInputValue('#af-budget-gb') ?? this.budgetGbInput;
         this.excludeGenresInput = this.readInputValue('#af-exclude-genres') ?? this.excludeGenresInput;
         this.cooldownInput = this.readInputValue('#af-cooldown') ?? this.cooldownInput;
@@ -1199,7 +1309,7 @@ export class AutoFillPanel {
             const recent = this.dialog?.querySelector('#af-podcast-recent') as any;
             const unplayed = this.dialog?.querySelector('#af-podcast-unplayed') as any;
             const mode = this.dialog?.querySelector('#af-podcast-mode') as any;
-            this.pipeline.podcastRetention.recentCount = clampInt(Number(recent?.value ?? 10), 0, 100);
+            this.pipeline.podcastRetention.recentCount = Number(this.numericDrafts.get('af-podcast-recent') ?? recent?.value ?? this.pipeline.podcastRetention.recentCount);
             this.pipeline.podcastRetention.unplayedOnly = !!unplayed?.checked;
             this.pipeline.podcastRetention.mode = mode?.value === 'selectedShows' ? 'selectedShows' : 'latest';
             if (this.pipeline.podcastRetention.mode === 'selectedShows') {
@@ -1223,9 +1333,9 @@ export class AutoFillPanel {
                 .filter((s) => s.length > 0);
         }
 
-        if (this.advancedOpen) {
+        {
             const cooldown = this.numberFromInput(this.cooldownInput);
-            this.pipeline.memory.cooldownWeeks = cooldown != null && cooldown > 0 ? Math.round(cooldown) : undefined;
+            this.pipeline.memory.cooldownWeeks = cooldown != null && cooldown > 0 ? cooldown : undefined;
             // 12.5 lesson: emit null/omit rather than 0 so a cleared field reads as "unset", not an
             // inert empty fill. serializePipeline drops 0/undefined for duration & headroom.
             this.pipeline.budget.targetDurationSecs = this.secondsFromHoursInput(
@@ -1245,6 +1355,7 @@ export class AutoFillPanel {
 
     /** Reads the free-text/number inputs into the model, then serializes and hands back. */
     private handleSave(): void {
+        if (!this.validateNumericInputs()) return;
         const out = this.buildPipeline();
         if (this.opts.modes.includes('podcasts') && out.podcastRetention.mode === 'selectedShows' && out.podcastRetention.showIds.length === 0) {
             window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: t('basket.autofill.podcast_select_required') } }));
@@ -1257,7 +1368,7 @@ export class AutoFillPanel {
     /** Preview entry point (AC2): explicit, debounced (≥300 ms), never fired on open/edit/toggle.
      * A request already in flight is ignored (the button is in its loading state). */
     private onPreviewClick(): void {
-        if (this.previewInFlight) return;
+        if (this.previewInFlight || !this.validateNumericInputs()) return;
         this.cancelPreviewTimer();
         this.previewLoading = true;
         this.previewError = null;
@@ -1270,6 +1381,7 @@ export class AutoFillPanel {
      * `maxBytes`. Surfaces all outcomes (result / empty / error) and always clears loading. */
     private async runPreview(): Promise<void> {
         this.previewTimer = null;
+        if (!this.validateNumericInputs()) { this.previewLoading = false; this.updatePreviewUi(); return; }
         this.previewLoading = true;
         this.previewInFlight = true;
         const generation = this.previewGeneration;
@@ -1334,7 +1446,7 @@ export class AutoFillPanel {
     private numberFromInput(raw: string): number | null {
         if (raw === '' || raw == null) return null;
         const n = Number(raw);
-        return isNaN(n) || n < 0 ? null : n;
+        return !Number.isFinite(n) || n < 0 ? null : n;
     }
 
     private bytesFromGbInput(raw: string, initialRaw: string, initialBytes?: number): number | undefined {

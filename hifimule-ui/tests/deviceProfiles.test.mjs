@@ -1,3 +1,4 @@
+import {numeric} from './numericTestHelpers.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -67,7 +68,7 @@ test('dropdown actions restore real selection synchronously, preserve parent val
 
 function loadManager(rpcCall, document){
  const exports={};const code=ts.transpileModule(readFileSync(new URL('../src/components/DeviceProfileManager.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
- new Function('require','exports','document',code)(name=>name==='../rpc'?{rpcCall}:name==='../i18n'?{t}:name==='../html'?{escapeAttr}:name==='../deviceProfiles'?profiles:{},exports,document);return exports;
+ new Function('require','exports','document',code)(name=>name==='../rpc'?{rpcCall}:name==='../i18n'?{t}:name==='../html'?{escapeAttr}:name==='../deviceProfiles'?profiles:name==='../numericValidation'?numeric:{},exports,document);return exports;
 }
 test('systems cannot be saved; clones receive independent custom drafts',async()=>{
  let calls=0;const {DeviceProfileManager}=loadManager(async()=>{calls++;});const manager=new DeviceProfileManager();manager.renderList=()=>{};manager.renderEditor=()=>{};manager.focus=()=>{};
@@ -160,4 +161,41 @@ test('save refresh keeps rendered controls disabled until detail refresh complet
 test('a completed profile selection re-enables the selected custom editor',async()=>{
  const selected={...profiles.newProfile(),id:'custom:next'};const {DeviceProfileManager}=loadManager(async()=>selected);const manager=new DeviceProfileManager();const elements=new Map();manager.dialog={querySelector:selector=>{if(!elements.has(selector))elements.set(selector,{addEventListener(){}});return elements.get(selector);},querySelectorAll:()=>[]};manager.renderList=()=>{};manager.setProfile({...profiles.newProfile(),id:'custom:old'},false);
  await manager.select(selected.id);assert.equal(manager.busy,false);assert.equal(manager.profile.id,selected.id);assert.equal(elements.get('#profile-save').disabled,false);assert.doesNotMatch(elements.get('.profile-manager-editor').innerHTML,/id="profile-name"[^>]*disabled/);
+});
+
+test('profile numeric boundaries and codec floors identify the field; missing metadata keeps save fallback',()=>{
+ const base=profiles.newProfile(),draft=profiles.toDraft(base);draft.output='aac';
+ const constraints={codecs:{aac:{sampleRateMin:7350,bitDepthMin:1},flac:{bitDepthMin:16}}};
+ for(const [key,min,max] of [['MaxAudioChannels',1,32],['MaxAudioBitDepth',1,64],['MaxAudioSampleRate',7350,768000],['MaxStreamingBitrate',.001,100000]]){
+  for(const value of [String(min),String(max),'']){draft.limits[key]=value;assert.equal(profiles.profileNumericErrors(draft,base,constraints)[key],undefined,`${key} ${value}`);}
+  for(const value of ['0',String(max+1),'Infinity']){draft.limits[key]=value;assert.ok(profiles.profileNumericErrors(draft,base,constraints)[key],`${key} ${value}`);}draft.limits[key]='';
+ }
+ draft.limits.MaxAudioSampleRate='48';assert.match(profiles.profileNumericErrors(draft,base,constraints).MaxAudioSampleRate,/numeric.sample_rate/);
+ assert.equal(profiles.profileNumericErrors(draft,base).MaxAudioSampleRate,undefined);
+ draft.mode='originals';draft.bitrate='wrong';assert.deepEqual(profiles.profileNumericErrors(draft,base,constraints),{});
+ draft.mode='compatible';const unsupported=structuredClone(base);unsupported.deviceProfile.FutureRule=true;assert.deepEqual(profiles.profileNumericErrors(draft,unsupported,constraints),{});
+ draft.limits.MaxAudioSampleRate='';draft.bitrate=' 256.125 ';assert.equal(profiles.fromDraft(base,draft).deviceProfile.MusicStreamingTranscodingBitrate,256125);
+ for(const key of profiles.limits)draft.limits[key]='  ';
+ assert.equal(profiles.validateDraft(draft,base),undefined);
+ const cleared=profiles.fromDraft(base,draft).deviceProfile;
+ for(const key of profiles.limits)assert.equal(cleared[key],undefined);
+});
+test('profile invalid drafts never write and structured daemon errors remain field-specific',async()=>{
+ let calls=0;const {DeviceProfileManager}=loadManager(async()=>{calls++;throw {data:{errorCode:'PROFILE_NUMERIC_CONSTRAINT',field:'MaxAudioSampleRate',min:7350,max:768000}};});
+ const manager=new DeviceProfileManager();manager.renderList=()=>{};manager.renderEditor=()=>{};manager.capture=()=>{};
+ const controls=new Map();manager.dialog={querySelector:key=>{if(!controls.has(key))controls.set(key,{});return controls.get(key);},querySelectorAll:()=>[]};
+ manager.setProfile(profiles.newProfile(),true);manager.draft.limits.MaxAudioChannels='33';await manager.save();assert.equal(calls,0);assert.equal(manager.draft.limits.MaxAudioChannels,'33');
+ manager.draft.limits.MaxAudioChannels='';manager.draft.limits.MaxAudioSampleRate='48';await manager.save();assert.equal(calls,1);assert.match(manager.serverErrors.MaxAudioSampleRate,/numeric.sample_rate/);assert.equal(manager.draft.limits.MaxAudioSampleRate,'48');
+});
+
+test('unchanged legacy numeric capabilities allow metadata edits but changed audio must validate',()=>{
+ const base=profiles.newProfile();base.deviceProfile.MaxAudioChannels=33;const draft=profiles.toDraft(base);draft.name='Metadata edit';
+ assert.equal(profiles.validateDraft(draft,base),undefined);assert.equal(profiles.fromDraft(base,draft).deviceProfile.MaxAudioChannels,33);
+ draft.bitrate='192';assert.ok(profiles.profileNumericErrors(draft,base).MaxAudioChannels);
+});
+test('changing output clears a cached server error for the previous codec',()=>{
+ const {DeviceProfileManager}=loadManager(async()=>{});const manager=new DeviceProfileManager();const elements=new Map();
+ manager.dialog={querySelector:key=>{if(!elements.has(key))elements.set(key,{handlers:{},addEventListener(event,fn){this.handlers[event]=fn;}});return elements.get(key);},querySelectorAll:()=>[]};manager.renderList=()=>{};
+ manager.setProfile(profiles.newProfile(),false);manager.capture=()=>{};manager.serverErrors={MaxAudioSampleRate:'Old codec error'};
+ elements.get('.profile-editor-fields').handlers['sl-change']({target:{id:'profile-output'}});assert.deepEqual(manager.serverErrors,{});
 });

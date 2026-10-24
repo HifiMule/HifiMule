@@ -33,6 +33,73 @@ pub fn normalized_for_source(
     normalized
 }
 
+/// Field metadata is additive RPC data; persisted profile schemas are unchanged.
+#[derive(Debug)]
+pub struct NumericConstraintError {
+    pub field: &'static str,
+    pub min: u64,
+    pub max: u64,
+}
+impl std::fmt::Display for NumericConstraintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} must be a whole number from {} to {}",
+            self.field, self.min, self.max
+        )
+    }
+}
+impl std::error::Error for NumericConstraintError {}
+fn numeric_floor(field: &'static str, value: Option<u32>, min: u32, max: u32) -> Result<()> {
+    if value.is_some_and(|n| n < min) {
+        return Err(NumericConstraintError {
+            field,
+            min: u64::from(min),
+            max: u64::from(max),
+        }
+        .into());
+    }
+    Ok(())
+}
+/// Query the controlled runtime rather than assuming the installed FFmpeg's codec capabilities.
+pub fn numeric_constraints() -> serde_json::Value {
+    let mut codecs = serde_json::Map::new();
+    if ff::init().is_ok() {
+        for (codec, encoder, depth) in [
+            ("mp3", "libmp3lame", 1),
+            ("aac", "aac", 1),
+            ("vorbis", "libvorbis", 1),
+            ("opus", "libopus", 1),
+            ("flac", "flac", 16),
+            ("alac", "alac", 16),
+            ("pcm_s16le", "pcm_s16le", 16),
+            ("pcm_s24le", "pcm_s24le", 24),
+            ("pcm_s32le", "pcm_s32le", 32),
+            ("pcm_f32le", "pcm_f32le", 32),
+        ] {
+            if let Some(audio) = ff::encoder::find_by_name(encoder).and_then(|c| c.audio().ok()) {
+                let rate = if codec == "opus" {
+                    Some(48000)
+                } else {
+                    audio
+                        .rates()
+                        .and_then(|rates| rates.filter(|rate| *rate > 0).min())
+                };
+                codecs.insert(
+                    codec.into(),
+                    serde_json::json!({"sampleRateMin":rate, "bitDepthMin":depth}),
+                );
+            }
+        }
+    }
+    serde_json::json!({"fields": {
+        "MaxAudioChannels":{"min":1,"max":32}, "MaxAudioBitDepth":{"min":1,"max":64},
+        "MaxAudioSampleRate":{"min":1,"max":768000},
+        "MaxStreamingBitrate":{"min":1,"max":100000000},
+        "MusicStreamingTranscodingBitrate":{"min":1,"max":100000000}
+    }, "codecs":codecs})
+}
+
 pub fn resolve(profile: &TranscodeProfile) -> Result<Target> {
     let container = profile
         .container
@@ -107,10 +174,12 @@ pub fn resolve(profile: &TranscodeProfile) -> Result<Target> {
         );
     }
     if encoder == "libopus" {
-        ensure!(
-            profile.max_sample_rate_hz.is_none_or(|rate| rate >= 48000),
-            "Opus files decode at 48000 Hz; choose another codec for a lower sample-rate ceiling"
-        );
+        numeric_floor(
+            "MaxAudioSampleRate",
+            profile.max_sample_rate_hz,
+            48000,
+            768000,
+        )?;
     }
     ff::init()?;
     ensure!(
@@ -118,29 +187,27 @@ pub fn resolve(profile: &TranscodeProfile) -> Result<Target> {
         "Local encoder '{encoder}' is unavailable; rebuild the controlled audio runtime"
     );
     let supported = ff::encoder::find_by_name(encoder).unwrap().audio()?;
-    if let Some(ceiling) = profile.max_sample_rate_hz
-        && let Some(rates) = supported.rates()
+    if let Some(floor) = supported
+        .rates()
+        .and_then(|rates| rates.filter(|rate| *rate > 0).min())
     {
-        ensure!(
-            rates
-                .into_iter()
-                .any(|rate| rate > 0 && rate as u32 <= ceiling),
-            "No local encoder sample rate meets the profile ceiling"
-        );
+        numeric_floor(
+            "MaxAudioSampleRate",
+            profile.max_sample_rate_hz,
+            floor as u32,
+            768000,
+        )?;
     }
     if matches!(encoder, "flac" | "alac") {
-        ensure!(
-            profile.max_bit_depth.is_none_or(|depth| depth >= 16),
-            "Local lossless encoding requires a bit-depth ceiling of at least 16"
-        );
+        numeric_floor("MaxAudioBitDepth", profile.max_bit_depth, 16, 64)?;
     }
     if encoder.starts_with("pcm_") {
-        ensure!(
-            profile
-                .max_bit_depth
-                .is_none_or(|depth| profile.pcm_bit_depth().unwrap_or(32) <= depth),
-            "Requested PCM codec exceeds profile bit-depth ceiling"
-        );
+        numeric_floor(
+            "MaxAudioBitDepth",
+            profile.max_bit_depth,
+            profile.pcm_bit_depth().unwrap_or(32),
+            64,
+        )?;
     }
     let name = std::ffi::CString::new(muxer)?;
     ensure!(
@@ -157,6 +224,29 @@ pub fn resolve(profile: &TranscodeProfile) -> Result<Target> {
 
 /// Reject constraints which the file encoder cannot faithfully interpret. HTTP
 /// transport flags deliberately never become encoder options.
+pub fn validate_numeric_configuration(profile: &serde_json::Value) -> Result<()> {
+    for (key, max) in [
+        ("MaxAudioSampleRate", 768000),
+        ("MaxAudioChannels", 32),
+        ("MaxAudioBitDepth", 64),
+        ("MaxStreamingBitrate", 100000000),
+        ("MusicStreamingTranscodingBitrate", 100000000),
+    ] {
+        if let Some(value) = profile.get(key) {
+            if !value.as_u64().is_some_and(|n| n > 0 && n <= max) {
+                return Err(NumericConstraintError {
+                    field: key,
+                    min: 1,
+                    max,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runtime profiles retain the existing storage bounds; editor limits are checked on save.
 pub fn validate_constraints(profile: &serde_json::Value) -> Result<()> {
     for key in [
         "MaxAudioSampleRate",
@@ -1015,6 +1105,58 @@ mod memory_benchmark;
 pub(crate) mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn numeric_configuration_bounds_and_runtime_metadata() {
+        let metadata = numeric_constraints();
+        assert_eq!(metadata["fields"]["MaxAudioChannels"]["max"], 32);
+        assert_eq!(metadata["codecs"]["opus"]["sampleRateMin"], 48000);
+        assert_eq!(metadata["codecs"]["flac"]["bitDepthMin"], 16);
+        let floor = metadata["codecs"]["aac"]["sampleRateMin"].as_u64().unwrap();
+        assert!(floor > 48 && floor <= 48000);
+        for (field, maximum) in [
+            ("MaxAudioChannels", 32),
+            ("MaxAudioBitDepth", 64),
+            ("MaxAudioSampleRate", 768000),
+            ("MaxStreamingBitrate", 100000000),
+            ("MusicStreamingTranscodingBitrate", 100000000),
+        ] {
+            for value in [1, maximum] {
+                validate_numeric_configuration(&serde_json::json!({field:value})).unwrap();
+            }
+            for value in [
+                serde_json::json!(0),
+                serde_json::json!(maximum + 1),
+                serde_json::json!(1.5),
+                serde_json::json!(-1),
+                serde_json::json!("48"),
+            ] {
+                let error =
+                    validate_numeric_configuration(&serde_json::json!({field:value})).unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<NumericConstraintError>()
+                        .unwrap()
+                        .field,
+                    field
+                );
+            }
+        }
+        // Existing runtime profiles retain their broader storage bounds.
+        validate_constraints(&serde_json::json!({"MaxAudioChannels":33})).unwrap();
+        let mut profile = serde_json::json!({"TranscodingProfiles":[{"Type":"Audio","Container":"mp4","AudioCodec":"aac"}], "MaxAudioSampleRate":48});
+        let error = validate_profile(&profile).unwrap_err();
+        let field = error.downcast_ref::<NumericConstraintError>().unwrap();
+        assert_eq!(field.field, "MaxAudioSampleRate");
+        assert_eq!(field.min, floor);
+        profile["MaxAudioSampleRate"] = serde_json::json!(48000);
+        validate_profile(&profile).unwrap();
+        profile
+            .as_object_mut()
+            .unwrap()
+            .remove("MaxAudioSampleRate");
+        validate_profile(&profile).unwrap();
+    }
 
     pub fn wav(path: &Path, seconds: u32) {
         let samples = 48000 * seconds;

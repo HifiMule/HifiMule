@@ -3260,3 +3260,10 @@ hm-radio-action sl-icon-button[aria-disabled="true"]::part(base) {
 }
 
 .device-profile-manager [hidden] { display: none !important; }
+
+/* Numeric configuration feedback shares the native and Shoelace control rhythm. */
+.numeric-feedback { font-size: var(--sl-font-size-small, 0.875rem); line-height: 1.45; overflow-wrap: anywhere; color: var(--sl-color-neutral-600); }
+.numeric-feedback--error { color: var(--sl-color-danger-600); }
+sl-input[aria-invalid="true"]::part(base) { border-color: var(--sl-color-danger-600); }
+.playback-selection-settings input[aria-invalid="true"] { border-color: var(--sl-color-danger-600); }
+.auto-fill-context-window-fields > *, .profile-limit-fields > * { min-width: 0; }
