@@ -26,7 +26,7 @@ class Element {
     cloneNode() { const copy = new Element(); copy.replaceWith = () => {}; return copy; }
     replaceWith() {} hide() {}
 }
-function setup() {
+function setup(profiles = []) {
     let profileSaved;
     const calls = [], body = new Element(), confirm = new Element();
     const dialog = new Element();
@@ -41,7 +41,7 @@ function setup() {
     vm.runInNewContext(script, ctx);
     const modal = new ctx.exports.InitDeviceModal({});
     Object.assign(modal, { dialog, pendingId: 'pending-target', observedDestinationRevision: '7' });
-    modal.renderContent(body, 'listener', []);
+    modal.renderContent(body, 'listener', profiles);
     return { modal, body, calls, profileSaved };
 }
 test('creation shows localized reconciliation and artwork choices with every option off', () => {
@@ -86,10 +86,25 @@ test('profile action sentinels never reach initialization writes',async()=>{
 });
 
 test('saved profile applies defaults only to individually untouched initialization folders',()=>{
- for(const touched of ['none','music','playlists']){
-  const {body,profileSaved}=setup();const music=body.querySelector('#init-folder-input'),playlists=body.querySelector('#init-playlist-folder-input');
-  if(touched==='music'){music.value='My/Music';music.emit('sl-input');}if(touched==='playlists'){playlists.value='My/Lists';playlists.emit('sl-input');}
-  profileSaved([],{id:'custom:saved',name:'Saved',defaultMusicFolder:'New/Music',defaultPlaylistFolder:'New/Lists'});
-  assert.equal(music.value,touched==='music'?'My/Music':'New/Music');assert.equal(playlists.value,touched==='playlists'?'My/Lists':'New/Lists');
+ const fields=[['init-folder-input','defaultMusicFolder'],['init-playlist-folder-input','defaultPlaylistFolder'],['init-audiobook-folder-input','defaultAudiobookFolder'],['init-podcast-folder-input','defaultPodcastFolder']];
+ for(const touched of ['none',...fields.map(([id])=>id)]){
+  const {body,profileSaved}=setup();
+  if(touched!=='none'){const input=body.querySelector('#'+touched);input.value='My/Folder';input.emit('sl-input');}
+  profileSaved([],{id:'custom:saved',name:'Saved',...Object.fromEntries(fields.map(([,key])=>[key,'New/'+key]))});
+  for(const [id,key] of fields)assert.equal(body.querySelector('#'+id).value,touched===id?'My/Folder':'New/'+key);
  }
+});
+
+test('initial profile media defaults reach initialization and missing defaults inherit music',async()=>{
+ const profile={id:'passthrough',name:'Originals',defaultAudiobookFolder:'Books',defaultPodcastFolder:'Shows'};
+ const {modal,body,calls}=setup([profile]);
+ assert.equal(body.querySelector('#init-audiobook-folder-input').value,'Books');
+ assert.equal(body.querySelector('#init-podcast-folder-input').value,'Shows');
+ await modal.handleConfirm('listener','usb-drive',{value:'Player'});
+ assert.equal(calls[0].params.audiobookFolderPath,'Books');assert.equal(calls[0].params.podcastFolderPath,'Shows');
+ const legacy=setup([{id:'passthrough',name:'Originals'}]);
+ assert.equal(legacy.body.querySelector('#init-audiobook-folder-input').value,'');
+ legacy.profileSaved([],{id:'custom:new',defaultAudiobookFolder:'Books',defaultPodcastFolder:'Shows'});
+ const select=legacy.body.querySelector('#init-transcoding-profile');select.value='passthrough';select.listeners.get('sl-change')({target:select});
+ assert.equal(legacy.body.querySelector('#init-audiobook-folder-input').value,'');assert.equal(legacy.body.querySelector('#init-podcast-folder-input').value,'');
 });

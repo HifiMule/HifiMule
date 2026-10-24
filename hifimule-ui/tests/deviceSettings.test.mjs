@@ -96,3 +96,23 @@ test('saved profile selection updates passthrough recovery and retains touched f
  profileSaved([],{id:'custom:saved',name:'Saved',description:'Custom',defaultMusicFolder:'Other',defaultPlaylistFolder:'New'});
  assert.equal(dialog.querySelector('#device-settings-profile-recovery').hidden,true);assert.equal(confirmation.checked,false);assert.equal(dialog.querySelector('#device-settings-profile-recover').disabled,true);assert.equal(music.value,'Unfinished/Music');
 });
+
+test('profile defaults fill each untouched device folder and persist audiobook and podcast paths',async()=>{
+ const fields=[['music','defaultMusicFolder'],['playlist','defaultPlaylistFolder'],['audiobook','defaultAudiobookFolder'],['podcast','defaultPodcastFolder']];
+ for(const touched of ['none',...fields.map(([id])=>id)]){
+  const {dialog,profileSaved,calls}=await setup({});
+  if(touched!=='none'){const input=dialog.querySelector('#device-settings-'+touched);input.value='My/Folder';input.listeners.get('sl-input')();}
+  profileSaved([],{id:'custom:saved',...Object.fromEntries(fields.map(([id,key])=>[key,'New/'+id]))});
+  for(const [id] of fields)assert.equal(dialog.querySelector('#device-settings-'+id).value,touched===id?'My/Folder':'New/'+id);
+  await dialog.querySelector('#device-settings-save').click();
+  const saved=calls.find(call=>call.method==='device.update_manifest').params;
+  assert.equal(saved.audiobookFolderPath,touched==='audiobook'?'My/Folder':'New/audiobook');
+  assert.equal(saved.podcastFolderPath,touched==='podcast'?'My/Folder':'New/podcast');
+ }
+});
+test('profiles without media defaults retain configured device folders',async()=>{
+ const {dialog,profileSaved}=await setup({audiobookPath:'Existing/Books',podcastPath:'Existing/Shows'});
+ profileSaved([],{id:'custom:legacy',defaultMusicFolder:'Music'});
+ assert.equal(dialog.querySelector('#device-settings-audiobook').value,'Existing/Books');
+ assert.equal(dialog.querySelector('#device-settings-podcast').value,'Existing/Shows');
+});

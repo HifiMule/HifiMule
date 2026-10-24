@@ -813,11 +813,10 @@ export class BasketSidebar {
         const audiobookInput = dialog.querySelector('#device-settings-audiobook') as any;
         const podcastInput = dialog.querySelector('#device-settings-podcast') as any;
         const playlistInput = dialog.querySelector('#device-settings-playlist') as any;
-        let foldersEdited = false;
-        musicInput?.addEventListener('sl-input', () => { foldersEdited = true; });
-        audiobookInput?.addEventListener('sl-input', () => { foldersEdited = true; });
-        podcastInput?.addEventListener('sl-input', () => { foldersEdited = true; });
-        playlistInput?.addEventListener('sl-input', () => { foldersEdited = true; });
+        const editedFolders = new Set<string>();
+        for (const [key, input] of [['music', musicInput], ['audiobooks', audiobookInput], ['podcasts', podcastInput], ['playlists', playlistInput]] as const) {
+            input?.addEventListener('sl-input', () => editedFolders.add(key));
+        }
         const applyProfile = (id: string, profile?: DeviceProfileSummary) => {
             if (profileRecovery) profileRecovery.hidden = id !== 'passthrough';
             if (profileConfirmation) {
@@ -825,10 +824,12 @@ export class BasketSidebar {
                 profileRecoveryButton.disabled = true;
             }
             if (profileDesc) profileDesc.textContent = profile?.description ?? '';
-            if (!foldersEdited && profile) {
-                musicInput.value = profile.defaultMusicFolder ?? musicInput.value ?? '';
-                playlistInput.value = profile.defaultPlaylistFolder ?? playlistInput.value ?? '';
-                playlistInput.placeholder = profile.defaultMusicFolder ?? musicInput.value ?? '';
+            if (profile) {
+                if (!editedFolders.has('music')) musicInput.value = profile.defaultMusicFolder ?? musicInput.value ?? '';
+                if (!editedFolders.has('audiobooks')) audiobookInput.value = profile.defaultAudiobookFolder ?? audiobookInput.value ?? '';
+                if (!editedFolders.has('podcasts')) podcastInput.value = profile.defaultPodcastFolder ?? podcastInput.value ?? '';
+                if (!editedFolders.has('playlists')) playlistInput.value = profile.defaultPlaylistFolder ?? playlistInput.value ?? '';
+                playlistInput.placeholder = musicInput.value ?? '';
             }
         };
         bindProfileActions(profileSelect, selectedProfileId, profiles, (_profiles, saved) => applyProfile(saved.id,saved));

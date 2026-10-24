@@ -203,10 +203,10 @@ export class InitDeviceModal {
                     ></sl-input>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
-                    <sl-input id="init-audiobook-folder-input" label="${t('basket.device.audiobook_folder')}" placeholder="${t('basket.device.media_folder_inherit')}" clearable></sl-input>
+                    <sl-input id="init-audiobook-folder-input" label="${t('basket.device.audiobook_folder')}" placeholder="${t('basket.device.media_folder_inherit')}" value="${escapeAttr(defaultPassthrough?.defaultAudiobookFolder ?? '')}" clearable></sl-input>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
-                    <sl-input id="init-podcast-folder-input" label="${t('basket.device.podcast_folder')}" placeholder="${t('basket.device.media_folder_inherit')}" clearable></sl-input>
+                    <sl-input id="init-podcast-folder-input" label="${t('basket.device.podcast_folder')}" placeholder="${t('basket.device.media_folder_inherit')}" value="${escapeAttr(defaultPassthrough?.defaultPodcastFolder ?? '')}" clearable></sl-input>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <sl-checkbox id="init-device-reconcile" help-text="${escapeAttr(t('basket.device.reconcile_hint'))}">${t('basket.device.reconcile_before_sync')}</sl-checkbox>
@@ -229,15 +229,23 @@ export class InitDeviceModal {
         const descEl = body.querySelector('#init-transcoding-desc') as HTMLElement;
         const musicFolderInput = body.querySelector('#init-folder-input') as any;
         const playlistFolderInput = body.querySelector('#init-playlist-folder-input') as any;
+        const audiobookFolderInput = body.querySelector('#init-audiobook-folder-input') as any;
+        const podcastFolderInput = body.querySelector('#init-podcast-folder-input') as any;
         let musicFolderEdited = false;
         let playlistFolderEdited = false;
         musicFolderInput?.addEventListener('sl-input', () => { musicFolderEdited = true; });
         playlistFolderInput?.addEventListener('sl-input', () => { playlistFolderEdited = true; });
+        let audiobookFolderEdited = false;
+        let podcastFolderEdited = false;
+        audiobookFolderInput?.addEventListener('sl-input', () => { audiobookFolderEdited = true; });
+        podcastFolderInput?.addEventListener('sl-input', () => { podcastFolderEdited = true; });
         const applyProfile = (profile?: DeviceProfileSummary) => {
             if (!profile) return;
             descEl.textContent = profile.description ?? '';
             if (!musicFolderEdited) musicFolderInput.value = profile.defaultMusicFolder ?? '';
             if (!playlistFolderEdited) playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
+            if (!audiobookFolderEdited) audiobookFolderInput.value = profile.defaultAudiobookFolder ?? '';
+            if (!podcastFolderEdited) podcastFolderInput.value = profile.defaultPodcastFolder ?? '';
         };
         if (selectEl && descEl) {
             bindProfileActions(selectEl, 'passthrough', profiles, (_profiles, saved) => applyProfile(saved));

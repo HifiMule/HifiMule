@@ -4,6 +4,7 @@ import { escapeAttr } from './html';
 export interface DeviceProfileSummary {
     id: string; name: string; aliases?: string[]; description?: string; ownership?: string; revision?: number;
     defaultMusicFolder?: string | null; defaultPlaylistFolder?: string | null;
+    defaultAudiobookFolder?: string | null; defaultPodcastFolder?: string | null;
 }
 export interface DeviceProfile extends DeviceProfileSummary {
     description: string; deviceProfile: Record<string, any> | null;
@@ -40,7 +41,7 @@ export const formats = [
 ] as const;
 export const outputs = formats.filter(f => f[0] !== 'm4b');
 export const limits = ['MaxAudioSampleRate', 'MaxAudioBitDepth', 'MaxAudioChannels', 'MaxStreamingBitrate'] as const;
-export type ProfileDraft = { name: string; description: string; music: string; playlists: string; mode: string; formats: string[]; output: string; bitrate: string; limits: Record<string, string> };
+export type ProfileDraft = { name: string; description: string; music: string; playlists: string; audiobooks: string; podcasts: string; mode: string; formats: string[]; output: string; bitrate: string; limits: Record<string, string> };
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 function rowFormats(row: any): string[] {
     if (!row || typeof row !== 'object' || row.Type !== 'Audio'
@@ -65,6 +66,7 @@ export function toDraft(profile: DeviceProfile): ProfileDraft {
     const target = audio?.TranscodingProfiles?.[0];
     const output = formats.find(([, , container, codec]) => (target?.Container === container || (container === 'mp4' && target?.Container === 'm4a')) && target?.AudioCodec === codec)?.[0] ?? 'mp3';
     return { name: profile.name, description: profile.description, music: profile.defaultMusicFolder ?? '', playlists: profile.defaultPlaylistFolder ?? '',
+        audiobooks: profile.defaultAudiobookFolder ?? '', podcasts: profile.defaultPodcastFolder ?? '',
         mode: !audio ? 'originals' : audio.DirectPlayProfiles?.length ? 'compatible' : 'always',
         formats: formats.filter(([id]) => (audio?.DirectPlayProfiles?.flatMap(rowFormats) ?? []).includes(id)).map(([id]) => id), output,
         bitrate: String((audio?.MusicStreamingTranscodingBitrate ?? 256000) / 1000),
@@ -86,6 +88,7 @@ export function fromDraft(base: DeviceProfile, draft: ProfileDraft): DeviceProfi
     delete result.usage; delete result.usageIncomplete;
     result.name = draft.name.trim(); result.description = draft.description;
     result.defaultMusicFolder = draft.music.trim() || null; result.defaultPlaylistFolder = draft.playlists.trim() || null;
+    result.defaultAudiobookFolder = draft.audiobooks.trim() || null; result.defaultPodcastFolder = draft.podcasts.trim() || null;
     // Unsupported rules remain intact and visible; only identity and folders are changed.
     const audioFields = (value: ProfileDraft) => JSON.stringify([value.mode,value.formats,value.output,value.bitrate,value.limits]);
     if (unsupportedRules(base).length || audioFields(draft) === audioFields(original)) return result;
@@ -108,7 +111,7 @@ export function fromDraft(base: DeviceProfile, draft: ProfileDraft): DeviceProfi
 }
 export function validateDraft(draft: ProfileDraft): string | undefined {
     if (!draft.name.trim() || draft.name.trim().length > 120) return t('profiles.invalid_name');
-    for (const folder of [draft.music,draft.playlists]) if (/^[\/]|[\\:\0]/.test(folder) || folder.split('/').some(s => s === '.' || s === '..')) return t('profiles.invalid_folder');
+    for (const folder of [draft.music,draft.playlists,draft.audiobooks,draft.podcasts]) if (/^[\/]|[\\:\0]/.test(folder) || folder.split('/').some(s => s === '.' || s === '..')) return t('profiles.invalid_folder');
     for (const [key,value] of Object.entries(draft.limits)) if (value !== '' && (key === 'MaxStreamingBitrate' ? kbpsToBps(value) === undefined : !Number.isInteger(Number(value)) || Number(value) <= 0)) return t('profiles.invalid_limit');
     if (draft.mode !== 'originals' && !['flac','alac','wav'].includes(draft.output) && kbpsToBps(draft.bitrate) === undefined) return t('profiles.invalid_limit');
     return undefined;

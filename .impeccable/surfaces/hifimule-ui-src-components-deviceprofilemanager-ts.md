@@ -9,6 +9,8 @@ related_targets: []
 Mode: Operate. Build path: code-led.
 User approved option A: Custom/System profile list left and capability editor right; narrow windows replace the list with a top Profile picker. Inherit DESIGN.md dark palette, spacing, typography, and Shoelace controls. System values are readable and locked, with Clone to customize. New and custom editing show identity, formats, conversion, collapsed limits and folder defaults. Native menu works without a device; device dropdown shortcuts preserve mounted parent drafts and return focus. Keep raw capability rules intact; visibly explain unsupported rules and server validation errors. Save identifies shared-device usage and future sync rewrites; switching/closing protects unsaved changes. No deletion, import/export, raw JSON UI, dependencies, or retroactive folder edits.
 
+Default folders cover music, playlists, audiobooks, and podcasts. Audiobook and podcast defaults are optional; blank values inherit the music folder. These profile defaults seed device initialization and apply to untouched fields when choosing a profile in device settings, preserving each field the user has edited. Keep the four fields within the existing collapsed Default folders section and reuse its labels, help text, controls, and responsive layout.
+
 ## Direction contract
 
 THESIS: Selected layout A keeps profile selection beside capability editing, so users can inspect or clone a system definition and keep their place.

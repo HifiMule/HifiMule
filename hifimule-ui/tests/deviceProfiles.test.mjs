@@ -10,6 +10,29 @@ test('new profile uses MP3 fallback, incompatible conversion and no limits',()=>
  const p=profiles.newProfile(), draft=profiles.toDraft(p);
  assert.equal(draft.mode,'compatible');assert.equal(draft.output,'mp3');assert.equal(draft.bitrate,'256');assert.deepEqual(draft.formats,['mp3']);assert.ok(Object.values(draft.limits).every(value=>value===''));
 });
+test('media folder defaults roundtrip, trim and clear without changing audio capabilities',()=>{
+ const profile=profiles.newProfile(),draft=profiles.toDraft(profile);
+ assert.equal(draft.audiobooks,'');assert.equal(draft.podcasts,'');
+ draft.audiobooks=' Books/Authors ';draft.podcasts=' Shows ';
+ const saved=profiles.fromDraft(profile,draft);assert.equal(saved.defaultAudiobookFolder,'Books/Authors');assert.equal(saved.defaultPodcastFolder,'Shows');
+ assert.deepEqual(saved.deviceProfile,profile.deviceProfile);assert.equal(profiles.toDraft(saved).audiobooks,'Books/Authors');assert.equal(profiles.toDraft(saved).podcasts,'Shows');
+ draft.audiobooks=' ';draft.podcasts='';const cleared=profiles.fromDraft(saved,draft);assert.equal(cleared.defaultAudiobookFolder,null);assert.equal(cleared.defaultPodcastFolder,null);
+ for(const field of ['audiobooks','podcasts'])for(const bad of ['../Books','/Shows','C:/Books','Shows\\Episodes','Books/./Author','Books\0Bad']){
+  const invalid=profiles.toDraft(profile);invalid[field]=bad;assert.ok(profiles.validateDraft(invalid),`${field}: ${bad}`);
+ }
+});
+test('media folder inputs render stored values, inherit hints and system locks and capture changes',()=>{
+ const {DeviceProfileManager}=loadManager(async()=>{});const manager=new DeviceProfileManager();const elements=new Map();
+ manager.dialog={querySelector:selector=>{if(!elements.has(selector))elements.set(selector,{addEventListener(){}});return elements.get(selector);},querySelectorAll:()=>[]};manager.renderList=()=>{};
+ const profile={...profiles.newProfile(),defaultAudiobookFolder:'Books',defaultPodcastFolder:'Shows'};
+ manager.setProfile(profile,false);let html=elements.get('.profile-manager-editor').innerHTML;
+ assert.match(html,/id="profile-audiobooks"[^>]*value="Books"[^>]*placeholder="basket.device.media_folder_inherit"/);
+ assert.match(html,/id="profile-podcasts"[^>]*value="Shows"/);
+ elements.set('#profile-audiobooks',{value:'Edited/Books'});elements.set('#profile-podcasts',{value:'Edited/Shows'});manager.capture();
+ assert.equal(manager.draft.audiobooks,'Edited/Books');assert.equal(manager.draft.podcasts,'Edited/Shows');
+ manager.setProfile({...profile,ownership:'system'},false);html=elements.get('.profile-manager-editor').innerHTML;
+ assert.match(html,/id="profile-audiobooks"[^>]*disabled/);assert.match(html,/id="profile-podcasts"[^>]*disabled/);
+});
 test('metadata edits preserve complete audio payload, aliases, unknown fields and lossless bitrate',()=>{
  const bundled=JSON.parse(readFileSync(new URL('../../hifimule-daemon/assets/device-profiles.json',import.meta.url),'utf8'));
  for(const profile of bundled.profiles){

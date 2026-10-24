@@ -10330,6 +10330,8 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
                 "ownership": p.ownership, "revision": p.revision, "aliases": crate::transcoding::aliases_for(&path,&p.id),
                 "defaultMusicFolder": p.default_music_folder,
                 "defaultPlaylistFolder": p.default_playlist_folder,
+                "defaultAudiobookFolder": p.default_audiobook_folder,
+                "defaultPodcastFolder": p.default_podcast_folder,
             })
         })
         .collect();

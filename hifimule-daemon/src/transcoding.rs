@@ -20,6 +20,10 @@ pub struct DeviceProfileEntry {
     pub default_music_folder: Option<String>,
     #[serde(rename = "defaultPlaylistFolder", default)]
     pub default_playlist_folder: Option<String>,
+    #[serde(rename = "defaultAudiobookFolder", default)]
+    pub default_audiobook_folder: Option<String>,
+    #[serde(rename = "defaultPodcastFolder", default)]
+    pub default_podcast_folder: Option<String>,
     #[serde(rename = "deviceProfile")]
     pub device_profile: Option<Value>,
     #[serde(flatten)]
@@ -260,9 +264,14 @@ pub fn validate_entry(
         entry.description.chars().count() <= 2000,
         "Description is too long"
     );
-    for folder in [&entry.default_music_folder, &entry.default_playlist_folder]
-        .into_iter()
-        .flatten()
+    for folder in [
+        &entry.default_music_folder,
+        &entry.default_playlist_folder,
+        &entry.default_audiobook_folder,
+        &entry.default_podcast_folder,
+    ]
+    .into_iter()
+    .flatten()
     {
         ensure!(
             !folder.contains(['\\', ':', '\0'])
@@ -459,6 +468,66 @@ mod tests {
             audio_fingerprint(Some(&json!({"Name":"B","MaxAudioChannels":2})))
         );
         assert_ne!(audio_fingerprint(None), audio_fingerprint(Some(&json!({}))));
+    }
+    #[test]
+    fn media_folder_defaults_persist_clone_clear_and_validate_without_audio_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        let system = load_profiles(&path).unwrap().remove(0);
+        assert!(system.default_audiobook_folder.is_none());
+        assert!(system.default_podcast_folder.is_none());
+        let mut draft = system.clone();
+        draft.default_audiobook_folder = Some("Books/Authors".into());
+        draft.default_podcast_folder = Some("Podcasts".into());
+        let created = save_profile(&path, draft, None, None).unwrap();
+        let loaded = resolve_profile(&path, &created.id).unwrap();
+        assert_eq!(
+            loaded.default_audiobook_folder.as_deref(),
+            Some("Books/Authors")
+        );
+        assert_eq!(loaded.default_podcast_folder.as_deref(), Some("Podcasts"));
+        let clone = save_profile(&path, loaded.clone(), None, Some(&loaded.id)).unwrap();
+        assert_eq!(
+            clone.default_audiobook_folder,
+            loaded.default_audiobook_folder
+        );
+        assert_eq!(clone.default_podcast_folder, loaded.default_podcast_folder);
+        assert_eq!(
+            audio_fingerprint(clone.device_profile.as_ref()),
+            audio_fingerprint(system.device_profile.as_ref())
+        );
+        for field in ["defaultAudiobookFolder", "defaultPodcastFolder"] {
+            for invalid in [
+                "../Books",
+                "/Shows",
+                "C:/Books",
+                "Shows\\Episodes",
+                "Books/./Author",
+                "Books\0Bad",
+            ] {
+                let before = std::fs::read(&path).unwrap();
+                let mut value = serde_json::to_value(&loaded).unwrap();
+                value[field] = json!(invalid);
+                let invalid = serde_json::from_value(value).unwrap();
+                assert!(save_profile(&path, invalid, Some(loaded.revision), None).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+        }
+        let mut cleared = loaded;
+        cleared.default_audiobook_folder = None;
+        cleared.default_podcast_folder = None;
+        let revision = cleared.revision;
+        let saved = save_profile(&path, cleared, Some(revision), None).unwrap();
+        let value = read_document(&path).unwrap();
+        let entry = value["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == saved.id)
+            .unwrap();
+        assert!(entry["defaultAudiobookFolder"].is_null());
+        assert!(entry["defaultPodcastFolder"].is_null());
     }
     #[test]
     fn invalid_documents_are_never_overwritten_and_atomic_failure_keeps_destination() {

@@ -118,7 +118,7 @@ export class DeviceProfileManager {
             <div class="profile-output-fields" ${draft.mode === 'originals' ? 'hidden' : ''}><sl-select id="profile-output" label="${t('profiles.output')}" value="${draft.output}" ${audioDisabled}>${outputs.map(([id,label]) => `<sl-option value="${id}">${label}</sl-option>`).join('')}</sl-select>
             ${input('profile-bitrate',t('profiles.bitrate'),draft.bitrate,`type="number" min="0.001" step="0.001" ${audioDisabled} ${['flac','alac','wav'].includes(draft.output) ? 'hidden' : ''}`)}</div>
             <sl-details summary="${t('profiles.limits')}"><p class="profile-help">${t('profiles.unlimited_help')}</p><div class="profile-limit-fields">${limits.map(key => input(`profile-${key}`,t(`profiles.${key}`),draft.limits[key],`type="number" min="${key === 'MaxStreamingBitrate' ? '0.001' : '1'}" step="${key === 'MaxStreamingBitrate' ? '0.001' : '1'}" placeholder="${t('profiles.unlimited')}" ${audioDisabled}`)).join('')}</div></sl-details>
-            <sl-details summary="${t('profiles.folders')}"><p class="profile-help">${t('profiles.folders_help')}</p>${input('profile-music',t('basket.device.music_folder'),draft.music)}${input('profile-playlists',t('basket.device.playlist_folder'),draft.playlists)}</sl-details>
+            <sl-details summary="${t('profiles.folders')}"><p class="profile-help">${t('profiles.folders_help')}</p>${input('profile-music',t('basket.device.music_folder'),draft.music)}${input('profile-playlists',t('basket.device.playlist_folder'),draft.playlists)}${input('profile-audiobooks',t('basket.device.audiobook_folder'),draft.audiobooks,`placeholder="${escapeAttr(t('basket.device.media_folder_inherit'))}"`)}${input('profile-podcasts',t('basket.device.podcast_folder'),draft.podcasts,`placeholder="${escapeAttr(t('basket.device.media_folder_inherit'))}"`)}</sl-details>
             <p class="profile-summary" aria-live="polite"></p>
             ${!system && profile.usage ? `<p class="profile-help">${escapeAttr(t('profiles.usage', {count: profile.usage.length, names: profile.usage.map(d => d.name || d.id).join(', ') || t('profiles.none')}))} ${t('profiles.offline_usage')}</p>` : ''}</div>`;
         this.dialog.querySelector('#profile-picker').addEventListener('sl-change', (event: any) => void this.select(event.target.value));
@@ -133,7 +133,7 @@ export class DeviceProfileManager {
     private capture(): void {
         if (!this.draft || this.busy) return;
         const value = (id: string) => this.dialog.querySelector(`#${id}`)?.value ?? '';
-        Object.assign(this.draft, {name:value('profile-name'),description:value('profile-description'),music:value('profile-music'),playlists:value('profile-playlists'),mode:value('profile-mode'),output:value('profile-output'),bitrate:value('profile-bitrate')});
+        Object.assign(this.draft, {name:value('profile-name'),description:value('profile-description'),music:value('profile-music'),playlists:value('profile-playlists'),audiobooks:value('profile-audiobooks'),podcasts:value('profile-podcasts'),mode:value('profile-mode'),output:value('profile-output'),bitrate:value('profile-bitrate')});
         this.draft.formats = formats.filter(([id]) => this.dialog.querySelector(`[data-format="${id}"]`)?.checked).map(([id]) => id);
         this.draft.limits = Object.fromEntries(limits.map(key => [key,value(`profile-${key}`)]));
     }
