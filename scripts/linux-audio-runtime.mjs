@@ -139,7 +139,7 @@ export function linuxBuildEnvironment(target, baseEnv = process.env, options = {
 function sha(path) { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
 function download(archive) {
   const temp = `${archive}.${process.pid}.${randomUUID()}.tmp`;
-  try { run("curl", ["--fail", "--location", "--retry", "3", "--output", temp, manifest.sourceUrl], { stdio: "inherit" }); if (sha(temp) !== manifest.sourceSha256) throw new Error("FFmpeg source checksum mismatch"); renameSync(temp, archive); }
+  try { run("curl", ["--fail", "--location", "--retry", "5", "--retry-all-errors", "--connect-timeout", "30", "--max-time", "300", "--retry-max-time", "600", "--output", temp, manifest.sourceUrl], { stdio: "inherit" }); if (sha(temp) !== manifest.sourceSha256) throw new Error("FFmpeg source checksum mismatch"); renameSync(temp, archive); }
   finally { rmSync(temp, { force: true }); }
 }
 function relocatePkgConfigFiles(staging, prefix) {

@@ -292,7 +292,7 @@ export function ensureWindowsAudioRuntime(target, options = {}) {
   const signature = `${archive}.asc`;
   const key = join(cacheRoot, "sources", "ffmpeg-devel.asc");
   const calculateSha = options.sha ?? sha;
-  const download = options.download ?? ((url, path) => execFileSync("curl.exe", ["--fail", "--location", "--retry", "3", "--output", path, url], { stdio: "inherit" }));
+  const download = options.download ?? ((url, path) => execFileSync("curl.exe", ["--fail", "--location", "--retry", "5", "--retry-all-errors", "--connect-timeout", "30", "--max-time", "300", "--retry-max-time", "600", "--output", path, url], { stdio: "inherit" }));
   let runtimeOptions = options;
   const verifySignature = options.verifySignature ?? ((archivePath, signaturePath, keyPath) => verifyOfficialSignature(archivePath, signaturePath, keyPath, runtimeOptions));
   const buildSource = options.buildSource ?? ((archivePath, staging, selectedTarget) => buildOfficialSource(archivePath, staging, selectedTarget, runtimeOptions));

@@ -27,7 +27,8 @@ export function buildEncodingDependencies({ cache, work, prefix, target, env = p
     if (!existsSync(archive) || hash(archive) !== dep.sha256) {
       const temporary = `${archive}.tmp-${randomUUID()}`;
       try {
-        run(windows ? 'curl.exe' : 'curl', ['--fail', '--location', '--retry', '3', '--output', temporary, dep.url]);
+        // File output lets curl discard partial transfers before retrying TLS/network errors.
+        run(windows ? 'curl.exe' : 'curl', ['--fail', '--location', '--retry', '5', '--retry-all-errors', '--connect-timeout', '30', '--max-time', '300', '--retry-max-time', '600', '--output', temporary, dep.url]);
         if (hash(temporary) !== dep.sha256) throw new Error(`${dep.name} source checksum mismatch`);
         renameSync(temporary, archive);
       } finally { rmSync(temporary, { force: true }); }

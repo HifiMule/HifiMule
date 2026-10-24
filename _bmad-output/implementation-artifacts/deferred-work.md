@@ -381,3 +381,8 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 
 Resolved on 2026-10-24: the auto-sync completion helper now records the execution audio fingerprint together with canonical profile history. Both regression tests use isolated migrated profile stores, assert the captured canonical identity/fingerprint, and cover aliases in both directions. The full Rust suite passes. See `spec-fix-profile-history-and-selection-test-regressions.md`.
+
+## Deferred from: CI audio download resilience review (2026-10-24)
+
+- **macOS FFmpeg downloads leave temporary archives after failure.** The download in `scripts/macos-audio-runtime.mjs` predates this change and lacks temporary-file cleanup on curl or checksum failure. Add a `finally` cleanup separately.
+- **Windows signature/key downloads retain partial files after terminal failure.** `scripts/windows-audio-runtime.mjs` downloads these directly to paths later checked with `existsSync`. Use temporary files and rename after success in a focused follow-up; the retry-policy change preserves existing verification.

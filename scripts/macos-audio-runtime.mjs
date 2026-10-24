@@ -113,7 +113,7 @@ export function ensureMacosAudioRuntime(target, options = {}) {
   try {
     if (!existsSync(archive) || sha(archive) !== manifest.sourceSha256) {
       const temporary = `${archive}.tmp-${randomUUID()}`;
-      execute("curl", ["--fail", "--location", "--retry", "3", "--output", temporary, manifest.sourceUrl], { stdio: "inherit" });
+      execute("curl", ["--fail", "--location", "--retry", "5", "--retry-all-errors", "--connect-timeout", "30", "--max-time", "300", "--retry-max-time", "600", "--output", temporary, manifest.sourceUrl], { stdio: "inherit" });
       if (sha(temporary) !== manifest.sourceSha256) throw new Error("FFmpeg source checksum mismatch");
       renameSync(temporary, archive);
     }
