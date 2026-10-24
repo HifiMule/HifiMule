@@ -101,6 +101,8 @@
       "description": "For Garmin watches with music storage. Copies MP3 and AAC in M4A/M4B within 320 kbps, stereo and 48 kHz; converts other formats to MP3 320 kbps. M4B recognition depends on model, firmware and AAC variant. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Music",
       "defaultPlaylistFolder": "Music",
+      "defaultPodcastFolder": "Podcasts",
+      "defaultAudiobookFolder": "Audiobooks",
       "deviceProfile": {
         "Name": "HifiMule-Garmin",
         "MaxStreamingBitrate": 320000,
