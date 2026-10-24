@@ -1,3 +1,4 @@
+import { loadProfiles } from './deviceProfileTestHelpers.mjs';
 import { escapeAttr } from '../src/html.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -26,13 +27,14 @@ class Element {
     replaceWith() {} hide() {}
 }
 function setup() {
+    let profileSaved;
     const calls = [], body = new Element(), confirm = new Element();
     const dialog = new Element();
     dialog.querySelector = selector => selector === '.init-device-body' ? body
         : selector === '#init-device-confirm-btn' ? confirm : body.querySelector(selector);
     const source = readFileSync(new URL('../src/components/InitDeviceModal.ts', import.meta.url), 'utf8');
     const script = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-    const ctx = { exports: {}, require: name => name === '../html' ? { escapeAttr }
+    const ctx = { exports: {}, require: name => name === '../deviceProfiles' ? {...loadProfiles(),bindProfileActions:(_select,_initial,_profiles,callback)=>{profileSaved=callback;}} : name === '../html' ? { escapeAttr }
         : name === '../rpc' ? { rpcCall: async (method, params) => { calls.push({ method, params }); return {}; } }
         : name === '../i18n' ? { t: key => key }
         : name === '../deviceIcon' ? { deviceIconLabel: icon => icon } : {} };
@@ -40,7 +42,7 @@ function setup() {
     const modal = new ctx.exports.InitDeviceModal({});
     Object.assign(modal, { dialog, pendingId: 'pending-target', observedDestinationRevision: '7' });
     modal.renderContent(body, 'listener', []);
-    return { modal, body, calls };
+    return { modal, body, calls, profileSaved };
 }
 test('creation shows localized reconciliation and artwork choices with every option off', () => {
     const { body } = setup();
@@ -76,4 +78,18 @@ test('creation captures enabled and disabled preferences before submitting in th
         assert.equal(params.pendingId, 'pending-target');
         assert.equal(params.observedDestinationRevision, '7');
     }
+});
+
+test('profile action sentinels never reach initialization writes',async()=>{
+ const {modal,body,calls}=setup();body.querySelector('#init-transcoding-profile').value='__profile_new__';
+ await modal.handleConfirm('listener','usb-drive',{value:'Player'});assert.equal(calls.length,0);
+});
+
+test('saved profile applies defaults only to individually untouched initialization folders',()=>{
+ for(const touched of ['none','music','playlists']){
+  const {body,profileSaved}=setup();const music=body.querySelector('#init-folder-input'),playlists=body.querySelector('#init-playlist-folder-input');
+  if(touched==='music'){music.value='My/Music';music.emit('sl-input');}if(touched==='playlists'){playlists.value='My/Lists';playlists.emit('sl-input');}
+  profileSaved([],{id:'custom:saved',name:'Saved',defaultMusicFolder:'New/Music',defaultPlaylistFolder:'New/Lists'});
+  assert.equal(music.value,touched==='music'?'My/Music':'New/Music');assert.equal(playlists.value,touched==='playlists'?'My/Lists':'New/Lists');
+ }
 });

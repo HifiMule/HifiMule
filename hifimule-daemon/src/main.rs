@@ -1056,6 +1056,7 @@ fn run_candidate(
     let open_ui_item = MenuItem::new(hifimule_i18n::t("tray.open_ui"), true, None);
     let open_settings_item =
         MenuItem::new(hifimule_i18n::t("tray.open_playback_settings"), true, None);
+    let device_profiles_item = MenuItem::new(hifimule_i18n::t("profiles.menu"), true, None);
     let choose_output_item =
         MenuItem::new(hifimule_i18n::t("tray.choose_audio_output"), true, None);
     let play_something_item = MenuItem::new(hifimule_i18n::t("tray.play_something"), true, None);
@@ -1080,6 +1081,7 @@ fn run_candidate(
         .append_items(&[
             &open_ui_item,
             &open_settings_item,
+            &device_profiles_item,
             &choose_output_item,
             &play_something_item,
             &resume_item,
@@ -1277,6 +1279,7 @@ fn run_candidate(
         let menu_available = !shutdown_pending && quit_reply.is_none() && fence_reply.is_none();
         play_something_item.set_enabled(menu_available && menu_start_pending.is_none());
         open_settings_item.set_enabled(menu_available);
+        device_profiles_item.set_enabled(menu_available);
         choose_output_item.set_enabled(menu_available);
         if let Some(ingress) = native_ingress.as_ref() {
             let view = ingress.latest();
@@ -1464,11 +1467,14 @@ fn run_candidate(
                 }
             } else if event.id == open_ui_item.id()
                 || event.id == open_settings_item.id()
+                || event.id == device_profiles_item.id()
                 || event.id == choose_output_item.id()
             {
                 // Post first. A live UI can act on this even if the launcher
                 // loses a close/reopen race or exits before Tauri is ready.
-                let activation = if event.id == open_settings_item.id() {
+                let activation = if event.id == device_profiles_item.id() {
+                    hifimule_lifecycle::request_ui_device_profiles_activation(&shutdown_app_data)
+                } else if event.id == open_settings_item.id() {
                     hifimule_lifecycle::request_ui_playback_settings_activation(&shutdown_app_data)
                 } else if event.id == choose_output_item.id() {
                     hifimule_lifecycle::request_ui_audio_output_activation(&shutdown_app_data)
@@ -1894,6 +1900,7 @@ async fn run_auto_sync_logged(
         }
     };
 
+    let execution_audio_fingerprint=crate::transcoding::audio_fingerprint(transcoding_profile.as_ref());
     let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
 
@@ -2137,6 +2144,7 @@ async fn run_auto_sync_logged(
                                     m,
                                     manifest.transcoding_profile_id.as_deref(),
                                 );
+                                m.record_completed_audio_profile(manifest.transcoding_profile_id.as_deref(), &execution_audio_fingerprint);
                             },
                         )
                         .await

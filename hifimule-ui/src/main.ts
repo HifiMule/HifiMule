@@ -1,3 +1,4 @@
+import { openDeviceProfiles } from './components/DeviceProfileManager';
 import { rpcCall } from './rpc';
 import { basketStore } from './state/basket';
 import { listen } from '@tauri-apps/api/event';
@@ -53,6 +54,7 @@ async function init() {
     // prompt scoped to the selected server's URL.
     registerReauthHandler();
 
+    await listen('hifimule-open-device-profiles', () => void openDeviceProfiles());
     await listen('hifimule-open-playback-settings', () => openPlaybackSettings());
     await listen('hifimule-open-audio-output', () => openAudioOutput());
 
@@ -63,7 +65,8 @@ async function init() {
         await showMainWindow();
         const { invoke } = await import('@tauri-apps/api/core');
         const activation = await invoke<string | null>('report_ui_ready');
-        if (activation === 'settings') openPlaybackSettings();
+        if (activation === 'profiles') await openDeviceProfiles();
+        else if (activation === 'settings') openPlaybackSettings();
         else if (activation === 'output') openAudioOutput();
         mountTraySetupGuidance(
             () => invoke<TraySupport>('get_tray_support'),

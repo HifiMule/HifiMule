@@ -1,3 +1,4 @@
+import { loadProfiles } from './deviceProfileTestHelpers.mjs';
 import { escapeAttr } from '../src/html.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -25,13 +26,14 @@ class Element {
     show() {} hide() {} remove() {}
 }
 async function setup(selected, current = {}) {
+    let profileSaved;
     const calls = []; const dialog = new Element();
     const rpc = async (method, params) => { calls.push({ method, params }); return method === 'device_profiles.list' ? [] : {}; };
-    const { BasketSidebar } = new Function('escapeAttr', 'deviceIconLabel', 'basketEstimateKey', 'rpcCall', 'basketStore', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(escapeAttr, icon => icon, basketEstimateKey, rpc, { getItems: () => [] }, key => key, { createElement: () => dialog, body: { appendChild() {} } }, { whenDefined: async () => {} });
+    const { BasketSidebar } = new Function('renderProfileOptions', 'bindProfileActions', 'isProfileAction', 'canonicalProfileId', 'displayProfile', 'escapeAttr', 'deviceIconLabel', 'basketEstimateKey', 'rpcCall', 'basketStore', 't', 'document', 'customElements', `${script}\nreturn { BasketSidebar };`)(loadProfiles().profileOptions, (_select,_initial,_profiles,callback)=>{profileSaved=callback;}, loadProfiles().isProfileAction, loadProfiles().canonicalProfileId, loadProfiles().displayProfile, escapeAttr, icon => icon, basketEstimateKey, rpc, { getItems: () => [] }, key => key, { createElement: () => dialog, body: { appendChild() {} } }, { whenDefined: async () => {} });
     const sidebar = Object.create(BasketSidebar.prototype);
     Object.assign(sidebar, { currentDevice: current, selectedDeviceSummary: () => ({ deviceId: 'device', ...selected }), refreshAndRender: async () => {} });
     await sidebar.openDeviceSettings();
-    return { sidebar, dialog, calls };
+    return { sidebar, dialog, calls, profileSaved };
 }
 test('device settings load the selected device value and default missing values off', async () => {
     for (const value of [undefined, false, true]) {
@@ -80,4 +82,17 @@ test('folder artwork loads legacy values but saves only the device switch', asyn
 test('all languages describe automatic integration during track updates', () => {
     const catalog=JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json',import.meta.url),'utf8'));
     for(const lang of ['en','fr','es','de']) for(const key of ['artwork','artwork_hint']) assert.ok(catalog[lang][`basket.device.${key}`]);
+});
+
+test('profile action sentinels never reach device settings writes',async()=>{
+ const {dialog,calls}=await setup({});dialog.querySelector('#device-settings-transcoding-profile').value='__profile_edit__';
+ await dialog.querySelector('#device-settings-save').click();assert.equal(calls.filter(c=>c.method==='device.update_manifest').length,0);
+});
+
+test('saved profile selection updates passthrough recovery and retains touched folder drafts',async()=>{
+ const {dialog,profileSaved}=await setup({deviceClass:'msc',transcodingProfileId:'passthrough',managedPaths:['Music']},{transcoding_profile_dirty:true});
+ const music=dialog.querySelector('#device-settings-music');music.value='Unfinished/Music';music.listeners.get('sl-input')();
+ const confirmation=dialog.querySelector('#device-settings-profile-confirm');confirmation.checked=true;dialog.querySelector('#device-settings-profile-recover').disabled=false;
+ profileSaved([],{id:'custom:saved',name:'Saved',description:'Custom',defaultMusicFolder:'Other',defaultPlaylistFolder:'New'});
+ assert.equal(dialog.querySelector('#device-settings-profile-recovery').hidden,true);assert.equal(confirmation.checked,false);assert.equal(dialog.querySelector('#device-settings-profile-recover').disabled,true);assert.equal(music.value,'Unfinished/Music');
 });

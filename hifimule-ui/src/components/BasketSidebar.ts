@@ -1,3 +1,4 @@
+import { profileOptions as renderProfileOptions, bindProfileActions, isProfileAction, canonicalProfileId, displayProfile, type DeviceProfileSummary } from '../deviceProfiles';
 import { deviceIconLabel } from '../deviceIcon';
 import { escapeAttr } from '../html';
 // Basket Sidebar Component
@@ -57,13 +58,7 @@ interface ConnectedDeviceSummary {
     deviceClass?: 'msc' | 'mtp';
 }
 
-interface DeviceProfileSummary {
-    id: string;
-    name: string;
-    description?: string;
-    defaultMusicFolder?: string | null;
-    defaultPlaylistFolder?: string | null;
-}
+
 
 interface SyncOperation {
     id: string;
@@ -706,9 +701,9 @@ export class BasketSidebar {
 
         let profiles: DeviceProfileSummary[] = [];
         try {
-            profiles = await rpcCall('device_profiles.list') as DeviceProfileSummary[];
+            profiles = (await rpcCall('device_profiles.list') as DeviceProfileSummary[]).map(displayProfile);
         } catch (err) {
-            profiles = [{ id: 'passthrough', name: t('basket.profile.no_transcoding'), description: t('basket.profile.no_transcoding_desc') }];
+            profiles = [{ id: 'passthrough', ownership: 'system', name: t('basket.profile.no_transcoding'), description: t('basket.profile.no_transcoding_desc') }];
         }
 
         const musicFolder = selected.managedPaths?.[0]
@@ -724,13 +719,11 @@ export class BasketSidebar {
         const folderArtwork = selected.folderArtwork ?? current.folderArtwork ?? {};
         const podcastFolder = selected.podcastPath ?? current.podcastPath ?? current.podcast_path ?? '';
         let selectedIcon = selected.icon || 'usb-drive';
-        const selectedProfileId = selected.transcodingProfileId
+        const selectedProfileId = canonicalProfileId(profiles, selected.transcodingProfileId
             ?? current.transcodingProfileId
             ?? current.transcoding_profile_id
-            ?? 'passthrough';
-        const profileOptions = profiles
-            .map(profile => `<sl-option value="${escapeAttr(profile.id)}">${escapeAttr(profile.name)}</sl-option>`)
-            .join('');
+            ?? 'passthrough');
+        const profileOptions = renderProfileOptions(profiles);
         const selectedProfile = profiles.find(profile => profile.id === selectedProfileId)
             ?? profiles.find(profile => profile.id === 'passthrough');
         const canConfirmPassthrough = selected.deviceClass === 'msc' && selectedProfileId === 'passthrough'
@@ -825,19 +818,23 @@ export class BasketSidebar {
         audiobookInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         podcastInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         playlistInput?.addEventListener('sl-input', () => { foldersEdited = true; });
-        profileSelect?.addEventListener('sl-change', (event: any) => {
-            if (profileRecovery) profileRecovery.hidden = event.target.value !== 'passthrough';
+        const applyProfile = (id: string, profile?: DeviceProfileSummary) => {
+            if (profileRecovery) profileRecovery.hidden = id !== 'passthrough';
             if (profileConfirmation) {
                 profileConfirmation.checked = false;
                 profileRecoveryButton.disabled = true;
             }
-            const profile = profiles.find(p => p.id === event.target.value);
             if (profileDesc) profileDesc.textContent = profile?.description ?? '';
             if (!foldersEdited && profile) {
                 musicInput.value = profile.defaultMusicFolder ?? musicInput.value ?? '';
                 playlistInput.value = profile.defaultPlaylistFolder ?? playlistInput.value ?? '';
                 playlistInput.placeholder = profile.defaultMusicFolder ?? musicInput.value ?? '';
             }
+        };
+        bindProfileActions(profileSelect, selectedProfileId, profiles, (_profiles, saved) => applyProfile(saved.id,saved));
+        profileSelect?.addEventListener('sl-change', (event: any) => {
+            if (isProfileAction(event.target.value)) return;
+            applyProfile(event.target.value, profiles.find(profile => profile.id === event.target.value));
         });
         dialog.querySelector('#device-settings-cancel')?.addEventListener('click', () => dialog.hide());
         dialog.querySelector('#device-settings-save')?.addEventListener('click', async () => {
@@ -852,6 +849,7 @@ export class BasketSidebar {
                 const playlistFolderValue = ((dialog.querySelector('#device-settings-playlist') as any)?.value ?? '').trim();
                 const audiobookFolderValue = ((dialog.querySelector('#device-settings-audiobook') as any)?.value ?? '').trim();
                 const podcastFolderValue = ((dialog.querySelector('#device-settings-podcast') as any)?.value ?? '').trim();
+                if (isProfileAction(profileSelect.value)) return;
                 const payload: Record<string, unknown> = {
                     deviceId: selected.deviceId,
                     name: (dialog.querySelector('#device-settings-name') as any)?.value ?? '',

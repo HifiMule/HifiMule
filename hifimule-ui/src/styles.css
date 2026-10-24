@@ -3219,3 +3219,44 @@ hm-radio-action sl-icon-button[aria-disabled="true"]::part(base) {
     --speed: 0s;
   }
 }
+
+/* Device profile manager shares the existing dialog/control system. */
+.device-profile-manager { --width: min(960px, calc(100vw - 2rem)); }
+.device-profile-manager::part(body) { padding-block: var(--space-md); }
+.profile-manager-toolbar, .profile-editor-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }
+.profile-manager-toolbar { margin-bottom: var(--space-md); }
+.profile-manager-toolbar p, .profile-help { color: var(--text-muted, #b0bac6); font-size: .85rem; line-height: 1.5; margin: 0; }
+.profile-manager-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 28rem; gap: var(--space-lg); }
+.profile-manager-list { border-inline-end: 1px solid var(--surface-border, rgba(255,255,255,.1)); padding-inline-end: var(--space-md); }
+.profile-manager-group + .profile-manager-group { margin-top: var(--space-lg); }
+.profile-manager-group h3 { font-size: .8rem; color: var(--text-muted, #b0bac6); margin: 0 0 var(--space-xs); }
+.profile-list-item { display: block; width: 100%; text-align: start; color: inherit; background: transparent; border: 0; border-radius: var(--radius); padding: var(--space-xs); font: inherit; font-size: .85rem; line-height: 1.4; cursor: pointer; overflow-wrap: anywhere; }
+.profile-list-item:hover { background: var(--surface-fill-hover, rgba(255,255,255,.06)); }
+.profile-list-item[aria-current="true"] { background: rgba(var(--accent-rgb), .12); color: var(--accent); }
+.profile-list-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.profile-manager-editor { min-width: 0; }
+.profile-editor-heading { margin-bottom: var(--space-sm); }
+.profile-editor-heading h2 { font-size: 1.1rem; margin: 0; overflow-wrap: anywhere; }
+.profile-editor-fields { display: grid; gap: var(--space-md); margin-top: var(--space-md); }
+.profile-formats { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-xs) var(--space-md); padding: 0; margin: 0; border: 0; }
+.profile-formats legend { margin-bottom: var(--space-xs); font-size: .875rem; }
+.profile-output-fields, .profile-limit-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-md); }
+.profile-editor-fields sl-details::part(content) { display: grid; gap: var(--space-sm); }
+.profile-manager-picker { display: none; margin-bottom: var(--space-md); }
+.profile-summary { margin: 0; padding-block: var(--space-sm); border-top: 1px solid var(--surface-border, rgba(255,255,255,.1)); font-size: .85rem; line-height: 1.5; }
+.profile-option-group { display:block; padding: .5rem 1rem; color: var(--text-muted, #b0bac6); }
+.profile-output-fields[hidden], #profile-bitrate[hidden] { display: none; }
+#profile-error { margin-bottom: var(--space-sm); }
+@media (max-width: 700px) {
+    .profile-manager-layout { display: block; min-height: 0; }
+    .profile-manager-list { display: none; }
+    .profile-manager-picker { display: block; }
+    .profile-manager-toolbar { align-items: flex-start; }
+    .profile-manager-toolbar p { max-width: 36ch; }
+}
+@media (max-width: 420px) {
+    .profile-output-fields, .profile-limit-fields { grid-template-columns: minmax(0,1fr); }
+    .profile-manager-toolbar { flex-wrap: wrap; }
+}
+
+.device-profile-manager [hidden] { display: none !important; }

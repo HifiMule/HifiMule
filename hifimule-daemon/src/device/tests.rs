@@ -5461,6 +5461,7 @@ async fn manifest_migration_regression_explicit_confirmation_is_durable() {
     let durable = DeviceProber::probe(dir.path()).await.unwrap().unwrap();
     manifest.transcoding_profile_dirty = false;
     manifest.last_synced_transcoding_profile_id = None;
+    manifest.last_synced_audio_fingerprint = Some(crate::transcoding::audio_fingerprint(None));
     assert_eq!(
         serde_json::to_value(durable).unwrap(),
         serde_json::to_value(manifest).unwrap()
@@ -5573,4 +5574,72 @@ fn folder_artwork_legacy_defaults_and_compressed_ownership_roundtrip() {
     let mut target = crate::sync::SyncTarget { path: std::path::PathBuf::from("test"), manifest:decoded, io:Arc::new(crate::device_io::MscBackend::new("test".into())), observation:1 };
     crate::sync_plan::compact_target(&mut target);
     assert_eq!(target.manifest.folder_artwork_records,manifest.folder_artwork_records);
+}
+
+
+#[tokio::test]
+async fn shared_profile_audio_fingerprint_survives_offline_edits_and_compact_storage() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    crate::transcoding::ensure_profiles_file_exists(
+        &path,
+        include_bytes!("../../assets/device-profiles.json"),
+    )
+    .unwrap();
+    let source = crate::transcoding::resolve_profile(&path, "system:generic-mp3-player").unwrap();
+    let mut custom =
+        crate::transcoding::save_profile(&path, source.clone(), None, Some(&source.id)).unwrap();
+    crate::paths::TEST_DEVICE_PROFILES_PATH.scope(path.clone(),async {
+        let mut manifest=make_manifest("fingerprint","Player");
+        manifest.synced_items.push(serde_json::from_value(serde_json::json!({"providerItemId":"track","name":"Track","localPath":"Music/track.mp3","sizeBytes":100,"syncedAt":"now"})).unwrap());
+        manifest.transcoding_profile_id=Some(custom.id.clone());
+        let original=crate::transcoding::audio_fingerprint(custom.device_profile.as_ref());
+        manifest.record_completed_audio_profile(Some(&custom.id),&original);
+        assert!(!manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite());
+        custom.name="Renamed".into();custom.default_music_folder=Some("Later".into());
+        custom=crate::transcoding::save_profile(&path,custom.clone(),Some(custom.revision),None).unwrap();
+        assert!(!manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite());
+        custom.device_profile.as_mut().unwrap()["MusicStreamingTranscodingBitrate"]=serde_json::json!(192000);
+        custom=crate::transcoding::save_profile(&path,custom.clone(),Some(custom.revision),None).unwrap();
+        let encoded=manifest_codec::encode(&manifest).unwrap();
+        let offline=manifest_codec::decode(&encoded, true).unwrap();
+        assert_eq!(offline.last_synced_audio_fingerprint,Some(original.clone()));
+        assert!(offline.profile_snapshot_at(&path).needs_transcoding_profile_rewrite());
+        // A failure/cancellation never calls completion: the last successful fingerprint remains authoritative.
+        assert_eq!(offline.last_synced_audio_fingerprint,Some(original));
+        let completed=crate::transcoding::audio_fingerprint(custom.device_profile.as_ref());
+        let mut complete=offline;complete.record_completed_audio_profile(Some(&custom.id),&completed);
+        assert!(!complete.profile_snapshot_at(&path).needs_transcoding_profile_rewrite());
+    }).await;
+}
+
+#[tokio::test]
+async fn frozen_legacy_profile_history_and_aliases_are_conservative() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    let defaults: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../assets/device-profiles.json")).unwrap();
+    std::fs::write(&path, defaults.to_string()).unwrap();
+    crate::transcoding::ensure_profiles_file_exists(
+        &path,
+        include_bytes!("../../assets/device-profiles.json"),
+    )
+    .unwrap();
+    crate::paths::TEST_DEVICE_PROFILES_PATH.scope(path.clone(),async {
+        let mut manifest=make_manifest("legacy-fingerprint","Legacy");
+        manifest.synced_items.push(serde_json::from_value(serde_json::json!({"providerItemId":"track","name":"Track","localPath":"Music/track.mp3","sizeBytes":100,"syncedAt":"now"})).unwrap());
+        manifest.transcoding_profile_id=Some("generic-mp3-player".into());
+        manifest.last_synced_transcoding_profile_id=Some("generic-mp3-player".into());
+        assert!(!manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite());
+        manifest.set_transcoding_profile(Some("system:generic-mp3-player".into()));
+        assert!(!manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite(),"aliases must remain audio-equivalent");
+        manifest.last_synced_transcoding_profile_id=None;
+        assert!(!manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite(),"clean historyless selection uses the frozen baseline");
+        manifest.last_synced_transcoding_profile_id=Some("missing-history".into());
+        assert!(manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite());
+        manifest.last_synced_transcoding_profile_id=Some("passthrough".into());
+        assert!(manifest.profile_snapshot_at(&path).needs_transcoding_profile_rewrite(),"last synced history takes precedence over selected profile");
+        manifest.transcoding_profile_id=None;manifest.dirty=true;manifest.pending_item_ids=vec!["unfinished".into()];manifest.transcoding_profile_dirty=true;
+        let snapshot=manifest.profile_snapshot_at(&path);assert!(snapshot.dirty);assert!(snapshot.transcoding_profile_dirty);assert_eq!(snapshot.pending_item_ids,vec!["unfinished"]);
+    }).await;
 }

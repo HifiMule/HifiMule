@@ -1,489 +1,568 @@
 pub mod local;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::path::Path;
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use std::{io::Write, path::Path, sync::Mutex};
 
-/// A single entry in device-profiles.json.
-/// `device_profile` is `None` for the passthrough (no-transcode) profile.
+// All profile read/modify/write transactions share this lock, including startup reconciliation.
+static STORE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceProfileEntry {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub ownership: String,
+    #[serde(default)]
+    pub revision: u64,
     #[serde(rename = "defaultMusicFolder", default)]
     pub default_music_folder: Option<String>,
     #[serde(rename = "defaultPlaylistFolder", default)]
     pub default_playlist_folder: Option<String>,
     #[serde(rename = "deviceProfile")]
     pub device_profile: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
-
-#[derive(Debug, Deserialize)]
-struct ProfilesFile {
-    profiles: Vec<DeviceProfileEntry>,
-}
-
-/// Load all profiles from `device-profiles.json` at the given path.
-pub fn load_profiles(path: &Path) -> Result<Vec<DeviceProfileEntry>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("Failed to read device-profiles.json: {}", e))?;
-    let file: ProfilesFile = serde_json::from_str(&content)
-        .map_err(|e| anyhow!("Failed to parse device-profiles.json: {}", e))?;
-    Ok(file.profiles)
-}
-
-/// Seed or merge the default device-profiles.json into `dest_path`.
-/// Existing customer values win; embedded defaults fill missing attributes and
-/// append newly shipped profiles.
-pub fn ensure_profiles_file_exists(dest_path: &Path, default_bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow!("Failed to create profiles directory: {}", e))?;
+fn read_document(path: &Path) -> Result<Value> {
+    let doc: Value = serde_json::from_slice(&std::fs::read(path)?).map_err(|e| {
+        anyhow!("Cannot read device-profiles.json; restore or repair the file: {e}")
+    })?;
+    ensure!(
+        doc.is_object(),
+        "Cannot read device-profiles.json; repair the document object"
+    );
+    if let Some(version) = doc.get("profileStoreVersion") {
+        ensure!(
+            version.as_u64() == Some(1),
+            "Unsupported device-profiles.json storage version; use the matching HifiMule version or restore a backup"
+        );
     }
-    if dest_path.exists() {
-        let existing = std::fs::read_to_string(dest_path)
-            .map_err(|e| anyhow!("Failed to read device-profiles.json: {}", e))?;
-        let merged = merge_profiles_json(&existing, default_bytes)?;
-        if merged != existing {
-            std::fs::write(dest_path, merged)
-                .map_err(|e| anyhow!("Failed to write merged device-profiles.json: {}", e))?;
+    for key in ["systemProfileIds", "profileAliases", "legacyAudioBaselines"] {
+        if let Some(value) = doc.get(key) {
+            let map = value.as_object().ok_or_else(||anyhow!("Cannot read device-profiles.json; repair {key}: expected an object of string values"))?;
+            ensure!(
+                map.values()
+                    .all(|value| value.as_str().is_some_and(|value| !value.is_empty())),
+                "Cannot read device-profiles.json; repair {key}: expected nonempty string values"
+            );
         }
-        return Ok(());
     }
-    std::fs::write(dest_path, default_bytes)
-        .map_err(|e| anyhow!("Failed to write default device-profiles.json: {}", e))?;
+    let profiles = doc["profiles"]
+        .as_array()
+        .ok_or_else(|| anyhow!("device-profiles.json requires a profiles array"))?;
+    let mut ids = std::collections::HashSet::new();
+    for profile in profiles {
+        let entry: DeviceProfileEntry = serde_json::from_value(profile.clone())?;
+        ensure!(
+            !entry.id.is_empty() && ids.insert(entry.id),
+            "Duplicate or empty profile identity"
+        );
+    }
+    Ok(doc)
+}
+fn atomic_write(path: &Path, doc: &Value) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
+    serde_json::to_writer_pretty(&mut file, doc)?;
+    file.write_all(b"\n")?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|e| anyhow!("Cannot save device profiles: {}", e.error))?;
+    Ok(())
+}
+pub fn audio_fingerprint(profile: Option<&Value>) -> String {
+    let mut value = profile.cloned().unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("Name");
+    }
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+pub fn load_profiles(path: &Path) -> Result<Vec<DeviceProfileEntry>> {
+    serde_json::from_value(read_document(path)?["profiles"].clone()).map_err(Into::into)
+}
+pub fn aliases_for(path: &Path, id: &str) -> Vec<String> {
+    read_document(path)
+        .ok()
+        .and_then(|d| d["profileAliases"].as_object().cloned())
+        .map(|aliases| {
+            aliases
+                .into_iter()
+                .filter_map(|(alias, value)| (value.as_str() == Some(id)).then_some(alias))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+pub fn resolve_profile(path: &Path, id: &str) -> Result<DeviceProfileEntry> {
+    let doc = read_document(path)?;
+    let resolved = doc["profileAliases"][id].as_str().unwrap_or(id);
+    doc["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == resolved)
+        .cloned()
+        .ok_or_else(|| anyhow!("Profile {id} not found"))
+        .and_then(|p| serde_json::from_value(p).map_err(Into::into))
+}
+pub fn legacy_fingerprint(path: &Path, id: Option<&str>) -> Option<String> {
+    if id.is_none() || id == Some("passthrough") {
+        return Some(audio_fingerprint(None));
+    }
+    read_document(path).ok()?["legacyAudioBaselines"][id?]
+        .as_str()
+        .map(str::to_owned)
+}
+pub fn ensure_profiles_file_exists(path: &Path, default_bytes: &[u8]) -> Result<()> {
+    let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existed = path.exists();
+    let mut doc = if existed {
+        read_document(path)?
+    } else {
+        json!({"profiles":[]})
+    };
+    let before = doc.clone();
+    let defaults: Value = serde_json::from_slice(default_bytes)?;
+    let defaults = defaults["profiles"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Embedded profiles invalid"))?;
+    ensure!(
+        doc.get("profileStoreVersion").is_none() || doc["profileStoreVersion"] == 1,
+        "This device-profiles.json uses a newer storage version; open it with the matching HifiMule version"
+    );
+    let first = doc["profileStoreVersion"] != 1;
+    let mut profiles = doc["profiles"].as_array().unwrap().clone();
+    if first {
+        let mut baselines = Map::new();
+        let mut aliases = Map::new();
+        for p in &mut profiles {
+            let id = p["id"].as_str().unwrap().to_string();
+            baselines.insert(
+                id.clone(),
+                json!(audio_fingerprint(
+                    p.get("deviceProfile").filter(|v| !v.is_null())
+                )),
+            );
+            // Only exact shipped entries are safe to replace; all uncertain data remains custom.
+            let exact = defaults.iter().any(|d| {
+                let mut d = d.clone();
+                d.as_object_mut().unwrap().remove("ownership");
+                let mut old = p.clone();
+                old.as_object_mut().unwrap().remove("ownership");
+                old == d
+            });
+            if exact {
+                aliases.insert(
+                    id.clone(),
+                    json!(if id == "passthrough" {
+                        id.clone()
+                    } else {
+                        format!("system:{id}")
+                    }),
+                );
+                p["ownership"] = json!("legacy-stock");
+            } else {
+                p["ownership"] = json!("custom");
+                p["revision"] = json!(1);
+            }
+        }
+        profiles.retain(|p| p["ownership"] != "legacy-stock");
+        // passthrough is a reserved identity even when an old hand-edited row used it.
+        for p in &mut profiles {
+            if p["id"] == "passthrough" {
+                p["id"] = json!(format!("custom:{}", uuid::Uuid::new_v4()));
+            }
+        }
+        doc["legacyAudioBaselines"] = json!(baselines);
+        doc["profileAliases"] = json!(aliases);
+        doc["systemProfileIds"] = json!({});
+        doc["profileStoreVersion"] = json!(1);
+    }
+    for bundled in defaults {
+        let original = bundled["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Embedded profile identity missing"))?;
+        let preferred = if original == "passthrough" {
+            original.to_string()
+        } else {
+            format!("system:{original}")
+        };
+        let id = doc["systemProfileIds"][original]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if profiles
+                    .iter()
+                    .any(|p| p["id"] == preferred && p["ownership"] != "system")
+                {
+                    format!("system:{original}:{}", uuid::Uuid::new_v4())
+                } else {
+                    preferred
+                }
+            });
+        doc["systemProfileIds"][original] = json!(id);
+        if first && doc["profileAliases"].get(original).is_some() {
+            doc["legacyAudioBaselines"][&id] = doc["legacyAudioBaselines"][original].clone();
+        }
+        // Only aliases installed for exact stock entries can follow the bundled system.
+        if doc["profileAliases"].get(original).is_some() {
+            doc["profileAliases"][original] = json!(id);
+        }
+        let mut system = bundled.clone();
+        system["id"] = json!(id);
+        system["ownership"] = json!("system");
+        let pos = profiles
+            .iter()
+            .position(|p| p["id"] == id && p["ownership"] == "system");
+        let revision = pos
+            .and_then(|i| profiles[i]["revision"].as_u64())
+            .unwrap_or(1);
+        system["revision"] = json!(revision);
+        if let Some(i) = pos {
+            if profiles[i] != system {
+                system["revision"] = json!(revision + 1);
+            }
+            profiles[i] = system;
+        } else {
+            profiles.push(system);
+        }
+    }
+    doc["profiles"] = json!(profiles);
+    if before != doc {
+        if existed && first {
+            let backup = path.with_extension("json.pre-profiles-v1.bak");
+            if !backup.exists() {
+                let mut out = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(backup)?;
+                out.write_all(&std::fs::read(path)?)?;
+                out.sync_all()?;
+            }
+        }
+        atomic_write(path, &doc)?;
+    }
     Ok(())
 }
 
-fn merge_profiles_json(existing: &str, default_bytes: &[u8]) -> Result<String> {
-    let mut existing_json: Value = serde_json::from_str(existing)
-        .map_err(|e| anyhow!("Failed to parse device-profiles.json: {}", e))?;
-    let default_json: Value = serde_json::from_slice(default_bytes)
-        .map_err(|e| anyhow!("Failed to parse embedded device-profiles.json: {}", e))?;
-
-    let changed = merge_profile_defaults(&mut existing_json, &default_json)?;
-    if changed {
-        serde_json::to_string_pretty(&existing_json)
-            .map(|json| format!("{}\n", json))
-            .map_err(|e| anyhow!("Failed to serialize merged device-profiles.json: {}", e))
+pub fn validate_entry(
+    entry: &DeviceProfileEntry,
+    previous: Option<&DeviceProfileEntry>,
+) -> Result<()> {
+    ensure!(
+        !entry.name.trim().is_empty() && entry.name.chars().count() <= 120,
+        "Profile name must contain 1–120 characters"
+    );
+    ensure!(
+        entry.description.chars().count() <= 2000,
+        "Description is too long"
+    );
+    for folder in [&entry.default_music_folder, &entry.default_playlist_folder]
+        .into_iter()
+        .flatten()
+    {
+        ensure!(
+            !folder.contains(['\\', ':', '\0'])
+                && !folder.starts_with('/')
+                && !folder.split('/').any(|s| s == ".." || s == "."),
+            "Folders must be relative device paths without . or .."
+        );
+    }
+    if let Some(profile) = &entry.device_profile {
+        // Existing unsupported rules remain editable as metadata; never silently drop them.
+        if previous.is_some_and(|old| old.device_profile.as_ref() == Some(profile)) {
+            return Ok(());
+        }
+        ensure!(profile.is_object(), "Device capabilities must be an object");
+        local::validate_profile(profile)?;
+        let direct = profile["DirectPlayProfiles"]
+            .as_array()
+            .ok_or_else(|| anyhow!("DirectPlayProfiles must be an array"))?;
+        for rule in direct {
+            ensure!(
+                rule["Type"].as_str() == Some("Audio"),
+                "Direct play rules must describe audio"
+            );
+            let containers = rule["Container"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing direct play container"))?;
+            let codecs = rule["AudioCodec"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing direct play codec"))?;
+            for container in containers.split(',') {
+                for codec in codecs.split(',') {
+                    let valid = match container.trim().to_ascii_lowercase().as_str() {
+                        "mp3" => codec == "mp3",
+                        "mp4" | "m4a" => matches!(codec, "aac" | "alac"),
+                        "m4b" => codec == "aac",
+                        "flac" => codec == "flac",
+                        "ogg" => matches!(codec, "vorbis" | "opus" | "flac"),
+                        "opus" => codec == "opus",
+                        "wav" => {
+                            matches!(codec, "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le")
+                        }
+                        _ => false,
+                    };
+                    ensure!(
+                        valid,
+                        "Unsupported direct play codec/container pair: {codec}/{container}"
+                    );
+                }
+            }
+        }
+        ensure!(
+            profile["TranscodingProfiles"]
+                .as_array()
+                .is_some_and(|p| p.len() == 1),
+            "Choose one audio conversion target"
+        );
+        ensure!(
+            profile["CodecProfiles"].as_array().is_some(),
+            "CodecProfiles must be an array"
+        );
+        for (key, max) in [
+            ("MaxAudioChannels", 32),
+            ("MaxAudioSampleRate", 768000),
+            ("MaxAudioBitDepth", 64),
+            ("MaxStreamingBitrate", 100000000),
+            ("MusicStreamingTranscodingBitrate", 100000000),
+        ] {
+            if let Some(value) = profile.get(key) {
+                ensure!(
+                    value.as_u64().is_some_and(|n| n > 0 && n <= max),
+                    "Invalid {key}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+/// Expected revision is checked under the same lock as the atomic replacement.
+pub fn save_profile(
+    path: &Path,
+    mut entry: DeviceProfileEntry,
+    expected: Option<u64>,
+    source: Option<&str>,
+) -> Result<DeviceProfileEntry> {
+    let _lock = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut doc = read_document(path)?;
+    let profiles = doc["profiles"].as_array_mut().unwrap();
+    let source_entry = source
+        .map(|source| {
+            profiles
+                .iter()
+                .find(|p| p["id"] == source)
+                .cloned()
+                .ok_or_else(|| anyhow!("Source profile no longer exists"))
+                .and_then(|p| serde_json::from_value::<DeviceProfileEntry>(p).map_err(Into::into))
+        })
+        .transpose()?;
+    let pos = if expected.is_some() {
+        profiles.iter().position(|p| p["id"] == entry.id)
     } else {
-        Ok(existing.to_string())
-    }
-}
-
-fn merge_profile_defaults(existing: &mut Value, defaults: &Value) -> Result<bool> {
-    let existing_profiles = existing
-        .get_mut("profiles")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("device-profiles.json must contain a profiles array"))?;
-    let default_profiles = defaults
-        .get("profiles")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("embedded device-profiles.json must contain a profiles array"))?;
-
-    let mut changed = false;
-    for default_profile in default_profiles {
-        let Some(default_id) = default_profile.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        match existing_profiles.iter_mut().find(|profile| {
-            profile
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id == default_id)
-        }) {
-            Some(existing_profile) => {
-                changed |= migrate_legacy_mp3_192(existing_profile, default_profile);
-                changed |= migrate_legacy_garmin_m4b(existing_profile, default_profile);
-                changed |= migrate_legacy_original_description(existing_profile, default_profile);
-                changed |= merge_missing_values(existing_profile, default_profile);
-            }
-            None => {
-                existing_profiles.push(default_profile.clone());
-                changed = true;
-            }
-        }
-    }
-
-    Ok(changed)
-}
-
-/// Match the old description too, so later direct-play edits are not migrated again.
-fn migrate_legacy_mp3_192(existing: &mut Value, defaults: &Value) -> bool {
-    const LEGACY_DESCRIPTION: &str =
-        "For devices with limited storage. Transcodes everything to MP3 192 kbps.";
-    if existing["id"] != "rockbox-mp3-192" || existing["description"] != LEGACY_DESCRIPTION {
-        return false;
-    }
-    let mut legacy = serde_json::json!({
-        "Name":"HifiMule-Rockbox-192", "MaxStreamingBitrate":192000,
-        "MusicStreamingTranscodingBitrate":192000, "MaxAudioBitDepth":16,
-        "DirectPlayProfiles":[], "CodecProfiles":[],
-        "TranscodingProfiles":[{"Container":"mp3","Type":"Audio","AudioCodec":"mp3",
-            "Protocol":"http","EstimateContentLength":true,"EnableMpegtsM2TsMode":false}]
-    });
-    let with_depth = existing.get("deviceProfile") == Some(&legacy);
-    legacy.as_object_mut().unwrap().remove("MaxAudioBitDepth");
-    if !with_depth && existing.get("deviceProfile") != Some(&legacy) {
-        return false;
-    }
-    existing["deviceProfile"]["DirectPlayProfiles"] = defaults["deviceProfile"]["DirectPlayProfiles"].clone();
-    existing["description"] = defaults["description"].clone();
-    true
-}
-
-fn migrate_legacy_original_description(existing: &mut Value, defaults: &Value) -> bool {
-    if existing["id"] != "passthrough"
-        || existing["description"] != "Download files as-is from Jellyfin without transcoding."
-        || existing.get("deviceProfile") != Some(&Value::Null) {
-        return false;
-    }
-    existing["description"] = defaults["description"].clone();
-    true
-}
-
-fn migrate_legacy_garmin_m4b(existing: &mut Value, defaults: &Value) -> bool {
-    const LEGACY_DESCRIPTION: &str = "For Garmin watches with music storage (Forerunner, Fenix, Venu, Vivoactive). Passes through MP3 and AAC/M4A directly; transcodes FLAC, OGG, and other formats to MP3 320 kbps.";
-    if existing["id"] != "garmin-music" || existing["description"] != LEGACY_DESCRIPTION {
-        return false;
-    }
-    let legacy = serde_json::json!({
-        "Name":"HifiMule-Garmin", "MaxStreamingBitrate":320000,
-        "MusicStreamingTranscodingBitrate":320000, "MaxAudioChannels":2, "MaxAudioSampleRate":48000,
-        "DirectPlayProfiles":[{"Container":"mp3","Type":"Audio","AudioCodec":"mp3"},
-            {"Container":"mp4","Type":"Audio","AudioCodec":"aac"}],
-        "TranscodingProfiles":[{"Container":"mp3","Type":"Audio","AudioCodec":"mp3",
-            "Protocol":"http","EstimateContentLength":true,"EnableMpegtsM2TsMode":false}],
-        "CodecProfiles":[]
-    });
-    if existing.get("deviceProfile") != Some(&legacy) {
-        return false;
-    }
-    existing["deviceProfile"]["DirectPlayProfiles"] = defaults["deviceProfile"]["DirectPlayProfiles"].clone();
-    existing["description"] = defaults["description"].clone();
-    true
-}
-
-fn merge_missing_values(existing: &mut Value, defaults: &Value) -> bool {
-    let (Some(existing_object), Some(default_object)) =
-        (existing.as_object_mut(), defaults.as_object())
-    else {
-        return false;
+        None
     };
-    merge_missing_object_values(existing_object, default_object)
-}
-
-fn merge_missing_object_values(
-    existing_object: &mut Map<String, Value>,
-    default_object: &Map<String, Value>,
-) -> bool {
-    let mut changed = false;
-    for (key, default_value) in default_object {
-        match existing_object.get_mut(key) {
-            Some(existing_value) if existing_value.is_object() && default_value.is_object() => {
-                changed |= merge_missing_values(existing_value, default_value);
-            }
-            Some(_) => {}
-            None => {
-                existing_object.insert(key.clone(), default_value.clone());
-                changed = true;
-            }
+    let previous = pos
+        .map(|i| serde_json::from_value::<DeviceProfileEntry>(profiles[i].clone()))
+        .transpose()?;
+    if let Some(expected) = expected {
+        let previous = previous
+            .as_ref()
+            .ok_or_else(|| anyhow!("Profile no longer exists"))?;
+        ensure!(
+            previous.ownership != "system" && previous.id != "passthrough",
+            "System profiles are read-only; clone to customize"
+        );
+        ensure!(
+            previous.revision == expected,
+            "Profile changed elsewhere; reload before saving"
+        );
+    } else {
+        entry.id = format!("custom:{}", uuid::Uuid::new_v4());
+    }
+    validate_entry(&entry, source_entry.as_ref().or(previous.as_ref()))?;
+    entry.ownership = "custom".into();
+    entry.revision = previous.as_ref().map_or(1, |p| p.revision + 1);
+    // Preserve future top-level fields even when an older client edits a profile.
+    if let Some(old) = previous {
+        for (k, v) in old.extra {
+            entry.extra.entry(k).or_insert(v);
         }
     }
-    changed
+    let value = serde_json::to_value(&entry)?;
+    if let Some(i) = pos {
+        profiles[i] = value;
+    } else {
+        profiles.push(value);
+    }
+    atomic_write(path, &doc)?;
+    Ok(entry)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    const EMBEDDED: &[u8] = include_bytes!("../assets/device-profiles.json");
-
-    fn mp3_192_profile(value: &mut Value) -> &mut Value {
-        value["profiles"].as_array_mut().unwrap().iter_mut()
-            .find(|entry| entry["id"] == "rockbox-mp3-192").unwrap()
-    }
-
+    const DEFAULTS: &[u8] = include_bytes!("../assets/device-profiles.json");
     #[test]
-    fn m4b_original_description_migration_preserves_custom_profiles() {
-        for (description, device_profile, updated) in [
-            ("Download files as-is from Jellyfin without transcoding.", Value::Null, true),
-            ("My originals", Value::Null, false),
-            ("Download files as-is from Jellyfin without transcoding.", serde_json::json!({"DirectPlayProfiles":[]}), false),
-        ] {
-            let existing = serde_json::json!({"profiles":[{"id":"passthrough","name":"My choice",
-                "description":description,"deviceProfile":device_profile,"defaultMusicFolder":"CustomMusic"}]}).to_string();
-            let merged = merge_profiles_json(&existing, EMBEDDED).unwrap();
-            let value: Value = serde_json::from_str(&merged).unwrap();
-            let entry = &value["profiles"][0];
-            assert_eq!(entry["name"], "My choice");
-            assert_eq!(entry["defaultMusicFolder"], "CustomMusic");
-            assert_eq!(entry["description"] != description, updated);
-            assert_eq!(merge_profiles_json(&merged, EMBEDDED).unwrap(), merged);
-        }
-    }
-
-    #[test]
-    fn m4b_garmin_stock_migration_preserves_customizations_and_is_idempotent() {
-        let defaults: Value = serde_json::from_slice(EMBEDDED).unwrap();
-        let current = defaults["profiles"].as_array().unwrap().iter().find(|p| p["id"] == "garmin-music").unwrap();
-        let mut legacy = current.clone();
-        legacy["description"] = "For Garmin watches with music storage (Forerunner, Fenix, Venu, Vivoactive). Passes through MP3 and AAC/M4A directly; transcodes FLAC, OGG, and other formats to MP3 320 kbps.".into();
-        legacy["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([
-            {"Container":"mp3","Type":"Audio","AudioCodec":"mp3"},
-            {"Container":"mp4","Type":"Audio","AudioCodec":"aac"}
-        ]);
-        legacy["name"] = "My watch".into();
-        legacy["defaultMusicFolder"] = "CustomMusic".into();
-        for edit in [None, Some("DirectPlayProfiles"), Some("MaxAudioChannels"), Some("customFlag")] {
-            let mut existing = legacy.clone();
-            if let Some(key) = edit { existing["deviceProfile"][key] = serde_json::json!([]); }
-            let document = serde_json::json!({"profiles":[existing.clone()]}).to_string();
-            let merged = merge_profiles_json(&document, EMBEDDED).unwrap();
-            let value: Value = serde_json::from_str(&merged).unwrap();
-            let profiles = value["profiles"].as_array().unwrap();
-            let garmin = profiles.iter().find(|p| p["id"] == "garmin-music").unwrap();
-            assert_eq!(garmin["name"], "My watch");
-            assert_eq!(garmin["defaultMusicFolder"], "CustomMusic");
-            if edit.is_none() {
-                assert_eq!(garmin["deviceProfile"], current["deviceProfile"]);
-                assert!(garmin["deviceProfile"]["DirectPlayProfiles"].as_array().unwrap().iter().any(|p| p["Container"] == "m4b"));
-            } else { assert_eq!(garmin["deviceProfile"], existing["deviceProfile"]); }
-            for id in ["modern-dap-lossless-m4b", "rockbox-audiobooks-m4b", "audiobooks-m4b-mp3", "pocketbook-audiobooks", "android-voice-audiobooks"] {
-                assert_eq!(profiles.iter().filter(|p| p["id"] == id).count(), 1);
-            }
-            assert_eq!(merge_profiles_json(&merged, EMBEDDED).unwrap(), merged);
-        }
-        // A user removes M4B after upgrading: the updated description prevents re-migration.
-        let mut modified = current.clone();
-        modified["deviceProfile"]["DirectPlayProfiles"] = legacy["deviceProfile"]["DirectPlayProfiles"].clone();
-        let merged: Value = serde_json::from_str(&merge_profiles_json(&serde_json::json!({"profiles":[modified.clone()]}).to_string(), EMBEDDED).unwrap()).unwrap();
-        assert_eq!(merged["profiles"][0], modified);
-    }
-
-    #[test]
-    fn mp3_direct_copy_preset_seed_and_legacy_migration() {
+    fn migration_preserves_custom_collisions_and_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("device-profiles.json");
-        ensure_profiles_file_exists(&path, EMBEDDED).unwrap();
-        let mut seeded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let current = mp3_192_profile(&mut seeded).clone();
-        assert_eq!(current["deviceProfile"]["DirectPlayProfiles"], serde_json::json!([
-            {"Container":"mp3","Type":"Audio","AudioCodec":"mp3"}
-        ]));
-        for depth in [true, false] {
-            let mut existing = seeded.clone();
-            let legacy = mp3_192_profile(&mut existing);
-            legacy["name"] = "My portable".into();
-            legacy["defaultMusicFolder"] = "CustomMusic".into();
-            legacy["description"] =
-                "For devices with limited storage. Transcodes everything to MP3 192 kbps.".into();
-            legacy["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
-            if !depth { legacy["deviceProfile"].as_object_mut().unwrap().remove("MaxAudioBitDepth"); }
-            let merged = merge_profiles_json(&existing.to_string(), EMBEDDED).unwrap();
-            let mut merged_json: Value = serde_json::from_str(&merged).unwrap();
-            let repaired = mp3_192_profile(&mut merged_json);
-            assert_eq!(repaired["deviceProfile"], current["deviceProfile"]);
-            assert_eq!(repaired["name"], "My portable");
-            assert_eq!(repaired["defaultMusicFolder"], "CustomMusic");
-            assert_eq!(merge_profiles_json(&merged, EMBEDDED).unwrap(), merged);
-        }
-    }
-
-    #[test]
-    fn mp3_direct_copy_migration_preserves_later_direct_play_edit() {
-        let mut existing: Value = serde_json::from_slice(EMBEDDED).unwrap();
-        let entry = mp3_192_profile(&mut existing);
-        entry["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
-        let expected = entry.clone();
-        let mut merged: Value = serde_json::from_str(
-            &merge_profiles_json(&existing.to_string(), EMBEDDED).unwrap(),
-        ).unwrap();
-        assert_eq!(*mp3_192_profile(&mut merged), expected);
-    }
-
-    #[test]
-    fn mp3_direct_copy_migration_preserves_custom_force_transcode() {
-        let mut current: Value = serde_json::from_slice(EMBEDDED).unwrap();
-        for edit in ["Name", "MusicStreamingTranscodingBitrate", "customFlag"] {
-            let mut existing = current.clone();
-            let entry = mp3_192_profile(&mut existing);
-            entry["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
-            entry["deviceProfile"][edit] = serde_json::json!(123);
-            let expected = entry.clone();
-            let mut merged: Value = serde_json::from_str(&merge_profiles_json(&existing.to_string(), EMBEDDED).unwrap()).unwrap();
-            assert_eq!(*mp3_192_profile(&mut merged), expected);
-        }
-        let preset = mp3_192_profile(&mut current);
-        preset["id"] = "custom-force".into();
-        preset["deviceProfile"]["DirectPlayProfiles"] = serde_json::json!([]);
-        let expected = preset.clone();
-        let merged: Value = serde_json::from_str(&merge_profiles_json(&current.to_string(), EMBEDDED).unwrap()).unwrap();
-        assert!(merged["profiles"].as_array().unwrap().contains(&expected));
-    }
-
-    fn write_temp_profiles(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("device-profiles.json");
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        (dir, path)
-    }
-
-    const VALID_JSON: &str = r#"{
-        "profiles": [
-            {"id": "passthrough", "name": "No Transcoding", "description": "Pass.", "deviceProfile": null},
-            {"id": "rockbox-mp3-320", "name": "Rockbox 320", "description": "MP3 320", "defaultMusicFolder": "Music", "defaultPlaylistFolder": "Playlists", "deviceProfile": {"Name": "Test"}}
-        ]
-    }"#;
-
-    #[test]
-    fn test_load_profiles_valid() {
-        let (_dir, path) = write_temp_profiles(VALID_JSON);
-        let profiles = load_profiles(&path).unwrap();
-        assert_eq!(profiles.len(), 2);
-        assert_eq!(profiles[0].id, "passthrough");
-        assert!(profiles[0].device_profile.is_none());
-        assert_eq!(profiles[1].id, "rockbox-mp3-320");
-        assert_eq!(profiles[1].default_music_folder.as_deref(), Some("Music"));
+        let defaults: Value = serde_json::from_slice(DEFAULTS).unwrap();
+        let stock = defaults["profiles"][1].clone();
+        let old = json!({"future":true,"profiles":[stock,{"id":"system:garmin-music","name":"Mine","description":"","deviceProfile":null,"future":42}]});
+        std::fs::write(&path, old.to_string()).unwrap();
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        let doc = read_document(&path).unwrap();
+        assert_eq!(doc["future"], true);
+        assert_eq!(doc["profiles"][0]["future"], 42);
         assert_eq!(
-            profiles[1].default_playlist_folder.as_deref(),
-            Some("Playlists")
+            resolve_profile(&path, "rockbox-mp3-320").unwrap().ownership,
+            "system"
         );
-        assert!(profiles[1].device_profile.is_some());
+        assert_ne!(
+            doc["systemProfileIds"]["garmin-music"],
+            "system:garmin-music"
+        );
+        assert!(path.with_extension("json.pre-profiles-v1.bak").exists());
+        let bytes = std::fs::read(&path).unwrap();
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
-
     #[test]
-    fn test_load_profiles_malformed() {
-        let (_dir, path) = write_temp_profiles("not json");
-        let result = load_profiles(&path);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_load_profiles_missing_file() {
-        let path = std::path::Path::new("/nonexistent/device-profiles.json");
-        let result = load_profiles(path);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ensure_profiles_file_exists_creates_when_missing() {
+    fn revisions_immutability_clone_and_failed_validation() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("device-profiles.json");
-        assert!(!path.exists());
-        ensure_profiles_file_exists(&path, b"hello").unwrap();
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "hello");
+        let path = dir.path().join("profiles.json");
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        let system = load_profiles(&path).unwrap().remove(0);
+        assert!(save_profile(&path, system.clone(), Some(system.revision), None).is_err());
+        let mut cloned = save_profile(&path, system.clone(), None, Some(&system.id)).unwrap();
+        assert_eq!(cloned.ownership, "custom");
+        assert_ne!(cloned.id, system.id);
+        let old = cloned.clone();
+        cloned.name = "Edited".into();
+        let saved = save_profile(&path, cloned, Some(1), None).unwrap();
+        assert_eq!(saved.revision, 2);
+        assert!(save_profile(&path, old, Some(1), None).is_err());
+        let before = std::fs::read(&path).unwrap();
+        let mut invalid = saved;
+        invalid.name = " ".into();
+        assert!(save_profile(&path, invalid, Some(2), None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-
     #[test]
-    fn test_ensure_profiles_file_exists_preserves_existing_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("device-profiles.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "profiles": [
-                    {"id": "passthrough", "name": "Custom Name", "description": "Custom description", "deviceProfile": null}
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        ensure_profiles_file_exists(&path, VALID_JSON.as_bytes()).unwrap();
-
-        let merged: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let passthrough = merged["profiles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|profile| profile["id"] == "passthrough")
-            .unwrap();
-        assert_eq!(passthrough["name"], "Custom Name");
-        assert_eq!(passthrough["description"], "Custom description");
+    fn fingerprints_ignore_metadata() {
+        assert_eq!(
+            audio_fingerprint(Some(&json!({"Name":"A","MaxAudioChannels":2}))),
+            audio_fingerprint(Some(&json!({"Name":"B","MaxAudioChannels":2})))
+        );
+        assert_ne!(audio_fingerprint(None), audio_fingerprint(Some(&json!({}))));
     }
-
     #[test]
-    fn test_ensure_profiles_file_exists_merges_new_profiles_and_missing_attributes() {
+    fn invalid_documents_are_never_overwritten_and_atomic_failure_keeps_destination() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("device-profiles.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "profiles": [
-                    {
-                        "id": "rockbox-mp3-320",
-                        "name": "Custom Rockbox",
-                        "description": "Customer edit",
-                        "customFlag": true,
-                        "deviceProfile": {
-                            "Name": "Custom-Device",
-                            "DirectPlayProfiles": []
-                        }
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        let defaults = br#"{
-            "profiles": [
-                {
-                    "id": "rockbox-mp3-320",
-                    "name": "Default Rockbox",
-                    "description": "Default description",
-                    "defaultMusicFolder": "Music",
-                    "deviceProfile": {
-                        "Name": "Default-Device",
-                        "MaxStreamingBitrate": 320000,
-                        "TranscodingProfiles": []
-                    }
-                },
-                {
-                    "id": "new-profile",
-                    "name": "New Profile",
-                    "description": "New default",
-                    "deviceProfile": null
-                }
-            ]
-        }"#;
-
-        ensure_profiles_file_exists(&path, defaults).unwrap();
-
-        let merged: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let profiles = merged["profiles"].as_array().unwrap();
-        assert_eq!(profiles.len(), 2);
-
-        let rockbox = profiles
-            .iter()
-            .find(|profile| profile["id"] == "rockbox-mp3-320")
-            .unwrap();
-        assert_eq!(rockbox["name"], "Custom Rockbox");
-        assert_eq!(rockbox["description"], "Customer edit");
-        assert_eq!(rockbox["customFlag"], true);
-        assert_eq!(rockbox["defaultMusicFolder"], "Music");
-        assert_eq!(rockbox["deviceProfile"]["Name"], "Custom-Device");
-        assert_eq!(rockbox["deviceProfile"]["MaxStreamingBitrate"], 320000);
-        assert!(rockbox["deviceProfile"]["TranscodingProfiles"].is_array());
-
-        assert!(
-            profiles
-                .iter()
-                .any(|profile| profile["id"] == "new-profile")
+        let path = dir.path().join("profiles.json");
+        for bytes in [b"broken".as_slice(),br#"{"profiles":{}}"#,br#"{"profiles":[{"id":"same","name":"A","description":"","deviceProfile":null},{"id":"same","name":"B","description":"","deviceProfile":null}]}"#] {
+        std::fs::write(&path,bytes).unwrap();assert!(ensure_profiles_file_exists(&path,DEFAULTS).is_err());assert_eq!(std::fs::read(&path).unwrap(),bytes);
+    }
+        let destination = dir.path().join("directory");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep"), b"original").unwrap();
+        assert!(atomic_write(&destination, &json!({"profiles":[]})).is_err());
+        assert_eq!(
+            std::fs::read(destination.join("keep")).unwrap(),
+            b"original"
         );
     }
-
     #[test]
-    fn test_ensure_profiles_file_exists_leaves_current_file_when_defaults_have_no_changes() {
+    fn uncertain_old_defaults_and_unsupported_clones_keep_their_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("device-profiles.json");
-        std::fs::write(&path, VALID_JSON).unwrap();
-        ensure_profiles_file_exists(&path, VALID_JSON.as_bytes()).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, VALID_JSON);
+        let path = dir.path().join("profiles.json");
+        let defaults: Value = serde_json::from_slice(DEFAULTS).unwrap();
+        let mut old = defaults["profiles"][2].clone();
+        old["description"] =
+            json!("For devices with limited storage. Transcodes everything to MP3 192 kbps.");
+        old["deviceProfile"]["DirectPlayProfiles"] = json!([]);
+        old["deviceProfile"]["CodecProfiles"] =
+            json!([{"Conditions":[{"Property":"AudioProfile","Value":"custom"}]}]);
+        old["future"] = json!(true);
+        std::fs::write(&path, json!({"profiles":[old.clone()]}).to_string()).unwrap();
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        let source = resolve_profile(&path, "rockbox-mp3-192").unwrap();
+        assert_eq!(source.ownership, "custom");
+        assert_eq!(
+            source.device_profile.as_ref().unwrap(),
+            &old["deviceProfile"]
+        );
+        let mut draft = source.clone();
+        draft.name = "Cloned legacy".into();
+        draft.description = "My description".into();
+        draft.default_music_folder = Some("Mine".into());
+        let cloned = save_profile(&path, draft, None, Some(&source.id)).unwrap();
+        assert_ne!(cloned.id, source.id);
+        assert_eq!(cloned.description, "My description");
+        assert_eq!(cloned.default_music_folder.as_deref(), Some("Mine"));
+        assert_eq!(cloned.device_profile, source.device_profile);
+        assert_eq!(cloned.extra["future"], true);
+    }
+    #[test]
+    fn system_refresh_preserves_baselines_custom_entries_and_collision_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let mut defaults: Value = serde_json::from_slice(DEFAULTS).unwrap();
+        std::fs::write(&path, defaults.to_string()).unwrap();
+        ensure_profiles_file_exists(&path, DEFAULTS).unwrap();
+        let before = read_document(&path).unwrap();
+        let source = resolve_profile(&path, "system:generic-mp3-player").unwrap();
+        let custom = save_profile(&path, source.clone(), None, Some(&source.id)).unwrap();
+        defaults["profiles"][3]["deviceProfile"]["MusicStreamingTranscodingBitrate"] =
+            json!(192000);
+        ensure_profiles_file_exists(&path, defaults.to_string().as_bytes()).unwrap();
+        let after = read_document(&path).unwrap();
+        assert_eq!(
+            before["legacyAudioBaselines"],
+            after["legacyAudioBaselines"]
+        );
+        assert_eq!(
+            resolve_profile(&path, &custom.id).unwrap().device_profile,
+            custom.device_profile
+        );
+        assert_eq!(
+            resolve_profile(&path, "generic-mp3-player")
+                .unwrap()
+                .device_profile
+                .unwrap()["MusicStreamingTranscodingBitrate"],
+            192000
+        );
+    }
+    #[test]
+    fn malformed_known_store_metadata_returns_error_without_panicking_or_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        for key in ["systemProfileIds", "profileAliases", "legacyAudioBaselines"] {
+            for invalid in [
+                json!(4),
+                json!([]),
+                Value::Null,
+                json!({"bad":false}),
+                json!({"bad":""}),
+            ] {
+                let mut doc = json!({"profileStoreVersion":1,"profiles":[]});
+                doc[key] = invalid;
+                let original = doc.to_string();
+                std::fs::write(&path, &original).unwrap();
+                let result =
+                    std::panic::catch_unwind(|| ensure_profiles_file_exists(&path, DEFAULTS));
+                assert!(result.is_ok(), "malformed {key} must never panic");
+                assert!(result.unwrap().is_err());
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            }
+        }
+        std::fs::write(&path, r#"{"profileStoreVersion":2,"profiles":[]}"#).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(ensure_profiles_file_exists(&path, DEFAULTS).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 }

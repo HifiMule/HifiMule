@@ -165,7 +165,7 @@ fn report_ui_ready(
     else {
         return Ok(None);
     };
-    if !(request.open_playback_settings || request.open_audio_output)
+    if !(request.open_playback_settings || request.open_audio_output || request.open_device_profiles)
         || hifimule_lifecycle::read_ui_activation_ack(&path)
             .map_err(|e| e.to_string())?
             .as_deref()
@@ -175,7 +175,9 @@ fn report_ui_ready(
     }
     hifimule_lifecycle::acknowledge_ui_activation(&path, &request.request_id)
         .map_err(|e| e.to_string())?;
-    Ok(Some(if request.open_audio_output {
+    Ok(Some(if request.open_device_profiles {
+        "profiles".to_string()
+    } else if request.open_audio_output {
         "output".to_string()
     } else {
         "settings".to_string()
@@ -1000,7 +1002,7 @@ fn watch_ui_activation(
                     handled = Some(request.request_id);
                     continue;
                 }
-                if request.open_playback_settings || request.open_audio_output {
+                if request.open_playback_settings || request.open_audio_output || request.open_device_profiles {
                     let ready = app
                         .try_state::<StartupCoordinator>()
                         .is_some_and(|coordinator| {
@@ -1019,9 +1021,12 @@ fn watch_ui_activation(
                 let foreground_app = app.clone();
                 let open_settings = request.open_playback_settings;
                 let open_output = request.open_audio_output;
+                let open_profiles = request.open_device_profiles;
                 match app.run_on_main_thread(move || {
                     let activated = activate_existing_ui(&foreground_app);
-                    if activated && open_settings {
+                    if activated && open_profiles {
+                        let _ = foreground_app.emit("hifimule-open-device-profiles", ());
+                    } else if activated && open_settings {
                         let _ = foreground_app.emit("hifimule-open-playback-settings", ());
                     } else if activated && open_output {
                         let _ = foreground_app.emit("hifimule-open-audio-output", ());

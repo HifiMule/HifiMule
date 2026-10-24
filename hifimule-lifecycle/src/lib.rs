@@ -602,27 +602,34 @@ pub struct UiActivationRequest {
     pub open_playback_settings: bool,
     #[serde(default)]
     pub open_audio_output: bool,
+    #[serde(default)]
+    pub open_device_profiles: bool,
 }
 
 /// A mailbox rather than a UI server: concurrent requests may coalesce, since
 /// each asks for the same idempotent window activation. It works before daemon
 /// readiness and does not depend on a platform-specific notification endpoint.
 pub fn request_ui_activation(app_data: &Path) -> Result<String, LifecycleError> {
-    request_ui_activation_with_target(app_data, false, false)
+    request_ui_activation_with_target(app_data, false, false, false)
 }
 
 pub fn request_ui_playback_settings_activation(app_data: &Path) -> Result<String, LifecycleError> {
-    request_ui_activation_with_target(app_data, true, false)
+    request_ui_activation_with_target(app_data, true, false, false)
 }
 
 pub fn request_ui_audio_output_activation(app_data: &Path) -> Result<String, LifecycleError> {
-    request_ui_activation_with_target(app_data, false, true)
+    request_ui_activation_with_target(app_data, false, true, false)
+}
+
+pub fn request_ui_device_profiles_activation(app_data: &Path) -> Result<String, LifecycleError> {
+    request_ui_activation_with_target(app_data, false, false, true)
 }
 
 fn request_ui_activation_with_target(
     app_data: &Path,
     open_playback_settings: bool,
     open_audio_output: bool,
+    open_device_profiles: bool,
 ) -> Result<String, LifecycleError> {
     let runtime = prepare_runtime_dir(app_data)?;
     let request_id = Uuid::new_v4().to_string();
@@ -633,6 +640,7 @@ fn request_ui_activation_with_target(
             request_id: request_id.clone(),
             open_playback_settings,
             open_audio_output,
+            open_device_profiles,
         },
     )?;
     Ok(request_id)
@@ -663,6 +671,7 @@ pub fn acknowledge_ui_activation(app_data: &Path, request_id: &str) -> Result<()
             request_id: request_id.to_owned(),
             open_playback_settings: false,
             open_audio_output: false,
+            open_device_profiles: false,
         },
     )
 }

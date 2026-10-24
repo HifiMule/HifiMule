@@ -247,6 +247,8 @@ pub struct DeviceManifest {
     /// Last profile that produced the synced files currently recorded in the manifest.
     #[serde(default)]
     pub last_synced_transcoding_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub last_synced_audio_fingerprint: Option<String>,
     /// True when the active profile changed and matching tracks must be rewritten.
     #[serde(default)]
     pub transcoding_profile_dirty: bool,
@@ -296,7 +298,17 @@ impl DeviceManifest {
 
     pub fn set_transcoding_profile(&mut self, profile_id: Option<String>) {
         let effective = Self::effective_profile_id(profile_id.as_deref());
-        if Self::effective_profile_id(self.transcoding_profile_id.as_deref()) != effective {
+        let equivalent =
+            crate::rpc::load_selected_transcoding_profile(self.transcoding_profile_id.as_deref())
+                .ok()
+                .zip(crate::rpc::load_selected_transcoding_profile(profile_id.as_deref()).ok())
+                .is_some_and(|(old, new)| {
+                    crate::transcoding::audio_fingerprint(old.as_ref())
+                        == crate::transcoding::audio_fingerprint(new.as_ref())
+                });
+        if !equivalent
+            && Self::effective_profile_id(self.transcoding_profile_id.as_deref()) != effective
+        {
             let changed_from_history = match self.last_synced_transcoding_profile_id.as_deref() {
                 Some(history) => Self::effective_profile_id(Some(history)) != effective,
                 None => !self.synced_items.is_empty(),
@@ -312,6 +324,59 @@ impl DeviceManifest {
         self.transcoding_profile_dirty =
             Self::effective_profile_id(self.transcoding_profile_id.as_deref())
                 != Self::effective_profile_id(completed_profile);
+    }
+
+    /// Re-evaluate shared capabilities whenever a sync snapshot is captured, including offline reconnection.
+    fn profile_snapshot(&self) -> Self {
+        crate::paths::get_device_profiles_path()
+            .ok()
+            .map(|path| self.profile_snapshot_at(&path))
+            .unwrap_or_else(|| self.clone())
+    }
+    fn profile_snapshot_at(&self, path: &Path) -> Self {
+        let mut snapshot = self.clone();
+        let selected = self.transcoding_profile_id.as_deref();
+        let resolved = selected
+            .filter(|id| *id != "passthrough")
+            .map(|id| crate::transcoding::resolve_profile(path, id))
+            .transpose();
+        if let Ok(resolved) = resolved {
+            if let Some(entry) = &resolved {
+                snapshot.transcoding_profile_id = Some(entry.id.clone());
+            }
+            let fingerprint = crate::transcoding::audio_fingerprint(
+                resolved
+                    .as_ref()
+                    .and_then(|entry| entry.device_profile.as_ref()),
+            );
+            let baseline = self.last_synced_audio_fingerprint.clone().or_else(|| {
+                let history = self.last_synced_transcoding_profile_id.as_deref();
+                if history.is_some() {
+                    crate::transcoding::legacy_fingerprint(path, history)
+                } else if !self.dirty
+                    && self.pending_item_ids.is_empty()
+                    && !self.transcoding_profile_dirty
+                {
+                    crate::transcoding::legacy_fingerprint(path, selected)
+                } else {
+                    None
+                }
+            });
+            if !self.synced_items.is_empty() || self.dirty || !self.pending_item_ids.is_empty() {
+                snapshot.transcoding_profile_dirty |= baseline.as_ref() != Some(&fingerprint);
+            }
+        }
+        snapshot
+    }
+    pub fn record_completed_audio_profile(&mut self, completed: Option<&str>, fingerprint: &str) {
+        self.record_completed_transcoding_profile(completed);
+        self.last_synced_audio_fingerprint = Some(fingerprint.to_owned());
+        if let Ok(profile) =
+            crate::rpc::load_selected_transcoding_profile(self.transcoding_profile_id.as_deref())
+        {
+            self.transcoding_profile_dirty =
+                crate::transcoding::audio_fingerprint(profile.as_ref()) != fingerprint;
+        }
     }
 
     pub fn recovery_scan_roots(&self) -> Vec<String> {
@@ -357,6 +422,7 @@ impl DeviceManifest {
             auto_fill: self.auto_fill.clone(),
             transcoding_profile_id: self.transcoding_profile_id.clone(),
             last_synced_transcoding_profile_id: self.last_synced_transcoding_profile_id.clone(),
+            last_synced_audio_fingerprint: self.last_synced_audio_fingerprint.clone(),
             transcoding_profile_dirty: self.transcoding_profile_dirty,
             storage_id: self.storage_id.clone(),
             ..Default::default()
@@ -1656,7 +1722,7 @@ impl DeviceManager {
         state
             .connected_devices
             .get(path)
-            .map(|d| d.manifest.clone())
+            .map(|d| d.manifest.profile_snapshot())
     }
 
     /// Returns the IO backend for the currently selected device.
@@ -1696,7 +1762,7 @@ impl DeviceManager {
         let connected = state.connected_devices.get(path)?;
         Some((
             path.clone(),
-            connected.manifest.clone(),
+            connected.manifest.profile_snapshot(),
             std::sync::Arc::clone(&connected.device_io),
             connected.observation_token,
         ))
@@ -1719,7 +1785,7 @@ impl DeviceManager {
                 (connected.manifest.device_id == device_id).then(|| {
                     (
                         path.clone(),
-                        connected.manifest.clone(),
+                        connected.manifest.profile_snapshot(),
                         std::sync::Arc::clone(&connected.device_io),
                         connected.observation_token,
                     )
@@ -1733,7 +1799,7 @@ impl DeviceManager {
             .connected_devices
             .values()
             .find(|connected| connected.manifest.device_id == device_id)
-            .map(|connected| connected.manifest.clone())
+            .map(|connected| connected.manifest.profile_snapshot())
     }
 
     /// Returns a snapshot of all currently connected managed devices.
@@ -1743,7 +1809,7 @@ impl DeviceManager {
             .await
             .connected_devices
             .iter()
-            .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
+            .map(|(p, d)| (p.clone(), d.manifest.profile_snapshot(), d.device_class.clone()))
             .collect()
     }
 
@@ -1971,7 +2037,7 @@ impl DeviceManager {
                     );
                 }
                 let completed = manifest.transcoding_profile_id.clone();
-                manifest.record_completed_transcoding_profile(completed.as_deref());
+                manifest.record_completed_audio_profile(completed.as_deref(), &crate::transcoding::audio_fingerprint(None));
                 Ok(())
             },
             crate::paths::get_local_mtp_manifest_path,
@@ -2504,6 +2570,7 @@ impl DeviceManager {
             auto_fill: AutoFillConfig::default(),
             transcoding_profile_id, // stored in .hifimule.json.zst; read back on sync to apply transcoding
             last_synced_transcoding_profile_id: None,
+            last_synced_audio_fingerprint: None,
             transcoding_profile_dirty: false,
             playlists: vec![],
             storage_id,

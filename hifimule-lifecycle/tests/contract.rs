@@ -455,3 +455,35 @@ fn ui_evidence_contains_hydration_identity_but_no_credentials() {
         hifimule_lifecycle::publish_ui_ready(temp.path(), "../../outside", &descriptor).is_err()
     );
 }
+
+#[test]
+fn device_profiles_activation_is_available_without_a_daemon_and_acknowledged() {
+    let profile = tempfile::tempdir().unwrap();
+    let id = hifimule_lifecycle::request_ui_device_profiles_activation(profile.path()).unwrap();
+    let request = hifimule_lifecycle::read_ui_activation_detail(profile.path())
+        .unwrap()
+        .unwrap();
+    assert!(request.open_device_profiles);
+    assert!(!request.open_audio_output);
+    assert!(!request.open_playback_settings);
+    acknowledge_ui_activation(profile.path(), &id).unwrap();
+    assert_eq!(
+        hifimule_lifecycle::read_ui_activation_ack(profile.path()).unwrap(),
+        Some(id)
+    );
+    // Older activation records omit the new metadata and remain readable.
+    std::fs::write(
+        profile.path().join("runtime/ui-activation.json"),
+        format!(
+            r#"{{"schemaVersion":1,"requestId":"{}"}}"#,
+            request.request_id
+        ),
+    )
+    .unwrap();
+    assert!(
+        !hifimule_lifecycle::read_ui_activation_detail(profile.path())
+            .unwrap()
+            .unwrap()
+            .open_device_profiles
+    );
+}

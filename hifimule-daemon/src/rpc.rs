@@ -724,6 +724,7 @@ async fn handler(
         "autoFill.setPipeline" => handle_auto_fill_set_pipeline(&state, payload.params).await,
         "sync.setAutoFill" => handle_sync_set_auto_fill(&state, payload.params).await,
         "device_profiles.list" => handle_device_profiles_list().await,
+        "device_profiles.get" | "device_profiles.create" | "device_profiles.update" | "device_profiles.clone" => handle_device_profile(&state, &payload.method, payload.params).await,
         "device.set_transcoding_profile" => {
             handle_set_transcoding_profile(&state, payload.params).await
         }
@@ -935,7 +936,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "basket.autoFill"
             | "autoFill.setPipeline"
             | "sync.setAutoFill"
-            | "device_profiles.list"
+            | "device_profiles.list" | "device_profiles.get" | "device_profiles.create" | "device_profiles.update" | "device_profiles.clone"
             | "device.set_transcoding_profile"
             | "device.select"
             | "destination.select"
@@ -5308,16 +5309,7 @@ pub(crate) fn load_selected_transcoding_profile(
     }
 
     let profiles_path = crate::paths::get_device_profiles_path().map_err(|e| e.to_string())?;
-    let profiles = crate::transcoding::load_profiles(&profiles_path).map_err(|e| e.to_string())?;
-    let entry = profiles
-        .into_iter()
-        .find(|profile| profile.id == profile_id)
-        .ok_or_else(|| {
-            format!(
-                "Transcoding profile '{}' not found in device-profiles.json",
-                profile_id
-            )
-        })?;
+    let entry = crate::transcoding::resolve_profile(&profiles_path, profile_id).map_err(|e| e.to_string())?;
 
     Ok(entry.device_profile)
 }
@@ -8373,6 +8365,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
     plan.validate().map_err(sync_plan_error)?;
     let delta = plan;
     let manifest = &target.manifest;
+    let execution_audio_fingerprint = crate::transcoding::audio_fingerprint(load_selected_transcoding_profile(manifest.transcoding_profile_id.as_deref()).map_err(|e|sync_plan_error(anyhow::anyhow!(e)))?.as_ref());
 
     let destructive_cleanup_count = delta.destructive_cleanup_count;
     if destructive_cleanup_count > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
@@ -8589,9 +8582,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                                 m.dirty = false;
                                 m.pending_item_ids.clear();
                                 m.last_sync_at = Some(now_unix_secs());
-                                m.last_synced_transcoding_profile_id =
-                                    m.transcoding_profile_id.clone();
-                                m.transcoding_profile_dirty = false;
+                                m.record_completed_audio_profile(sync_manifest.transcoding_profile_id.as_deref(), &execution_audio_fingerprint);
                             },
                         )
                         .await
@@ -8677,9 +8668,7 @@ async fn handle_sync_execute_logged(state: &AppState, params: Option<Value>) -> 
                                         m.dirty = false;
                                         m.pending_item_ids.clear();
                                         m.last_sync_at = Some(now_unix_secs());
-                                        m.last_synced_transcoding_profile_id =
-                                            m.transcoding_profile_id.clone();
-                                        m.transcoding_profile_dirty = false;
+                                        m.record_completed_audio_profile(sync_manifest.transcoding_profile_id.as_deref(), &execution_audio_fingerprint);
                                     },
                                 )
                                 .await
@@ -9195,20 +9184,7 @@ fn validate_transcoding_profile_id(
                 message: e.to_string(),
                 data: None,
             })?;
-            let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
-                code: ERR_STORAGE_ERROR,
-                message: e.to_string(),
-                data: None,
-            })?;
-            if profiles.iter().any(|p| p.id == id) {
-                Ok(Some(id.to_string()))
-            } else {
-                Err(JsonRpcError {
-                    code: ERR_INVALID_PARAMS,
-                    message: format!("Profile '{}' not found in device-profiles.json", id),
-                    data: None,
-                })
-            }
+            crate::transcoding::resolve_profile(&path,id).map(|entry|Some(entry.id)).map_err(|e|JsonRpcError{code:ERR_INVALID_PARAMS,message:e.to_string(),data:None})
         }
     }
 }
@@ -9724,30 +9700,7 @@ async fn handle_device_initialize(
         .transpose()?
         .unwrap_or_default();
 
-    // Validate the transcoding profile ID exists in device-profiles.json (if provided)
-    if let Some(ref tpid) = transcoding_profile_id {
-        let profiles_path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: e.to_string(),
-            data: None,
-        })?;
-        let profiles =
-            crate::transcoding::load_profiles(&profiles_path).map_err(|e| JsonRpcError {
-                code: ERR_STORAGE_ERROR,
-                message: format!("Failed to load device profiles: {}", e),
-                data: None,
-            })?;
-        if !profiles.iter().any(|p| p.id == *tpid) {
-            return Err(JsonRpcError {
-                code: ERR_INVALID_PARAMS,
-                message: format!(
-                    "Transcoding profile '{}' not found in device-profiles.json",
-                    tpid
-                ),
-                data: None,
-            });
-        }
-    }
+    let transcoding_profile_id = validate_transcoding_profile_id(transcoding_profile_id.as_deref())?;
 
     let mut manifest = state
         .device_manager
@@ -10374,6 +10327,7 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
                 "id": p.id,
                 "name": p.name,
                 "description": p.description,
+                "ownership": p.ownership, "revision": p.revision, "aliases": crate::transcoding::aliases_for(&path,&p.id),
                 "defaultMusicFolder": p.default_music_folder,
                 "defaultPlaylistFolder": p.default_playlist_folder,
             })
@@ -10381,6 +10335,120 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
         .collect();
 
     Ok(Value::Array(summary))
+}
+
+async fn handle_device_profile(
+    state: &AppState,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(Value::Null);
+    let error = |e: String| {
+        let key = if e.contains("changed elsewhere") { Some("profiles.conflict") }
+            else if e.contains("pipeline is active") { Some("profiles.busy") }
+            else if e.contains("read-only") { Some("profiles.read_only_error") } else { None };
+        JsonRpcError { code: ERR_INVALID_PARAMS, message: e,
+            data: Some(serde_json::json!({"errorCode":"PROFILE_SAVE_FAILED", "i18nKey":key})) }
+    };
+    let path = crate::paths::get_device_profiles_path().map_err(|e| error(e.to_string()))?;
+    crate::transcoding::ensure_profiles_file_exists(
+        &path,
+        include_bytes!("../assets/device-profiles.json"),
+    )
+    .map_err(|e| error(e.to_string()))?;
+    if method == "device_profiles.get" {
+        let entry = crate::transcoding::resolve_profile(
+            &path,
+            p["id"]
+                .as_str()
+                .ok_or_else(|| error("Missing profile id".into()))?,
+        )
+        .map_err(|e| error(e.to_string()))?;
+        let mut value = serde_json::to_value(&entry).unwrap();
+        let usage: Vec<Value> = {
+            let conn = state.db.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stmt = conn
+                .prepare("SELECT id, name, transcoding_profile_id FROM devices")
+                .map_err(|e| error(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(|e| error(e.to_string()))?;
+            rows.filter_map(Result::ok)
+                .filter(|(_, _, id)| {
+                    id.as_deref().is_some_and(|id| {
+                        crate::transcoding::resolve_profile(&path, id)
+                            .ok()
+                            .is_some_and(|p| p.id == entry.id)
+                    })
+                })
+                .map(|(id, name, _)| serde_json::json!({"id":id,"name":name}))
+                .collect()
+        };
+        value["usage"] = serde_json::json!(usage);
+        value["usageIncomplete"] = Value::Bool(true);
+        return Ok(value);
+    }
+    let entry: crate::transcoding::DeviceProfileEntry =
+        serde_json::from_value(p["profile"].clone()).map_err(|e| error(e.to_string()))?;
+    let old = if method == "device_profiles.update" {
+        Some(
+            crate::transcoding::resolve_profile(&path, &entry.id)
+                .map_err(|e| error(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let audio_changed = old.as_ref().is_none_or(|old| {
+        crate::transcoding::audio_fingerprint(old.device_profile.as_ref())
+            != crate::transcoding::audio_fingerprint(entry.device_profile.as_ref())
+    });
+    // Claim the same admission guard as preview/manual/automatic sync. Metadata-only saves remain available.
+    let _guard = if audio_changed {
+        Some(
+            state
+                .sync_operation_manager
+                .try_start_pipeline()
+                .ok_or_else(|| {
+                    error("A sync pipeline is active; retry after it finishes".into())
+                })?,
+        )
+    } else {
+        None
+    };
+    let expected = if method == "device_profiles.update" {
+        Some(
+            p["revision"]
+                .as_u64()
+                .ok_or_else(|| error("Missing profile revision".into()))?,
+        )
+    } else {
+        None
+    };
+    let source = if method == "device_profiles.clone" {
+        Some(
+            p["sourceId"]
+                .as_str()
+                .ok_or_else(|| error("Missing source profile".into()))?,
+        )
+    } else {
+        None
+    };
+    let saved = crate::transcoding::save_profile(&path, entry, expected, source)
+        .map_err(|e| error(e.to_string()))?;
+    if audio_changed {
+        *state
+            .sync_operation_manager
+            .pending_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    Ok(serde_json::to_value(saved).unwrap())
 }
 
 async fn handle_set_transcoding_profile(
@@ -11697,6 +11765,7 @@ mod tests {
             transcoding_profile_id: Some("legacy-profile".to_string()),
             last_sync_at: None,
             last_synced_transcoding_profile_id: Some("legacy-profile".to_string()),
+            last_synced_audio_fingerprint: None,
             transcoding_profile_dirty: false,
             playlists: vec![crate::device::PlaylistManifestEntry {
                 jellyfin_id: "playlist-1".to_string(),
@@ -18834,5 +18903,84 @@ mod tests {
                 .unwrap()
         );
     }
+
+    #[tokio::test]
+    async fn device_profile_rpc_rejects_system_conflicts_and_active_audio_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        crate::transcoding::ensure_profiles_file_exists(
+            &path,
+            include_bytes!("../assets/device-profiles.json"),
+        )
+        .unwrap();
+        crate::paths::TEST_DEVICE_PROFILES_PATH
+            .scope(path.clone(), async {
+                let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+                let system =
+                    crate::transcoding::resolve_profile(&path, "system:generic-mp3-player")
+                        .unwrap();
+                let error = handle_device_profile(
+                    &state,
+                    "device_profiles.update",
+                    Some(serde_json::json!({"profile":system,"revision":system.revision})),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.message.contains("read-only"));
+                let cloned = handle_device_profile(
+                    &state,
+                    "device_profiles.clone",
+                    Some(serde_json::json!({"profile":system,"sourceId":system.id})),
+                )
+                .await
+                .unwrap();
+                let id = cloned["id"].as_str().unwrap();
+                let mut metadata = cloned.clone();
+                metadata["name"] = serde_json::json!("My player");
+                let guard = state.sync_operation_manager.try_start_pipeline().unwrap();
+                let saved = handle_device_profile(
+                    &state,
+                    "device_profiles.update",
+                    Some(serde_json::json!({"profile":metadata,"revision":1})),
+                )
+                .await
+                .unwrap();
+                let mut audio = saved.clone();
+                audio["deviceProfile"]["MusicStreamingTranscodingBitrate"] =
+                    serde_json::json!(192000);
+                let busy = handle_device_profile(
+                    &state,
+                    "device_profiles.update",
+                    Some(serde_json::json!({"profile":audio,"revision":2})),
+                )
+                .await
+                .unwrap_err();
+                assert!(busy.message.contains("pipeline"));
+                drop(guard);
+                let conflict = handle_device_profile(
+                    &state,
+                    "device_profiles.update",
+                    Some(serde_json::json!({"profile":cloned,"revision":1})),
+                )
+                .await
+                .unwrap_err();
+                assert!(conflict.message.contains("changed elsewhere"));
+                let detail = handle_device_profile(
+                    &state,
+                    "device_profiles.get",
+                    Some(serde_json::json!({"id":id})),
+                )
+                .await
+                .unwrap();
+                assert_eq!(detail["name"], "My player");
+                assert_eq!(detail["usageIncomplete"], true);
+                assert_eq!(
+                    validate_transcoding_profile_id(Some("system:generic-mp3-player")).unwrap(),
+                    Some(system.id)
+                );
+            })
+            .await;
+    }
+
     include!("rpc/runtime_tests.rs");
 }

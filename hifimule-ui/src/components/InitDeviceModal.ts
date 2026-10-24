@@ -1,3 +1,4 @@
+import { profileOptions as renderProfileOptions, bindProfileActions, isProfileAction, displayProfile, type DeviceProfileSummary } from '../deviceProfiles';
 import { deviceIconLabel } from '../deviceIcon';
 import { escapeAttr } from '../html';
 // Initialize Device Modal Component
@@ -6,17 +7,10 @@ import { escapeAttr } from '../html';
 
 import { rpcCall } from '../rpc';
 import { t } from '../i18n';
-import english from 'virtual:hifimule-locale/en';
 import { basketStore } from '../state/basket';
 import { withDeadline } from '../lifecycleDeadline';
 
-interface DeviceProfileSummary {
-    id: string;
-    name: string;
-    description?: string;
-    defaultMusicFolder?: string | null;
-    defaultPlaylistFolder?: string | null;
-}
+
 
 export class InitDeviceModal {
     private dialog: HTMLElement | null = null;
@@ -77,7 +71,7 @@ export class InitDeviceModal {
 
         document.body.appendChild(dialogEl);
         this.dialog = dialogEl;
-        
+
         dialogEl.addEventListener('sl-after-hide', (e: Event) => {
             if (e.target === dialogEl) {
                 dialogEl.remove();
@@ -133,7 +127,7 @@ export class InitDeviceModal {
     }
 
     private renderContent(body: HTMLElement, userId: string | null, profiles: DeviceProfileSummary[]) {
-        profiles = (profiles || []).map(profile => this.localizeProfile(profile));
+        profiles = (profiles || []).map(displayProfile);
         if (!userId) {
             body.innerHTML = `
                 <div class="init-device-no-login">
@@ -144,9 +138,7 @@ export class InitDeviceModal {
             return;
         }
 
-        const profileOptions = (profiles || []).map(p => 
-            `<sl-option value="${escapeAttr(p.id)}">${escapeAttr(p.name)}</sl-option>`
-        ).join('');
+        const profileOptions = renderProfileOptions(profiles);
         const defaultPassthroughDesc = (profiles || []).find(p => p.id === 'passthrough')?.description || '';
         const defaultPassthrough = (profiles || []).find(p => p.id === 'passthrough');
 
@@ -237,20 +229,22 @@ export class InitDeviceModal {
         const descEl = body.querySelector('#init-transcoding-desc') as HTMLElement;
         const musicFolderInput = body.querySelector('#init-folder-input') as any;
         const playlistFolderInput = body.querySelector('#init-playlist-folder-input') as any;
-        let foldersEdited = false;
-        musicFolderInput?.addEventListener('sl-input', () => { foldersEdited = true; });
-        playlistFolderInput?.addEventListener('sl-input', () => { foldersEdited = true; });
+        let musicFolderEdited = false;
+        let playlistFolderEdited = false;
+        musicFolderInput?.addEventListener('sl-input', () => { musicFolderEdited = true; });
+        playlistFolderInput?.addEventListener('sl-input', () => { playlistFolderEdited = true; });
+        const applyProfile = (profile?: DeviceProfileSummary) => {
+            if (!profile) return;
+            descEl.textContent = profile.description ?? '';
+            if (!musicFolderEdited) musicFolderInput.value = profile.defaultMusicFolder ?? '';
+            if (!playlistFolderEdited) playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
+        };
         if (selectEl && descEl) {
+            bindProfileActions(selectEl, 'passthrough', profiles, (_profiles, saved) => applyProfile(saved));
             selectEl.addEventListener('sl-change', (e: any) => {
                 const selectedId = e.target.value;
-                const profile = (profiles || []).find(p => p.id === selectedId);
-                if (profile) {
-                    descEl.innerHTML = escapeAttr(profile.description ?? '');
-                    if (!foldersEdited) {
-                        musicFolderInput.value = profile.defaultMusicFolder ?? '';
-                        playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
-                    }
-                }
+                if (isProfileAction(selectedId)) return;
+                applyProfile(profiles.find(profile => profile.id === selectedId));
             });
         }
 
@@ -342,6 +336,7 @@ export class InitDeviceModal {
 
         const profileSelect = this.dialog?.querySelector('#init-transcoding-profile') as any;
         let transcodingProfileId = profileSelect?.value;
+        if (isProfileAction(transcodingProfileId)) return;
 
         const confirmBtn = this.dialog?.querySelector('#init-device-confirm-btn') as any;
         if (confirmBtn) confirmBtn.loading = true;
@@ -546,24 +541,4 @@ export class InitDeviceModal {
         render();
     }
 
-    private localizeProfile(profile: DeviceProfileSummary): DeviceProfileSummary {
-        // Translate stock text only: saved profiles can contain customer overrides.
-        if (profile.id === 'passthrough') {
-            return {
-                ...profile,
-                name: profile.name === 'No Transcoding (Download Original)' || profile.name === english['basket.profile.no_transcoding']
-                    ? t('basket.profile.no_transcoding') : profile.name,
-                description: profile.description === 'Download files as-is from Jellyfin without transcoding.' || profile.description === english['basket.profile.no_transcoding_desc']
-                    ? t('basket.profile.no_transcoding_desc') : profile.description,
-            };
-        }
-        const nameKey = `device.profile.${profile.id}.name`;
-        const descriptionKey = `device.profile.${profile.id}.description`;
-        return {
-            ...profile,
-            name: english[nameKey] && profile.name === english[nameKey] ? t(nameKey) : profile.name,
-            description: english[descriptionKey] && profile.description === english[descriptionKey]
-                ? t(descriptionKey) : profile.description,
-        };
-    }
 }

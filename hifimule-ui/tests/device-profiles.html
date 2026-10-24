@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" class="sl-theme-dark">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Device profiles renderer checks</title>
+<div style="padding:1rem;display:flex;gap:1rem;flex-wrap:wrap"><button id="custom">Open custom</button><button id="system">Open system</button><button id="new">New profile</button><button id="device">Device settings</button><output id="saved"></output></div>
+<script type="module">
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../src/shoelace.ts';
+import '../src/styles.css';
+import {setBasePath} from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+import bundled from '../../hifimule-daemon/assets/device-profiles.json';
+setBasePath('/node_modules/@shoelace-style/shoelace/dist');
+const records=bundled.profiles.map(profile=>({...structuredClone(profile),id:profile.id==='passthrough'?profile.id:`system:${profile.id}`,ownership:'system',revision:1}));
+const custom={...structuredClone(records.find(p=>p.id==='system:sony-walkman-aac-flac')),id:'custom:walkman',name:'My Walkman',description:'Music for the daily commute.',ownership:'custom',revision:1,usage:[{id:'fixture-device',name:'Silver Walkman'}],usageIncomplete:true};records.unshift(custom);
+const calls=[];window.profileFixture={records,calls};
+window.__TAURI_INTERNALS__={invoke:async(_command,{method,params={}})=>{
+ calls.push({method,params});
+ if(method==='device_profiles.list')return structuredClone(records);
+ if(method==='device_profiles.get'){const profile=records.find(p=>p.id===params.id);if(!profile)throw new Error('Fixture profile unavailable');return structuredClone(profile);}
+ if(['device_profiles.create','device_profiles.clone','device_profiles.update'].includes(method)){
+  const profile=structuredClone(params.profile);if(method==='device_profiles.update'){const old=records.find(p=>p.id===profile.id);if(old.ownership==='system')throw new Error('System profile');if(old.revision!==params.revision)throw new Error('Profile changed elsewhere');records.splice(records.indexOf(old),1);profile.revision++;}
+  else {profile.id=`custom:fixture-${records.length}`;profile.revision=1;profile.ownership='custom';}records.unshift(profile);return profile;
+ }
+ if(method==='device.update_manifest')return {relocationRequired:false};
+ return {};
+}};
+const {openDeviceProfiles}=await import('../src/components/DeviceProfileManager.ts');
+const {BasketSidebar}=await import('../src/components/BasketSidebar.ts');
+const {initializeI18n,setLanguage}=await import('../src/i18n.ts');
+const params=new URLSearchParams(location.search);if(params.has('lang'))await setLanguage(params.get('lang'));else await initializeI18n();
+const options={returnFocus:document.getElementById('custom'),onSaved:profile=>{document.getElementById('saved').textContent=`Saved ${profile.name}`;}};
+const open=kind=>openDeviceProfiles({...options,selectedId:kind==='system'?'system:garmin-music':custom.id,create:kind==='new'});
+for(const kind of ['custom','system','new'])document.getElementById(kind).onclick=()=>open(kind);
+document.getElementById('device').onclick=()=>{const sidebar=Object.create(BasketSidebar.prototype);Object.assign(sidebar,{currentDevice:{transcoding_profile_id:custom.id},selectedDeviceSummary:()=>({deviceId:'fixture-device',name:'Silver Walkman',transcodingProfileId:custom.id,managedPaths:['Music'],playlistPath:'Playlists',reconcileBeforeSync:false,deviceClass:'msc'}),refreshAndRender:async()=>{}});void sidebar.openDeviceSettings();};
+await open(params.get('open')||'custom');
+</script></html>

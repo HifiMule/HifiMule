@@ -2,12 +2,14 @@
   "profiles": [
     {
       "id": "passthrough",
+      "ownership": "system",
       "name": "No Transcoding (Download Original)",
       "description": "Download originals without transcoding, including M4B audiobooks and podcasts. Device compatibility is your responsibility.",
       "deviceProfile": null
     },
     {
       "id": "rockbox-mp3-320",
+      "ownership": "system",
       "name": "Rockbox / iPod — MP3 320 kbps",
       "description": "For iPods and DAPs running Rockbox firmware. Transcodes non-MP3 to MP3 320 kbps; passes through MP3 and FLAC directly.",
       "defaultMusicFolder": "Music",
@@ -37,6 +39,7 @@
     },
     {
       "id": "rockbox-mp3-192",
+      "ownership": "system",
       "name": "Rockbox / iPod — MP3 192 kbps",
       "description": "For devices with limited storage. Copies MP3 within the 192 kbps ceiling; transcodes other audio to MP3 192 kbps.",
       "defaultMusicFolder": "Music",
@@ -64,6 +67,7 @@
     },
     {
       "id": "generic-mp3-player",
+      "ownership": "system",
       "name": "Generic MP3 Player",
       "description": "For basic MP3 players that only support MP3. Transcodes all audio to MP3 256 kbps.",
       "defaultMusicFolder": "Music",
@@ -90,6 +94,7 @@
     },
     {
       "id": "garmin-music",
+      "ownership": "system",
       "name": "Garmin Music Watch",
       "description": "For Garmin watches with music storage. Copies MP3 and AAC in M4A/M4B within 320 kbps, stereo and 48 kHz; converts other formats to MP3 320 kbps. M4B recognition depends on model, firmware and AAC variant. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Music",
@@ -120,6 +125,7 @@
     },
     {
       "id": "modern-dap-lossless",
+      "ownership": "system",
       "name": "Modern DAP — Lossless Friendly",
       "description": "For modern digital audio players with broad codec support. Passes through MP3, AAC/M4A, FLAC, ALAC, OGG, Opus, and WAV directly; transcodes other formats to FLAC.",
       "defaultMusicFolder": "Music",
@@ -156,6 +162,7 @@
     },
     {
       "id": "sony-walkman-aac-flac",
+      "ownership": "system",
       "name": "Sony Walkman — AAC / FLAC",
       "description": "For Sony Walkman players with MUSIC storage. Passes through MP3, AAC/M4A, FLAC, and WAV directly; transcodes OGG, Opus, and other formats to AAC 256 kbps.",
       "defaultMusicFolder": "MUSIC",
@@ -188,6 +195,7 @@
     },
     {
       "id": "car-usb-mp3",
+      "ownership": "system",
       "name": "Car Stereo USB — MP3 256 kbps",
       "description": "For car stereos and FAT32 USB sticks where predictable MP3 compatibility matters more than preserving original formats. Transcodes all audio to stereo MP3 256 kbps.",
       "defaultMusicFolder": "Music",
@@ -215,6 +223,7 @@
     },
     {
       "id": "spoken-word-mp3-96",
+      "ownership": "system",
       "name": "Audiobooks / Podcasts — MP3 96 kbps",
       "description": "For speech-heavy libraries and small storage devices. Transcodes everything to compact stereo MP3 96 kbps.",
       "defaultMusicFolder": "Audiobooks",
@@ -242,6 +251,7 @@
     },
     {
       "id": "modern-dap-lossless-m4b",
+      "ownership": "system",
       "name": "Modern DAP — Lossless + M4B Audiobooks",
       "description": "For modern DAPs or apps known to recognize M4B. Keeps the Lossless Friendly music formats and adds AAC/M4B originals; converts other formats to FLAC. Verify your device's AAC variants and audiobook features. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Audiobooks",
@@ -272,6 +282,7 @@
     },
     {
       "id": "rockbox-audiobooks-m4b",
+      "ownership": "system",
       "name": "Rockbox — M4B Audiobooks",
       "description": "For Rockbox targets known to support AAC/M4B. Copies MP3 and AAC in M4A/M4B up to 320 kbps, stereo and 48 kHz; converts other audio to MP3 96 kbps. AAC variant support varies by target. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Audiobooks",
@@ -294,6 +305,7 @@
     },
     {
       "id": "audiobooks-m4b-mp3",
+      "ownership": "system",
       "name": "Audiobooks / Podcasts — Preserve M4B",
       "description": "For devices or apps known to accept M4B. Copies MP3 and AAC in M4A/M4B up to 320 kbps, stereo and 48 kHz; converts other audio to MP3 96 kbps. Verify the device's AAC variants, chapters and resume support. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Audiobooks",
@@ -316,6 +328,7 @@
     },
     {
       "id": "pocketbook-audiobooks",
+      "ownership": "system",
       "name": "PocketBook — M4B Audiobooks",
       "description": "For audiobook-capable PocketBook readers. Copies MP3, Ogg/Vorbis and AAC in M4A/M4B up to 320 kbps, stereo and 48 kHz; converts other audio to MP3 96 kbps. Verify model, firmware and AAC variant support. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Audiobooks",
@@ -339,6 +352,7 @@
     },
     {
       "id": "android-voice-audiobooks",
+      "ownership": "system",
       "name": "Android / Voice — M4B Audiobooks",
       "description": "For Android devices using Voice with access to the copied audiobook folder. Copies MP3, Ogg/Vorbis, Opus and AAC in M4A/M4B up to 320 kbps, stereo and 48 kHz; converts other audio to MP3 96 kbps. AAC decoding depends on the device. Audiobookshelf conversion requires local encoding.",
       "defaultMusicFolder": "Audiobooks",
