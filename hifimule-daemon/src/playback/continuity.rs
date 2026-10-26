@@ -45,7 +45,7 @@ impl SuccessorFence {
     /// False means submission won; rejection must not change its authorization.
     pub fn revoke(&self) -> bool {
         self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if state & Self::MASK == Self::CLAIMED {
                     None
                 } else {
@@ -61,7 +61,7 @@ impl SuccessorFence {
 
     pub fn disarm(&self, epoch: u64) -> bool {
         self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state & !Self::MASK == epoch && state & Self::MASK != Self::CLAIMED)
                     .then_some(epoch)
             })
@@ -72,7 +72,7 @@ impl SuccessorFence {
     pub fn adopted(&self) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state & Self::MASK == Self::CLAIMED)
                     .then(|| (state & !Self::MASK).checked_add(Self::MASK + 1))
                     .flatten()

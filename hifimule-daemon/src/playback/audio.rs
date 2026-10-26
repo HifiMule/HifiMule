@@ -522,7 +522,7 @@ impl OutputControl {
             .saturating_mul(u64::from(configured.channels));
         let previous = configured
             .consumed
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |samples| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |samples| {
                 Some(samples.saturating_sub(rollback_samples))
             })
             .unwrap_or_else(|samples| samples);
@@ -1227,6 +1227,7 @@ impl AudioEngine {
 
     /// Start only work belonging to the transport command that admitted it.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) async fn start_at_epoch(
         &self,
         description: PlaybackDescription,

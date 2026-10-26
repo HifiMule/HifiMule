@@ -1106,6 +1106,7 @@ impl SyncOperationManager {
         Some(MutationGuard(counter))
     }
 
+    #[cfg(test)]
     pub async fn create_operation(
         &self,
         operation_id: String,
@@ -1679,6 +1680,7 @@ pub fn planned_audio_bytes(item: &SyncAddItem, profile: Option<&serde_json::Valu
     planned_audio_size(item, profile, preferred).reserved_bytes
 }
 
+#[cfg(test)]
 pub fn planned_song_bytes(song: &crate::domain::models::Song, profile: Option<&serde_json::Value>, override_kbps: Option<u32>) -> u64 {
     planned_song_bytes_with_preferred(song, profile, None, override_kbps)
 }
@@ -1801,6 +1803,7 @@ pub fn replace_oversized_goal_residents(delta: &mut SyncDelta, desired: &[Desire
     }
 }
 
+#[cfg(test)]
 pub fn scanned_audio_compatible(profile: Option<&serde_json::Value>, preferred: Option<&str>, extension: &str, codec: &str, bitrate: Option<u32>) -> bool {
     scanned_audio_compatible_with_properties(profile, preferred, extension, codec, bitrate, Default::default())
 }

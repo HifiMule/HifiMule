@@ -29,10 +29,12 @@ pub struct ObservationScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleEligibility {
     Eligible,
+    #[cfg_attr(not(test), expect(dead_code, reason = "policy exclusion exercised by tests"))]
     Startup,
     Cached,
     RangeOrSeek,
     Partial,
+    #[cfg_attr(not(test), expect(dead_code, reason = "policy exclusion exercised by tests"))]
     Failed,
     TooShort,
 }

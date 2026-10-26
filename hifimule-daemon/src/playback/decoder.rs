@@ -18,6 +18,7 @@ fn apply_album_gain(sample: f32, gain: f32) -> f32 {
 }
 
 pub struct DecodeSummary {
+    #[cfg_attr(not(test), expect(dead_code, reason = "total decoded frames checked by decoder tests"))]
     pub frames: u64,
     pub emitted_frames: u64,
 }

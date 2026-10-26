@@ -604,6 +604,7 @@ pub struct EncodeReport {
 
 /// The caller reserves original+output bytes before download. Abort rather than
 /// exceed that output headroom; it cannot wait for bytes held by other originals.
+#[cfg(test)]
 pub fn encode(
     input: &Path,
     output: &Path,

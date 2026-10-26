@@ -13,6 +13,7 @@ pub(crate) enum Health {
     Healthy,
     Risk,
     Recovering,
+    #[cfg_attr(not(test), expect(dead_code, reason = "stale health policy exercised by tests"))]
     Stale,
 }
 

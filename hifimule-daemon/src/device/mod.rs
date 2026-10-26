@@ -1227,6 +1227,7 @@ impl DeviceManager {
         }
     }
 
+    #[cfg(test)]
     pub async fn handle_device_detected(
         &self,
         path: PathBuf,
@@ -1439,6 +1440,7 @@ impl DeviceManager {
         }
     }
 
+    #[cfg(test)]
     pub async fn handle_device_unrecognized(
         &self,
         path: PathBuf,
@@ -1623,6 +1625,7 @@ impl DeviceManager {
             .map(|state| state.path)
     }
 
+    #[cfg(test)]
     pub async fn get_unrecognized_device_io(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
@@ -2355,6 +2358,7 @@ impl DeviceManager {
 
     /// Initializes a new device by generating a UUID, writing the initial manifest,
     /// and transitioning the device from unrecognized to recognized state.
+    #[cfg(test)]
     pub async fn initialize_device(
         &self,
         folder_path: &str,

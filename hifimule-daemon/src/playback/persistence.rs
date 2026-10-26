@@ -1,8 +1,10 @@
 use super::book_progress::{BookMap, BookOccurrenceRecord, BookPart};
 use super::model::{
-    AuditionOutcome, Occurrence, PersistedAudition, PersistedSession, PlaybackAttempt,
+    Occurrence, PersistedAudition, PersistedSession,
     SourceAvailability, TrackSource, TransportState,
 };
+#[cfg(test)]
+use super::model::{AuditionOutcome, PlaybackAttempt};
 use crate::db::Database;
 use crate::domain::models::ProviderIdentity;
 use crate::providers::BookTiming;
@@ -1772,6 +1774,7 @@ impl Database {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn playback_attempts(
         &self,
         session_id: &str,
@@ -1884,6 +1887,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn save_book_continuity(&self, record: &BookOccurrenceRecord) -> Result<()> {
         self.save_book_continuity_with_timing(record, None)
     }
@@ -2143,6 +2147,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn audition_outcomes(
         &self,
         after_outcome_id: Option<u64>,
@@ -2236,6 +2241,7 @@ fn audition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedAudit
     })
 }
 
+#[cfg(test)]
 fn audition_outcome_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditionOutcome> {
     Ok(AuditionOutcome {
         outcome_id: nonnegative(row, 0)?,

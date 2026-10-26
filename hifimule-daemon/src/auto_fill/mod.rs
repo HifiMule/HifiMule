@@ -271,6 +271,7 @@ pub async fn run_auto_fill(
 /// Assumes tracks arrive in priority order (server-sorted). Skips tracks that do not
 /// fit so smaller later candidates can use the remaining capacity.
 /// Returns `(items, capacity_reached)`.
+#[cfg(test)]
 pub fn rank_and_truncate(
     tracks: Vec<JellyfinItem>,
     max_fill_bytes: u64,

@@ -678,6 +678,7 @@ pub struct PersistedAudition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub struct AuditionOutcome {
     pub outcome_id: u64,
     pub audition_id: String,
@@ -694,6 +695,7 @@ pub struct AuditionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub struct PlaybackAttempt {
     pub attempt_seq: u64,
     pub attempt_id: String,

@@ -177,6 +177,7 @@ impl BookMap {
         Some((&self.parts[index].track_id, whole_ms - self.starts[index]))
     }
 
+    #[cfg(test)]
     pub fn whole(&self, file_id: &str, local_ms: u64) -> Option<u64> {
         let index = self.parts.iter().position(|part| part.file_id == file_id)?;
         if local_ms > self.parts[index].duration_ms {

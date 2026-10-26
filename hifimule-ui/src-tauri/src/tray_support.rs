@@ -3,8 +3,11 @@ use serde::Serialize;
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SupportState {
+    #[cfg(any(target_os = "linux", test))]
     Available,
+    #[cfg(any(target_os = "linux", test))]
     Missing,
+    #[cfg(any(target_os = "linux", test))]
     Unknown,
     NotApplicable,
 }
@@ -29,10 +32,12 @@ pub async fn get_tray_support() -> TraySupport {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn is_gnome(desktop: &str) -> bool {
     desktop.split([':', ';']).any(|token| token.trim().eq_ignore_ascii_case("gnome"))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn classify_probe(host: Option<bool>, remote_error: Option<&str>) -> SupportState {
     match host {
         Some(true) => SupportState::Available,

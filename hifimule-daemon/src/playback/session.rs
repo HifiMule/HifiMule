@@ -417,6 +417,7 @@ impl PlaybackSession {
                 .is_some_and(|radio| radio.cycle == lease.cycle)
     }
 
+    #[cfg(test)]
     pub fn admit_radio_refill(
         &self,
         lease: super::radio::RefillLease,
@@ -426,6 +427,7 @@ impl PlaybackSession {
         self.admit_radio_refill_with_more(lease, candidates, failure, false)
     }
 
+    #[cfg(test)]
     pub fn admit_radio_refill_with_more(
         &self,
         lease: super::radio::RefillLease,
@@ -935,6 +937,7 @@ impl PlaybackSession {
 
     /// Installed output workers already own a serial-fenced generation. Avoid
     /// taking the owner lock while it waits for a native pause acknowledgment.
+    #[cfg(target_os = "linux")]
     pub(crate) fn publish_pipeline_event(
         &self,
         serial: u64,

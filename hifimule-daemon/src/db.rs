@@ -891,6 +891,7 @@ impl Database {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub fn update_server_identity(&self, id: &str, name: Option<&str>, icon: Option<Option<&str>>) -> Result<()> {
         self.update_server_settings(id, name, icon, None)
     }

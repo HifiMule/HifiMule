@@ -36,6 +36,7 @@ pub struct RecordingEvidence {
 }
 
 impl RecordingEvidence {
+    #[cfg(test)]
     pub fn from_recording_field(
         provenance: RecordingProvenance,
         raw: Option<&str>,

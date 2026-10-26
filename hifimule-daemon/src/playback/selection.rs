@@ -1023,6 +1023,7 @@ pub async fn fetch_radio_window(
 /// equivalent sync and Playback fixtures yield the same order for an explicit seed. With
 /// multiple servers the internal ID is a reversible, collision-free namespace; the output
 /// is mapped back to the typed portable identity before it leaves this function.
+#[cfg(test)]
 pub fn select(
     config: &PlaybackSelectionConfig,
     pools: Vec<SelectionPool>,
@@ -1032,6 +1033,7 @@ pub fn select(
 
 #[derive(Clone, Copy)]
 enum SelectionMode {
+    #[cfg_attr(not(test), expect(dead_code, reason = "pure selector parity mode exercised by tests"))]
     Standard,
     Radio,
     RadioShortlist,
