@@ -16,8 +16,12 @@ route: 'one-shot'
 
 Validation on macOS: workspace check and compilation of every workspace test target passed through `npm run build:daemon`. All three `playback::output::queue_edit_tests` and both `tray_support::tests` passed. Three pre-existing test-only warnings remain in `api.rs` and `rpc.rs`. Linux and Windows builds were not run.
 
+Follow-up: replace the static profile-manager import in `main.ts` with dynamic imports in both the native event and startup activation paths. The production UI build now emits a separate `DeviceProfileManager` chunk (14.53 kB) and no `INEFFECTIVE_DYNAMIC_IMPORT` warning for it. TypeScript compilation and all 27 existing device-profile tests pass; two unrelated BigInt target warnings remain visible.
+
 ## Suggested Review Order
 
+- Load the profile manager only when a native event or startup activation requests it.
+  [main.ts:56](../../hifimule-ui/src/main.ts#L56)
 - Preserve atomic handoff behavior using the renamed standard-library method.
   [continuity.rs:48](../../hifimule-daemon/src/playback/continuity.rs#L48)
 - Apply the same rename to Windows pause accounting.
