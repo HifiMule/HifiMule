@@ -1,18 +1,18 @@
 import { defineConfig } from "vite";
-import { cpSync } from "fs";
-import { resolve } from "path";
-import { localeCatalog } from './localeCatalog';
+import { cpSync } from "node:fs";
+import { resolve } from "node:path";
+import { localeCatalog } from './localeCatalog.ts';
 
 const host = process.env.TAURI_DEV_HOST;
-const shoelaceAssets = resolve(__dirname, 'node_modules/@shoelace-style/shoelace/dist/assets');
+const shoelaceAssets = resolve(import.meta.dirname, 'node_modules/@shoelace-style/shoelace/dist/assets');
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  root: __dirname,
-  plugins: [localeCatalog(resolve(__dirname, '../hifimule-i18n/catalog.json')), {
+  root: import.meta.dirname,
+  plugins: [localeCatalog(resolve(import.meta.dirname, '../hifimule-i18n/catalog.json')), {
     name: 'copy-shoelace-assets',
     closeBundle() {
-      cpSync(shoelaceAssets, resolve(__dirname, 'dist/shoelace/assets'), { recursive: true });
+      cpSync(shoelaceAssets, resolve(import.meta.dirname, 'dist/shoelace/assets'), { recursive: true });
     },
   }],
 
@@ -40,23 +40,22 @@ export default defineConfig(async () => ({
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   resolve: {
     alias: {
-      '@hifimule/i18n-catalog': resolve(__dirname, '../hifimule-i18n/catalog.json'),
+      '@hifimule/i18n-catalog': resolve(import.meta.dirname, '../hifimule-i18n/catalog.json'),
     },
   },
   build: {
+    outDir: 'dist',
+    emptyOutDir: true,
     target:
       process.env.TAURI_ENV_PLATFORM == 'windows'
         ? 'chrome105'
         : 'safari13',
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
-    rollupOptions: {
+    rolldownOptions: {
       input: {
-        main: resolve(__dirname, 'index.html'),
-        splashscreen: resolve(__dirname, 'splashscreen.html'),
+        main: resolve(import.meta.dirname, 'index.html'),
+        splashscreen: resolve(import.meta.dirname, 'splashscreen.html'),
       },
     },
   },
-  outDir: 'dist',
-  // Recommended for Tauri to ensure assets are linked correctly
-  emptyOutDir: true,
 }));

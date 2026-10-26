@@ -78,19 +78,17 @@ jobs:
         with:
           ref: ${{ inputs.candidate_ref || github.sha }}
 
-      - name: Install pnpm
-        # action-v4.0.0 (latest reviewed for this hardening pass)
-        uses: pnpm/action-setup@v4.0.0
-        with:
-          version: 10.24.0
-
-      - name: Setup Node.js 24
+      - name: Setup Node.js 26.12.1
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          # Candidate refs created before .nvmrc must remain buildable.
+          node-version: "26.12.1"
 
-      - name: Install Rust 1.93.0
-        uses: dtolnay/rust-toolchain@1.93.0
+      - name: Install npm 12.2.1
+        run: npm install --global npm@12.2.1
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.rust-targets }}
 
@@ -240,7 +238,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: hifimule-ui
-        run: pnpm install
+        run: npm ci
 
       - name: Stage daemon sidecar
         run: node scripts/prepare-sidecar.mjs
@@ -254,7 +252,7 @@ jobs:
         working-directory: hifimule-ui
         env:
           HIFIMULE_SKIP_SIDECAR_PREP: "1"
-        run: pnpm exec tauri build ${{ matrix.args }}
+        run: npm run tauri -- build ${{ matrix.args }}
 
       - name: Build signed macOS immutable candidate
         if: github.event_name == 'workflow_dispatch' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'true'
@@ -267,7 +265,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: pnpm exec tauri build ${{ matrix.args }} --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+        run: npm run tauri -- build ${{ matrix.args }} --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
 
       - name: Build ad-hoc signed macOS immutable candidate
         if: github.event_name == 'workflow_dispatch' && startsWith(matrix.platform, 'macos') && steps.macos_signing.outputs.enabled == 'false'
@@ -276,7 +274,7 @@ jobs:
           HIFIMULE_SKIP_SIDECAR_PREP: "1"
         run: |
           unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
-          pnpm exec tauri build ${{ matrix.args }}
+          npm run tauri -- build ${{ matrix.args }}
 
       - name: Revalidate prepared draft before packaging
         if: github.event_name == 'push'
@@ -303,6 +301,7 @@ jobs:
           releaseDraft: true
           prerelease: false
           projectPath: hifimule-ui
+          tauriScript: npm run tauri
           args: ${{ matrix.args }}
 
       - name: Build signed macOS draft release
@@ -326,6 +325,7 @@ jobs:
           releaseDraft: true
           prerelease: false
           projectPath: hifimule-ui
+          tauriScript: npm run tauri
           args: ${{ matrix.args }} --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
 
       - name: Build ad-hoc signed macOS draft release
@@ -343,6 +343,7 @@ jobs:
           releaseDraft: true
           prerelease: false
           projectPath: hifimule-ui
+          tauriScript: npm run tauri
           args: ${{ matrix.args }}
 
       - name: Verify Linux AppImage bundles private daemon libraries

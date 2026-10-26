@@ -255,12 +255,23 @@ test("release workflow supports explicit immutable candidates without publishing
   assert.match(workflow, /candidate_ref:/);
   assert.match(workflow, /candidate_version:/);
   assert.match(workflow, /actions\/checkout@v6[\s\S]*?ref: \$\{\{ inputs\.candidate_ref/);
-  assert.match(workflow, /Install Rust 1\.93\.0/);
-  assert.match(workflow, /dtolnay\/rust-toolchain@1\.93\.0/);
+  assert.match(workflow, /Install Rust 1\.99\.1/);
+  assert.match(workflow, /dtolnay\/rust-toolchain@1\.99\.1/);
   assert.match(workflow, /Build immutable candidate/);
   assert.match(workflow, /Upload immutable candidate/);
   assert.match(workflow, /if: github\.event_name == 'push'/);
   assert.match(workflow, /releaseDraft: true/);
+});
+
+test("release action preserves Tauri options and accepts candidate refs without a node pin file", () => {
+  const workflow = read(".github/workflows/release.yml");
+  // tauri-action's runner inserts npm's separator before its build options.
+  // A separator inside tauriScript would forward a second one to the Tauri CLI.
+  const scripts = [...workflow.matchAll(/^\s+tauriScript: (.+)$/gm)].map((match) => match[1].trim());
+  assert.deepEqual(scripts, ["npm run tauri", "npm run tauri", "npm run tauri"]);
+  const nodePin = read(".nvmrc").trim();
+  assert.ok(workflow.includes(`node-version: "${nodePin}"`));
+  assert.doesNotMatch(workflow, /node-version-file:/);
 });
 
 test("smoke callers and callee retain draft-release visibility without publishing", () => {

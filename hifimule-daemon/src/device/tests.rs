@@ -627,7 +627,7 @@ fn manifest_codec_benchmark_and_rust_fixtures() {
     .unwrap();
     use sha2::{Digest, Sha256};
     let id =
-        |index: usize| format!("{:x}", Sha256::digest(format!("track-{index}")))[..32].to_string();
+        |index: usize| Sha256::digest(format!("track-{index}")).iter().map(|byte| format!("{byte:02x}")).collect::<String>()[..32].to_string();
     let mut manifest = make_manifest("synthetic-benchmark", "Benchmark");
     manifest.dirty = true;
     manifest.pending_item_ids = (0..45522).map(id).collect();

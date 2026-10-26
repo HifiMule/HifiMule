@@ -3,7 +3,7 @@
 //! Secrets and discovery remain on the native side. The operating-system file lock,
 //! rather than descriptor metadata or a PID probe, is the ownership authority.
 
-use rand::RngCore;
+use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -866,7 +866,9 @@ impl OwnerGuard {
             ));
         }
         let mut token_bytes = [0_u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut token_bytes)
+            .expect("OS entropy is required for the daemon bearer token");
         let token = token_bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))

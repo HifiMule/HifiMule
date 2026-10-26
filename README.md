@@ -101,9 +101,8 @@ For code and feature maps, start with the [project documentation index](docs/ind
 
 ## Prerequisites
 
-- **Rust** 1.93.0+ ([rustup](https://rustup.rs/))
-- **Node.js** LTS ([nodejs.org](https://nodejs.org/))
-- **npm** (bundled with Node)
+- **Rust** 1.99.1 (pinned in `rust-toolchain.toml`) ([rustup](https://rustup.rs/))
+- **Node.js** 26.12.1 + **npm** 12.2.1 (Node pinned in `.nvmrc`) ([nodejs.org](https://nodejs.org/))
 - Platform-specific Tauri dependencies — see the [Tauri prerequisites guide](https://v2.tauri.app/start/prerequisites/)
 
 ## Getting Started

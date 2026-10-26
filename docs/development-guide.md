@@ -1,15 +1,15 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-10-26 | **Scan depth:** Deep
 
 ---
 
 ## Prerequisites
 
 ### All Platforms
-- **Rust** (stable, MSRV 1.93.0) — install via [rustup](https://rustup.rs/)
-- **Node.js** (LTS) + **npm** — current project scripts use npm; pnpm can work if you manage the lockfile consistently
-- **Tauri CLI v2** — `pnpm add -D @tauri-apps/cli` (installed via `package.json`)
+- **Rust** 1.99.1 (stable, pinned in `rust-toolchain.toml`) — install via [rustup](https://rustup.rs/)
+- **Node.js** 26.12.1 + **npm** 12.2.1 — use `nvm install && nvm use`, then `npm install --global npm@12.2.1`. CI and local builds use the committed npm lockfile.
+- **Tauri CLI v2** — installed locally by `npm ci` in `hifimule-ui/`
 
 ### macOS
 ```bash
@@ -36,7 +36,7 @@ rtk sudo dnf install gcc gcc-c++ make clang clang-devel glibc-devel nasm \
   gtk3-devel webkit2gtk4.1-devel libsoup3-devel libappindicator-gtk3-devel \
   libxdo-devel libmtp-devel alsa-lib-devel pulseaudio-libs-devel dbus-devel \
   pkgconf-pkg-config curl tar xz binutils patchelf rpm cpio
-rtk npm install --prefix hifimule-ui
+rtk npm ci --prefix hifimule-ui
 rtk npm run tauri --prefix hifimule-ui -- build --bundles rpm
 ```
 
@@ -129,7 +129,7 @@ hifimule-daemon.exe --service
 cd hifimule-ui
 
 # Install dependencies
-rtk npm install
+rtk npm ci
 
 # Development mode (Vite dev server + Tauri hot reload)
 rtk npm run tauri dev
@@ -140,9 +140,14 @@ rtk node ../scripts/prepare-sidecar.mjs  # copies daemon binary to src-tauri/sid
 rtk npm run tauri build                  # bundles: .dmg / .deb / .exe
 ```
 
+TypeScript 7.0.2 provides the `tsc` build command through the `@typescript/native`
+npm alias. The `typescript` alias points to Microsoft’s stable TypeScript 6
+compatibility package because the existing UI regression tests use its JavaScript
+compiler API, which TypeScript 7 does not yet expose. Both are development-only.
+
 ### Important: Sidecar Preparation
 
-Before running `pnpm tauri build`, the daemon binary must exist in `src-tauri/sidecars/` with the correct Tauri triple name. `prepare-sidecar.mjs` handles this automatically. In CI, the daemon is built first, then `prepare-sidecar.mjs` is run.
+Before running `npm run tauri -- build`, the daemon binary must exist in `src-tauri/sidecars/` with the correct Tauri triple name. `prepare-sidecar.mjs` handles this automatically. In CI, the daemon is built first, then `prepare-sidecar.mjs` is run.
 
 ---
 
@@ -438,8 +443,8 @@ recovery evidence in a JSON export.
 
 ### Building local sync encoders
 
-The controlled runtime also builds pinned LAME 3.100, Ogg 1.3.5, Vorbis 1.3.7 and
-Opus 1.5.2 from hash-verified upstream archives. Unix uses their release configure
+The controlled runtime also builds pinned LAME 3.100, Ogg 1.3.6, Vorbis 1.3.7 and
+Opus 1.6.1 from hash-verified upstream archives. Unix uses their release configure
 scripts; Windows additionally requires **CMake** on PATH and uses MSVC static
 libraries. They are private static dependencies of the shared FFmpeg libraries,
 so installers retain the existing shared-library closure. The runtime manifest

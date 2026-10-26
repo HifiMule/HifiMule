@@ -7,7 +7,7 @@ and are
 redistributed under FFmpeg's LGPL 2.1-or-later terms. FFmpeg is a trademark of
 Fabrice Bellard, originator of the FFmpeg project.
 
-The Rust bindings are `ffmpeg-next` 9.0.0 and `ffmpeg-sys-next` 9.0.0. Audio
+The Rust bindings are `ffmpeg-next` 9.0.0 and `ffmpeg-sys-next` 9.0.1. Audio
 output uses the repository's patched CPAL 0.18.2. Linux shared output uses
 `libpulse-binding` 2.30.1. Native transport integration uses Souvlaki 0.8.3.
 Their complete license texts and attribution metadata are
@@ -37,9 +37,9 @@ commands and exact source SHA-256 values are in `audio-runtime.json` and
 `scripts/encoding-dependencies.mjs`. These sources are available at:
 
 - lame 3.100: https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz (LGPL-2.0-or-later)
-- ogg 1.3.5: https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.xz (BSD-3-Clause)
+- ogg 1.3.6: https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.xz (BSD-3-Clause)
 - vorbis 1.3.7: https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz (BSD-3-Clause)
-- opus 1.5.2: https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz (BSD-3-Clause)
+- opus 1.6.1: https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz (BSD-3-Clause)
 
 ### lame 3.100 license
 
@@ -536,7 +536,7 @@ necessary.  Here is a sample; alter the names:
 That's all there is to it!
 ```
 
-### ogg 1.3.5 license
+### ogg 1.3.6 license
 
 ```text
 Copyright (c) 2002, Xiph.org Foundation
@@ -602,7 +602,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### opus 1.5.2 license
+### opus 1.6.1 license
 
 ```text
 Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,

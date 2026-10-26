@@ -82,7 +82,10 @@ pub fn audio_fingerprint(profile: Option<&Value>) -> String {
     if let Some(object) = value.as_object_mut() {
         object.remove("Name");
     }
-    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+    Sha256::digest(value.to_string().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 pub fn load_profiles(path: &Path) -> Result<Vec<DeviceProfileEntry>> {
     serde_json::from_value(read_document(path)?["profiles"].clone()).map_err(Into::into)

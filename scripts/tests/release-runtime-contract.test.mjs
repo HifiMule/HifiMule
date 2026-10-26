@@ -116,7 +116,7 @@ test("ad-hoc macOS release paths do not export Apple signing credentials to Taur
 
   assert.match(unsignedCandidate, /steps\.macos_signing\.outputs\.enabled == 'false'/);
   assert.match(unsignedCandidate, new RegExp(`unset ${appleSigningVariables.join(" ")}`));
-  assert.match(unsignedCandidate, /pnpm exec tauri build/);
+  assert.match(unsignedCandidate, /npm run tauri -- build/);
   assert.match(unsignedTag, /steps\.macos_signing\.outputs\.enabled == 'false'/);
   assert.match(unsignedTag, /uses: tauri-apps\/tauri-action@/);
   for (const variable of appleSigningVariables) {

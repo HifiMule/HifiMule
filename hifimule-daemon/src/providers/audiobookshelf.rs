@@ -1901,12 +1901,12 @@ impl AudiobookshelfProvider {
             client,
             base_url,
             session: Arc::new(Mutex::new(AuthSession {
-                access_token: SecretString::new(login.user.access_token),
+                access_token: SecretString::from(login.user.access_token),
                 refresh_token: login
                     .user
                     .refresh_token
                     .filter(|token| !token.trim().is_empty())
-                    .map(SecretString::new),
+                    .map(SecretString::from),
             })),
             library_id: None,
             library_role: None,
@@ -2027,13 +2027,13 @@ async fn refresh_auth(
             "Audiobookshelf refresh omitted access token".into(),
         ));
     }
-    session.access_token = SecretString::new(tokens.user.access_token);
+    session.access_token = SecretString::from(tokens.user.access_token);
     if let Some(refresh) = tokens
         .user
         .refresh_token
         .filter(|value| !value.trim().is_empty())
     {
-        session.refresh_token = Some(SecretString::new(refresh));
+        session.refresh_token = Some(SecretString::from(refresh));
     }
     Ok(())
 }

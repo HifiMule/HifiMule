@@ -148,7 +148,7 @@ features = ["derive"]
 version = "3.5"
 
 [dev-dependencies.ringbuf]
-version = "0.4"
+version = "0.5.3"
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.futures-channel]
 version = "0.3"

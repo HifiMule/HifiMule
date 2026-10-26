@@ -1757,7 +1757,11 @@ fn auth_token(password: &str, salt: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(password.as_bytes());
     hasher.update(salt.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> ProviderError {

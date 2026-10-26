@@ -34,10 +34,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Node.js 24
+      - name: Install Node.js 26.12.1
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
+
+      - name: Install npm 12.2.1
+        run: npm install --global npm@12.2.1
 
       - name: Install UI test compiler
         run: npm ci --prefix hifimule-ui --ignore-scripts
@@ -54,8 +57,8 @@ jobs:
           node --test scripts/tests/*.test.mjs hifimule-ui/tests/*.test.mjs
           python -m unittest discover -s scripts/tests -p 'test_playback_session_evidence.py'
 
-      - name: Install Rust 1.93.0
-        uses: dtolnay/rust-toolchain@1.93.0
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install Windows FFmpeg source-build tools
         if: runner.os == 'Windows'

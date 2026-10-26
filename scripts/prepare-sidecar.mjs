@@ -41,8 +41,8 @@ if (!targetTriple) {
 console.log(`Target triple: ${targetTriple}`);
 
 if (!existsSync(join(uiDir, "node_modules"))) {
-  console.log("hifimule-ui/node_modules is missing; running pnpm install...");
-  execSync("pnpm install", {
+  console.log("hifimule-ui/node_modules is missing; running npm ci...");
+  execSync("npm ci", {
     cwd: uiDir,
     stdio: "inherit",
   });

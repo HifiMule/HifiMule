@@ -7,7 +7,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::RPC_E_CHANGED_MODE,
+        Foundation::{PROPERTYKEY, RPC_E_CHANGED_MODE},
         Media::Audio::{
             DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IMMDeviceEnumerator,
             IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
@@ -15,7 +15,6 @@ use windows::{
         System::Com::{
             CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
         },
-        UI::Shell::PropertiesSystem::PROPERTYKEY,
     },
     core::{PCWSTR, implement},
 };

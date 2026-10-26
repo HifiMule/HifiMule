@@ -77,7 +77,6 @@ pub mod windows_wpd {
     use super::{MtpDeviceInfo, MtpDeviceInner, resolve_path_with_lookup};
     use crate::device_io::{FileEntry, MtpHandle};
     use anyhow::Result;
-    use std::mem::ManuallyDrop;
     use std::sync::{Mutex, mpsc};
     use std::thread::JoinHandle;
     use windows::Win32::Devices::PortableDevices::{
@@ -87,7 +86,8 @@ pub mod windows_wpd {
     use windows::Win32::System::Com::*;
     use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::Win32::UI::Shell::Common::{ITEMIDLIST, STRRET};
-    use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
+    use windows::Win32::Foundation::{HWND, PROPERTYKEY};
+    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::UI::Shell::{
         FILEOPERATION_FLAGS, FileOperation, IEnumIDList, IFileOperation, IShellFolder, IShellItem,
         KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHCreateItemFromParsingName,
@@ -507,7 +507,7 @@ pub mod windows_wpd {
             let mut enum_opt: Option<IEnumIDList> = None;
             folder
                 .EnumObjects(
-                    None,
+                    HWND::default(),
                     (SHCONTF_FOLDERS.0 | SHCONTF_NONFOLDERS.0) as u32,
                     &mut enum_opt,
                 )
@@ -565,7 +565,7 @@ pub mod windows_wpd {
             let folder: IShellFolder = parent.BindToHandler(None, &BHID_SFObject)?;
             let mut enum_opt: Option<IEnumIDList> = None;
             folder
-                .EnumObjects(None, SHCONTF_FOLDERS.0 as u32, &mut enum_opt)
+                .EnumObjects(HWND::default(), SHCONTF_FOLDERS.0 as u32, &mut enum_opt)
                 .ok()?;
             let enum_list = enum_opt
                 .ok_or_else(|| anyhow::anyhow!("WPD: no Shell enumerator for MTP device"))?;
@@ -595,7 +595,7 @@ pub mod windows_wpd {
                 let mut attrs = 0u32;
                 // ParseDisplayName: pcheaten=None (Option<*const u32>), ppidl, pdwattributes
                 folder.ParseDisplayName(
-                    None,
+                    HWND::default(),
                     None,
                     PWSTR(wide.as_mut_ptr()),
                     None,
@@ -851,14 +851,13 @@ pub mod windows_wpd {
             }
             std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
 
-            let mut raw: windows::core::imp::PROPVARIANT = std::mem::zeroed();
-            raw.Anonymous.Anonymous.vt = VT_LPWSTR.0;
-            raw.Anonymous.Anonymous.Anonymous.pwszVal = ptr;
-            let pv: ManuallyDrop<windows::core::PROPVARIANT> =
-                ManuallyDrop::new(std::mem::transmute(raw));
+            let mut pv = PROPVARIANT::default();
+            (*pv.Anonymous.Anonymous).vt = VT_LPWSTR;
+            (*pv.Anonymous.Anonymous).Anonymous.pwszVal = PWSTR(ptr);
 
-            collection.Add(&*pv as *const _)?;
+            let result = collection.Add(&pv);
             CoTaskMemFree(Some(ptr as *const _));
+            result?;
 
             Ok(collection)
         }

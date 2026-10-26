@@ -2,8 +2,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
 };
-use rand::{RngCore, rngs::OsRng};
-use secrecy::{ExposeSecret, Secret};
+use rand::{TryRng, rngs::SysRng};
+use secrecy::{ExposeSecret, SecretBox};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -23,12 +23,12 @@ pub enum VaultError {
 
 // BLAKE3 is appropriate here: the hardware UID has UUID-grade entropy, so there is no
 // dictionary to brute-force. Threat model: disk/backup exfiltration only.
-fn derive_key(app_salt: &str) -> Result<Secret<[u8; 32]>, VaultError> {
+fn derive_key(app_salt: &str) -> Result<SecretBox<[u8; 32]>, VaultError> {
     let hw_uid = machine_uid::get().map_err(|e| VaultError::HardwareId(e.to_string()))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(hw_uid.as_bytes());
     hasher.update(app_salt.as_bytes());
-    Ok(Secret::new(*hasher.finalize().as_bytes()))
+    Ok(SecretBox::new(Box::new(*hasher.finalize().as_bytes())))
 }
 
 #[cfg(unix)]
@@ -54,11 +54,13 @@ pub fn encrypt_file(path: &Path, plaintext: &str, app_salt: &str) -> Result<(), 
     let cipher = ChaCha20Poly1305::new(key.expose_secret().into());
 
     let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    SysRng
+        .try_fill_bytes(&mut nonce_bytes)
+        .map_err(|_| VaultError::Crypto)?;
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
+        .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|_| VaultError::Crypto)?;
 
     let parent = path.parent().unwrap_or(Path::new("."));
@@ -82,7 +84,7 @@ pub fn decrypt_file(path: &Path, app_salt: &str) -> Result<String, VaultError> {
         return Err(VaultError::InvalidPayload);
     }
     let (nonce_bytes, ciphertext) = data.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = <&Nonce>::try_from(nonce_bytes).map_err(|_| VaultError::InvalidPayload)?;
 
     let key = derive_key(app_salt)?;
     let cipher = ChaCha20Poly1305::new(key.expose_secret().into());
@@ -92,4 +94,25 @@ pub fn decrypt_file(path: &Path, app_salt: &str) -> Result<String, VaultError> {
         .map_err(|_| VaultError::Crypto)?;
 
     String::from_utf8(plaintext).map_err(|_| VaultError::InvalidPayload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_roundtrip_uses_fresh_nonces_and_rejects_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.vault");
+        encrypt_file(&path, "saved credential", "test-salt").unwrap();
+        let first = fs::read(&path).unwrap();
+        assert_eq!(decrypt_file(&path, "test-salt").unwrap(), "saved credential");
+
+        encrypt_file(&path, "saved credential", "test-salt").unwrap();
+        let mut second = fs::read(&path).unwrap();
+        assert_ne!(&first[..12], &second[..12]);
+        *second.last_mut().unwrap() ^= 1;
+        fs::write(&path, second).unwrap();
+        assert!(matches!(decrypt_file(&path, "test-salt"), Err(VaultError::Crypto)));
+    }
 }

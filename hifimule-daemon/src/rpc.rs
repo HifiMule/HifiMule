@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use futures::{StreamExt, TryStreamExt};
-use rand::RngCore;
+use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3433,7 +3433,9 @@ async fn handle_server_connect(
 
 fn random_setup_id() -> String {
     let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS entropy is required for setup identifiers");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -3587,7 +3589,7 @@ async fn handle_audiobookshelf_discover(
         created_at: std::time::Instant::now(),
         url: url.to_string(),
         username: username.to_string(),
-        password: SecretString::new(password.to_string()),
+        password: SecretString::from(password.to_string()),
         provider: discovery.provider,
         choices,
     };
@@ -4303,7 +4305,7 @@ async fn handle_get_daemon_state_snapshot(
         if let Ok(Some(profile))=load_selected_transcoding_profile(profile_id) {
             use sha2::Digest;
             device["plannedBitrateKbps"] = serde_json::json!(crate::sync::target_bitrate_kbps(&profile).unwrap_or(9216));
-            device["plannedProfileRevision"] = serde_json::json!(format!("{:x}", sha2::Sha256::digest(profile.to_string().as_bytes())));
+            device["plannedProfileRevision"] = serde_json::json!(sha2::Sha256::digest(profile.to_string().as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         }
     }
     let mapping = if let Some(ref d) = device {
@@ -4588,7 +4590,7 @@ async fn handle_basket_estimate(state: &AppState, params: Option<Value>) -> Resu
     if let Some(expected) = params.get("expectedProfileRevision").and_then(Value::as_str) {
         use sha2::Digest;
         let revision = profile.as_ref().map(|profile|
-            format!("{:x}", sha2::Sha256::digest(profile.to_string().as_bytes())));
+            sha2::Sha256::digest(profile.to_string().as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         if revision.as_deref() != Some(expected) {
             return Err(stale_plan_error("Basket estimate profile changed; refresh destination"));
         }
