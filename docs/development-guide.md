@@ -1,6 +1,6 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-10-26 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-11-01 | **Scan depth:** Deep
 
 ---
 
@@ -53,12 +53,14 @@ and the distinction between tray menus and in-window right-click menus.
 
 ### Windows
 - Visual Studio Build Tools (MSVC)
-- MSYS2 with `make`, `sed`, `grep`, `gawk`, `diffutils`, `pkgconf`, and `gnupg` (the controlled
+- MSYS2 UCRT64 with `make`, `sed`, `grep`, `gawk`, `diffutils`, `pkgconf`, and `gnupg` (the controlled
   audio-only FFmpeg build disables optional x86 assembly, so NASM is not required)
   - The default location is `C:\msys64`. For another location, set
     `MSYS2_ROOT` to the directory containing `usr\bin\bash.exe`.
-  - Install the required packages from an MSYS2 shell with
+  - Install the required packages from the **MSYS2 UCRT64** shell with
     `pacman -S --needed make sed grep gawk diffutils pkgconf gnupg`.
+    These are shared MSYS packages; FFmpeg and its encoding dependencies compile
+    with MSVC. Both Windows CI workflows explicitly select `msystem: UCRT64`.
 - LLVM, with its Clang runtime library available to Rust bindgen (`LIBCLANG_PATH`
   may be set to LLVM's `bin` directory when it is not discoverable through `PATH`)
 - WPD is part of the Windows SDK; MTP support is provided by the `windows-sys` crate

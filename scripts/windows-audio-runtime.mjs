@@ -326,12 +326,28 @@ export function ensureWindowsAudioRuntime(target, options = {}) {
     if (!existsSync(key)) download(manifest.signingKeyUrl, key);
     verifySignature(archive, signature, key);
     const staging = `${prefix}.staging-${process.pid}-${randomUUID()}`;
+    let verified = false;
     try {
       buildSource(archive, staging, target);
       writeFileSync(join(staging, ".hifimule-audio-runtime.json"), `${JSON.stringify(expectedReceipt(target), null, 2)}\n`);
       verifyWindowsAudioRuntime(staging, target);
-      renameSync(staging, prefix);
-    } finally { rmSync(staging, { recursive: true, force: true }); }
+      verified = true;
+      const rename = options.renameSync ?? renameSync;
+      const sleep = options.sleep ?? (delay => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay));
+      for (let attempt = 0; ; attempt += 1) {
+        try { rename(staging, prefix); break; }
+        catch (error) {
+          // Windows scanners can briefly hold newly built DLLs open and block directory renames.
+          if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 20) {
+            error.message += `\nVerified FFmpeg build retained at: ${staging}\nSet FFMPEG_DIR to this directory to reuse it without rebuilding.`;
+            throw error;
+          }
+          sleep(250);
+        }
+      }
+    } finally {
+      if (!verified) rmSync(staging, { recursive: true, force: true });
+    }
     return verifyWindowsAudioRuntime(prefix, target).prefix;
   } finally { unlock(); }
 }

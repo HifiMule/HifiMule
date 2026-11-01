@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
@@ -295,6 +295,67 @@ for (const target of ["aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc"]) {
 test("FFMPEG_DIR remains a validated explicit override", () => {
   const prefix = fakeRuntime("x86_64-pc-windows-msvc");
   assert.equal(ensureWindowsAudioRuntime("x86_64-pc-windows-msvc", { env: { FFMPEG_DIR: prefix } }), prefix);
+});
+
+for (const code of ["EPERM", "EACCES", "EBUSY", "ENOENT"]) {
+  test(`Windows runtime publication handles ${code} without losing a verified build`, t => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "hm-publish-"));
+    t.after(() => rmSync(cacheRoot, { recursive: true, force: true }));
+    const target = "x86_64-pc-windows-msvc";
+    const retryable = code !== "ENOENT";
+    let staging;
+    let attempts = 0;
+    let waits = 0;
+    const failure = Object.assign(new Error("fixture rename failure"), { code });
+    const options = {
+      platform: "win32", env: {}, cacheRoot,
+      sha: () => manifest.sourceSha256,
+      download: (_url, path) => writeFileSync(path, "archive fixture"),
+      verifySignature: () => {},
+      buildSource: (_archive, path) => { staging = path; populateOfficialRuntime(path, target); },
+      renameSync: (source, destination) => {
+        attempts += 1;
+        if (attempts === 1 || !retryable) throw failure;
+        renameSync(source, destination);
+      },
+      sleep: () => { waits += 1; },
+    };
+    if (retryable) {
+      const prefix = ensureWindowsAudioRuntime(target, options);
+      assert.equal(verifyWindowsAudioRuntime(prefix, target).dlls.length, 4);
+      assert.equal(existsSync(staging), false);
+      assert.equal(waits, 1);
+    } else {
+      assert.throws(() => ensureWindowsAudioRuntime(target, options), error => error === failure);
+      assert.equal(verifyWindowsAudioRuntime(staging, target).dlls.length, 4);
+      assert.equal(waits, 0);
+      assert.ok(failure.message.includes(staging));
+    }
+    assert.equal(existsSync(join(cacheRoot, `ffmpeg-${manifest.ffmpegRelease}-official-${target}.lock`)), false);
+  });
+}
+
+test("persistent Windows rename locks stop retrying and retain the validated override", t => {
+  const cacheRoot = mkdtempSync(join(tmpdir(), "hm-publish-locked-"));
+  t.after(() => rmSync(cacheRoot, { recursive: true, force: true }));
+  const target = "x86_64-pc-windows-msvc";
+  let staging;
+  let attempts = 0;
+  let waited = 0;
+  const failure = Object.assign(new Error("locked"), { code: "EPERM" });
+  assert.throws(() => ensureWindowsAudioRuntime(target, {
+    platform: "win32", env: {}, cacheRoot,
+    sha: () => manifest.sourceSha256,
+    download: (_url, path) => writeFileSync(path, "archive fixture"),
+    verifySignature: () => {},
+    buildSource: (_archive, path) => { staging = path; populateOfficialRuntime(path, target); },
+    renameSync: () => { attempts += 1; if (attempts > 100) assert.fail("unbounded retries"); throw failure; },
+    sleep: delay => { waited += delay; },
+  }), error => error === failure);
+  assert.ok(attempts > 1 && attempts <= 100);
+  assert.ok(waited > 0 && waited <= 10_000);
+  assert.equal(ensureWindowsAudioRuntime(target, { env: { FFMPEG_DIR: staging } }), staging);
+  assert.match(failure.message, /FFMPEG_DIR/);
 });
 
 test("stages the verified runtime beside Cargo test executables", (t) => {
