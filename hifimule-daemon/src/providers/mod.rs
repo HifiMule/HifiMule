@@ -426,6 +426,18 @@ pub struct ArtistRelation {
 
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
+    /// Numeric ratings are distinct from favorite/like feedback.
+    fn numeric_rating_account(&self) -> Option<String> {None}
+    /// A bounded page of normalized 0–5 ratings; None offset marks the last page.
+    async fn numeric_ratings_page(&self, _offset: u32) -> Result<(Vec<(String, u8)>, Option<u32>), ProviderError> {
+        Err(feedback::unsupported())
+    }
+    async fn read_numeric_rating(&self, _track: &str) -> Result<u8, ProviderError> {
+        Err(feedback::unsupported())
+    }
+    async fn set_numeric_rating(&self, _track: &str, _rating: u8) -> Result<(), ProviderError> {
+        Err(feedback::unsupported())
+    }
     /// A fresh authenticated read returns both capability and preference.
     /// Missing browse fields never establish neutral or capability support.
     async fn read_feedback(

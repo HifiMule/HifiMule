@@ -34,6 +34,13 @@ impl Progress {
 }
 #[derive(Clone, Debug)]
 pub struct Tags {
+    pub album_artist: String,
+    pub genre: String,
+    pub composer: String,
+    pub comment: String,
+    pub grouping: String,
+    pub year: Option<u32>,
+    pub duration_ms: u64,
     pub source_audio: crate::domain::models::SourceAudioProperties,
     pub title: String,
     pub artist: String,
@@ -115,9 +122,20 @@ pub async fn probe(io: &dyn DeviceIO, file: &FileEntry, progress: Arc<Progress>)
         let _staged = staged;
         ffmpeg_next::init()?;
         let cancel = progress.clone();
-        let input = ffmpeg_next::format::input_with_interrupt(&path, move || {
-            cancel.cancelled.load(Ordering::Relaxed)
-        })?;
+        let offset = hifimule_daemon::source_audio::id3_prefixed_wave_offset(
+            &path,
+            std::fs::metadata(&path)?.len(),
+        );
+        let prefix_tags = offset
+            .map(|offset| crate::sync_tags::prefixed_wave_tags(&path, offset))
+            .transpose()?;
+        progress.check()?;
+        let interrupted = move || cancel.cancelled.load(Ordering::Relaxed);
+        let input = if let Some(offset) = offset {
+            hifimule_daemon::source_audio::open_prefixed_wave(&path, offset, interrupted)
+        } else {
+            ffmpeg_next::format::input_with_interrupt(&path, interrupted)
+        }?;
         let stream = input
             .streams()
             .best(ffmpeg_next::media::Type::Audio)
@@ -128,13 +146,29 @@ pub async fn probe(io: &dyn DeviceIO, file: &FileEntry, progress: Arc<Progress>)
         let tags = input.metadata();
         let stream_tags = stream.metadata();
         let tag = |key: &str| {
-            tags.get(key)
+            use id3::TagLike;
+            prefix_tags.as_ref().and_then(|tags| {
+                    if key == "comment" {
+                        return tags.comments().next().map(|comment| comment.text.as_str());
+                    }
+                    let id = match key {
+                        "title" => "TIT2", "artist" => "TPE1", "album" => "TALB",
+                        "album_artist" | "albumartist" => "TPE2", "genre" => "TCON",
+                        "composer" => "TCOM", "grouping" => "TIT1", "date" => "TDRC",
+                        "year" => "TYER", "track" => "TRCK", "disc" => "TPOS", _ => return None,
+                    };
+                    tags.get(id).and_then(|frame| frame.content().text())
+                })
+                .or_else(|| tags.get(key))
                 .or_else(|| stream_tags.get(key))
                 .unwrap_or("")
                 .to_string()
         };
         let number = |s: String| s.split('/').next().and_then(|s| s.parse::<u32>().ok());
         Ok(Tags {
+            album_artist: if tag("album_artist").is_empty() {tag("albumartist")}else{tag("album_artist")}, genre: tag("genre"), composer: tag("composer"),
+            comment: tag("comment"), grouping: tag("grouping"), year:tag("date").split('-').next().and_then(|s|s.parse().ok()).or_else(||number(tag("year"))),
+            duration_ms: (input.duration().max(0)/1000)as u64,
             source_audio: crate::domain::models::SourceAudioProperties {
                 sample_rate_hz: Some(decoder.rate()).filter(|v| *v > 0),
                 channels: Some(u32::from(decoder.channels())).filter(|v| *v > 0),
@@ -802,6 +836,7 @@ pub(crate) mod tests {
     }
     fn tags() -> Tags {
         Tags {
+            album_artist:String::new(),genre:String::new(),composer:String::new(),comment:String::new(),grouping:String::new(),year:None,duration_ms:4000,
             source_audio: Default::default(),
             title: "Track".into(),
             artist: "Artist".into(),

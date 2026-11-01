@@ -9,6 +9,8 @@ use std::{io::Write, path::Path, sync::Mutex};
 static STORE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceProfileEntry {
+    #[serde(rename="defaultRockbox",default)]
+    pub default_rockbox: crate::rockbox::Settings,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -166,6 +168,9 @@ pub fn ensure_profiles_file_exists(path: &Path, default_bytes: &[u8]) -> Result<
                 if old.get("defaultFolderArtwork").is_none() {
                     d.as_object_mut().unwrap().remove("defaultFolderArtwork");
                 }
+                if old.get("defaultRockbox").is_none() {
+                    d.as_object_mut().unwrap().remove("defaultRockbox");
+                }
                 old == d
             });
             if exact {
@@ -274,6 +279,7 @@ pub fn validate_entry(
         entry.description.chars().count() <= 2000,
         "Description is too long"
     );
+    entry.default_rockbox.validate()?;
     for folder in [
         &entry.default_music_folder,
         &entry.default_playlist_folder,
@@ -474,6 +480,7 @@ mod tests {
             let path = dir.path().join("profiles.json");
             let mut old = defaults["profiles"][1].clone();
             old.as_object_mut().unwrap().remove("defaultFolderArtwork");
+            old.as_object_mut().unwrap().remove("defaultRockbox");
             if let Some(value) = explicit {
                 old["defaultFolderArtwork"] = json!(value);
             }

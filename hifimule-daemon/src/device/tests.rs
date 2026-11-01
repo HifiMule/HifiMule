@@ -1785,6 +1785,7 @@ async fn test_dirty_manifest_roundtrip() {
         dirty: true,
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2118,6 +2119,7 @@ async fn test_write_manifest_creates_files() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2169,6 +2171,7 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2211,6 +2214,7 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2270,6 +2274,7 @@ async fn test_get_discrepancies_missing_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2320,6 +2325,7 @@ async fn test_get_discrepancies_orphaned_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2391,6 +2397,7 @@ async fn test_get_discrepancies_no_issues() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2472,6 +2479,7 @@ async fn test_prune_items() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2539,6 +2547,7 @@ async fn test_relink_item() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2590,6 +2599,7 @@ async fn test_relink_item_path_traversal() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2629,6 +2639,7 @@ async fn test_clear_dirty_flag() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -2679,6 +2690,7 @@ async fn test_clear_dirty_flag_with_orphaned_files() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -3582,6 +3594,7 @@ async fn test_save_basket_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -3652,6 +3665,7 @@ async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -3701,6 +3715,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -3752,6 +3767,7 @@ fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -4409,6 +4425,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        rockbox: Default::default(),
         folder_artwork: Default::default(),
         folder_artwork_records: Default::default(),
         reconcile_before_sync: false,
@@ -5642,4 +5659,11 @@ async fn frozen_legacy_profile_history_and_aliases_are_conservative() {
         manifest.transcoding_profile_id=None;manifest.dirty=true;manifest.pending_item_ids=vec!["unfinished".into()];manifest.transcoding_profile_dirty=true;
         let snapshot=manifest.profile_snapshot_at(&path);assert!(snapshot.dirty);assert!(snapshot.transcoding_profile_dirty);assert_eq!(snapshot.pending_item_ids,vec!["unfinished"]);
     }).await;
+}
+#[test]
+fn rockbox_settings_survive_compressed_manifest_storage() {
+    let mut manifest=super::DeviceManifest::default();
+    manifest.rockbox=crate::rockbox::Settings{enabled:true,import_ratings:true,format:"3.15".into(),path_prefix:"/<HDD0>".into()};
+    let bytes=super::manifest_codec::encode(&manifest).unwrap();
+    assert_eq!(super::manifest_codec::decode(&bytes,true).unwrap().rockbox,manifest.rockbox);
 }

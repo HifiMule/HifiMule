@@ -229,6 +229,61 @@ fn is_navidrome_server_type(server_type: Option<&str>) -> bool {
 
 #[async_trait]
 impl MediaProvider for SubsonicProvider {
+    fn numeric_rating_account(&self)->Option<String> {Some(super::feedback::account_scope(&self.client.username))}
+    async fn numeric_ratings_page(&self, offset: u32) -> Result<(Vec<(String, u8)>, Option<u32>), ProviderError> {
+        use super::feedback::*;
+        const PAGE: u32 = 500;
+        if offset > 1_000_000 || offset % PAGE != 0 { return Err(malformed()); }
+        if offset == 0 {
+            let ping: SubsonicEnvelope<PingBody> = self.client.get_envelope_url_with_limit(
+                self.client.signed_url("ping", &[])?, Some(MAX_FEEDBACK_RESPONSE_BYTES)).await
+                .map_err(|error| match error { ProviderError::UnsupportedCapability(_) => malformed(), other => other })?;
+            if !is_navidrome_server_type(ping.response.server_type.as_deref()) {
+                return Err(unsupported());
+            }
+        }
+        #[derive(Default, Deserialize)]
+        struct Results { #[serde(default)] song: Vec<serde_json::Value> }
+        #[derive(Default, Deserialize)]
+        struct Body { #[serde(rename="searchResult3")] result: Option<Results> }
+        let offset_text = offset.to_string();
+        let response: SubsonicEnvelope<Body> = self.client.get_envelope_url_with_limit(
+            self.client.signed_url("search3", &[("query", ""), ("artistCount", "0"), ("albumCount", "0"),
+                ("songCount", "500"), ("songOffset", &offset_text)])?, Some(8 * 1024 * 1024)).await
+                .map_err(|error| match error { ProviderError::UnsupportedCapability(_) => malformed(), other => other })?;
+        let songs = response.response.body.result.ok_or_else(malformed)?.song;
+        if songs.len() > PAGE as usize { return Err(malformed()); }
+        let next = (songs.len() == PAGE as usize).then_some(offset + PAGE);
+        let mut ratings = Vec::with_capacity(songs.len());
+        for song in songs {
+            let id = song.get("id").and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 4096).ok_or_else(malformed)?.to_owned();
+            let rating = match song.get("userRating") {
+                None => 0,
+                Some(value) => value.as_u64().filter(|v| *v <= 5).ok_or_else(malformed)? as u8,
+            };
+            ratings.push((id, rating));
+        }
+        Ok((ratings, next))
+    }
+    async fn read_numeric_rating(&self,track:&str)->Result<u8,ProviderError> {
+        use super::feedback::*;
+        let ping:SubsonicEnvelope<PingBody>=self.client.get_envelope_url_with_limit(self.client.signed_url("ping",&[])?,Some(MAX_FEEDBACK_RESPONSE_BYTES)).await?;
+        if !is_navidrome_server_type(ping.response.server_type.as_deref()) {return Err(unsupported());}
+        #[derive(Default,Deserialize)] struct Body {song:Option<serde_json::Value>}
+        let response:SubsonicEnvelope<Body>=self.client.get_envelope_url_with_limit(self.client.signed_url("getSong",&[("id",track)])?,Some(MAX_FEEDBACK_RESPONSE_BYTES)).await?;
+        let song=response.response.body.song.ok_or_else(malformed)?;
+        if song.get("id").and_then(serde_json::Value::as_str)!=Some(track) {return Err(malformed());}
+        match song.get("userRating") {None=>Ok(0),Some(value)=>value.as_u64().filter(|v|*v<=5).map(|v|v as u8).ok_or_else(malformed)}
+    }
+    async fn set_numeric_rating(&self,track:&str,rating:u8)->Result<(),ProviderError> {
+        use super::feedback::*;
+        if rating>5 {return Err(malformed());}
+        self.read_numeric_rating(track).await?;
+        let value=rating.to_string();
+        let _:SubsonicEnvelope<NoBody>=self.client.get_envelope_url_with_limit(self.client.signed_url("setRating",&[("id",track),("rating",&value)])?,Some(MAX_FEEDBACK_RESPONSE_BYTES)).await?;
+        Ok(())
+    }
     async fn read_feedback(
         &self,
         track_id: &str,
@@ -2577,6 +2632,61 @@ mod tests {
     async fn provider(server: &Server) -> SubsonicProvider {
         let client = SubsonicClient::new(server.url(), USERNAME, PASSWORD).expect("client");
         SubsonicProvider::from_client_for_tests(client, true)
+    }
+    #[tokio::test]
+    async fn numeric_rating_pages_are_bounded_and_qualify_once() {
+        let mut server = Server::new_async().await;
+        let ping = server.mock("GET","/rest/ping.view").match_query(Matcher::Any)
+            .with_body(ok(r#""type":"navidrome""#)).expect(1).create_async().await;
+        let songs: Vec<_> = (0..500).map(|i| serde_json::json!({"id":i.to_string(),"userRating":i%6})).collect();
+        let first = server.mock("GET","/rest/search3.view")
+            .match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("songOffset".into(),"0".into()),Matcher::UrlEncoded("songCount".into(),"500".into()),Matcher::UrlEncoded("query".into(),"".into())]))
+            .with_body(serde_json::json!({"subsonic-response":{"status":"ok","searchResult3":{"song":songs}}}).to_string()).expect(1).create_async().await;
+        let last = server.mock("GET","/rest/search3.view").match_query(Matcher::UrlEncoded("songOffset".into(),"500".into()))
+            .with_body(ok(r#""searchResult3":{"song":[{"id":"last"}]}"#)).expect(1).create_async().await;
+        let provider = provider(&server).await;
+        let (ratings,next) = provider.numeric_ratings_page(0).await.unwrap();
+        assert_eq!(ratings.len(),500); assert_eq!(next,Some(500));
+        assert_eq!(ratings[4],("4".into(),4));
+        assert_eq!(provider.numeric_ratings_page(500).await.unwrap(),(vec![("last".into(),0)],None));
+        assert!(provider.numeric_ratings_page(1).await.is_err());
+        assert!(provider.numeric_ratings_page(1_000_500).await.is_err());
+        ping.assert_async().await; first.assert_async().await; last.assert_async().await;
+    }
+    #[tokio::test]
+    async fn numeric_rating_response_limits_are_reported_as_failures() {
+        for endpoint in ["ping", "search3"] {
+            let mut server = Server::new_async().await;
+            let _ping = if endpoint == "search3" {Some(server.mock("GET","/rest/ping.view").match_query(Matcher::Any)
+                .with_body(ok(r#""type":"navidrome""#)).create_async().await)} else {None};
+            let oversized = server.mock("GET",format!("/rest/{endpoint}.view").as_str()).match_query(Matcher::Any)
+                .with_body("x".repeat(if endpoint == "ping" {64 * 1024 + 1} else {8 * 1024 * 1024 + 1}))
+                .expect(1).create_async().await;
+            let result = provider(&server).await.numeric_ratings_page(0).await;
+            assert!(matches!(result, Err(ProviderError::Deserialization(_))), "{endpoint}: {result:?}");
+            oversized.assert_async().await;
+        }
+    }
+    #[tokio::test]
+    async fn numeric_rating_pages_reject_unsupported_and_invalid_values() {
+        for (server_type, songs) in [
+            ("generic",serde_json::json!([])),
+            ("navidrome",serde_json::json!([{"id":"track","userRating":6}])),
+            ("navidrome",serde_json::json!([{"id":"track","userRating":-1}])),
+            ("navidrome",serde_json::json!([{"id":"track","userRating":"4"}])),
+            ("navidrome",serde_json::json!([{"userRating":4}])),
+            ("navidrome",serde_json::json!([{"id":"","userRating":4}])),
+            ("navidrome",serde_json::json!((0..501).map(|i|serde_json::json!({"id":i.to_string()})).collect::<Vec<_>>())),
+        ] {
+            let mut server = Server::new_async().await;
+            let _ping = server.mock("GET","/rest/ping.view").match_query(Matcher::Any)
+                .with_body(serde_json::json!({"subsonic-response":{"status":"ok","type":server_type}}).to_string()).create_async().await;
+            let request = server.mock("GET","/rest/search3.view").match_query(Matcher::Any)
+                .with_body(serde_json::json!({"subsonic-response":{"status":"ok","searchResult3":{"song":songs}}}).to_string())
+                .expect(if server_type == "generic" {0} else {1}).create_async().await;
+            assert!(provider(&server).await.numeric_ratings_page(0).await.is_err());
+            request.assert_async().await;
+        }
     }
 
     fn auth_matchers() -> Vec<Matcher> {

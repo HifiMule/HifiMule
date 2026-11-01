@@ -187,6 +187,8 @@ pub struct FolderArtworkRecord {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct DeviceManifest {
+    #[serde(default)]
+    pub rockbox: crate::rockbox::Settings,
     #[serde(default, rename = "folderArtwork")]
     pub folder_artwork: FolderArtwork,
     #[serde(default, rename = "folderArtworkRecords", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -418,6 +420,7 @@ impl DeviceManifest {
             auto_sync_on_connect: self.auto_sync_on_connect,
             reconcile_before_sync: self.reconcile_before_sync,
             folder_artwork: self.folder_artwork.clone(),
+            rockbox: self.rockbox.clone(),
             last_sync_at: self.last_sync_at,
             auto_fill: self.auto_fill.clone(),
             transcoding_profile_id: self.transcoding_profile_id.clone(),
@@ -1138,6 +1141,7 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
+    pub(crate) fn database(&self) -> &crate::db::Database { &self.db }
     #[cfg(test)]
     pub(crate) async fn set_test_sync_io(
         &self,
@@ -2566,6 +2570,7 @@ impl DeviceManager {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork,
             folder_artwork_records: Default::default(),
             reconcile_before_sync,

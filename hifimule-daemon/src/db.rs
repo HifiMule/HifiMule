@@ -197,6 +197,17 @@ impl Database {
 
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS rockbox_ratings (
+            device TEXT NOT NULL, server TEXT NOT NULL, account TEXT NOT NULL, track TEXT NOT NULL,
+            observed INTEGER NOT NULL, confirmed INTEGER, initialized_zero INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(device,server,account,track));")?;
+        if !conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('rockbox_ratings') WHERE name='initialized_zero')", [], |row| row.get::<_, bool>(0))? {
+            conn.execute("ALTER TABLE rockbox_ratings ADD COLUMN initialized_zero INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS rockbox_rating_backfills (
+            device TEXT NOT NULL, server TEXT NOT NULL, account TEXT NOT NULL, track TEXT NOT NULL,
+            rating INTEGER NOT NULL, original TEXT NOT NULL,
+            PRIMARY KEY(device,server,account,track));")?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS devices (
                 id TEXT PRIMARY KEY,

@@ -15,7 +15,7 @@ class Element {
             const child = new Element();
             child.checked = /\schecked(?:\s|>)/.test(tag[0]);
             child.hidden = /\shidden(?:\s|>)/.test(tag[0]);
-            child.value = tag[0].match(/value="([^"]*)"/)?.[1] ?? '';
+            child.value = (tag[0].match(/value="([^"]*)"/)?.[1] ?? '').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&amp;','&');
             this.children.set('#' + tag[1], child);
         }
     }
@@ -62,6 +62,16 @@ test('untouched creation explicitly saves all preferences off', async () => {
     const params = JSON.parse(JSON.stringify(calls[0].params));
     assert.equal(params.reconcileBeforeSync, false);
     assert.deepEqual(params.folderArtwork, { enabled: false });
+});
+
+test('Rockbox profile defaults initialize once and manual preferences survive profile changes',async()=>{
+ const defaults={enabled:true,importRatings:true,format:'3.15',pathPrefix:'/<HDD0>'};
+ const {modal,body,calls,profileSaved}=setup([{id:'passthrough',name:'Player',defaultRockbox:defaults}]);
+ assert.equal(body.querySelector('#init-rockbox-enabled').checked,true);
+ body.querySelector('#init-rockbox-ratings').checked=false;body.querySelector('#init-rockbox-ratings').emit('sl-change');
+ profileSaved([],{id:'new',name:'Other',defaultRockbox:{enabled:false,importRatings:true,format:'4.0',pathPrefix:'/'}});
+ await modal.handleConfirm('listener','usb-drive',{value:'Player'});
+ assert.deepEqual(JSON.parse(JSON.stringify(calls[0].params.rockbox)),{...defaults,importRatings:false});
 });
 test('creation captures enabled and disabled preferences before submitting in the single request', async () => {
     for (const enabled of [true, false]) {

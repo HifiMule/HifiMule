@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// A few libraries prepend an ID3 tag to a RIFF/WAVE file. FFmpeg probes the
 /// WAVE container but otherwise attempts to read its header from the ID3 bytes.
 /// Trust only the declared tag boundary and a complete, bounded RIFF header.
-fn id3_prefixed_wave_offset(input: &Path, input_len: u64) -> Option<u64> {
+pub fn id3_prefixed_wave_offset(input: &Path, input_len: u64) -> Option<u64> {
     let mut file = std::fs::File::open(input).ok()?;
     let mut header = [0; 10];
     file.read_exact(&mut header).ok()?;
@@ -53,7 +53,14 @@ fn id3_prefixed_wave_offset(input: &Path, input_len: u64) -> Option<u64> {
         .then_some(offset)
 }
 
-fn open_prefixed_wave(input: &Path, offset: u64) -> Result<format::context::Input, ff::Error> {
+pub fn open_prefixed_wave(
+    input: &Path,
+    offset: u64,
+    mut cancelled: impl FnMut() -> bool + Send + 'static,
+) -> Result<format::context::Input, ff::Error> {
+    if cancelled() {
+        return Err(ff::Error::Exit);
+    }
     let path = CString::new(input.to_str().ok_or(ff::Error::InvalidData)?)
         .map_err(|_| ff::Error::InvalidData)?;
     let mut options = ff::Dictionary::new();
@@ -65,7 +72,14 @@ fn open_prefixed_wave(input: &Path, offset: u64) -> Result<format::context::Inpu
         if wave.is_null() {
             return Err(ff::Error::DemuxerNotFound);
         }
-        let mut context = std::ptr::null_mut();
+        let mut context = ff::ffi::avformat_alloc_context();
+        if context.is_null() {
+            return Err(ff::Error::Other {
+                errno: ff::error::ENOMEM,
+            });
+        }
+        let interrupt = ff::util::interrupt::new(Box::new(cancelled));
+        (*context).interrupt_callback = interrupt.interrupt;
         let mut options = options.disown();
         let result = ff::ffi::avformat_open_input(&mut context, path.as_ptr(), wave, &mut options);
         // FFmpeg returns unused options to the caller, which owns them again.
@@ -76,7 +90,7 @@ fn open_prefixed_wave(input: &Path, offset: u64) -> Result<format::context::Inpu
         }
         // Own the opened context before the next fallible operation so stream
         // discovery failures close the input and release all native resources.
-        let mut context = format::context::Input::wrap(context);
+        let mut context = format::context::Input::wrap_with_interrupt(context, interrupt.guard);
         let result = ff::ffi::avformat_find_stream_info(context.as_mut_ptr(), std::ptr::null_mut());
         if result < 0 {
             return Err(ff::Error::from(result));
@@ -173,7 +187,7 @@ impl SourceDecoder {
             .len();
         let skipped_id3_bytes = id3_prefixed_wave_offset(input, input_len);
         let context = if let Some(offset) = skipped_id3_bytes {
-            open_prefixed_wave(input, offset)
+            open_prefixed_wave(input, offset, || false)
         } else {
             format::input(input)
         }

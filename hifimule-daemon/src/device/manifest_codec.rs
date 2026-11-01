@@ -119,6 +119,7 @@ fn encode_with_compressed_limit(manifest: &DeviceManifest, limit: usize) -> Resu
     // Exhaustive destructuring makes adding a model field a compile-time prompt
     // to preserve it in storage, instead of silently omitting future metadata.
     let DeviceManifest {
+        rockbox,
         device_id,
         name,
         icon,
@@ -146,6 +147,7 @@ fn encode_with_compressed_limit(manifest: &DeviceManifest, limit: usize) -> Resu
         folder_ids,
     } = manifest;
     let metadata = DeviceManifest {
+        rockbox: rockbox.clone(),
         device_id: device_id.clone(),
         name: name.clone(),
         icon: icon.clone(),

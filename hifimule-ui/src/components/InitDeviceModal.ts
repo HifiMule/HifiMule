@@ -141,6 +141,7 @@ export class InitDeviceModal {
         const profileOptions = renderProfileOptions(profiles);
         const defaultPassthroughDesc = (profiles || []).find(p => p.id === 'passthrough')?.description || '';
         const defaultPassthrough = (profiles || []).find(p => p.id === 'passthrough');
+        const rockbox={enabled:false,importRatings:false,format:'4.0',pathPrefix:'/',...defaultPassthrough?.defaultRockbox};
 
         let selectedIcon = 'usb-drive';
 
@@ -214,6 +215,11 @@ export class InitDeviceModal {
                 <div style="margin-bottom: 1.25rem;">
                     <sl-checkbox id="init-device-artwork" ${defaultPassthrough?.defaultFolderArtwork === true ? 'checked' : ''} help-text="${escapeAttr(t('basket.device.artwork_hint'))}">${t('basket.device.artwork')}</sl-checkbox>
                 </div>
+<sl-details summary="${t('rockbox.title')}"><p class="profile-help">${t('rockbox.help')}</p>
+    <sl-checkbox id="init-rockbox-enabled" ${rockbox.enabled ? 'checked' : ''} >${t('rockbox.maintain')}</sl-checkbox>
+    <sl-checkbox id="init-rockbox-ratings" ${rockbox.importRatings ? 'checked' : ''}  help-text="${escapeAttr(t('rockbox.ratings_help'))}">${t('rockbox.ratings')}</sl-checkbox>
+    <sl-select id="init-rockbox-format" label="${t('rockbox.format')}" value="${rockbox.format ?? '4.0'}" ><sl-option value="4.0">Rockbox 4.0</sl-option><sl-option value="3.15">Rockbox 3.15</sl-option></sl-select>
+    <sl-input id="init-rockbox-prefix" label="${t('rockbox.prefix')}" value="${escapeAttr(rockbox.pathPrefix ?? '/')}"  help-text="${escapeAttr(t('rockbox.prefix_help'))}"></sl-input></sl-details>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">${t('device.init.linked_profile')}</div>
                     <div style="font-size: 0.85rem;">
@@ -242,9 +248,18 @@ export class InitDeviceModal {
         const artworkInput = body.querySelector('#init-device-artwork') as any;
         let artworkEdited = false;
         artworkInput?.addEventListener('sl-change', () => { artworkEdited = true; });
+        let rockboxEdited=false;
+        for(const suffix of ['enabled','ratings','format','prefix']) for(const event of ['sl-input','sl-change']) body.querySelector(`#init-rockbox-${suffix}`)?.addEventListener(event,()=>{rockboxEdited=true;});
         const applyProfile = (profile?: DeviceProfileSummary) => {
             if (!profile) return;
             descEl.textContent = profile.description ?? '';
+            if(!rockboxEdited) {
+                const settings={enabled:false,importRatings:false,format:'4.0',pathPrefix:'/',...profile.defaultRockbox};
+                for(const [suffix,key] of [['enabled','enabled'],['ratings','importRatings'],['format','format'],['prefix','pathPrefix']]) {
+                    const control=body.querySelector(`#init-rockbox-${suffix}`) as any;
+                    if(control) control[suffix==='enabled' || suffix==='ratings' ? 'checked':'value']=(settings as any)[key];
+                }
+            }
             if (!artworkEdited) artworkInput.checked = profile.defaultFolderArtwork === true;
             if (!musicFolderEdited) musicFolderInput.value = profile.defaultMusicFolder ?? '';
             if (!playlistFolderEdited) playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
@@ -345,6 +360,7 @@ export class InitDeviceModal {
 
         const reconcileBeforeSync = (body.querySelector('#init-device-reconcile') as any)?.checked === true;
         const folderArtwork = { enabled: (body.querySelector('#init-device-artwork') as any)?.checked === true };
+        const rockbox={enabled:(body as any).querySelector('#init-rockbox-enabled')?.checked === true,importRatings:(body as any).querySelector('#init-rockbox-ratings')?.checked === true,format:(body as any).querySelector('#init-rockbox-format')?.value ?? '4.0',pathPrefix:(body as any).querySelector('#init-rockbox-prefix')?.value?.trim() ?? '/'};
 
         const profileSelect = this.dialog?.querySelector('#init-transcoding-profile') as any;
         let transcodingProfileId = profileSelect?.value;
@@ -365,6 +381,7 @@ export class InitDeviceModal {
                 podcastFolderPath,
                 reconcileBeforeSync,
                 folderArtwork,
+                rockbox,
                 profileId: userId,
                 transcodingProfileId,
                 name: deviceName,

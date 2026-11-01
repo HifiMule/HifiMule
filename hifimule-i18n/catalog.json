@@ -981,7 +981,16 @@
     "lifecycle.playback_checkpoint_failed": "HifiMule could not save your listening session. Quit remains in progress. Retry saving the session.",
     "lifecycle.playback_checkpoint_pending": "Quitting HifiMule — saving your listening session while device writes finish.",
     "lifecycle.retry_saving_session": "Retry saving session",
-    "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
+    "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked.",
+    "rockbox.title": "Rockbox database",
+    "rockbox.maintain": "Maintain database after sync",
+    "rockbox.ratings": "Sync ratings when supported",
+    "rockbox.help": "Mounted storage and default .rockbox location only. New databases index HifiMule-managed audio; existing listening statistics and other indexed tracks are preserved.",
+    "rockbox.ratings_help": "Requires Gather runtime data in Rockbox. Syncs with servers supporting ratings (currently Navidrome). Device ratings 1–10 become 1–5, rounding up. Unrated tracks receive server ratings ×2; later device clears take precedence. Can update an existing database even when maintenance is disabled.",
+    "rockbox.format": "Format for new databases",
+    "rockbox.prefix": "Rockbox path prefix",
+    "rockbox.prefix_help": "Find this volume's path prefix on your player under System → Rockbox Info. Enter it explicitly, usually /; for example /<microSD0> or /foo/bar. Other prefixes are preserved.",
+    "rockbox.invalid": "Enter a valid Rockbox format and absolute prefix without . or .."
   },
   "fr": {
     "numeric.required": "Saisissez une valeur.",
@@ -1941,7 +1950,16 @@
     "lifecycle.playback_checkpoint_failed": "HifiMule n’a pas pu enregistrer votre session d’écoute. La fermeture reste en cours. Réessayez l’enregistrement.",
     "lifecycle.playback_checkpoint_pending": "Fermeture de HifiMule — enregistrement de votre session d’écoute et fin des écritures sur l’appareil.",
     "lifecycle.retry_saving_session": "Réessayer l’enregistrement de la session",
-    "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
+    "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée.",
+    "rockbox.title": "Base de données Rockbox",
+    "rockbox.maintain": "Mettre à jour la base après synchronisation",
+    "rockbox.ratings": "Synchroniser les notes si pris en charge",
+    "rockbox.help": "Stockage monté et emplacement .rockbox par défaut uniquement. Une nouvelle base indexe les fichiers gérés par HifiMule ; les statistiques et autres pistes indexées sont conservées.",
+    "rockbox.ratings_help": "Activez la collecte des données de lecture dans Rockbox. Synchronisation avec les serveurs compatibles (Navidrome actuellement). Les notes 1–10 deviennent 1–5, arrondies au supérieur. Les pistes sans note reçoivent la note du serveur ×2 ; les suppressions sur l’appareil sont prioritaires. Peut modifier une base existante même sans maintenance.",
+    "rockbox.format": "Format des nouvelles bases",
+    "rockbox.prefix": "Préfixe de chemin Rockbox",
+    "rockbox.prefix_help": "Retrouvez le préfixe de ce volume sur le lecteur dans Système → Infos Rockbox. Saisissez-le explicitement, généralement / ; par exemple /<microSD0> ou /foo/bar. Les autres préfixes sont conservés.",
+    "rockbox.invalid": "Saisissez un format Rockbox valide et un préfixe absolu sans . ni .."
   },
   "es": {
     "numeric.required": "Introduce un valor.",
@@ -2901,7 +2919,16 @@
     "lifecycle.playback_checkpoint_failed": "HifiMule no pudo guardar la sesión de escucha. El cierre sigue en curso. Vuelve a guardar la sesión.",
     "lifecycle.playback_checkpoint_pending": "Cerrando HifiMule — guardando la sesión de escucha mientras terminan las escrituras del dispositivo.",
     "lifecycle.retry_saving_session": "Reintentar guardar la sesión",
-    "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
+    "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado.",
+    "rockbox.title": "Base de datos Rockbox",
+    "rockbox.maintain": "Actualizar la base después de sincronizar",
+    "rockbox.ratings": "Sincronizar puntuaciones cuando sea compatible",
+    "rockbox.help": "Solo almacenamiento montado y ubicación .rockbox predeterminada. Las bases nuevas indexan audio gestionado por HifiMule; se conservan las estadísticas y otras pistas indexadas.",
+    "rockbox.ratings_help": "Active la recopilación de datos de reproducción en Rockbox. Sincroniza con servidores compatibles (actualmente Navidrome). Las puntuaciones 1–10 se convierten a 1–5 redondeando hacia arriba. Las pistas sin puntuación reciben la del servidor ×2; los borrados del dispositivo tienen prioridad. Puede modificar una base existente sin mantenimiento.",
+    "rockbox.format": "Formato de bases nuevas",
+    "rockbox.prefix": "Prefijo de ruta Rockbox",
+    "rockbox.prefix_help": "Busque el prefijo de este volumen en el reproductor, en Sistema → Información de Rockbox. Introdúzcalo explícitamente, normalmente /; por ejemplo /<microSD0> o /foo/bar. Se conservan los otros prefijos.",
+    "rockbox.invalid": "Introduzca un formato Rockbox válido y un prefijo absoluto sin . ni .."
   },
   "de": {
     "numeric.required": "Geben Sie einen Wert ein.",
@@ -3861,6 +3888,15 @@
     "lifecycle.playback_checkpoint_failed": "HifiMule konnte Ihre Hörsitzung nicht speichern. Das Beenden läuft weiter. Versuchen Sie das Speichern erneut.",
     "lifecycle.playback_checkpoint_pending": "HifiMule wird beendet — die Hörsitzung wird gespeichert und Geräte-Schreibvorgänge werden abgeschlossen.",
     "lifecycle.retry_saving_session": "Sitzung erneut speichern",
-    "lifecycle.playback_owner_failed": "Ihre Sitzung wurde gespeichert, aber HifiMule konnte das Ende des Wiedergabedienstes nicht bestätigen. Das Beenden bleibt blockiert."
+    "lifecycle.playback_owner_failed": "Ihre Sitzung wurde gespeichert, aber HifiMule konnte das Ende des Wiedergabedienstes nicht bestätigen. Das Beenden bleibt blockiert.",
+    "rockbox.title": "Rockbox-Datenbank",
+    "rockbox.maintain": "Datenbank nach Synchronisierung aktualisieren",
+    "rockbox.ratings": "Bewertungen synchronisieren, wenn unterstützt",
+    "rockbox.help": "Nur eingebundene Datenträger mit dem Standardordner .rockbox. Neue Datenbanken erfassen von HifiMule verwaltete Audiodateien; Hörstatistiken und andere indexierte Titel bleiben erhalten.",
+    "rockbox.ratings_help": "Laufzeitdaten in Rockbox aktivieren. Synchronisiert mit unterstützten Servern (derzeit Navidrome). Bewertungen von 1–10 werden auf 1–5 aufgerundet. Unbewertete Titel erhalten die Serverbewertung ×2; Löschungen am Gerät haben Vorrang. Kann eine vorhandene Datenbank auch ohne Wartung ändern.",
+    "rockbox.format": "Format für neue Datenbanken",
+    "rockbox.prefix": "Rockbox-Pfadpräfix",
+    "rockbox.prefix_help": "Das Pfadpräfix dieses Datenträgers finden Sie auf dem Player unter System → Rockbox-Info. Geben Sie es ausdrücklich ein, normalerweise /; etwa /<microSD0> oder /foo/bar. Andere Präfixe bleiben erhalten.",
+    "rockbox.invalid": "Gültiges Rockbox-Format und absolutes Präfix ohne . oder .. eingeben"
   }
 }

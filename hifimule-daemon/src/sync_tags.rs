@@ -12,6 +12,41 @@ use std::{
 // Bound metadata allocation independently of audiobook size. A second disk copy is
 // reserved by the caller before this module starts any rewrite.
 const MAX_METADATA: u64 = 16 * 1024 * 1024;
+pub(crate) fn prefixed_wave_tags(input: &Path, prefix_bytes: u64) -> Result<id3::Tag> {
+    ensure!(
+        prefix_bytes <= MAX_METADATA + 20,
+        "ID3 metadata exceeds safety limit"
+    );
+    let mut bytes = vec![0; prefix_bytes as usize];
+    std::fs::File::open(input)?.read_exact(&mut bytes)?;
+    ensure!(bytes.len() >= 10, "Truncated ID3 header");
+    let header = &bytes[..10];
+    ensure!(
+        &header[..3] == b"ID3"
+            && (2..=4).contains(&header[3])
+            && header[6..10].iter().all(|b| b & 0x80 == 0),
+        "Invalid ID3 header"
+    );
+    ensure!(
+        header[5] & 0x40 == 0,
+        "Unsupported ID3 extended header or compression"
+    );
+    let size = header[6..10]
+        .iter()
+        .fold(0usize, |n, b| (n << 7) | usize::from(*b));
+    ensure!(
+        size as u64 <= MAX_METADATA && size <= bytes.len() - 10,
+        "Invalid ID3 metadata size"
+    );
+    let mut frames = bytes[10..10 + size].to_vec();
+    if header[3] < 4 && header[5] & 0x80 != 0 {
+        undo_unsynchronisation(&mut frames);
+    }
+    validate_id3_frames(&frames, header[3], 0)?;
+    drop(frames);
+    Ok(id3::Tag::read_from2(std::io::Cursor::new(bytes))?)
+}
+
 pub fn rewrite_reservation(source: u64) -> Result<u64> {
     source
         .checked_mul(2)

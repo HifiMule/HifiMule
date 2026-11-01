@@ -2,7 +2,9 @@ import english from 'virtual:hifimule-locale/en';
 import { t } from './i18n';
 import { escapeAttr } from './html';
 import { numericError, type NumericRules } from './numericValidation';
+export interface RockboxSettings { enabled:boolean; importRatings:boolean; format:string; pathPrefix:string; }
 export interface DeviceProfileSummary {
+    defaultRockbox?: RockboxSettings;
     id: string; name: string; aliases?: string[]; description?: string; ownership?: string; revision?: number;
     defaultMusicFolder?: string | null; defaultPlaylistFolder?: string | null;
     defaultAudiobookFolder?: string | null; defaultPodcastFolder?: string | null;
@@ -43,7 +45,7 @@ export const formats = [
 ] as const;
 export const outputs = formats.filter(f => f[0] !== 'm4b');
 export const limits = ['MaxAudioSampleRate', 'MaxAudioBitDepth', 'MaxAudioChannels', 'MaxStreamingBitrate'] as const;
-export type ProfileDraft = { name: string; description: string; music: string; playlists: string; audiobooks: string; podcasts: string; artwork: boolean; mode: string; formats: string[]; output: string; bitrate: string; limits: Record<string, string> };
+export type ProfileDraft = { name: string; description: string; music: string; playlists: string; audiobooks: string; podcasts: string; artwork: boolean; rockbox: RockboxSettings; mode: string; formats: string[]; output: string; bitrate: string; limits: Record<string, string> };
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 function rowFormats(row: any): string[] {
     if (!row || typeof row !== 'object' || row.Type !== 'Audio'
@@ -69,7 +71,7 @@ export function toDraft(profile: DeviceProfile): ProfileDraft {
     const target = audio?.TranscodingProfiles?.[0];
     const output = formats.find(([, , container, codec]) => (target?.Container === container || (container === 'mp4' && target?.Container === 'm4a')) && target?.AudioCodec === codec)?.[0] ?? 'mp3';
     return { name: profile.name, description: profile.description, music: profile.defaultMusicFolder ?? '', playlists: profile.defaultPlaylistFolder ?? '',
-        audiobooks: profile.defaultAudiobookFolder ?? '', podcasts: profile.defaultPodcastFolder ?? '', artwork: profile.defaultFolderArtwork === true,
+        audiobooks: profile.defaultAudiobookFolder ?? '', podcasts: profile.defaultPodcastFolder ?? '', artwork: profile.defaultFolderArtwork === true, rockbox:copy({enabled:false,importRatings:false,format:'4.0',pathPrefix:'/',...profile.defaultRockbox}),
         mode: !audio ? 'originals' : audio.DirectPlayProfiles?.length ? 'compatible' : 'always',
         formats: formats.filter(([id]) => (audio?.DirectPlayProfiles?.flatMap(rowFormats) ?? []).includes(id)).map(([id]) => id), output,
         bitrate: String((audio?.MusicStreamingTranscodingBitrate ?? 256000) / 1000),
@@ -93,6 +95,7 @@ export function fromDraft(base: DeviceProfile, draft: ProfileDraft): DeviceProfi
     result.defaultMusicFolder = draft.music.trim() || null; result.defaultPlaylistFolder = draft.playlists.trim() || null;
     result.defaultAudiobookFolder = draft.audiobooks.trim() || null; result.defaultPodcastFolder = draft.podcasts.trim() || null;
     result.defaultFolderArtwork = draft.artwork;
+    result.defaultRockbox = copy(draft.rockbox);
     // Unsupported rules remain intact and visible; only identity and creation defaults are changed.
     const audioFields = (value: ProfileDraft) => JSON.stringify([value.mode,value.formats,value.output,value.bitrate,value.limits]);
     if (unsupportedRules(base).length || audioFields(draft) === audioFields(original)) return result;
@@ -146,6 +149,7 @@ export function profileNumericErrors(draft: ProfileDraft, base?: DeviceProfile, 
     return errors;
 }
 export function validateDraft(draft: ProfileDraft, base?: DeviceProfile, constraints?: ProfileConstraints): string | undefined {
+    if (!['4.0','3.15'].includes(draft.rockbox.format) || !draft.rockbox.pathPrefix.startsWith('/') || /[\\:\0]/.test(draft.rockbox.pathPrefix) || draft.rockbox.pathPrefix.split('/').some(s=>s==='.' || s==='..')) return t('rockbox.invalid');
     if (!draft.name.trim() || draft.name.trim().length > 120) return t('profiles.invalid_name');
     for (const folder of [draft.music,draft.playlists,draft.audiobooks,draft.podcasts]) if (/^[\/]|[\\:\0]/.test(folder) || folder.split('/').some(s => s === '.' || s === '..')) return t('profiles.invalid_folder');
     return Object.values(profileNumericErrors(draft, base, constraints))[0];

@@ -141,6 +141,21 @@ mod tests {
     use crate::providers::{CredentialKind, MediaProvider, ProviderCredentials};
     use mockito::{Matcher, Server};
 
+    #[tokio::test]
+    async fn rockbox_numeric_ratings_qualify_navidrome_without_changing_favorites() {
+        for kind in ["navidrome","subsonic"] {
+            let mut server=Server::new_async().await;
+            let _ping=server.mock("GET","/rest/ping.view").match_query(Matcher::Any).with_body(format!(r#"{{"subsonic-response":{{"status":"ok","version":"1.16.1","type":"{kind}"}}}}"#)).create_async().await;
+            let read=server.mock("GET","/rest/getSong.view").match_query(Matcher::UrlEncoded("id".into(),"track".into())).with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","song":{"id":"track","userRating":4}}}"#).expect(if kind=="navidrome"{1}else{0}).create_async().await;
+            let write=server.mock("GET","/rest/setRating.view").match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("id".into(),"track".into()),Matcher::UrlEncoded("rating".into(),"0".into())])).with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#).expect(if kind=="navidrome"{1}else{0}).create_async().await;
+            let favorite=server.mock("GET","/rest/star.view").expect(0).create_async().await;
+            let p=crate::providers::subsonic::SubsonicProvider::from_stored_config(ProviderCredentials{server_url:server.url(),credential:CredentialKind::Password{username:"user".into(),password:"secret".into()}},true,None).unwrap();
+            assert_eq!(p.set_numeric_rating("track",0).await.is_ok(),kind=="navidrome");
+            assert!(p.set_numeric_rating("track",6).await.is_err());
+            read.assert_async().await;write.assert_async().await;favorite.assert_async().await;
+        }
+    }
+
     #[test]
     fn feedback_missing_is_neutral_only_inside_a_valid_authoritative_item() {
         assert_eq!(

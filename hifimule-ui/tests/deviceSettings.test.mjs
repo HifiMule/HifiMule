@@ -15,7 +15,7 @@ class Element {
         for (const tag of html.matchAll(/<[^>]+id="([^"]+)"[^>]*>/g)) {
             const child = new Element();
             child.checked = /\schecked(?:\s|>)/.test(tag[0]);
-            child.value = tag[0].match(/value="([^"]*)"/)?.[1] ?? '';
+            child.value = (tag[0].match(/value="([^"]*)"/)?.[1] ?? '').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&amp;','&');
             this.children.set('#' + tag[1], child);
         }
     }
@@ -53,6 +53,15 @@ test('settings save sends both enabled and disabled values explicitly', async ()
         assert.equal(save.params.reconcileBeforeSync, value);
         assert.equal(save.params.deviceId, 'device');
     }
+});
+
+test('Rockbox device preferences save independent rating-only mode and invalidate prepared estimates',async()=>{
+ const rockbox={enabled:false,importRatings:true,format:'3.15',pathPrefix:'/<HDD0>'};
+ const {sidebar,dialog,calls}=await setup({rockbox},{device_id:'device',rockbox});
+ assert.equal(dialog.querySelector('#device-rockbox-enabled').checked,false);assert.equal(dialog.querySelector('#device-rockbox-ratings').checked,true);
+ await dialog.querySelector('#device-settings-save').click();
+ assert.deepEqual(calls.find(c=>c.method==='device.update_manifest').params.rockbox,rockbox);
+ const before=sidebar.capacityRevision();sidebar.currentDevice.rockbox={...rockbox,enabled:true};assert.notEqual(sidebar.capacityRevision(),before);
 });
 test('changing reconciliation invalidates prepared capacity', async () => {
     const { sidebar } = await setup({}, { device_id: 'device', reconcileBeforeSync: false });

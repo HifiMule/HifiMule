@@ -4434,6 +4434,7 @@ async fn handle_get_daemon_state_snapshot(
                 "transcodingProfileId": m.transcoding_profile_id.clone(),
                 "reconcileBeforeSync": m.reconcile_before_sync,
                 "folderArtwork": m.folder_artwork,
+                "rockbox": m.rockbox,
                 "deviceClass": match class {
                     crate::device::DeviceClass::Msc => "msc",
                     crate::device::DeviceClass::Mtp => "mtp",
@@ -9405,6 +9406,10 @@ async fn handle_device_update_manifest(
     let folder_artwork = params.get("folderArtwork")
         .map(|value| parse_folder_artwork(value, current.folder_artwork.clone()))
         .transpose()?;
+    let rockbox = params.get("rockbox").map(|value| parse_rockbox(value, current.rockbox.clone())).transpose()?;
+    if rockbox.as_ref().is_some_and(|r|r.active()) && state.device_manager.get_current_device_path().await.is_some_and(|p|p.to_string_lossy().starts_with("mtp://")) {
+        return Err(stale_plan_error("Rockbox requires a mounted mass-storage device"));
+    }
     let music_folder_path = string_param(&params, "musicFolderPath")?
         .map(normalize_editable_folder_path)
         .transpose()?;
@@ -9481,6 +9486,7 @@ async fn handle_device_update_manifest(
         .device_manager
         .update_manifest(|manifest| {
             if let Some(settings) = folder_artwork { manifest.folder_artwork = settings; }
+            if let Some(settings) = rockbox { manifest.rockbox = settings; }
             if let Some(enabled) = reconcile_before_sync {
                 manifest.reconcile_before_sync = enabled;
             }
@@ -9583,6 +9589,16 @@ async fn handle_music_setup_scan(state:&AppState,method:&str,params:Option<Value
     result.map_err(sync_plan_error)
 }
 
+fn parse_rockbox(value:&Value,settings:crate::rockbox::Settings)->Result<crate::rockbox::Settings,JsonRpcError> {
+    let parse=||->anyhow::Result<crate::rockbox::Settings> {
+        let fields=value.as_object().ok_or_else(||anyhow::anyhow!("rockbox must be an object"))?;
+        let mut base=serde_json::to_value(settings)?;
+        for (key,value) in fields {base.as_object_mut().unwrap().insert(key.clone(),value.clone());}
+        let settings:crate::rockbox::Settings=serde_json::from_value(base)?;settings.validate()?;Ok(settings)
+    };
+    parse().map_err(|e|JsonRpcError{code:ERR_INVALID_PARAMS,message:format!("Invalid Rockbox settings: {e}"),data:None})
+}
+
 fn parse_folder_artwork(
     value: &Value,
     mut settings: crate::device::FolderArtwork,
@@ -9625,6 +9641,7 @@ async fn handle_device_initialize(
         "icon",
         "reconcileBeforeSync",
         "folderArtwork",
+        "rockbox",
     ];
     if params
         .as_object()
@@ -9703,6 +9720,10 @@ async fn handle_device_initialize(
         .transpose()?
         .unwrap_or_default();
 
+    let rockbox=params.get("rockbox").map(|value|parse_rockbox(value,Default::default())).transpose()?.unwrap_or_default();
+    if rockbox.active() && state.device_manager.get_pending_devices_snapshot().await.iter().any(|p|p.pending_id==pending_id && p.path.to_string_lossy().starts_with("mtp://")) {
+        return Err(stale_plan_error("Rockbox requires a mounted mass-storage device"));
+    }
     let transcoding_profile_id = validate_transcoding_profile_id(transcoding_profile_id.as_deref())?;
 
     let mut manifest = state
@@ -9734,7 +9755,7 @@ async fn handle_device_initialize(
             }
         })?;
 
-    if audiobook_folder_path.is_some() || podcast_folder_path.is_some() {
+    if audiobook_folder_path.is_some() || podcast_folder_path.is_some() || rockbox != crate::rockbox::Settings::default() {
         if let Some(device_io) = state.device_manager.get_device_io().await {
             for path in [
                 audiobook_folder_path.as_deref(),
@@ -9755,6 +9776,7 @@ async fn handle_device_initialize(
         state
             .device_manager
             .update_manifest(|current| {
+                current.rockbox = rockbox.clone();
                 current.audiobook_path = book_path;
                 current.podcast_path = podcast_path;
             })
@@ -9764,6 +9786,7 @@ async fn handle_device_initialize(
                 message: e.to_string(),
                 data: None,
             })?;
+        manifest.rockbox = rockbox;
         manifest.audiobook_path = audiobook_folder_path;
         manifest.podcast_path = podcast_folder_path;
     }
@@ -9835,6 +9858,7 @@ async fn handle_device_initialize(
             "transcodingProfileId": manifest.transcoding_profile_id,
             "reconcileBeforeSync": manifest.reconcile_before_sync,
             "folderArtwork": manifest.folder_artwork,
+            "rockbox": manifest.rockbox,
         }
     }))
 }
@@ -10336,6 +10360,7 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
                 "defaultAudiobookFolder": p.default_audiobook_folder,
                 "defaultPodcastFolder": p.default_podcast_folder,
                 "defaultFolderArtwork": p.default_folder_artwork,
+                "defaultRockbox": p.default_rockbox,
             })
         })
         .collect();
@@ -11737,6 +11762,17 @@ mod tests {
         let _ = server.await;
     }
 
+    #[test]
+    fn rockbox_settings_validate_and_roundtrip_through_manifest_storage_and_polling() {
+        let settings=parse_rockbox(&json!({"enabled":true,"importRatings":true,"format":"3.15","pathPrefix":"/<HDD0>"}),Default::default()).unwrap();
+        let mut manifest=crate::device::DeviceManifest::default();manifest.rockbox=settings.clone();
+        assert_eq!(manifest.polling_metadata().rockbox,settings);
+        assert!(parse_rockbox(&json!({"enabled":"true"}),settings.clone()).is_err());
+        assert!(parse_rockbox(&json!({"pathPrefix":"/../Music"}),settings.clone()).is_err());
+        assert!(parse_rockbox(&json!({"unknown":true}),settings.clone()).is_err());
+        assert!(parse_rockbox(&Value::Null,settings.clone()).is_err());
+        assert_eq!(parse_rockbox(&json!({"enabled":false}),settings).unwrap().format,"3.15");
+    }
     fn manifest_for_update() -> crate::device::DeviceManifest {
         crate::device::DeviceManifest {
             device_id: "dev-1".to_string(),
@@ -11770,6 +11806,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -12886,6 +12923,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -13070,6 +13108,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -13193,6 +13232,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -13355,6 +13395,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -14998,6 +15039,7 @@ mod tests {
                 size_ticks: 0,
                 size_bytes: 4000,
             }],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15102,6 +15144,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15162,6 +15205,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15209,6 +15253,7 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15261,6 +15306,7 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15389,6 +15435,7 @@ mod tests {
                     dirty: false,
                     pending_item_ids: vec![],
                     basket_items: vec![],
+                    rockbox: Default::default(),
                     folder_artwork: Default::default(),
                     folder_artwork_records: Default::default(),
                     reconcile_before_sync: false,
@@ -15488,6 +15535,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15780,6 +15828,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15867,6 +15916,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -15985,6 +16035,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -16005,6 +16056,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -16071,6 +16123,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,

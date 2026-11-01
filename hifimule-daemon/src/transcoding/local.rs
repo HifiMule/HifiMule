@@ -4,7 +4,7 @@ use crate::providers::TranscodeProfile;
 use anyhow::{Context, Result, anyhow, ensure};
 use ff::packet::Mut;
 use ffmpeg_next::{self as ff, ChannelLayout, codec, format, frame, media};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::{
     path::Path,
     sync::{
@@ -515,40 +515,7 @@ fn drained(error: ff::Error) -> Result<()> {
 
 fn prefixed_wave_tags(input: &Path, prefix_bytes: u64) -> Result<id3::Tag> {
     use id3::TagLike;
-    // Match the bounded metadata policy used by audiobook tag rewriting.
-    const MAX_METADATA: u64 = 16 * 1024 * 1024;
-    ensure!(
-        prefix_bytes <= MAX_METADATA + 20,
-        "ID3 metadata exceeds safety limit"
-    );
-    let mut bytes = vec![0; prefix_bytes as usize];
-    std::fs::File::open(input)?.read_exact(&mut bytes)?;
-    ensure!(bytes.len() >= 10, "Truncated ID3 header");
-    let header = &bytes[..10];
-    ensure!(
-        &header[..3] == b"ID3"
-            && (2..=4).contains(&header[3])
-            && header[6..10].iter().all(|b| b & 0x80 == 0),
-        "Invalid ID3 header"
-    );
-    ensure!(
-        header[5] & 0x40 == 0,
-        "Unsupported ID3 extended header or compression"
-    );
-    let size = header[6..10]
-        .iter()
-        .fold(0usize, |n, b| (n << 7) | usize::from(*b));
-    ensure!(
-        size as u64 <= MAX_METADATA && size <= bytes.len() - 10,
-        "Invalid ID3 metadata size"
-    );
-    let mut frames = bytes[10..10 + size].to_vec();
-    if header[3] < 4 && header[5] & 0x80 != 0 {
-        crate::sync_tags::undo_unsynchronisation(&mut frames);
-    }
-    crate::sync_tags::validate_id3_frames(&frames, header[3], 0)?;
-    drop(frames);
-    let mut tags = id3::Tag::read_from2(std::io::Cursor::new(bytes))?;
+    let mut tags = crate::sync_tags::prefixed_wave_tags(input, prefix_bytes)?;
     ensure!(
         tags.chapters()
             .all(|chapter| chapter.start_offset == u32::MAX && chapter.end_offset == u32::MAX),

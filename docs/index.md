@@ -68,6 +68,7 @@
 - [Playback Guide](./playback.md) — Desktop listening, queue and previews, outputs, native media controls, persistence, and boundaries
 - [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) — Books and Podcasts setup, identity, browse, playback, sync, auto-fill, and evidence limits
 - [Audiobookshelf Integration Contract](./audiobookshelf-integration-contract.md) — Dated controlled-server observations and fixture contract
+- [Rockbox Database and Ratings](./rockbox-database.md) — Opt-in tagcache maintenance, Navidrome ratings, supported formats and recovery
 
 ### UI
 

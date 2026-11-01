@@ -7,6 +7,16 @@ import { escapeAttr } from '../src/html.ts';
 import { loadProfiles } from './deviceProfileTestHelpers.mjs';
 const t=(key,vars={})=>key+Object.values(vars).join(' ');
 const profiles=loadProfiles();
+
+test('Rockbox defaults roundtrip independently of audio capabilities',()=>{
+ const p=profiles.newProfile(), draft=profiles.toDraft(p);
+ assert.deepEqual(draft.rockbox,{enabled:false,importRatings:false,format:'4.0',pathPrefix:'/'});
+ draft.rockbox={enabled:true,importRatings:true,format:'3.15',pathPrefix:'/<HDD0>'};
+ const saved=profiles.fromDraft(p,draft);
+ assert.deepEqual(saved.defaultRockbox,draft.rockbox);assert.deepEqual(saved.deviceProfile,p.deviceProfile);
+ assert.deepEqual(profiles.toDraft(saved).rockbox,draft.rockbox);
+ draft.rockbox.pathPrefix='/../Music';assert.ok(profiles.validateDraft(draft,p));
+});
 test('new profile uses MP3 fallback, incompatible conversion and no limits',()=>{
  const p=profiles.newProfile(), draft=profiles.toDraft(p);
  assert.equal(draft.mode,'compatible');assert.equal(draft.output,'mp3');assert.equal(draft.bitrate,'256');assert.deepEqual(draft.formats,['mp3']);assert.ok(Object.values(draft.limits).every(value=>value===''));

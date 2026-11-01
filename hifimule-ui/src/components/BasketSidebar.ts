@@ -44,6 +44,7 @@ interface RootFoldersResponse {
 }
 
 interface ConnectedDeviceSummary {
+    rockbox?: {enabled?:boolean; importRatings?:boolean; format?:string; pathPrefix?:string};
     path: string;
     deviceId: string;
     name: string;
@@ -717,6 +718,8 @@ export class BasketSidebar {
         const audiobookFolder = selected.audiobookPath ?? current.audiobookPath ?? current.audiobook_path ?? '';
         const reconcileBeforeSync = selected.reconcileBeforeSync ?? current.reconcileBeforeSync ?? false;
         const folderArtwork = selected.folderArtwork ?? current.folderArtwork ?? {};
+        const rockbox = selected.rockbox ?? current.rockbox ?? {};
+        const rockboxDisabled = selected.deviceClass === 'mtp' ? 'disabled' : '';
         const podcastFolder = selected.podcastPath ?? current.podcastPath ?? current.podcast_path ?? '';
         let selectedIcon = selected.icon || 'usb-drive';
         const selectedProfileId = canonicalProfileId(profiles, selected.transcodingProfileId
@@ -765,6 +768,11 @@ export class BasketSidebar {
                 <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${escapeAttr(musicFolder)}" value="${escapeAttr(playlistFolder ?? '')}"></sl-input>
                 <sl-checkbox id="device-settings-reconcile" ${reconcileBeforeSync ? 'checked' : ''} help-text="${t('basket.device.reconcile_hint')}">${t('basket.device.reconcile_before_sync')}</sl-checkbox>
                 <sl-checkbox id="device-settings-artwork" ${folderArtwork.enabled ? 'checked' : ''} help-text="${t('basket.device.artwork_hint')}">${t('basket.device.artwork')}</sl-checkbox>
+<sl-details summary="${t('rockbox.title')}"><p class="profile-help">${t('rockbox.help')}</p>
+    <sl-checkbox id="device-rockbox-enabled" ${rockbox.enabled ? 'checked' : ''} ${rockboxDisabled}>${t('rockbox.maintain')}</sl-checkbox>
+    <sl-checkbox id="device-rockbox-ratings" ${rockbox.importRatings ? 'checked' : ''} ${rockboxDisabled} help-text="${escapeAttr(t('rockbox.ratings_help'))}">${t('rockbox.ratings')}</sl-checkbox>
+    <sl-select id="device-rockbox-format" label="${t('rockbox.format')}" value="${rockbox.format ?? '4.0'}" ${rockboxDisabled}><sl-option value="4.0">Rockbox 4.0</sl-option><sl-option value="3.15">Rockbox 3.15</sl-option></sl-select>
+    <sl-input id="device-rockbox-prefix" label="${t('rockbox.prefix')}" value="${escapeAttr(rockbox.pathPrefix ?? '/')}" ${rockboxDisabled} help-text="${escapeAttr(t('rockbox.prefix_help'))}"></sl-input></sl-details>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
             <sl-button slot="footer" variant="default" id="device-settings-cancel">${t('basket.actions.cancel')}</sl-button>
@@ -858,6 +866,7 @@ export class BasketSidebar {
                     transcodingProfileId: (dialog.querySelector('#device-settings-transcoding-profile') as any)?.value ?? 'passthrough',
                     reconcileBeforeSync: (dialog.querySelector('#device-settings-reconcile') as any)?.checked === true,
                     folderArtwork: { enabled: (dialog.querySelector('#device-settings-artwork') as any)?.checked === true },
+                    rockbox:{enabled:(dialog as any).querySelector('#device-rockbox-enabled')?.checked === true,importRatings:(dialog as any).querySelector('#device-rockbox-ratings')?.checked === true,format:(dialog as any).querySelector('#device-rockbox-format')?.value ?? '4.0',pathPrefix:(dialog as any).querySelector('#device-rockbox-prefix')?.value?.trim() ?? '/'},
                     playlistFolderPath: playlistFolderValue,
                     audiobookFolderPath: audiobookFolderValue,
                     podcastFolderPath: podcastFolderValue,
@@ -1276,7 +1285,7 @@ export class BasketSidebar {
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.anyAutoFillEnabled() && !((this.currentDevice?.syncedItemCount ?? this.currentDevice?.synced_items?.length ?? 0) > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.anyAutoFillEnabled() && !this.currentDevice?.rockbox?.enabled && !this.currentDevice?.rockbox?.importRatings && !((this.currentDevice?.syncedItemCount ?? this.currentDevice?.synced_items?.length ?? 0) > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                         ${t('basket.actions.start_sync')}
                     </sl-button>

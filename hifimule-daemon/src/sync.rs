@@ -3388,6 +3388,15 @@ async fn execute_plan_sync_buffered(
     let _warning_writer=WarningWriterGuard(Arc::clone(&warning_journal));
     let mut sync_warnings = Vec::new();
 
+    let mut rockbox = if target.manifest.rockbox.active() {
+        let before=device_manager.get_manifest_for_device(&target.manifest.device_id).await.context("Rockbox device disconnected")?;
+        let root=target.path.clone();
+        Some(tokio::task::spawn_blocking(move||crate::rockbox::Session::open(&root,before)).await??)
+    } else {None};
+    if target.manifest.rockbox.import_ratings && let Some(session)=&rockbox {
+        sync_warnings.extend(session.import_ratings(device_manager.database(),&providers_by_server,&operation_manager,&operation_id).await?);
+    }
+
 
     crate::daemon_log!(
         "[Sync] execute_provider_sync preparing: adds={} deletes={} id_changes={} playlists={}",
@@ -5125,6 +5134,30 @@ async fn execute_plan_sync_buffered(
         }
         device_warnings.push(warning);
     }
+    if errors.is_empty() && !operation_manager.is_cancelled(&operation_id).await && target.manifest.rockbox.active() && let Some(session)=&mut rockbox {
+        let result = async {
+            let connected=device_manager.get_sync_target_for_device(&target.manifest.device_id).await.context("Rockbox device disconnected")?;
+            anyhow::ensure!(connected.0==target.path && connected.3==target.observation && Arc::ptr_eq(&connected.2,&target.io),"Rockbox device connection changed");
+            let mut warn = |warning: String| {
+                warning_journal.record(&warning)?;
+                crate::daemon_log!("{}", warning);
+                if device_warnings.len() < 101 { device_warnings.push(warning); }
+                Ok(())
+            };
+            let prepared = if connected.1.rockbox.enabled {
+                Some(session.prepare_update(&connected.1, device_io.as_ref(), &operation_manager, &operation_id, &mut warn).await?)
+            } else { None };
+            let prepared = session.prepare_rating_backfills(prepared, &connected.1, device_manager.database(), &providers_by_server, &operation_manager, &operation_id, &mut warn).await?;
+            if let Some(prepared) = prepared {
+                publish_rockbox_update(prepared, target, &device_manager, &operation_manager, &operation_id).await?;
+                session.confirm_rating_backfills(device_manager.database())?;
+            }
+            Ok::<_,anyhow::Error>(())
+        }.await;
+        if let Err(error)=result {
+            errors.push(SyncFileError{jellyfin_id:String::new(),filename:"rockbox-database".into(),error_message:format!("{error:#}")});
+        }
+    }
     if device_warnings.len() > 100 {
         device_warnings.truncate(100);
         device_warnings.push(format!("Complete warning details ({} entries) available through sync_get_warning_details",warning_journal.count.load(Ordering::Acquire)));
@@ -5159,6 +5192,19 @@ async fn execute_plan_sync_buffered(
     deletion_log.finish(outcome, 0);
     result
 
+}
+
+async fn publish_rockbox_update(
+    prepared: crate::rockbox::PreparedUpdate,
+    target: &SyncTarget,
+    devices: &crate::device::DeviceManager,
+    operations: &SyncOperationManager,
+    operation: &str,
+) -> Result<()> {
+    let connected = devices.get_sync_target_for_device(&target.manifest.device_id).await.context("Rockbox device disconnected before publication")?;
+    anyhow::ensure!(connected.0 == target.path && connected.3 == target.observation && Arc::ptr_eq(&connected.2, &target.io), "Rockbox device connection changed before publication");
+    anyhow::ensure!(!operations.is_cancelled(operation).await, "Rockbox publication cancelled");
+    prepared.publish().await
 }
 
 async fn wait_for_protection_admission(
@@ -6185,6 +6231,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            rockbox: Default::default(),
             folder_artwork: Default::default(),
             folder_artwork_records: Default::default(),
             reconcile_before_sync: false,
@@ -6194,6 +6241,86 @@ mod tests {
             playlists: vec![],
             storage_id: None,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn rockbox_metadata_only_sync_creates_selected_format_from_compact_plan() {
+        for (enabled,format,magic) in [(false,"4.0",0x54434810i32),(true,"4.0",0x54434810),(true,"3.15",0x5443480f)] {
+            let root=tempfile::tempdir().unwrap();std::fs::create_dir(root.path().join(".rockbox")).unwrap();
+            let mut manifest=empty_manifest();manifest.rockbox.enabled=enabled;manifest.rockbox.format=format.into();
+            let db=Arc::new(crate::db::Database::memory().unwrap());let devices=Arc::new(crate::device::DeviceManager::new(db));
+            let io:Arc<dyn crate::device_io::DeviceIO>=Arc::new(crate::device_io::MscBackend::new(root.path().to_path_buf()));
+            devices.handle_device_detected(root.path().to_path_buf(),manifest.clone(),io.clone()).await.unwrap();
+            let mut target:SyncTarget=devices.get_sync_target_for_device(&manifest.device_id).await.unwrap().into();
+            let delta=calculate_delta(&[],&manifest);let plan=crate::sync_plan::SyncPlan::from_delta(delta,&manifest).unwrap();crate::sync_plan::compact_target(&mut target);
+            let (_,errors)=execute_plan_sync_with_settings(&plan,&target,ProviderSyncSource{local_encoding_servers:HashSet::new(),provider:subsonic_provider("http://127.0.0.1:9".into()),transcoding_profile:None,providers_by_server:HashMap::new()},Arc::new(SyncOperationManager::new()),"rbdb-empty".into(),devices,None,crate::sync_performance::SyncPerformance::default()).await.unwrap();
+            assert!(errors.is_empty(),"{errors:?}");let path=root.path().join(".rockbox/database_idx.tcd");assert_eq!(path.exists(),enabled);
+            if enabled {let data=std::fs::read(path).unwrap();assert_eq!(data.len(),24);assert_eq!(i32::from_le_bytes(data[..4].try_into().unwrap()),magic);}
+        }
+    }
+
+    #[tokio::test]
+    async fn rockbox_unreadable_track_warnings_are_paged_and_polling_stays_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".rockbox")).unwrap();
+        std::fs::create_dir(root.path().join("Music")).unwrap();
+        let mut manifest = empty_manifest();
+        manifest.rockbox.enabled = true;
+        for i in 0..102 {
+            let mut item = make_synced_item(&format!("bad-{i}"), &format!("Bad {i}"), None, None);
+            item.local_path = format!("Music/bad-{i}.mp3");
+            item.size_bytes = 9;
+            std::fs::write(root.path().join(&item.local_path), b"not audio").unwrap();
+            manifest.synced_items.push(item);
+        }
+        let devices = Arc::new(crate::device::DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap())));
+        let io: Arc<dyn crate::device_io::DeviceIO> = Arc::new(crate::device_io::MscBackend::new(root.path().to_path_buf()));
+        devices.handle_device_detected(root.path().to_path_buf(), manifest.clone(), io).await.unwrap();
+        let mut target: SyncTarget = devices.get_sync_target_for_device(&manifest.device_id).await.unwrap().into();
+        let mut delta = calculate_delta(&[], &Default::default());
+        delta.unchanged = manifest.synced_items.len();
+        let plan = crate::sync_plan::SyncPlan::from_delta(delta, &manifest).unwrap();
+        crate::sync_plan::compact_target(&mut target);
+        let operations = Arc::new(SyncOperationManager::new());
+        operations.create_operation("rbdb-warnings".into(), 0).await;
+        let (_, errors) = execute_plan_sync_with_settings(&plan, &target, ProviderSyncSource {
+            local_encoding_servers: HashSet::new(), provider: subsonic_provider("http://127.0.0.1:9".into()),
+            transcoding_profile: None, providers_by_server: HashMap::new(),
+        }, operations.clone(), "rbdb-warnings".into(), devices, None, crate::sync_performance::SyncPerformance::default()).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let (warnings, count) = operations.warning_details("rbdb-warnings", 0).unwrap();
+        assert_eq!(count, 102);
+        assert_eq!(warnings.len(), 102);
+        assert!(warnings[0].contains("Music/bad-0.mp3"));
+        assert!(warnings[101].contains("Music/bad-101.mp3"));
+        let operation = operations.get_operation("rbdb-warnings").await.unwrap();
+        assert_eq!(operation.warnings.len(), 101);
+        assert!(operation.warnings[100].contains("102 entries"));
+        assert_eq!(std::fs::metadata(root.path().join(".rockbox/database_idx.tcd")).unwrap().len(), 24);
+        assert_eq!(std::fs::read(root.path().join("Music/bad-101.mp3")).unwrap(), b"not audio");
+    }
+
+    #[tokio::test]
+    async fn rockbox_publication_rechecks_connection_after_preparation() {
+        for change in ["io", "reconnect", "cancel"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join(".rockbox")).unwrap();
+            let mut manifest = empty_manifest(); manifest.rockbox.enabled = true;
+            let devices = crate::device::DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+            let io: Arc<dyn crate::device_io::DeviceIO> = Arc::new(crate::device_io::MscBackend::new(root.path().to_path_buf()));
+            devices.handle_device_detected(root.path().to_path_buf(), manifest.clone(), io.clone()).await.unwrap();
+            let target: SyncTarget = devices.get_sync_target_for_device(&manifest.device_id).await.unwrap().into();
+            let operations = SyncOperationManager::new(); operations.create_operation("rbdb-guard".into(), 0).await;
+            let mut session = crate::rockbox::Session::open(root.path(), manifest.clone()).unwrap();
+            let prepared = session.prepare_update(&manifest, io.as_ref(), &operations, "rbdb-guard", &mut |_| Ok(())).await.unwrap();
+            match change {
+                "io" => devices.set_test_sync_io(root.path(), Arc::new(crate::device_io::MscBackend::new(root.path().to_path_buf()))).await,
+                "reconnect" => { devices.handle_device_removed(&root.path().to_path_buf()).await; devices.handle_device_detected(root.path().to_path_buf(), manifest, io).await.unwrap(); },
+                _ => { operations.request_cancel("rbdb-guard").await; },
+            }
+            assert!(publish_rockbox_update(prepared, &target, &devices, &operations, "rbdb-guard").await.is_err(), "{change}");
+            assert!(!root.path().join(".rockbox/database_idx.tcd").exists(), "{change}");
         }
     }
 
