@@ -69,6 +69,7 @@
 - [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) — Books and Podcasts setup, identity, browse, playback, sync, auto-fill, and evidence limits
 - [Audiobookshelf Integration Contract](./audiobookshelf-integration-contract.md) — Dated controlled-server observations and fixture contract
 - [Rockbox Database and Ratings](./rockbox-database.md) — Opt-in tagcache maintenance, Navidrome ratings, supported formats and recovery
+- [Rockbox Tagcache Data Flow](./rockbox-tagcache-data-flow.md) — Data sources, device and local file inventory, and sync sequence diagrams
 
 ### UI
 

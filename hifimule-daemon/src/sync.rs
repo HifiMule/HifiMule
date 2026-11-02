@@ -4590,6 +4590,31 @@ async fn execute_plan_sync_buffered(
             continue;
         }
         let staged = prepared;
+        let local_tags = if target.manifest.rockbox.enabled {
+            let probe_started = std::time::Instant::now();
+            let path = staged.staged_path.clone();
+            let progress = Arc::new(crate::device_music_scan::Progress::default());
+            let worker_progress = Arc::clone(&progress);
+            let mut worker = tokio::task::spawn_blocking(move ||
+                crate::device_music_scan::probe_path(&path, &worker_progress));
+            let result = tokio::select! {
+                result = &mut worker => result,
+                _ = wait_for_operation_cancellation(&operation_manager, &operation_id) => {
+                    progress.cancelled.store(true, Ordering::Relaxed);
+                    worker.await
+                }
+            };
+            crate::daemon_log!("[Rockbox] phase=local_probe elapsed_ms={} success={}", probe_started.elapsed().as_millis(), matches!(&result, Ok(Ok(_))));
+            match result {
+                Ok(Ok(tags)) => Some(tags),
+                _ => None, // Existing device fallback retains the per-track warning policy.
+            }
+        } else { None };
+        if operation_manager.is_cancelled(&operation_id).await {
+            staged.discard().await;
+            writer_failed = true;
+            continue;
+        }
         mark_operation_preparing_file(&operation_manager, &operation_id,
             &staged.add_item.name, staged.add_item.size_bytes).await;
         let t_write = std::time::Instant::now();
@@ -4741,6 +4766,14 @@ async fn execute_plan_sync_buffered(
                     let _ = operation_manager.request_cancel(&operation_id).await;
                     writer_failed = true;
                 } else {
+                    if let (Some(tags), Some(session)) = (local_tags, rockbox.as_mut()) {
+                        if let Ok(Some(path)) = device_io.metadata_path(&staged.rel_path).await {
+                            if let Ok(metadata) = std::fs::metadata(path) {
+                                let _ = session.accept_transferred_metadata(staged.rel_path.clone(),
+                                    synced_item.server_id.clone(), synced_item.jellyfin_id.clone(), metadata, tags);
+                            }
+                        }
+                    }
                     let warnings = folder_artwork.touch(
                         &synced_item, staged.add_item.artwork.clone(), &device_io, &provider,
                         &providers_by_server, &operation_manager, &operation_id, checkpoint,

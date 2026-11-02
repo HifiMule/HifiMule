@@ -118,8 +118,15 @@ pub async fn probe(io: &dyn DeviceIO, file: &FileEntry, progress: Arc<Progress>)
         staged = Some(temp);
         path
     };
-    let result = tokio::task::spawn_blocking(move || -> Result<Tags> {
+    tokio::task::spawn_blocking(move || {
         let _staged = staged;
+        probe_path(&path, &progress)
+    }).await?
+}
+
+/// Probe the final local artifact, shared by transfers and device scans.
+/// Call on a blocking worker and retain the file until that worker has joined.
+pub(crate) fn probe_path(path: &std::path::Path, progress: &Arc<Progress>) -> Result<Tags> {
         ffmpeg_next::init()?;
         let cancel = progress.clone();
         let offset = hifimule_daemon::source_audio::id3_prefixed_wave_offset(
@@ -186,10 +193,8 @@ pub async fn probe(io: &dyn DeviceIO, file: &FileEntry, progress: Arc<Progress>)
             codec,
             bitrate: u32::try_from(decoder.bit_rate()).ok().filter(|b| *b > 0),
         })
-    })
-    .await??;
-    Ok(result)
 }
+
 pub async fn scan(
     io: &dyn DeviceIO,
     folder: &str,

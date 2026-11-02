@@ -1,5 +1,8 @@
 # Rockbox database and ratings
 
+For data origins, a complete integration file inventory and diagrams, see
+[Rockbox tagcache: data sources and files](./rockbox-tagcache-data-flow.md).
+
 Device settings and the profile editor include a **Rockbox database** section.
 Both options start disabled. Profile defaults apply during device setup; they do
 not replace preferences on an existing device.

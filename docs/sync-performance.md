@@ -133,3 +133,22 @@ per wall second, staged bytes, queue depth and writer idle/write time. Compare
 workers `1`, `2`, `4` and automatic on representative MP3/AAC/FLAC selections;
 use total sync duration and validate the output. More workers may stop helping
 when network throughput, staging headroom or device writes become the bottleneck.
+
+## Rockbox database maintenance
+
+`[Rockbox]` diagnostics separate snapshot, preparation, encoding, rating import,
+rating backfill, backup and publication work. Preparation reports inspected and
+retained entries, accepted local metadata and device probes. Publication reports
+changed/unchanged file counts and output bytes. Local probe records report time
+and success. Database/backup I/O records report requested byte counts (OS caching may avoid physical reads); preparation also reports inspection/probe milliseconds. Phase durations include nested work: do not add them together.
+
+Transferred audio is probed locally after encoding/tag edits. Unchanged resident
+entries retain their metadata after filesystem checks. Database publication skips
+unchanged files, and a no-op run keeps the existing commit and RAM snapshot.
+Local metadata has a 64 MiB session budget; overflow falls back to device probing.
+
+Compare cold builds, 200-track incremental updates, unchanged runs and ratings-only
+updates separately. Restore equivalent starting states and report median phase
+times and probe/output counts over repeated runs. Physical-device performance has
+not been measured for this change; fixture tests establish behavior, not a promised
+speedup. The first build still scans resident audio with no valid metadata source.

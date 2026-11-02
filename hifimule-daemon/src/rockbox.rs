@@ -8,6 +8,22 @@ use std::{
     path::{Path, PathBuf},
 };
 
+struct Timing {
+    phase: &'static str,
+    started: std::time::Instant,
+}
+impl Timing {
+    fn new(phase: &'static str) -> Self {
+        crate::daemon_log!("[Rockbox] phase={} event=start", phase);
+        Self { phase, started: std::time::Instant::now() }
+    }
+}
+impl Drop for Timing {
+    fn drop(&mut self) {
+        crate::daemon_log!("[Rockbox] phase={} event=end elapsed_ms={}", self.phase, self.started.elapsed().as_millis());
+    }
+}
+
 const MAX_FILE: usize = 128 * 1024 * 1024;
 const MAX_TOTAL: usize = 512 * 1024 * 1024;
 // Rockbox TAG_MAXLEN = MAX_PATH (260) * 2; the codec keeps its wider legacy budget.
@@ -525,6 +541,7 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
         .take(MAX_FILE as u64 + 1)
         .read_to_end(&mut bytes).with_context(|| format!("Cannot read Rockbox file {}",path.display()))?;
     ensure!(bytes.len() <= MAX_FILE, "Rockbox file exceeds size limit");
+    crate::daemon_log!("[Rockbox] io=database_read bytes={}", bytes.len());
     Ok(bytes)
 }
 fn hash(bytes: &[u8]) -> String {
@@ -541,6 +558,7 @@ fn atomic_file(path: &Path, data: &[u8]) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().context("No parent")?)
         .with_context(|| format!("Cannot stage Rockbox file {}",path.display()))?;
     file.write_all(data).with_context(|| format!("Cannot write Rockbox file {}",path.display()))?;
+    crate::daemon_log!("[Rockbox] io=database_write bytes={}", data.len());
     file.as_file().sync_all().with_context(|| format!("Cannot flush Rockbox file {}",path.display()))?;
     file.persist(path).map_err(|e| anyhow::anyhow!(e.error))
         .with_context(|| format!("Cannot publish Rockbox file {}",path.display()))?;
@@ -558,6 +576,7 @@ fn backup_file(path: &Path, data: &[u8]) -> Result<()> {
         .create_new(true)
         .open(&stage).with_context(|| format!("Cannot stage Rockbox backup {}",path.display()))?;
     file.write_all(data).with_context(|| format!("Cannot write Rockbox backup {}",path.display()))?;
+    crate::daemon_log!("[Rockbox] io=backup_write bytes={}", data.len());
     file.sync_all().with_context(|| format!("Cannot flush Rockbox backup {}",path.display()))?;
     drop(file);
     std::fs::rename(stage, path).with_context(|| format!("Cannot publish Rockbox backup {}",path.display()))?;
@@ -588,6 +607,8 @@ struct Journal {
     prepared: bool,
     committed: bool,
     changes: Vec<Change>,
+    #[serde(default)]
+    unchanged: BTreeMap<String, Option<String>>,
 }
 fn cleanup_backup(dir: &Path, changes: &[Change]) -> Result<()> {
     let backup = dir.join(BACKUP);
@@ -623,6 +644,14 @@ fn recover(dir: &Path) -> Result<()> {
         journal.changes.len() <= 12 && journal.changes.iter().all(|c| db_filename(&c.name)),
         "Invalid Rockbox recovery filenames"
     );
+    ensure!(journal.unchanged.len() + journal.changes.len() <= 12
+        && journal.unchanged.keys().all(|name| db_filename(name)
+            && !journal.changes.iter().any(|c| &c.name == name)),
+        "Invalid Rockbox recovery dependencies");
+    for (name, expected) in &journal.unchanged {
+        ensure!(optional_bytes(&dir.join(name))?.as_deref().map(hash) == *expected,
+            "Rockbox dependency changed outside interrupted transaction: {}", name);
+    }
     for change in &journal.changes {
         let current = optional_bytes(&dir.join(&change.name))?
             .as_deref()
@@ -685,6 +714,7 @@ fn publish(
     files: &BTreeMap<String, Vec<u8>>,
     expected: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
+    let _timing = Timing::new("publication");
     RbDatabase::decode(files)?;
     recover(dir)?;
     let backup = dir.join(BACKUP);
@@ -700,10 +730,12 @@ fn publish(
     names.push("database_state.tcd".into());
     names.push(MASTER.into());
     let mut journal = Journal {
+        unchanged: BTreeMap::new(),
         prepared: false,
         committed: false,
         changes: Vec::new(),
     };
+    let mut unchanged = Vec::new();
     for name in names {
         let old = optional_bytes(&dir.join(&name))?;
         if let Some(expected) = expected {
@@ -712,15 +744,28 @@ fn publish(
                 "Rockbox database changed since sync started"
             );
         }
-        journal.changes.push(Change {
+        let change = Change {
             name: name.clone(),
             old: old.as_deref().map(hash),
             new: files.get(&name).map(|b| hash(b)),
-        });
+        };
+        if change.old == change.new { unchanged.push(change); }
+        else { journal.changes.push(change); }
     }
+    journal.unchanged = unchanged.iter().map(|c| (c.name.clone(), c.old.clone())).collect();
+    // The RAM snapshot is invalidated only when database contents change.
+    if journal.changes.iter().all(|c| c.name == "database_state.tcd") { return Ok(()); }
+    let verify_unchanged = || -> Result<()> {
+        for change in &unchanged {
+            ensure!(optional_bytes(&dir.join(&change.name))?.as_deref().map(hash) == change.old,
+                "Rockbox unchanged file changed during publication: {}", change.name);
+        }
+        Ok(())
+    };
     atomic_file(&dir.join(JOURNAL), &serde_json::to_vec(&journal)?)?;
     sync_dir(dir)?;
     let prepared = (|| -> Result<()> {
+        let _timing = Timing::new("backup");
         std::fs::create_dir(&backup)?;
         for change in &journal.changes {
             let old = optional_bytes(&dir.join(&change.name))?;
@@ -742,7 +787,11 @@ fn publish(
         recover(dir).context(format!("Rockbox backup preparation failed: {error}"))?;
         return Err(error);
     }
+    crate::daemon_log!("[Rockbox] changed_files={} unchanged_files={} output_bytes={}",
+        journal.changes.len(), unchanged.len(), journal.changes.iter().filter_map(|c| files.get(&c.name)).map(Vec::len).sum::<usize>());
     let result = (|| -> Result<()> {
+        let _timing = Timing::new("write_and_verify");
+        verify_unchanged()?;
         for change in &journal.changes {
             ensure!(
                 optional_bytes(&dir.join(&change.name))?
@@ -758,6 +807,7 @@ fn publish(
             }
         }
         sync_dir(dir)?;
+        verify_unchanged()?;
         ensure!(
             load(dir)?
                 .context("Missing published Rockbox database")?
@@ -873,7 +923,17 @@ fn owned(manifest: &crate::device::DeviceManifest) -> Vec<OwnedPath> {
         })
         .collect()
 }
+struct TransferredMetadata {
+    server: Option<String>,
+    track: String,
+    size: u64,
+    modified: std::time::SystemTime,
+    tags: crate::device_music_scan::Tags,
+}
 pub struct Session {
+    transferred: HashMap<String, TransferredMetadata>,
+    transferred_bytes: usize,
+
     dir: PathBuf,
     db: RbDatabase,
     before: crate::device::DeviceManifest,
@@ -897,14 +957,30 @@ impl PreparedUpdate {
         tokio::task::spawn_blocking(move || {
             publish(&self.dir, &self.files, Some(&self.original))
                 .with_context(|| format!("Cannot publish Rockbox database in {}",self.dir.display()))?;
-            atomic_file(&self.dir.join(OWNERSHIP), &self.owners)?;
+            if optional_bytes(&self.dir.join(OWNERSHIP))?.as_deref() != Some(self.owners.as_slice()) {
+                atomic_file(&self.dir.join(OWNERSHIP), &self.owners)?;
+            }
             sync_dir(&self.dir)
         })
         .await?
     }
 }
 impl Session {
+    pub(crate) fn accept_transferred_metadata(&mut self, path: String, server: Option<String>, track: String,
+        metadata: std::fs::Metadata, tags: crate::device_music_scan::Tags) -> Result<()> {
+        let bytes = [&tags.title, &tags.artist, &tags.album, &tags.album_artist, &tags.genre,
+            &tags.composer, &tags.comment, &tags.grouping, &tags.codec, &track, &path]
+            .iter().map(|s| s.len()).sum::<usize>() + server.as_ref().map_or(0, String::len)
+            + std::mem::size_of::<TransferredMetadata>() + 128;
+        if bytes > 64 * 1024 * 1024 - self.transferred_bytes { return Ok(()); }
+        self.transferred_bytes += bytes;
+        self.transferred.insert(path, TransferredMetadata {
+            server, track, size: metadata.len(), modified: metadata.modified()?, tags,
+        });
+        Ok(())
+    }
     pub fn open(root: &Path, before: crate::device::DeviceManifest) -> Result<Self> {
+        let _timing = Timing::new("snapshot");
         before.rockbox.validate()?;
         let dir = mounted_dir(root)?;
         let files = load_files(&dir)?;
@@ -960,7 +1036,10 @@ impl Session {
             }
         }
         if before.rockbox.enabled {
-            atomic_file(&dir.join(OWNERSHIP), &serde_json::to_vec(&previous)?)?;
+            let owners = serde_json::to_vec(&previous)?;
+            if optional_bytes(&dir.join(OWNERSHIP))?.as_deref() != Some(owners.as_slice()) {
+                atomic_file(&dir.join(OWNERSHIP), &owners)?;
+            }
             sync_dir(&dir)?;
         }
         let mut by_path = HashMap::new();
@@ -987,6 +1066,8 @@ impl Session {
                 .or_insert(Some(source));
         }
         Ok(Self {
+            transferred: HashMap::new(),
+            transferred_bytes: 0,
             dir,
             db,
             before,
@@ -1020,6 +1101,7 @@ impl Session {
         cancel: &crate::sync::SyncOperationManager,
         operation: &str,
     ) -> Result<Vec<String>> {
+        let _timing = Timing::new("rating_import");
         let mut warnings = Vec::new();
         // Resolve retryable intents before maintenance replaces the admitted snapshot.
         db.conn.lock().unwrap().execute(
@@ -1236,6 +1318,7 @@ impl Session {
         operation: &str,
         warn: &mut (dyn FnMut(String) -> Result<()> + Send),
     ) -> Result<Option<PreparedUpdate>> {
+        let _timing = Timing::new("rating_backfill");
         if !after.rockbox.import_ratings { return Ok(prepared); }
         ensure!(virtual_path(&self.before.rockbox.path_prefix)? == virtual_path(&after.rockbox.path_prefix)?, "Rockbox prefix changed during sync; retry");
         if !self.original.contains_key(MASTER) && prepared.is_none() { return Ok(None); }
@@ -1350,8 +1433,9 @@ impl Session {
         let update = prepared.as_mut().unwrap();
         let master = update.files.get_mut(MASTER).context("Missing Rockbox master")?;
         let slots = if database.version == 15 {22} else {23};
-        // Decoding drops deleted rows; a rating-only patch must retain disk row offsets.
-        let disk_rows = if ratings_only {
+        // Decoding drops deleted rows. Both ratings-only and unchanged maintenance
+        // can retain the original serialization, so always map the actual candidate rows.
+        let disk_rows = {
             let count = usize::try_from(word(master,8,database.big)?).context("Invalid Rockbox row count")?;
             ensure!(master.len() == 24 + count * (slots + 1) * 4, "Rockbox master changed during rating lookup");
             let mut rows = Vec::new();
@@ -1359,7 +1443,7 @@ impl Session {
                 if word(master,24 + index * (slots + 1) * 4 + slots * 4,database.big)? & 1 == 0 { rows.push(index); }
             }
             rows
-        } else { (0..database.entries.len()).collect() };
+        };
         for (index,rating) in seeds.values() {
             let index = disk_rows.get(*index).context("Rockbox rows changed during rating lookup")?;
             let offset = 24 + index * (slots + 1) * 4 + physical(16,database.version) * 4;
@@ -1398,6 +1482,12 @@ impl Session {
         operation: &str,
         warn: &mut (dyn FnMut(String) -> Result<()> + Send),
     ) -> Result<PreparedUpdate> {
+        let _timing = Timing::new("prepare");
+        let mut local_probes = 0usize;
+        let mut device_probes = 0usize;
+        let mut retained = 0usize;
+        let mut inspection_time = std::time::Duration::ZERO;
+        let mut probe_time = std::time::Duration::ZERO;
         let root = self.dir.parent().context("Missing device root")?.canonicalize()
             .context("Cannot inspect Rockbox device root")?;
         let mut old_by_source: HashMap<(Option<String>, String), Vec<&OwnedPath>> = HashMap::new();
@@ -1495,6 +1585,7 @@ impl Session {
                 );
                 candidates.into_iter().next()
             };
+            let inspection_started = std::time::Instant::now();
             let inspected = async {
                 let path = io.metadata_path(&local).await
                     .with_context(|| format!("Cannot locate Rockbox audio {local}"))?
@@ -1510,6 +1601,7 @@ impl Session {
                     .min(i32::MAX as u64) as i32;
                 Ok::<_,anyhow::Error>((metadata,mtime))
             }.await;
+            inspection_time += inspection_started.elapsed();
             let (metadata,mtime) = match inspected {
                 Ok(value) => value,
                 Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
@@ -1527,12 +1619,18 @@ impl Session {
                 },
                 Err(error) => return Err(error),
             };
-            if previous_items.get(item.local_path.as_str()).is_some_and(|old| *old == item)
+            if !self.transferred.contains_key(&local)
+                && previous_items.get(item.local_path.as_str()).is_some_and(|old| *old == item)
                 && self.source_owns(&local,&item.server_id,&item.jellyfin_id)
                 && index.is_some_and(|i| self.db.entries[i].numbers[20].abs_diff(mtime) <= 1) {
+                retained += 1;
                 continue;
             }
-            let tags = match crate::device_music_scan::probe(
+            let transferred = self.transferred.remove(&local).filter(|cached|
+                cached.server == item.server_id && cached.track == item.jellyfin_id
+                && cached.size == metadata.len() && metadata.modified().ok() == Some(cached.modified));
+            let probe_started = std::time::Instant::now();
+            let probed = if let Some(cached) = transferred { local_probes += 1; Ok(cached.tags) } else { device_probes += 1; crate::device_music_scan::probe(
                 io,
                 &crate::device_io::FileEntry {
                     path: local.clone(),
@@ -1541,8 +1639,9 @@ impl Session {
                 },
                 std::sync::Arc::new(crate::device_music_scan::Progress::default()),
             )
-            .await
-            {
+            .await };
+            probe_time += probe_started.elapsed();
+            let tags = match probed {
                 Ok(tags) => tags,
                 Err(error) => {
                     let missing = if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
@@ -1651,13 +1750,21 @@ impl Session {
             .enumerate()
             .filter_map(|(i, e)| (!removed.contains(&i)).then_some(e))
             .collect();
-        self.db.commit = self.db.commit.saturating_add(1);
+        let changed = !removed.is_empty() || !self.refreshed_sources.is_empty();
+        if changed {
+            self.db.commit = self.db.commit.saturating_add(1);
+        }
         ensure!(
             !cancel.is_cancelled(operation).await,
             "Rockbox update cancelled"
         );
         let dir = self.dir.clone();
-        let files = self.db.encode()?;
+        crate::daemon_log!("[Rockbox] inspected={} retained={} local_metadata={} device_probes={} inspection_ms={} probe_ms={}",
+            after.synced_items.len(), retained, local_probes, device_probes, inspection_time.as_millis(), probe_time.as_millis());
+        let _encoding = Timing::new("encode");
+        let files = if !changed && self.original.contains_key(MASTER) {
+            load_files(&self.dir)?.context("Rockbox database disappeared")?
+        } else { self.db.encode()? };
         let original = self.original.clone();
         let mut owners = owned(after);
         for previous in &self.previous {
@@ -2051,6 +2158,84 @@ mod tests {
         }
     }
     #[test]
+    fn rockbox_subset_recovery_preserves_evidence_when_unchanged_dependency_changes() {
+        for committed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path();
+            let mut db = one(); let original = db.encode().unwrap(); save(dir, &original);
+            db.entries[0].numbers[16] = 10;
+            let updated = db.encode().unwrap();
+            std::fs::create_dir(dir.join(BACKUP)).unwrap();
+            std::fs::write(dir.join(BACKUP).join(MASTER), &original[MASTER]).unwrap();
+            std::fs::write(dir.join(MASTER), &updated[MASTER]).unwrap();
+            let unchanged = original.iter().filter(|(name, _)| name.as_str() != MASTER)
+                .map(|(name, bytes)| (name.clone(), Some(hash(bytes)))).collect();
+            let journal = Journal {
+                prepared: true, committed, unchanged,
+                changes: vec![Change { name: MASTER.into(), old: Some(hash(&original[MASTER])), new: Some(hash(&updated[MASTER])) }],
+            };
+            std::fs::write(dir.join(JOURNAL), serde_json::to_vec(&journal).unwrap()).unwrap();
+            std::fs::write(dir.join("database_0.tcd"), b"external change").unwrap();
+            assert!(recover(dir).is_err());
+            assert_eq!(std::fs::read(dir.join(MASTER)).unwrap(), updated[MASTER]);
+            assert!(dir.join(JOURNAL).exists());
+            assert_eq!(std::fs::read(dir.join(BACKUP).join(MASTER)).unwrap(), original[MASTER]);
+            std::fs::write(dir.join("database_0.tcd"), &original["database_0.tcd"]).unwrap();
+            recover(dir).unwrap();
+            assert_eq!(std::fs::read(dir.join(MASTER)).unwrap(), if committed {updated[MASTER].clone()} else {original[MASTER].clone()});
+            assert!(!dir.join(JOURNAL).exists());
+        }
+    }
+
+    #[test]
+    fn rockbox_selective_publication_preserves_string_timestamps_and_noop_state() {
+        for version in [15, 16] {
+            for big in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut db = one(); db.version = version; db.big = big;
+                let files = db.encode().unwrap(); save(root.path(), &files);
+                let string = root.path().join("database_0.tcd");
+                let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+                std::fs::File::options().write(true).open(&string).unwrap().set_modified(time).unwrap();
+                let before = std::fs::metadata(&string).unwrap().modified().unwrap();
+                std::fs::write(root.path().join("database_state.tcd"), b"ram").unwrap();
+                publish(root.path(), &files, None).unwrap();
+                assert!(root.path().join("database_state.tcd").exists());
+                assert!(!root.path().join(JOURNAL).exists());
+                db.entries[0].numbers[16] = 10;
+                publish(root.path(), &db.encode().unwrap(), None).unwrap();
+                assert_eq!(std::fs::metadata(&string).unwrap().modified().unwrap(), before);
+                assert!(!root.path().join("database_state.tcd").exists());
+                assert_eq!(load(root.path()).unwrap().unwrap().entries[0].numbers[16], 10);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn rockbox_local_transfer_metadata_avoids_device_probe_and_preserves_noop_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".rockbox"); std::fs::create_dir(&dir).unwrap();
+        write_audio(root.path(), "source.wav");
+        let tags = crate::device_music_scan::probe_path(&root.path().join("source.wav"),
+            &std::sync::Arc::new(crate::device_music_scan::Progress::default())).unwrap();
+        std::fs::create_dir(root.path().join("Music")).unwrap();
+        let destination = root.path().join("Music/song.mp3");
+        std::fs::write(&destination, b"not probeable audio").unwrap();
+        let mut manifest = crate::device::DeviceManifest::default();
+        manifest.rockbox.enabled = true; manifest.synced_items = vec![item()];
+        let io = crate::device_io::MscBackend::new(root.path().to_path_buf());
+        let manager = crate::sync::SyncOperationManager::new();
+        let mut session = Session::open(root.path(), manifest.clone()).unwrap();
+        session.accept_transferred_metadata("Music/song.mp3".into(), item().server_id,
+            item().jellyfin_id, std::fs::metadata(&destination).unwrap(), tags).unwrap();
+        assert!(update_session(&mut session, &manifest, &io, &manager, "test").await.unwrap().is_empty());
+        let first = load_files(&dir).unwrap().unwrap();
+        assert_eq!(load(&dir).unwrap().unwrap().entries.len(), 1);
+        let mut session = Session::open(root.path(), manifest.clone()).unwrap();
+        assert!(update_session(&mut session, &manifest, &io, &manager, "test").await.unwrap().is_empty());
+        assert_eq!(load_files(&dir).unwrap().unwrap(), first);
+    }
+
+    #[test]
     fn rockbox_rejects_corrupt_master_size_and_pending_numeric_commit() {
         for at in [4, 20] {
             let mut files = one().encode().unwrap();
@@ -2097,6 +2282,7 @@ mod tests {
         atomic_file(
             &dir.join(JOURNAL),
             &serde_json::to_vec(&Journal {
+                unchanged: BTreeMap::new(),
                 prepared: true,
                 committed: false,
                 changes,
@@ -2117,6 +2303,7 @@ mod tests {
         atomic_file(
             &dir.join(JOURNAL),
             &serde_json::to_vec(&Journal {
+                unchanged: BTreeMap::new(),
                 prepared: true,
                 committed: true,
                 changes,
@@ -2142,6 +2329,7 @@ mod tests {
         atomic_file(
             &dir.join(JOURNAL),
             &serde_json::to_vec(&Journal {
+                unchanged: BTreeMap::new(),
                 prepared: true,
                 committed: false,
                 changes,
@@ -2167,6 +2355,7 @@ mod tests {
         atomic_file(
             &dir.join(JOURNAL),
             &serde_json::to_vec(&Journal {
+                unchanged: BTreeMap::new(),
                 prepared: false,
                 committed: false,
                 changes,
@@ -2359,19 +2548,37 @@ mod tests {
         use mockito::Matcher;
         let mut server = mockito::Server::new_async().await;
         let ping = server.mock("GET","/rest/ping.view").match_query(Matcher::Any)
-            .with_body(r#"{"subsonic-response":{"status":"ok","type":"navidrome"}}"#).expect(4).create_async().await;
+            .with_body(r#"{"subsonic-response":{"status":"ok","type":"navidrome"}}"#).expect(8).create_async().await;
         let page = server.mock("GET","/rest/search3.view").match_query(Matcher::AllOf(vec![Matcher::UrlEncoded("query".into(),"".into()),Matcher::UrlEncoded("songOffset".into(),"0".into())]))
-            .with_body(r#"{"subsonic-response":{"status":"ok","searchResult3":{"song":[{"id":"track","userRating":4}]}}}"#).expect(4).create_async().await;
+            .with_body(r#"{"subsonic-response":{"status":"ok","searchResult3":{"song":[{"id":"track","userRating":4}]}}}"#).expect(8).create_async().await;
         let writes = server.mock("GET","/rest/setRating.view").match_query(Matcher::Any).expect(0).create_async().await;
         let reads = server.mock("GET","/rest/getSong.view").match_query(Matcher::Any).expect(0).create_async().await;
-        for version in [15,16] { for big in [false,true] {
-            let (root,db,manifest,providers) = backfill_fixture(&server,version,big,0);
+        for maintenance in [false, true] { for version in [15,16] { for big in [false,true] {
+            let (root,db,mut manifest,providers) = backfill_fixture(&server,version,big,0);
             let dir = root.path().join(".rockbox");
+            manifest.rockbox.enabled = maintenance;
+            if maintenance {
+                write_audio(root.path(), "Music/song.mp3");
+                let mtime = std::fs::metadata(root.path().join("Music/song.mp3")).unwrap()
+                    .modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().min(i32::MAX as u64) as i32;
+                let mut files = load_files(&dir).unwrap().unwrap();
+                let slots = if version == 15 {22} else {23};
+                let offset = 24 + (slots + 1)*4 + physical(20,version)*4;
+                files.get_mut(MASTER).unwrap()[offset..offset+4]
+                    .copy_from_slice(&if big {mtime.to_be_bytes()} else {mtime.to_le_bytes()});
+                save(&dir, &files);
+            }
             let original = load_files(&dir).unwrap().unwrap();
-            let session = Session::open(root.path(),manifest.clone()).unwrap();
+            let mut session = Session::open(root.path(),manifest.clone()).unwrap();
             let cancel = crate::sync::SyncOperationManager::new();
             assert!(session.import_ratings(&db,&providers,&cancel,"test").await.unwrap().is_empty());
-            let update = session.prepare_rating_backfills(None,&manifest,&db,&providers,&cancel,"test",&mut |_| panic!("unexpected warning")).await.unwrap().unwrap();
+            let prepared = if maintenance {
+                let io = crate::device_io::MscBackend::new(root.path().to_path_buf());
+                let update = session.prepare_update(&manifest, &io, &cancel, "test", &mut |_| panic!("unexpected warning")).await.unwrap();
+                assert_eq!(update.files, original, "no-op retains tombstone serialization");
+                Some(update)
+            } else { None };
+            let update = session.prepare_rating_backfills(prepared,&manifest,&db,&providers,&cancel,"test",&mut |_| panic!("unexpected warning")).await.unwrap().unwrap();
             // There is deliberately no audio file: ratings-only must not probe it.
             for (name,bytes) in &original {
                 let mut expected = bytes.clone();
@@ -2389,7 +2596,7 @@ mod tests {
             assert!(next.prepare_rating_backfills(None,&manifest,&db,&providers,&cancel,"test",&mut |_| panic!("unexpected warning")).await.unwrap().is_none());
             assert_eq!(load(&dir).unwrap().unwrap().entries[0].numbers[16],8);
             assert_eq!(db.conn.lock().unwrap().query_row("SELECT count(*) FROM rockbox_rating_backfills",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-        }}
+        }}}
         ping.assert_async().await; page.assert_async().await; writes.assert_async().await; reads.assert_async().await;
     }
     #[tokio::test]
@@ -3812,6 +4019,7 @@ mod tests {
             atomic_file(
                 &dir.join(JOURNAL),
                 &serde_json::to_vec(&Journal {
+                unchanged: BTreeMap::new(),
                     prepared: false,
                     committed: false,
                     changes,
