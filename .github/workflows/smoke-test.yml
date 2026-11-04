@@ -64,12 +64,14 @@ jobs:
             Tee-Object smoke.log
           exit $LASTEXITCODE
 
-      - name: Upload sanitized lifecycle evidence
+      - name: Upload Windows smoke and installer evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: smoke-log-windows
-          path: ./installers/smoke.log
+          path: |
+            ./installers/smoke.log
+            ./installers/hifimule-msi-install.log
           if-no-files-found: ignore
 
   smoke-linux:
