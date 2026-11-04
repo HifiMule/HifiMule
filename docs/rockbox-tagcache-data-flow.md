@@ -15,7 +15,7 @@ locations are unsupported.
 
 ```mermaid
 flowchart TD
-    S[Media server] -->|Normal media sync: download or transcode| A
+    S[Media server] -->|Normal media sync: download or transcode| P
     subgraph Device[Mounted device]
         A[Audio files and embedded tags]
         M[HifiMule manifest]
@@ -28,6 +28,7 @@ flowchart TD
         P[Final locally staged audio]
         L[Local SQLite: rating state and source accounts]
     end
+    P -->|Verified device write| A
     P -->|Successful transfer tags, duration and bitrate| B
     A -->|Resident fallback tags and destination timestamps| B
     M -->|Managed paths, source IDs and settings| B
@@ -37,7 +38,7 @@ flowchart TD
     L -->|Send pending numeric rating edits| V[Original Navidrome server and account]
     V -->|Fetch server ratings for eligible unrated tracks| B
     L -->|Baselines, pending edits and backfill intents| B
-    B -->|Validate and publish with recovery journal| N
+    B -->|Validate; journal and publish changed files only| N
 ```
 
 The media server is an upstream source of downloaded audio, but tagcache
@@ -47,7 +48,7 @@ another probe.
 
 | Data written or retained | Immediate source | How it is used |
 | --- | --- | --- |
-| Artist, album, genre, title, composer, comment, album artist, grouping | Final local audio tags for transfers; device audio tags for resident fallback | Read through `device_music_scan::probe`; missing text becomes `<Untagged>`. New text is bounded to 520 UTF-8 bytes. |
+| Artist, album, genre, title, composer, comment, album artist, grouping | Final local audio tags for transfers; device audio tags for resident fallback | Read through `probe_path` locally or `probe` on the device; missing text becomes `<Untagged>`. New text is bounded to 520 UTF-8 bytes. |
 | Year, disc number, track number | Final local audio tags for transfers; device audio tags for resident fallback | Parsed into numeric fields; missing values become zero. |
 | Bitrate and duration | Final local audio probe or resident device probe | Stored as kbps and milliseconds. |
 | File modification time | Device filesystem | Stored in the index and used when deciding whether to refresh a track. |
@@ -57,7 +58,7 @@ another probe.
 | Initial rating for an eligible unrated track | Original Navidrome server/account | Server 1–5 becomes Rockbox 2, 4, 6, 8 or 10. Existing positive device ratings are preserved. |
 | Device rating edits sent to Navidrome | Existing device tagcache, compared with local SQLite state | Rockbox 1–10 becomes server 1–5, rounding upward. Initial zero is unrated; zero after an observed positive rating is a clear. |
 | Existing unmanaged tracks and their metadata | Existing device tagcache | Preserved, including tracks belonging to other storage prefixes. |
-| Format, byte order and build counters | Existing tagcache, or settings for a new database | Existing format and byte order are retained; build metadata is regenerated. |
+| Format, byte order and build counters | Existing tagcache, or settings for a new database | Existing format and byte order are retained; changed builds regenerate build metadata, while unchanged maintenance preserves the original bytes and commit counter. |
 
 Rating lookups use bounded server pages. Source IDs, ownership and account checks
 prevent updates from being sent to a different track or account. Local SQLite
@@ -88,11 +89,11 @@ the sync layout.
 | `.rockbox/database_7.tcd` | Read/write album artist strings. |
 | `.rockbox/database_8.tcd` | Read/write grouping strings. |
 | `.rockbox/database_12.tcd` | Read/write canonical artist strings, **Rockbox 4.0 only**. |
-| `.rockbox/database_state.tcd` | Existing RAM database snapshot: fingerprinted and backed up if present, then invalidated during replacement to avoid stale state. |
+| `.rockbox/database_state.tcd` | Existing RAM database snapshot: fingerprinted and backed up if present, then invalidated only when database contents change. Unchanged maintenance retains it. |
 | `.rockbox/database_tmp.tcd` | Pending Rockbox database work. Its presence blocks admission; commit the work on the player first. |
 | `.rockbox/database_changelog.txt` | Pending Rockbox changes. A nonempty file blocks admission; an empty file is allowed. |
 | `.rockbox/.hifimule-rbdb-managed.json` | HifiMule ownership evidence: previous managed paths, source identities and prefixes. Supports safe removal and history preservation across moves or interrupted syncs. Updated after successful database publication. |
-| `.rockbox/.hifimule-rbdb-journal.json` | Transaction state and old/new file hashes. Written for publication and read during recovery; removed after cleanup. |
+| `.rockbox/.hifimule-rbdb-journal.json` | Transaction state and old/new file hashes. Written only when database files change and read during recovery; removed after cleanup. Includes hashes for unchanged files to detect conflicts. |
 | `.rockbox/.hifimule-rbdb-backup/<filename>` | Prior versions of files affected by publication, including the master, string files and RAM snapshot when present. Used for rollback and removed after recovery/commit cleanup. |
 | `.rockbox/.hifimule-rbdb-backup/.hifimule-rbdb-stage-<filename>` | Temporary backup writes, renamed into completed backup files after flushing. Recovery handles interrupted staging. |
 | Temporary files with generated names beside their destination | Used by `atomic_file` to write and flush a complete file before replacing the destination. These are implementation artifacts, not additional Rockbox inputs. |
@@ -133,23 +134,32 @@ sequenceDiagram
         H->>S: Retry/send pending rating edits and verify by readback
         H->>L: Record confirmations or retain pending edits
     end
-    H->>D: Run normal media sync
+    H->>H: Stage final audio after encoding/tag edits
+    opt Database maintenance enabled
+        H->>H: Probe local audio before copying
+    end
+    H->>D: Run verified media transfers and update manifest
+    H->>H: Retain bounded metadata for successful transfers
     Note over H,D: Finalization requires no sync errors and no cancellation
     opt Database maintenance enabled
         H->>H: Reuse accepted local transfer metadata
-        H->>D: Probe remaining missing/changed resident entries
+        H->>D: Inspect managed paths and validate metadata reuse
+        H->>D: Probe entries needing metadata without a valid local result
         H->>H: Merge metadata with retained source history
     end
     opt Rating sync enabled and a database is available
         H->>S: Fetch ratings for eligible unrated tracks
         H->>L: Persist backfill intents before device writes
     end
-    opt A database update is prepared
+    opt Database bytes change
         H->>D: Recheck connection and original file hashes
-        H->>D: Journal and back up prior files
-        H->>D: Publish strings, invalidate RAM snapshot, publish master last
-        H->>D: Verify, commit, clean up and save ownership evidence
-        H->>L: Confirm published rating backfills
+        H->>D: Journal hashes and back up affected files only
+        H->>D: Publish changed strings, invalidate RAM snapshot, publish changed master last
+        H->>D: Verify changed and unchanged files, commit and clean up
+    end
+    opt Prepared update completed successfully, including unchanged database
+        H->>D: Save ownership evidence if changed
+        H->>L: Confirm any published rating backfills
     end
 ```
 
@@ -184,7 +194,8 @@ use the normal device fallback. Actual destination size and modification time
 validate reuse. Local staging timestamps are never stored as device timestamps.
 
 Resident entries still undergo filesystem and ownership checks to detect external
-changes. A fully unchanged database keeps its original bytes and commit counter.
+changes. A fully unchanged database keeps its original bytes and commit counter and creates
+no publication journal or backup. Ownership evidence is written only if it changes.
 Publication backs up and replaces byte-changed files only, checks unchanged files
 for conflicts, and invalidates the RAM snapshot only for a database change.
 Ratings-only updates therefore leave string files untouched. Recovery remains
@@ -192,3 +203,9 @@ on the device with the master published last.
 
 An empty 40,000-track managed database with 200 local transfer results still needs
 roughly 39,800 resident probes. No persistent metadata cache is introduced.
+
+`[Rockbox]` logs report local probe time/success, inspected and retained entries,
+accepted local metadata, device probe counts, and inspection/probe durations.
+Publication reports changed and unchanged file counts and output bytes when files
+are replaced. See [maintenance diagnostics](./sync-performance.md#rockbox-database-maintenance)
+for phase timings and guidance on comparing initial and incremental syncs.

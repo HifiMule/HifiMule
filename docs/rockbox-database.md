@@ -34,6 +34,31 @@ firmware-visible prefix explicitly: HifiMule does not guess another volume from
 a matching filename suffix. Ordinary prefixes such as `/foo/bar` work as well.
 Entries under other prefixes remain untouched.
 
+## Faster database maintenance
+
+HifiMule builds and updates the tagcache on your computer as part of sync,
+avoiding the long database build on the player. Incremental updates reduce device
+reads and writes:
+
+- Newly transferred audio is probed locally after encoding and tag edits. Its
+  metadata is accepted only after a successful device write and manifest update,
+  and reuse is checked against the destination file's size and modification time.
+- Unchanged managed tracks retain their existing tags after filesystem, manifest
+  and ownership checks, without rereading their audio metadata.
+- Only database files whose bytes change are backed up and replaced. An unchanged
+  database retains its original bytes, commit counter and RAM snapshot, and needs
+  no publication journal. Ratings-only updates leave the string files untouched.
+
+The first build still scans resident audio that has no reusable metadata. Transfer
+metadata is held only for the current sync, with a 64 MiB limit; unavailable or
+excess metadata falls back to probing the device. There is no persistent audio
+metadata cache. Even an unchanged sync still checks files and ownership, so it is
+not free of device I/O.
+
+See [Rockbox maintenance diagnostics](./sync-performance.md#rockbox-database-maintenance)
+for log counters and how to compare initial builds, incremental updates and
+unchanged syncs.
+
 ## Ratings policy
 
 Enable **Gather runtime data** in Rockbox so ratings are stored in the database.
@@ -75,12 +100,14 @@ pages, rather than making a request for every unrated device track.
 
 Database maintenance preserves ratings, play counts, play time, last-played and
 resume fields for retained tracks. A replacement of the same source track can
-carry these values to its new path. Build metadata and file timestamps are
-regenerated. Missing managed paths are removed only with recorded ownership;
+carry these values to its new path. Changed database builds regenerate build metadata; unchanged runs retain the
+original serialization and commit counter. Audio modification times come from
+the destination device, never from temporary staging files. Missing managed paths are removed only with recorded ownership;
 HifiMule does not infer ownership from a folder or a track title.
 
-Before publishing, HifiMule validates the complete database, saves prior files,
-and journals replacement with the master index last. Handled errors roll back;
+Before publishing, HifiMule validates the complete database, backs up only files
+affected by the update, and journals replacement with the master index last.
+Unchanged database files are checked for conflicts but are not rewritten. Handled errors roll back;
 interrupted transactions recover on the next enabled sync. Publication spans
 multiple files, so an interrupted device should reconnect to HifiMule before
 being used in Rockbox. Recovery preserves an externally changed file and reports

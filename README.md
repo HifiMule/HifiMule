@@ -28,6 +28,7 @@ HifiMule is a desktop application that bridges self-hosted media servers and por
 - **Resumable & cancellable transfers** — Interrupted syncs pick up where they left off, and a running sync can be cancelled cleanly. The sync preview explains *why* each file is added or removed.
 - **Auto-sync** — Devices can sync automatically the moment they're connected.
 - **Broad device support** — Built-in profiles for Rockbox players, Garmin smartwatches, modern DAPs, Sony Walkman, generic MP3 players, car USB sticks, and audiobook/podcast devices, plus MTP phones. Transcoding profiles convert audio to a device-compatible format only when needed.
+- **Fast Rockbox database sync** — Build and update the Rockbox tagcache on your computer as part of media sync, much faster than building it on the player. Incremental updates reuse existing metadata and skip unchanged database files while preserving playback history and ratings. When used with Navidrome, it synchronize ratings both ways.
 - **Device management** — Initialize and edit devices, inspect storage, and configure name, icon, transcoding profile, music folder, and a separate playlist folder.
 - **Manifest tracking** — A lossless `.hifimule.json.zst` manifest tracks synced files with repair, prune, and relink tools. Legacy JSON migrates on successful writes. [Display manifest contents](docs/development-guide.md#inspect-the-manifest) with the read-only Node.js inspector.
 - **Scrobble bridge** — Reads Rockbox playback logs and reports listening history back to your media server.
@@ -195,6 +196,19 @@ HifiMule/
 5. **Plug in** — Connect your portable device, initialize it, and configure its folders and transcoding profile
 6. **Sync** — HifiMule calculates deltas and transfers only what's needed; syncs can resume or be cancelled
 7. **Listen on the go** — Play music on your device; scrobble logs sync back to your media server
+
+### Rockbox database sync
+
+Skip the long database build on your player: HifiMule creates or updates the Rockbox tagcache on your computer after a successful media sync. It reads newly transferred audio's metadata locally and reuses existing metadata for unchanged tracks, making subsequent updates faster too. Existing indexed tracks outside HifiMule's management, playback history, resume positions, and ratings are preserved.
+
+1. Connect your Rockbox player as a mounted USB mass-storage device.
+2. Open device settings and enable **Rockbox database → Maintain database after sync** (off by default).
+3. For a new database, select your Rockbox version (**4.0** or **3.15**) and the storage volume's path prefix.
+4. Sync normally. HifiMule maintains the database even when no audio transfers are needed; check the sync result before ejecting.
+
+Optionally enable **Sync ratings when supported** to exchange ratings with Navidrome. Rockbox must already be installed in the standard `.rockbox` location; MTP connections and custom database paths are unsupported. A first build still needs to scan existing audio that has no reusable metadata.
+
+See the [Rockbox database and ratings guide](docs/rockbox-database.md) for storage prefixes, rating behavior, and recovery details.
 
 ### Listening in HifiMule
 
