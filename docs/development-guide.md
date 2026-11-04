@@ -1,6 +1,6 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-11-01 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-11-04 | **Scan depth:** Deep
 
 ---
 
@@ -13,17 +13,16 @@
 
 ### macOS
 ```bash
-brew install pkg-config libmtp ffmpeg
-# For universal builds, the CI also merges arm64+x86_64 libmtp dylibs (see release.yml)
+rtk brew install pkg-config libmtp
 ```
 
 ### Ubuntu / Linux
 ```bash
-sudo apt-get install -y \
+rtk sudo apt-get install -y \
   libgtk-3-dev libxdo-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev \
   libappindicator3-dev librsvg2-dev libfuse2 libmtp-dev libasound2-dev \
   libpulse-dev libdbus-1-dev build-essential clang libclang-dev libc6-dev \
-  nasm curl xz-utils pkg-config binutils patchelf
+  curl tar xz-utils pkg-config binutils patchelf
 ```
 
 The development packages provide the `pkg-config` metadata used by Rust and
@@ -32,7 +31,7 @@ The development packages provide the `pkg-config` metadata used by Rust and
 ### Fedora 44 x86_64
 
 ```bash
-rtk sudo dnf install gcc gcc-c++ make clang clang-devel glibc-devel nasm \
+rtk sudo dnf install gcc gcc-c++ make clang clang-devel glibc-devel \
   gtk3-devel webkit2gtk4.1-devel libsoup3-devel libappindicator-gtk3-devel \
   libxdo-devel libmtp-devel alsa-lib-devel pulseaudio-libs-devel dbus-devel \
   pkgconf-pkg-config curl tar xz binutils patchelf rpm cpio
@@ -53,17 +52,14 @@ and the distinction between tray menus and in-window right-click menus.
 
 ### Windows
 - Visual Studio Build Tools (MSVC)
-- MSYS2 UCRT64 with `make`, `sed`, `grep`, `gawk`, `diffutils`, `pkgconf`, and `gnupg` (the controlled
-  audio-only FFmpeg build disables optional x86 assembly, so NASM is not required)
-  - The default location is `C:\msys64`. For another location, set
-    `MSYS2_ROOT` to the directory containing `usr\bin\bash.exe`.
-  - Install the required packages from the **MSYS2 UCRT64** shell with
-    `pacman -S --needed make sed grep gawk diffutils pkgconf gnupg`.
-    These are shared MSYS packages; FFmpeg and its encoding dependencies compile
-    with MSVC. Both Windows CI workflows explicitly select `msystem: UCRT64`.
 - LLVM, with its Clang runtime library available to Rust bindgen (`LIBCLANG_PATH`
   may be set to LLVM's `bin` directory when it is not discoverable through `PATH`)
 - WPD is part of the Windows SDK; MTP support is provided by the `windows-sys` crate
+
+Normal builds consume the pinned FFmpeg release and do not require MSYS2, NASM,
+or codec source-build tools. Intentional source builds require the additional
+prerequisites documented in `dependencies/ffmpeg-runtime/README.md`, including
+MSYS2 UCRT64 and CMake on Windows, and NASM/GnuPG on Unix.
 
 ---
 
@@ -72,6 +68,7 @@ and the distinction between tray menus and in-window right-click menus.
 ```
 hifimule/
 ├── Cargo.toml                 Cargo workspace root
+├── dependencies/ffmpeg-runtime/  Pinned native audio build recipes (submodule)
 ├── hifimule-daemon/       Rust backend
 ├── hifimule-i18n/         Shared localization crate
 ├── hifimule-lifecycle/    Shared daemon/UI ownership and launch contract
@@ -102,11 +99,10 @@ rtk npm run build:daemon -- clippy -p hifimule-daemon
 
 Do not invoke raw `cargo build` for the daemon. FFmpeg's dependency build
 scripts run before `hifimule-daemon/build.rs`, so only the wrapper can prepare
-and export the controlled native runtime in time. On Linux it builds and caches
-the pinned runtime. On Windows it downloads, hashes, verifies and builds the
-official signed FFmpeg 9.0.2 source with MSVC, then generates the import
-libraries needed by Cargo. `FFMPEG_DIR` may explicitly select a previously
-verified override.
+and export the controlled native runtime in time. With a validated release lock,
+it downloads, verifies and caches the prebuilt runtime for the selected target,
+including Windows import libraries. `FFMPEG_DIR` on Windows and
+`HIFIMULE_FFMPEG_PREFIX` on Unix may select a previously verified override.
 
 Binary output: `target/debug/hifimule-daemon` or `target/release/hifimule-daemon`.
 
@@ -445,6 +441,30 @@ recovery evidence in a JSON export.
 
 ### Building local sync encoders
 
+Initialize the recipe submodule after cloning/updating HifiMule:
+
+```bash
+rtk git submodule update --init --recursive
+```
+
+FFmpeg source builds now run from `dependencies/ffmpeg-runtime`. Once
+`hifimule-daemon/audio-runtime-lock.json` pins a validated dependency release,
+normal builds download its checksum-verified SDK/runtime instead of compiling
+FFmpeg. Local prefixes are cached by dependency release and target. Existing
+`FFMPEG_DIR` (Windows) and `HIFIMULE_FFMPEG_PREFIX` (Unix) overrides still validate.
+
+For an intentional native source rebuild:
+
+```bash
+rtk node dependencies/ffmpeg-runtime/scripts/build-runtime.mjs aarch64-apple-darwin
+```
+
+Or set `HIFIMULE_FFMPEG_SOURCE_BUILD=1` for the build wrapper. Source builds need
+the producer's documented prerequisites, including GnuPG. Before the first release
+is pinned, wrappers retain source provisioning. In prebuilt mode, download,
+checksum/configuration errors fail without falling back to compilation.
+`HIFIMULE_FFMPEG_PREBUILT=1` explicitly requires a validated lock during bootstrap.
+
 The controlled runtime also builds pinned LAME 3.100, Ogg 1.3.6, Vorbis 1.3.7 and
 Opus 1.6.1 from hash-verified upstream archives. Unix uses their release configure
 scripts; Windows additionally requires **CMake** on PATH and uses MSVC static
@@ -458,7 +478,7 @@ Run native encoder tests through the controlled wrapper:
 ```bash
 rtk npm run build:daemon -- test -p hifimule-daemon transcoding::local
 rtk npm run build:daemon -- test -p hifimule-daemon local_encoding_pipeline
-rtk node --test scripts/tests/encoding-audio-runtime.test.mjs
+rtk node --test dependencies/ffmpeg-runtime/tests/encoding-audio-runtime.test.mjs
 rtk node --test hifimule-ui/tests/serverTranscoding.test.mjs
 ```
 

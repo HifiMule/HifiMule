@@ -2,6 +2,29 @@
 
 This guide covers reproducible `0.15.x` candidate verification and draft release creation. Publishing is a separate, explicit release-manager action.
 
+## Updating the FFmpeg dependency
+
+FFmpeg has an independent release lifecycle in `dependencies/ffmpeg-runtime`.
+Initialize recipes with `rtk git submodule update --init --recursive`; its README
+documents native builds and dependency releases.
+
+For a dependency bump, publish a new `ffmpeg-<version>-r<revision>` release. Wait
+for all four relocated archives to pass ABI/capability and encode/decode checks.
+Update the submodule pointer to that producer commit, align build requirements in
+`hifimule-daemon/audio-runtime.json`, download `release-manifest.json`, and run:
+
+```bash
+rtk node scripts/pin-audio-runtime.mjs /path/to/release-manifest.json
+```
+
+The generated `hifimule-daemon/audio-runtime-lock.json` pins release, producer
+commit, build identity and each archive's SHA-256. Review/commit it with the
+submodule pointer. Its presence activates prebuilt provisioning; never invent
+checksums or activate before the producer assets validate. Verify immutable
+HifiMule candidate packages on all four platforms before shipping. Keep the
+existing installed-runtime, sidecar and license checks. Application playback
+policy changes do not require an FFmpeg release.
+
 ## 1. Shipping contract
 
 The authoritative machine-readable contract is [`playback-evidence/release-contract-0.15.0.json`](playback-evidence/release-contract-0.15.0.json). The release matrix has four independent rows:

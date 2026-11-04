@@ -390,3 +390,9 @@ Resolved on 2026-10-24: the auto-sync completion helper now records the executio
 ## Deferred from: stable music collision paths (2026-10-24)
 
 - **Protection tests use expiring fixed timestamps in long suites.** `sync::protection::tests::delivery_risk_without_a_shared_source_does_not_throttle_unrelated_sync` and `sync::protection::tests::depleted_playback_without_a_shared_source_uses_the_global_minimum_delay` construct snapshots at 1,000 ms, expiring after 60 seconds, while `protection_decision` reads actual process monotonic time. Both returned `Stale` during the full daemon run; all ten protection tests pass standalone. Git blame attributes the fixtures to unchanged commit `989103c8`. Use current monotonic time or an injected clock in a focused follow-up. The broader collision verification passed with only these two fixtures excluded.
+
+
+## Deferred from: prebuilt FFmpeg runtime review (2026-11-04)
+
+- Native source-build cache hardening: inherited builder/packager cache lifetimes do not guarantee concurrent source builds and packaging in one checkout. Source lock age also has no heartbeat. Keep producer CI jobs isolated and address developer source-cache ownership in a focused producer revision. Ordinary prebuilt consumer lock release races and interrupted-install recovery are fixed in this change.
+- Existing macOS Mach-O path parsers split dependencies on whitespace, so paths containing spaces need focused hardening across source builders, producer SDK relocation and installed-package validation. Preserve full dependency names when removing compatibility-version annotations.
