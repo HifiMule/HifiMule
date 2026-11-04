@@ -288,7 +288,6 @@ fn set_shortcut_app_id_with_retry(path: &std::path::Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::PROPERTYKEY;
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-    use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
         CoUninitialize, IPersistFile, STGM_READWRITE,
@@ -298,7 +297,7 @@ fn set_shortcut_app_id_with_retry(path: &std::path::Path) -> Result<()> {
         PropertiesSystem::IPropertyStore,
         ShellLink,
     };
-    use windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR};
+    use windows::core::{GUID, Interface, PCWSTR};
 
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
     if !initialized {
@@ -313,14 +312,7 @@ fn set_shortcut_app_id_with_retry(path: &std::path::Path) -> Result<()> {
         fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
         pid: 5,
     };
-    // PROPVARIANT now lives in the generated bindings and has no owning Drop.
-    // The property store copies this borrowed string during SetValue.
-    let app_id = HSTRING::from("hifimule.github.io");
-    let mut value = PROPVARIANT::default();
-    unsafe {
-        (*value.Anonymous.Anonymous).vt = VT_LPWSTR;
-        (*value.Anonymous.Anonymous).Anonymous.pwszVal = PWSTR(app_id.as_ptr().cast_mut());
-    }
+    let value = PROPVARIANT::from("hifimule.github.io");
     let mut last_error = None;
     for _ in 0..50 {
         let result = (|| -> windows::core::Result<()> {

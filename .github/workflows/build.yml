@@ -129,6 +129,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'mediacheck build failed' }
           ./scripts/smoke-tests/check-mediacheck-windows-shares.ps1 -MediaCheck target/debug/mediacheck.exe
 
+      - name: Verify Windows shortcut registration and cleanup
+        if: runner.os == 'Windows'
+        run: npm run build:daemon -- test -p hifimule-daemon windows_shortcut_registration_survives_cleanup_and_persists_app_id
+
       - name: Verify Playback selector
         run: npm run build:daemon -- test -p hifimule-daemon playback::selection
 

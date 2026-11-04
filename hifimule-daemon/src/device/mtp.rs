@@ -855,9 +855,7 @@ pub mod windows_wpd {
             (*pv.Anonymous.Anonymous).vt = VT_LPWSTR;
             (*pv.Anonymous.Anonymous).Anonymous.pwszVal = PWSTR(ptr);
 
-            let result = collection.Add(&pv);
-            CoTaskMemFree(Some(ptr as *const _));
-            result?;
+            collection.Add(&pv)?;
 
             Ok(collection)
         }

@@ -1,6 +1,60 @@
 use super::*;
 use std::sync::Arc;
 
+#[cfg(windows)]
+#[test]
+fn windows_shortcut_registration_survives_cleanup_and_persists_app_id() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize, IPersistFile, STGM_READWRITE,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, PropertiesSystem::IPropertyStore, ShellLink};
+    use windows::core::{BSTR, GUID, Interface, PCWSTR};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("HifiMule.lnk");
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .unwrap()
+    };
+    let result = (|| -> Result<()> {
+        {
+            let link: IShellLinkW =
+                unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
+            let target: Vec<u16> = std::env::current_exe()?
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            unsafe { link.SetPath(PCWSTR(target.as_ptr()))? };
+            let persist: IPersistFile = link.cast()?;
+            unsafe { persist.Save(PCWSTR(wide.as_ptr()), true)? };
+        }
+        // Returning from each call drops the variant that previously corrupted the heap.
+        for _ in 0..2 {
+            set_shortcut_app_id_with_retry(&path)?;
+        }
+        let link: IShellLinkW =
+            unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
+        let persist: IPersistFile = link.cast()?;
+        unsafe { persist.Load(PCWSTR(wide.as_ptr()), STGM_READWRITE)? };
+        let properties: IPropertyStore = link.cast()?;
+        let key = PROPERTYKEY {
+            fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+            pid: 5,
+        };
+        let value = unsafe { properties.GetValue(&key)? };
+        assert_eq!(BSTR::try_from(&value)?.to_string(), "hifimule.github.io");
+        Ok(())
+    })();
+    unsafe { CoUninitialize() };
+    result.unwrap();
+}
+
 #[tokio::test]
 async fn manifest_migration_regression_auto_completion_records_operation_profile_snapshot() {
     let profiles = tempfile::tempdir().unwrap();
