@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.21.0 - 2026-11-04
+
+You can now **build and maintain your Rockbox database on the computer** as part of sync, avoiding the long database build on the player. Enable **Maintain database after sync** in Device Settings to create or update a Rockbox 3.15 or 4.0 database while keeping existing ratings and playback history. The feature works with mounted mass-storage players using the standard `.rockbox` location, and leaves indexed tracks outside HifiMule's ownership in place.
+
+With **Sync ratings when supported**, you can send ratings made on your Rockbox player back to Navidrome and fill unrated device tracks from their original server account. Existing positive device ratings and deliberate clears are respected, while failed updates remain pending for a later sync. Rating sync is optional and independent of database maintenance; enable **Gather runtime data** in Rockbox so your player saves its ratings.
+
+Database updates reuse metadata from newly transferred files on your computer and retain unchanged indexed tags, reducing reads from the player. Only database files whose contents change are replaced. Interrupted writes recover when you reconnect and sync, while missing or unreadable audio produces warnings with the affected paths and keeps existing history available for retry. New guides help you configure Rockbox, collect troubleshooting logs, and share device profiles.
+
 ## v0.20.0 - 2026-10-24
 
 You can now **encode sync audio on the computer** instead of asking the server to convert it. Choose the encoding location separately for each server, then let your device profile decide which originals to keep and which files to convert. Local encoding also lets you convert Audiobookshelf books and podcast episodes for players that need another format. Downloads, conversion, and device writes overlap, with encoding concurrency and staging sized automatically for your computer.
