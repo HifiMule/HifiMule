@@ -100,10 +100,20 @@ test("Linux preflight turns a broken native header chain into setup guidance", (
 
 test("Linux x64 preflight requires NASM before configuring FFmpeg", () => {
   assert.throws(
-    () => preflightLinuxBuild("x86_64-unknown-linux-gnu", { osRelease: "ID=ubuntu", commandExists: (tool) => tool !== "nasm" }),
+    () => preflightLinuxBuild("x86_64-unknown-linux-gnu", { env: { HIFIMULE_FFMPEG_SOURCE_BUILD: "1" }, osRelease: "ID=ubuntu", commandExists: (tool) => tool !== "nasm" }),
     (error) => error.message.includes("Missing Linux build tools: nasm") && error.message.includes("apt-get install"),
   );
   assert.ok(linuxBuildPackages.includes("nasm"));
+});
+
+test("Linux prebuilt provisioning requires bindgen tools without source-build tools", () => {
+  assert.throws(
+    () => preflightLinuxBuild(target, {
+      env: { HIFIMULE_FFMPEG_PREBUILT: "1" }, osRelease: "ID=ubuntu",
+      commandExists: tool => !["cc", "make", "nasm", "clang"].includes(tool),
+    }),
+    error => error.message.startsWith("Missing Linux build tools: clang\n"),
+  );
 });
 
 test("Linux preflight reports missing ALSA development metadata before building", () => {

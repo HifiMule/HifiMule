@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,4 +33,22 @@ test("runtime lock times out after thirty minutes without deleting a fresh lock"
   t.mock.method(Date, "now", () => times.shift());
   assert.throws(() => acquireRuntimeLock(path), /Timed out waiting for audio runtime lock/);
   assert.equal(JSON.parse(readFileSync(join(path, "owner.json"), "utf8")).pid, process.pid);
+});
+
+test('a waiting installer retries when its owner releases between mkdir and stat', t => {
+  const directory = fs.mkdtempSync(join(tmpdir(), 'runtime-lock-race-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'runtime.lock');
+  fs.mkdirSync(path);
+  const originalStat = fs.statSync;
+  const mock = t.mock.method(fs, 'statSync', (candidate, ...args) => {
+    if (candidate !== path) return originalStat(candidate, ...args);
+    fs.rmSync(path, { recursive: true });
+    throw Object.assign(new Error('Owner released its lock'), { code: 'ENOENT' });
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  const unlock = acquireRuntimeLock(path);
+  assert.ok(fs.existsSync(join(path, 'owner.json')));
+  unlock();
 });

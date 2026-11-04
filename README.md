@@ -110,7 +110,7 @@ For code and feature maps, start with the [project documentation index](docs/ind
 
 ```bash
 # Clone
-git clone <repository-url>
+git clone --recurse-submodules <repository-url>
 cd HifiMule
 
 # Install dependencies
@@ -144,6 +144,11 @@ Use `npm run build:daemon -- <cargo arguments>` for daemon-related Cargo
 commands. The wrapper provisions the pinned FFmpeg runtime and exports the
 native build environment before Cargo starts. A raw `cargo build` cannot do
 that early enough for dependency build scripts on Linux or Windows.
+
+After updating an existing checkout, run `git submodule update --init --recursive`
+to initialize the FFmpeg recipes. Normal builds use the checksum-pinned runtime
+release; see [the development guide](docs/development-guide.md#building-local-sync-encoders)
+for intentional source builds.
 
 ## Project Structure
 

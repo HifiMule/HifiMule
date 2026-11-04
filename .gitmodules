@@ -1,0 +1,3 @@
+[submodule "dependencies/ffmpeg-runtime"]
+	path = dependencies/ffmpeg-runtime
+	url = https://github.com/HifiMule/ffmpeg-runtime.git
