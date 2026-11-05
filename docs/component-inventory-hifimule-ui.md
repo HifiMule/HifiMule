@@ -1,6 +1,6 @@
 # Component Inventory — HifiMule UI
 
-**Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
+**Last Updated:** 2026-11-05 | **Scan depth:** Deep | **Workspace version:** 0.21.0
 
 ## Entry, views, and shared state
 
@@ -17,6 +17,13 @@
 | `src/state/playback.ts` | Authoritative daemon playback snapshot projection and read coalescing |
 | `src/state/autoFill.ts` | Auto-fill pipeline types and UI state |
 | `src/i18n.ts` | Shared catalog lookup, language selection, document language |
+| `src/state/syncCapacity.ts` | Size math: planned vs actual selection, device capacity |
+| `src/state/basketEstimate.ts` | Cached per-basket size estimates |
+| `src/state/libraryCache.ts` | Page cache + playlist write capability flag |
+| `src/state/snapshotSaves.ts` | Snapshot save state |
+| `src/state/queue.ts` | Track queue helpers |
+| `src/deviceProfiles.ts` | Device profile domain module (draft/validate/constraints) |
+| `src/numericValidation.ts` | Numeric settings validation with inline feedback |
 
 ## UI components
 
@@ -37,6 +44,12 @@
 | `PlaylistPlayButton.ts` | Start ordered playback of a playlist or grouping |
 | `TrackPreviewButton.ts` | Audition a track without replacing the main queue |
 | `TrackQueueButton.ts` | Add a track to the daemon-owned upcoming queue |
+| `DeviceProfileManager.ts` (NEW) | Singleton modal for CRUD of device transcoding profiles (formats, outputs, folder defaults, numeric constraints); opened from tray/menu |
+| `PlaybackSelectionSettings.ts` | Settings for playback selection behavior |
+| `PlaybackSnapshots.ts` | Listening snapshots browser with Add-to-basket / Replace-basket export controls |
+| `TraySetupGuidance.ts` | Tray icon setup help |
+| `RadioPlayButton.ts` | Start radio-style playback from a seed item |
+| `BasketArtwork` / `basketMotion` / `cardArtwork` | Artwork rendering and FLIP animation helpers |
 
 ## Interaction patterns
 

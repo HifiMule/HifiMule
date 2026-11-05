@@ -1,12 +1,12 @@
 # HifiMule — Project Overview
 
-**Version:** 0.15.0 | **Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep
+**Version:** 0.21.0 | **Generated:** 2026-05-23 | **Last Updated:** 2026-11-05 | **Scan depth:** Deep
 
 ---
 
 ## Purpose
 
-HifiMule is a cross-platform desktop application for self-hosted music, audiobook, and podcast libraries. It plays media directly from a connected server and synchronizes selected items to legacy portable audio players — primarily iPods running Rockbox firmware, but also USB MSC and MTP devices.
+HifiMule is a cross-platform desktop application for self-hosted music, audiobook, and podcast libraries. It plays media directly from a connected server and synchronizes selected items to legacy portable audio players — primarily iPods running Rockbox firmware, but also USB MSC and MTP devices, DAPs, and Garmin smartwatches.
 
 The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic, and OpenSubsonic manage music libraries with rich metadata, but portable players like Rockbox iPods cannot connect to them directly. HifiMule bridges this gap by letting users browse and listen to that library on their computer, manage a listening queue, then curate a "basket" of albums/playlists/artists and copy them to a device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports played tracks back through the active provider when that provider supports scrobbling.
 
@@ -28,9 +28,9 @@ HifiMule is a **monorepo** containing two cooperating runtime processes and two 
 
 ```
 hifimule/
-├── hifimule-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine
+├── hifimule-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine, Rockbox tagcache
 ├── hifimule-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
-├── hifimule-i18n/       Shared translation catalog crate
+├── hifimule-i18n/       Shared translation catalog crate (en/fr/es/de, 1,061 keys)
 └── hifimule-lifecycle/  Shared process ownership and launch contract
 ```
 
@@ -49,23 +49,24 @@ The Tauri shell is responsible for:
 
 | Component | Technology |
 |-----------|-----------|
-| Daemon language | Rust 1.93+ (MSRV 1.93.0) |
-| Async runtime | Tokio (multi-thread) |
+| Daemon language | Rust 2024 (MSRV 1.99.1) |
+| Async runtime | Tokio (multi-thread, max 4 worker threads) |
 | HTTP server | Axum 0.8 |
 | Provider abstraction | `MediaProvider` trait + Jellyfin/Subsonic/OpenSubsonic/Audiobookshelf adapters |
-| Audio playback | FFmpeg 9 decoding, CPAL audio output, Souvlaki native media controls |
-| Database | SQLite via rusqlite (bundled) |
-| Keyring | `keyring` crate (OS credential store) |
-| System tray | `tray-icon` + `tao` |
-| MTP (Windows) | WPD COM API via `windows-sys` |
+| Audio playback | FFmpeg 9 decoding (pinned prebuilt runtime), CPAL 0.18 audio output, Souvlaki native media controls |
+| Database | SQLite via rusqlite 0.41 (bundled) |
+| Credential vault | ChaCha20-Poly1305 encrypted, machine-bound |
+| System tray | `tray-icon` 0.26 + `tao` 0.37 |
+| MTP (Windows) | WPD COM API via `windows-sys` 0.62 |
 | MTP (Unix) | libmtp FFI via `libc` |
-| UI framework | Tauri 2 |
-| Frontend language | TypeScript 5.6 |
-| Build tool | Vite 6 |
-| UI component library | Shoelace 2.19.1 |
+| Rockbox tagcache | Custom binary reader/writer for `apps/tagcache.{c,h}` format |
+| UI framework | Tauri 2.12 |
+| Frontend language | TypeScript 6/7 (dual: `@typescript/native` + `typescript`) |
+| Build tool | Vite 8 |
+| UI component library | Shoelace 2.20 |
 | Shared localization | `hifimule-i18n` crate (English, French, Spanish, German) |
 | Shared lifecycle | `hifimule-lifecycle` crate (OS locks, private descriptor, authenticated health, startup/Quit generation) |
-| Packaging | Tauri bundler (DMG, .deb, .exe WiX/NSIS) |
+| Packaging | Tauri bundler (DMG, .deb, AppImage, RPM, MSI) |
 
 ---
 
@@ -77,6 +78,13 @@ The Tauri shell is responsible for:
 - **Dirty-flag recovery**: if sync is interrupted, the manifest is marked dirty; on next connect the UI shows a Repair workflow to reconcile missing/orphaned files
 - **Write-temp-rename atomicity**: MSC backend writes to a `.tmp` file then renames, preventing partial writes
 - **FAT32/Rockbox path constraints**: paths are sanitized to ≤255 chars/component, ≤250 total (Windows MAX_PATH), with illegal characters replaced
+- **Folder artwork**: automatically publishes album art as folder icons/thumbnails on connected devices (KDE, Windows, macOS)
+
+### Rockbox tagcache (NEW in 0.20+)
+- Builds and updates the Rockbox on-device database (`database_idx.tcd` and related files) on the computer as part of media sync — much faster than building it on the player
+- Incremental updates reuse existing local metadata and skip unchanged database files
+- Two-way rating sync with Navidrome: reads device ratings into the tagcache and pushes ratings back to the server
+- See [Rockbox Database](./rockbox-database.md) and [Tagcache Data Flow](./rockbox-tagcache-data-flow.md)
 
 ### Desktop playback
 - **Play from the library**: start a whole album or preview an individual track without first copying it to a portable device
@@ -84,10 +92,18 @@ The Tauri shell is responsible for:
 - **Transport controls**: pause/resume, previous/next, stop, seek, retry failed preparation, and return from a preview to the interrupted session
 - **Output selection**: choose an available audio output; the selected endpoint is retained safely and playback recovers predictably when an output disappears
 - **Native controls**: operating-system media controls continue to control the daemon-owned session while the main window is closed
+- **Format support**: MP3, FLAC, AAC/ALAC (M4A/MP4), Opus, Vorbis, WAV, and AC3 (added in 0.20)
+
+### Device profiles (NEW in 0.20+)
+- Custom device transcoding profiles managed via `DeviceProfileManager` UI component
+- Built-in profiles for Rockbox players, Garmin smartwatches, Sony Walkman, generic MP3 players, car USB sticks, audiobook/podcast devices
+- Per-profile settings: music folder, playlist folder, audiobook/podcast paths, folder artwork defaults, transcoding format
+- Numeric constraint validation with inline feedback
+- Profiles stored in `device-profiles.json` and editable via `device_profiles.*` RPCs
 
 ### Multi-device
 - Multiple devices can be connected simultaneously (stored in a `HashMap` keyed by mount path)
-- The UI shows a "Device Hub" panel to switch between devices
+- The UI shows a "Destination Hub" panel to switch between playback and devices
 - Each device has its own `DeviceManifest` (`.hifimule.json.zst` at device root; authoritative local cache for MTP), basket, and sync settings
 
 ### Auto-fill
@@ -106,6 +122,7 @@ The Tauri shell is responsible for:
 - Books browse as albums and ordered audio-file parts, with Authors, Series, and Collections; podcasts browse as Shows, Recent Episodes, and individual episodes
 - Direct book and episode playback uses the daemon session. Book progress is player-owned and verified against current part timing before write-back
 - Basket and manifest keep media roles. Optional `audiobookPath` and `podcastPath` keep device folders distinct; role-aware auto-fill includes podcast retention settings
+- Direct-copy MP3 for Audiobookshelf (added in 0.20)
 - See the [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) for code paths and current boundaries
 
 ### Provider-Neutral Browse
@@ -126,8 +143,9 @@ The Tauri shell is responsible for:
 
 ### Transcoding
 - Optional per-device transcoding profiles stored in `device-profiles.json`
-- Uses the active provider to negotiate the best stream URL (`PlaybackInfo` for Jellyfin, Subsonic stream/download URLs for Subsonic-compatible servers)
+- Local transcoding uses FFmpeg for on-daemon format conversion; server-side transcoding uses the provider's `PlaybackInfo`/stream URLs
 - Passthrough (no transcoding) is the default
+- `mediacheck` CLI tool audits packaged libraries for format compatibility
 
 ---
 
@@ -135,13 +153,13 @@ The Tauri shell is responsible for:
 
 | Store | Location | Contents |
 |-------|----------|----------|
-| `DeviceManifest` | `<device-root>/.hifimule.json.zst`; authoritative `manifests/<device_id>.json.zst` cache for MTP | Lossless compressed sync state, basket, per-server auto-fill pipeline settings, dirty flag, MTP cache fields; legacy JSON migrates on successful writes |
-| `config.json` | `%APPDATA%/HifiMule/` (Win) / `~/Library/Application Support/HifiMule/` (macOS) / `~/.local/share/HifiMule/` (Linux) | Legacy Jellyfin URL and user ID |
-| OS keyring | System credential store | Access token or password-derived provider secret |
-| SQLite DB | Same app data dir as `config.json` | `devices`, `scrobble_history`, `server_config`, `autofill_history`, `autofill_rotation`, and `autofill_pity` tables |
-| `device-profiles.json` | Same app data dir | Available transcoding profiles (seeded from embedded asset) |
+| `DeviceManifest` | `<device-root>/.hifimule.json.zst`; authoritative `manifests/<device_id>.json.zst` cache for MTP | Lossless compressed sync state, basket, per-server auto-fill pipeline settings, dirty flag, folder artwork records |
+| `config.json` | App data dir (Win: `%APPDATA%/HifiMule/`, macOS: `~/Library/Application Support/HifiMule/`, Linux: `~/.local/share/HifiMule/`) | Legacy Jellyfin URL and user ID |
+| OS keyring / encrypted vault | Machine-bound ChaCha20-Poly1305 vault in app data dir | Access token or password-derived provider secret |
+| SQLite DB | Same app data dir | `devices`, `scrobble_history`, `server_config`, `autofill_history`, `autofill_rotation`, `autofill_pity`, `rockbox_ratings`, `rockbox_rating_backfills` |
+| `device-profiles.json` | Same app data dir | Available transcoding/device profiles (seeded from embedded asset) |
 | `playback.json` | Same app data dir | Selected audio-output preference and playback configuration |
-| `runtime/` | Same app data dir | Private lifecycle locks, owner descriptor, launch generation/tickets, and UI activation mailbox |
+| `runtime/` | Same app data dir | Private lifecycle locks, owner descriptor, launch generation/tickets, UI activation mailbox |
 | Browser `localStorage` | Tauri WebView | Basket state (session persistence) |
 
 ---
@@ -151,11 +169,11 @@ The Tauri shell is responsible for:
 | Platform | Support |
 |----------|---------|
 | macOS (10.15+) | Full — universal binary (x86_64 + arm64) |
-| Windows 10/11 | Full — MSC + WPD MTP, Windows Service mode |
-| Linux (Ubuntu 22.04+) | Full — MSC + libmtp, requires `libmtp-dev` |
+| Windows 10/11 | Full — MSC + WPD MTP, Windows Service mode, UCRT64 build |
+| Linux (Ubuntu 22.04+) | Full — MSC + libmtp, DEB/AppImage/RPM packages |
 
 ---
 
 ## Project Status
 
-Active development (v0.15.0). Core sync, desktop playback, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization and lifecycle, and Jellyfin/Subsonic/OpenSubsonic/Audiobookshelf support are implemented. Audiobookshelf installed-app playback evidence remains distinct from controlled-server transport observations.
+Active development (v0.21.0). Core sync, desktop playback, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization and lifecycle, Rockbox tagcache sync with two-way rating sync, custom device profiles, folder artwork, AC3/AAC/ALAC playback, and Jellyfin/Subsonic/OpenSubsonic/Audiobookshelf support are implemented.

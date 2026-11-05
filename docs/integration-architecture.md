@@ -1,6 +1,6 @@
 # HifiMule — Integration Architecture
 
-**Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
+**Last Updated:** 2026-11-05 | **Scan depth:** Deep | **Workspace version:** 0.21.0
 
 ## Runtime map
 

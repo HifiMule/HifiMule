@@ -1,6 +1,6 @@
 # API Contracts — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Protocol:** Bearer-authenticated JSON-RPC 2.0 over HTTP POST to the current lifecycle descriptor port
+**Generated:** 2026-05-23 | **Last Updated:** 2026-11-05 | **Scan depth:** Deep | **RPC methods:** ~130 | **Protocol:** Bearer-authenticated JSON-RPC 2.0 over HTTP POST to the current lifecycle descriptor port
 
 All requests: `Content-Type: application/json` and `Authorization: Bearer <owner descriptor token>`. The daemon binds an available `127.0.0.1` port and publishes it in private `<app-data>/runtime/owner.json`; port `19140` is a legacy collision check only. The Tauri `rpc_proxy` supplies the token and verifies owner identity.
 All successful responses: `{ "jsonrpc": "2.0", "result": <value>, "id": 1 }`  

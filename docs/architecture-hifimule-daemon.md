@@ -1,74 +1,59 @@
 # HifiMule Daemon — Architecture
 
-**Part:** `hifimule-daemon` | **Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
+**Part:** `hifimule-daemon` | **Last Updated:** 2026-11-05 | **Scan depth:** Deep | **Workspace version:** 0.21.0
 
 ## Process model
 
-`src/main.rs` owns the interactive daemon process, tray event loop, startup and Quit coordination, device observers, and auto-sync. A background OS thread runs the Tokio runtime so the native event loop can stay on the required main thread. Windows service behavior is in `service.rs`. `hifimule-lifecycle` establishes one daemon owner per app-data profile through an OS lock, validates generation-bound launch tickets, and publishes a private descriptor only after readiness. The daemon binds `127.0.0.1` on an available port; the descriptor supplies that port and a bearer token. Port `19140` is checked only to reject a concurrently running legacy daemon or another occupant.
+`src/main.rs` owns the interactive daemon process, tray event loop, startup and Quit coordination, device observers, and auto-sync. A background OS thread runs the Tokio runtime (max 4 worker threads) so the native event loop can stay on the required main thread. Windows service behavior is in `service.rs`. `hifimule-lifecycle` establishes one daemon owner per app-data profile through an OS lock, validates generation-bound launch tickets, and publishes a private descriptor only after readiness. The daemon binds `127.0.0.1` on an available port; the descriptor supplies that port and a bearer token.
 
-The current `DaemonState` variants are `Idle`, `Syncing`, `Scanning`, `DeviceFound`, `DeviceRecognized`, and `Error`. Explicit Quit stops new mutations, drains or cancels active work, checkpoints playback, and advances the durable launch generation so older launch attempts cannot revive the daemon. See [Lifecycle Architecture](./architecture-hifimule-lifecycle.md).
+The current `DaemonState` variants are `Idle`, `Syncing`, `Scanning`, `DeviceFound`, `DeviceRecognized`, and `Error`. Explicit Quit (`daemon.quit` / `daemon.retryQuit`) stops new mutations, drains or cancels active work, checkpoints playback, and advances the durable launch generation so older launch attempts cannot revive the daemon. See [Lifecycle Architecture](./architecture-hifimule-lifecycle.md).
+
+A second binary, `mediacheck` (`src/bin/mediacheck.rs`), is a packaged library audit tool that inspects audio files for format compatibility.
 
 ## Runtime state and RPC
 
-`rpc.rs` builds `AppState` around `ServerManager`, SQLite `Database`, `DeviceManager`, `SyncOperationManager`, daemon-owned `PlaybackSession`, state sender, caches, and pending Audiobookshelf setup choices. The manager loads server records from SQLite and connects provider instances lazily. The legacy `JellyfinClient` remains for compatibility paths. Axum exposes JSON-RPC 2.0 at `POST /` and an authenticated provider-aware image route at `GET /jellyfin/image/:id`. Local bearer authentication compares the descriptor token and binds health to the owner instance.
+`rpc.rs` (~19,000 lines) builds `AppState` around `ServerManager`, SQLite `Database`, `DeviceManager`, `SyncOperationManager`, daemon-owned `PlaybackSession`, state sender, caches, and pending Audiobookshelf setup choices. The dispatch match handles **~130 JSON-RPC methods** grouped by prefix:
 
-The dispatch table contains server setup and management, browse/search, playback, device and destination, sync, manifest, auto-fill, playlist, and legacy Jellyfin-compatible methods. The current method list and selected request shapes are in [API Contracts](./api-contracts-hifimule-daemon.md). The native Tauri proxy forwards structured JSON-RPC errors, including `code` and `data`.
+| Prefix | Examples |
+|--------|----------|
+| `server.*` | `connect`, `probe`, `reauthenticate`, `logout`, `list`, `select`, `update`, `remove`, `audiobookshelf.discover/commit/cancelSetup` |
+| `browse.*` | `listModes`, `listArtists`, `listAlbums`, `listPodcastShows`, `listRecentPodcastEpisodes`, `listTracks`, `search`, `listFavorites`, `listRecentlyPlayed` |
+| `playback.*` | `getSession`, `control`, `seek`, `listOutputs`, `selectOutput`, `playAlbum/playPlaylist/playEpisode/previewTrack`, `getFeedback/setFeedback`, snapshots, exports |
+| `device.*` / `device_profiles.*` | `list`, `select`, `initialize`, `update_manifest`, `music_scan_*`, `get/set/create/update/clone/constraints` |
+| `sync.*` | `calculate_delta`, `prepare`, `plan_details`, `detect_changes`, `execute`, `cancel`, `setAutoFill` |
+| `basket.*` / `autoFill.*` | `estimate`, `autoFill`, `setPipeline` |
+| `manifest.*` | `get_basket`, `save_basket`, `get_discrepancies`, `prune`, `relink`, `clear_dirty` |
+| `playlist.*` | `create`, `addItems`, `removeTracks`, `delete`, `rename`, `reorder` |
+| `daemon.*` | `health`, `quit`, `retryQuit` |
+
+Mutating methods acquire a `MutationGuard` from `SyncOperationManager` (shutdown fence). Heavy sync reads are spawned with admission control. Axum exposes JSON-RPC 2.0 at `POST /` and an authenticated provider-aware image route at `GET /jellyfin/image/:id`. Local bearer authentication compares the descriptor token and binds health to the owner instance. See [API Contracts](./api-contracts-hifimule-daemon.md).
 
 ## Provider boundary
 
-`providers/mod.rs` defines `MediaProvider`, provider errors, capabilities, playback descriptions, sync media representations, book timing, and library roles. Consumers resolve the selected provider through `ServerManager` or a portable server ID. `domain/models.rs` holds neutral music DTOs plus dedicated `PodcastShow`, `PodcastEpisode`, and search models.
+`providers/mod.rs` defines the `MediaProvider` trait (async via `async_trait`), provider errors, capabilities, playback descriptions, sync media representations, book timing, library roles, feedback (0–5 ratings), and scrobbling. Consumers resolve the selected provider through `ServerManager` or a portable server ID. `domain/models.rs` holds neutral music DTOs plus dedicated `PodcastShow`, `PodcastEpisode`, and search models.
 
 | Adapter | Role |
 | --- | --- |
-| `providers/jellyfin.rs` | Jellyfin catalog, playlists, change feed, artwork and streams |
+| `providers/jellyfin.rs` | Jellyfin catalog, playlists, change feed, artwork, streams, AAC/ALAC MP4 aliases |
 | `providers/subsonic.rs` | Subsonic/OpenSubsonic/Navidrome catalog, signed requests, playlist and history capabilities |
-| `providers/audiobookshelf.rs` | One selected Books or Podcasts library per configured server; authenticated discovery, catalog, grouping, search, direct playback, sync media, and book progress |
+| `providers/audiobookshelf.rs` | One selected Books or Podcasts library per configured server; authenticated discovery, catalog, grouping, search, direct playback, sync media, book progress, direct-copy MP3 |
 
-Capabilities decide the modes surfaced by the UI. The Audiobookshelf provider keeps upstream IDs scoped to its selected library and rejects cross-library or changed-role results. The [Audiobookshelf Implementation Map](./audiobookshelf-implementation.md) traces this adapter end to end.
+## Rockbox tagcache (NEW)
+
+`rockbox.rs` (~4,100 lines) is a reader/writer for the Rockbox `apps/tagcache.{c,h}` binary format — the on-device music database. It decodes/encodes `database_idx.tcd` and related files, with journal/backup/ownership sidecar files. `Session::open()` prepares a tagcache update from the device manifest; `Session::import_ratings()` syncs ratings both ways with Navidrome. Settings (`enabled`, `import_ratings`, `path_prefix`) are stored per server in `server_config`. See [Rockbox Database](./rockbox-database.md).
 
 ## Playback
 
-`playback/` owns the session, queue/history, persistence, direct HTTP source, FFmpeg decoding, CPAL output routing, native media controls, and seek qualification. UI actions go through `playback.*` RPC methods and the daemon's command service; the WebView is never an audio engine. Book playback uses ordered audio-file parts, verified whole-book timing, and `book_progress.rs` for player-owned progress. Direct MP3 and AAC/MP4 are seek candidates only after transport and decoder qualification; an HLS response is not fed to the byte-stream decoder. See [Playback Guide](./playback.md).
+`playback/` (~30 modules) owns the session, queue/history, persistence, direct HTTP source, FFmpeg decoding, CPAL/Pulse/WASAPI output routing, native media controls (Souvlaki), and seek qualification. UI actions go through `playback.*` RPC methods; the WebView is never an audio engine. Book playback uses ordered audio-file parts with `book_progress.rs`. Supported formats include MP3, FLAC, AAC/ALAC (M4A/MP4), Opus, Vorbis, WAV, and AC3. See [Playback Guide](./playback.md).
 
 ## Device and sync
 
-`device/mod.rs` defines `DeviceManifest`, `BasketItem`, `SyncedItem`, `MediaRole`, and `DeviceManager`. The manifest at the device root (`.hifimule.json.zst`) is authoritative for managed paths, basket, synced files, auto-fill settings, and repair state on MSC. MTP uses the local `manifests/<device_id>.json.zst` cache as authority, with a best-effort device mirror. `music`, `audiobook`, and `podcast` roles can use separate configured paths; absent role overrides fall back to the primary managed path. The manager tracks multiple connected MSC/MTP devices and a selected destination. Platform MTP implementations live in `device/mtp.rs`; `device_io.rs` abstracts MSC and MTP writes.
+`device/mod.rs` defines `DeviceManifest`, `BasketItem`, `SyncedItem`, `MediaRole`, and `DeviceManager`. The manifest at the device root (`.hifimule.json.zst`) is authoritative for MSC; MTP uses the local `manifests/<device_id>.json.zst` cache. `device/manifest_codec.rs` streams typed fields into column arrays compressed in a checksummed Zstd level 9 frame. `device_music_scan.rs` provides read-only music discovery on connected devices.
 
-`device/manifest_codec.rs` streams typed track fields into named column arrays and
-compresses the versioned JSON wrapper in one checksummed Zstd level 9 frame. Encoding
-runs on blocking workers after releasing state guards while keeping per-device
-commit ownership. Each commit reuses its encoded bytes for cache and mirror.
-Initial admission, 1000-update/ten-minute checkpoints and finalization retain their
-durability and physical-connection fences. Reads prefer compressed storage; missing
-compressed files permit legacy JSON, whereas invalid/unreadable authoritative
-storage reports a read failure. MTP checks caches under both backend and portable
-manifest identities. Atomic verified writes precede legacy cleanup; failed writes
-preserve old files and recovery evidence. Decode checks version, column counts/types,
-checksum and a 512 MiB decoded ceiling. RPC and basket hashing keep ordinary JSON.
-Manifest publication reads back the exact compressed bytes before legacy retirement.
-MSC and local-cache commits sync the parent directory before retirement and after
-successful removal. The existing platform helper uses directory fsync on Unix and
-is a no-op on non-Unix platforms; Windows retains file sync/readback without an
-additional directory durability guarantee. Postcommit failures preserve existing
-dirty/pending recovery evidence, while ordinary clean updates remain clean.
-See [storage format](./data-models-hifimule-daemon.md#devicemanifest) and
-[inspection](./development-guide.md#inspect-the-manifest).
+`folder_icons.rs` publishes album artwork as folder icons/thumbnails on mounted devices (KDE `.directory`, Windows `desktop.ini`, macOS `.VolumeIcon.icns`) with symlink-safe path validation and atomic staging.
 
-`sync.rs` expands basket selections, computes a delta against manifest state, stages and transfers media, generates paths and playlists, and records durable results. Book parts and podcast episodes keep role and portable server identity in the plan. Non-music transfers ask the provider for a compatible direct media representation. Transfer staging uses bounded memory rather than holding a full downloaded file in RAM. Interrupted syncs mark the manifest dirty for repair. `auto_fill/` separates provider-bound candidate fetching from a pure pipeline engine; per-server configuration travels on the device, while rotation/history counters live in SQLite.
+`sync.rs` (~14,000 lines) expands basket selections, computes deltas, stages and transfers media, generates paths/playlists, and records results. `sync/artwork.rs` automates folder artwork during sync. `sync/protection.rs` implements the playback/sync coexistence policy. `auto_fill/` separates provider-bound candidate fetching from a pure pipeline engine. `transcoding.rs` + `transcoding/local.rs` manage device profiles and FFmpeg-based local transcoding.
 
-Playback/sync coexistence uses a daemon-internal, playback-owner-published snapshot. It carries session/generation and preview identity, portable server/representation identity, monotonic observation and expiry times, bounded sample count, risk/recovery episode anchors, classification, and a sanitized evidence reason. The read-only observer has weak publisher lifetime, so closed playback ownership cannot retain a restriction. `sync/protection.rs` converts the snapshot into a cancellable admission delay before future provider resolution/request work and every retry, then re-samples after the bounded delay. It never changes the two-track/2 GiB staging bounds, holds a staging permit while waiting, or interrupts the single verified writer, manifest transaction, cleanup, or playlist work. Attributable risk affects only the matching server producer; current buffer depletion with no shared source receives the 100 ms global minimum delay; stale, healthy, unknown, and device-writer-only conditions preserve the normal scheduler. See [policy v1](./playback-sync-protection-v1.md).
+## Database
 
-## Persistent data and trust
-
-`db.rs` initializes and migrates SQLite tables for devices, scrobbles, server configuration, auto-fill runtime history, and book continuity. Server rows contain machine-local UUIDs plus deterministic portable IDs; Audiobookshelf rows additionally retain immutable upstream library ID and role. `api.rs` and `vault.rs` keep media-server credentials in native storage, outside the UI. `hifimule-i18n` provides daemon messages from the shared catalog.
-
-## Build and verification
-
-The root audio-runtime wrapper is required before daemon compilation because FFmpeg native libraries must be prepared before Cargo dependency build scripts. Use `rtk npm run build:daemon -- check -p hifimule-daemon` and `rtk npm run build:daemon -- test -p hifimule-daemon`. Provider tests, `tests/audiobookshelf_contract.rs`, sync/device tests, and installed smoke scripts cover separate boundaries. See [Development Guide](./development-guide.md) for platform prerequisites and commands.
-# Playback adaptation ownership
-
-`playback/adaptation.rs` owns the pure bounded policy and scoped history. `http_source.rs` captures
-sanitized byte/time facts; `streaming.rs` retains compressed-buffer ownership; `audio.rs` invokes
-the decision only in the existing successor preparation path. The CPAL/Pulse callback performs no
-adaptation work, allocation, I/O, estimator locking, persistence, or provider access. Existing
-generation and `SuccessorFence` admission remains the final authority.
+`db.rs` defines the SQLite schema: `devices`, `server_config` (multi-server with portable `server_id`, ABS `provider_library_id/role`), `scrobble_history`, `autofill_history`, `autofill_rotation`, `autofill_pity`, `rockbox_ratings`, and `rockbox_rating_backfills`. Credentials live in a separate encrypted vault (`vault.rs`, ChaCha20-Poly1305 + secrecy).

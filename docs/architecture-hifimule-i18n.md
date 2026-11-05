@@ -1,17 +1,29 @@
 # HifiMule i18n — Architecture
 
-**Last Updated:** 2026-09-27 | **Scan depth:** Deep | **Workspace version:** 0.15.0
+**Last Updated:** 2026-11-05 | **Scan depth:** Deep | **Workspace version:** 0.21.0
 
-## Purpose and data flow
+## Overview
 
-`hifimule-i18n` is the Rust translation library. `hifimule-i18n/catalog.json` is the shared catalog: the Rust crate embeds it with `include_str!`, while the TypeScript UI imports the same file through `@hifimule/i18n-catalog`. The daemon depends on the crate directly; the UI uses its TypeScript adapter in `hifimule-ui/src/i18n.ts`.
+`hifimule-i18n` is a shared Rust crate that embeds a JSON translation catalog at compile time and provides lookup functions. Both the daemon (Rust) and the UI (TypeScript via Vite alias) consume the same `catalog.json`.
 
-## Language behavior
+## Catalog
 
-Both runtimes support English, French, Spanish, and German. Rust checks `HIFIMULE_LANG`, then system/POSIX locale, and falls back to English. The UI checks `hifimule.language` in local storage, then `navigator.language`, and falls back to English. Both normalize regional tags to a base language. Missing catalog keys fall back to English, then to the key itself. `t`, `tf`, `translate`, and `translate_with` expose lookup and placeholder interpolation in Rust; the UI exports `t` and `setLanguage` and updates the document language for accessibility.
+- **File:** `catalog.json` (~335 KB, 3,902 lines)
+- **Languages:** English (`en`, default), French (`fr`), Spanish (`es`), German (`de`)
+- **Keys:** 1,061 flat dot-namespaced keys per language (parity enforced by tests)
+- **Largest namespaces:** `playback` (316), `basket` (284), `library` (97), `profiles` (57), `device` (54), `playlist` (44), `lifecycle` (28), `login` (25), `repair` (25), `error` (19), `numeric` (16)
 
-## Development and tests
+## API
 
-Add strings to every supported language in `catalog.json`, preserving placeholder names. Add any new language to normalization on both sides and to the UI catalog declaration. Run `rtk cargo test -p hifimule-i18n` and the UI build. The Rust tests cover fallback, regional tags, interpolation, and complete playback control keys across supported locales.
+| Function | Purpose |
+|----------|---------|
+| `system_language()` | Resolves language: `HIFIMULE_LANG` env → OS locale (Windows `GetUserDefaultLocaleName` / POSIX `LANG` etc.) → `"en"` |
+| `normalize_language(lang)` | Lowercases, `_`→`-`, matches base subtag; unknown → `"en"` |
+| `t(key)` | Translate using system language |
+| `tf(key, replacements)` | Translate with `{placeholder}` interpolation |
+| `translate(language, key)` | Translate in specific language with English fallback |
+| `translate_with(language, key, replacements)` | Translate with interpolation and fallback |
 
-See the [Localization Guide](./localization.md) for the editing procedure.
+## UI consumption
+
+TypeScript imports `catalog.json` through a Vite alias (`src/i18n.ts`), using the same lookup and fallback logic.

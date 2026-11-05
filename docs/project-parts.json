@@ -1,8 +1,8 @@
 {
   "repository_type": "monorepo",
   "workspace_type": "cargo",
-  "last_updated": "2026-09-27",
-  "version": "0.15.0",
+  "last_updated": "2026-11-05",
+  "version": "0.21.0",
   "parts": [
     {
       "part_id": "hifimule-daemon",
@@ -12,9 +12,10 @@
       "primary_language": "Rust",
       "primary_framework": "Axum 0.8",
       "entry_points": [
-        "src/main.rs"
+        "src/main.rs",
+        "src/bin/mediacheck.rs"
       ],
-      "description": "Authenticated local JSON-RPC daemon with media providers (Jellyfin, Subsonic/OpenSubsonic, Audiobookshelf), FFmpeg/CPAL playback, SQLite, auto-fill, and MSC/MTP sync"
+      "description": "Authenticated local JSON-RPC daemon with media providers (Jellyfin, Subsonic/OpenSubsonic, Audiobookshelf), FFmpeg/CPAL playback, SQLite, Rockbox tagcache sync, auto-fill, and MSC/MTP device sync"
     },
     {
       "part_id": "hifimule-ui",
@@ -27,7 +28,7 @@
         "src/main.ts",
         "src-tauri/src/main.rs"
       ],
-      "description": "Desktop shell and WebView for provider-neutral music, Books, Podcasts, playback and device sync"
+      "description": "Desktop shell and WebView for provider-neutral music, Books, Podcasts, playback, device profiles, and device sync"
     },
     {
       "part_id": "hifimule-i18n",
@@ -39,7 +40,7 @@
       "entry_points": [
         "src/lib.rs"
       ],
-      "description": "Shared catalog with English, French, Spanish, and German translations"
+      "description": "Shared catalog with English, French, Spanish, and German translations (1,061 keys per language)"
     },
     {
       "part_id": "hifimule-lifecycle",
@@ -51,7 +52,7 @@
       "entry_points": [
         "src/lib.rs"
       ],
-      "description": "Shared daemon and UI ownership, startup generation, authenticated health, and activation contract"
+      "description": "Shared daemon and UI ownership via OS locks, private owner descriptor, authenticated health, launch tickets, and UI activation mailbox"
     }
   ],
   "integration_points": [
@@ -60,8 +61,8 @@
       "to": "hifimule-daemon",
       "type": "Bearer-authenticated JSON-RPC 2.0 over loopback HTTP",
       "endpoint": "http://127.0.0.1:<owner descriptor port>/",
-      "method_count": 94,
-      "details": "Tauri rpc_proxy verifies lifecycle owner and forwards server, browse, playback, device, sync, manifest, auto-fill and playlist methods"
+      "method_count": 130,
+      "details": "Tauri rpc_proxy verifies lifecycle owner and forwards server, browse, playback, device, device_profiles, sync, manifest, auto-fill and playlist methods"
     },
     {
       "from": "hifimule-ui",
@@ -86,7 +87,7 @@
       "from": "hifimule-daemon",
       "to": "hifimule-i18n",
       "type": "Rust crate dependency",
-      "details": "Shared user-facing translations"
+      "details": "Shared user-facing translations (daemon-side tray and error strings)"
     },
     {
       "from": "hifimule-ui",
@@ -104,7 +105,7 @@
       "from": "hifimule-daemon",
       "to": "Portable devices",
       "type": "MSC filesystem or MTP",
-      "details": "Role-aware staged transfers and device manifest updates"
+      "details": "Role-aware staged transfers, folder artwork, Rockbox tagcache, and device manifest updates"
     }
   ]
 }

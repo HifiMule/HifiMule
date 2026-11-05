@@ -1,6 +1,6 @@
 # HifiMule Playback Guide
 
-**Last Updated:** 2026-09-27 | **Version:** 0.15.0
+**Last Updated:** 2026-11-05 | **Version:** 0.21.0
 
 ## What playback adds
 

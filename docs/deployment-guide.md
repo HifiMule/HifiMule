@@ -1,6 +1,6 @@
 # HifiMule — Build and Deployment Guide
 
-**Last Updated:** 2026-09-27 | **Workspace version:** 0.15.0
+**Last Updated:** 2026-11-05 | **Workspace version:** 0.21.0
 
 HifiMule is installed as a desktop application with a bundled daemon. It does not deploy to a hosted server. The Tauri native shell and daemon use `hifimule-lifecycle` to locate the user's private app-data profile and coordinate ownership after installation.
 

@@ -1,6 +1,6 @@
 # Data Models — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-09-29 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-11-05 | **Scan depth:** Deep | **Version:** 0.21.0
 
 ---
 
@@ -408,6 +408,17 @@ Machine-local SQLite tables supporting the configurable pipeline:
 | `autofill_history` | `(device_id, server_id, track_id)` | Last synced time and optional rotation tier per track |
 | `autofill_rotation` | `(device_id, server_id)` | Rotation cursor for Memory tiers |
 | `autofill_pity` | `(device_id, server_id)` | Dry-streak counter for pity discovery reserve |
+
+---
+
+## Rockbox Rating Tables (NEW in 0.20+)
+
+SQLite tables supporting two-way rating sync between the Rockbox tagcache and Navidrome:
+
+| Table | Key | Purpose |
+|-------|-----|---------|
+| `rockbox_ratings` | `(device_id, server_id, account, track_id)` | Per-track rating read from or written to the Rockbox tagcache |
+| `rockbox_rating_backfills` | `(device_id, server_id, account)` | Tracks which rating backfills have been pushed to the server |
 
 ---
 
